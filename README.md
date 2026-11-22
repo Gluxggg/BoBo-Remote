@@ -15,6 +15,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://github.com/Gluxggg/dual-remote/actions/workflows/ci.yml"><img src="https://github.com/Gluxggg/dual-remote/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078d6" alt="Platform">
   <img src="https://img.shields.io/badge/.NET%20Framework-4.8-512bd4" alt=".NET Framework 4.8">
   <img src="https://img.shields.io/badge/%E5%BC%95%E6%93%8E-RustDesk%20%7C%20Moonlight%20V%2B-2e4ecb" alt="Engines">
