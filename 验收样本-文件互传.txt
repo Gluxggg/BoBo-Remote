@@ -1,0 +1,4 @@
+DualRemote file transfer verification
+Sample: dualremote-transfer-check-01
+This file contains only public test text.
+Compare the SHA-256 of the received copy with the source file.

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-and-selftest:
+    name: 编译启动器并运行自检
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译（系统自带 csc.exe，无 NuGet、无 SDK）
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
+          $compiler = Join-Path $framework 'csc.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) { throw "未找到 csc.exe：$compiler" }
+          $sources = @(Get-ChildItem -LiteralPath .\src -Recurse -File -Filter *.cs |
+            Where-Object { $_.FullName -notmatch '\\_tmp\\' } |
+            Select-Object -ExpandProperty FullName)
+          if ($sources.Count -eq 0) { throw '没有可编译的源码' }
+          $references = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll') |
+            ForEach-Object { Join-Path $framework $_ }
+          New-Item -ItemType Directory -Force -Path .\ci-out | Out-Null
+          & $compiler /nologo /target:winexe /platform:x64 /optimize+ /warn:4 /codepage:65001 /utf8output `
+            "/out:.\ci-out\DualRemote.exe" `
+            "/win32manifest:.\src\app.manifest" `
+            "/reference:$($references -join ',')" @sources
+          if ($LASTEXITCODE -ne 0) { throw "编译失败，退出码 $LASTEXITCODE" }
+          Write-Host "已编译 $($sources.Count) 个源文件"
+
+      - name: 自检（无 UI）
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $process = Start-Process -FilePath '.\ci-out\DualRemote.exe' -ArgumentList '--self-test' -Wait -PassThru
+          "self-test 退出码：$($process.ExitCode)"
+          if ($process.ExitCode -ne 0) { throw "自检失败：$($process.ExitCode)" }
