@@ -25,9 +25,11 @@ $mainExe = Join-Path $repoRoot 'dist\BoBo远程-Windows-x64\BoBo远程.exe'
 $setupExe = Join-Path $repoRoot 'dist\BoBoRemote-Setup-x64.exe'
 $portableZip = Join-Path $repoRoot 'dist\BoBo远程-Windows-x64.zip'
 
-$p1 = Start-Process -FilePath $mainExe -ArgumentList '--self-test' -Wait -PassThru -NoNewWindow
+$p1 = Start-Process -FilePath $mainExe -ArgumentList '--self-test' -Wait -PassThru
+Write-Host "Launcher self-test exit code: $($p1.ExitCode)"
 if ($p1.ExitCode -ne 0) { throw "BoBo远程.exe --self-test failed ($($p1.ExitCode))" }
-$p2 = Start-Process -FilePath $setupExe -ArgumentList '--self-test' -Wait -PassThru -NoNewWindow
+$p2 = Start-Process -FilePath $setupExe -ArgumentList '--self-test' -Wait -PassThru
+Write-Host "Setup self-test exit code: $($p2.ExitCode)"
 if ($p2.ExitCode -ne 0) { throw "BoBoRemote-Setup-x64.exe --self-test failed ($($p2.ExitCode))" }
 
 Write-Host '=== Building & self-testing V5 Native D3D11VA Core ==='
@@ -95,9 +97,11 @@ try {
 
 if ($exists) {
     gh release edit $Tag --repo $Repository --title "BoBo Remote $Tag" --notes-file $notesPath --latest
+    if ($LASTEXITCODE -ne 0) { throw "gh release edit failed ($LASTEXITCODE)" }
     gh release upload $Tag $outSetup $outPort $outV5 $sumsPath --repo $Repository --clobber
+    if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
 } else {
     gh release create $Tag $outSetup $outPort $outV5 $sumsPath --repo $Repository --title "BoBo Remote $Tag" --notes-file $notesPath --latest
+    if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
 }
-if ($LASTEXITCODE -ne 0) { throw "gh release publish failed ($LASTEXITCODE)" }
 Write-Host "OK: Release $Tag published"
