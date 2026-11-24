@@ -747,6 +747,12 @@ namespace DualRemote
                 && File.Exists(EmbeddedTools.ResolveDisplayTool())
                 && File.Exists(EmbeddedTools.ResolveOptimizeTool()),
                 EmbeddedTools.ResolveOptimizeTool());
+            var barExpanded = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), true, 1f);
+            var barCollapsed = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), false, 1f);
+            Check("V5 顶部悬浮工具条几何：展开与收起均居中贴顶且不越界",
+                barExpanded.Width > 500 && barExpanded.Top == 8 && Math.Abs((barExpanded.Left + barExpanded.Width / 2) - 960) <= 1
+                && barCollapsed.Width < 140 && barCollapsed.Top == 0 && Math.Abs((barCollapsed.Left + barCollapsed.Width / 2) - 960) <= 1,
+                "exp=" + barExpanded + " col=" + barCollapsed);
 
             var badSnap = new HostSnapshot { SunshineInstalled = true };
             var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

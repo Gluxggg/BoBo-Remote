@@ -169,6 +169,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch -NoPu
 | 模块 / 路径 | 职责 |
 | --- | --- |
 | `installer/BoBoSetup.cs` | 零依赖原生 WinForms 安装/卸载向导：SHA-256 校验、流式解压、自动创建桌面/开始菜单快捷方式、系统卸载注册与保留配对升级 |
+| `native/bobo-stream-player/` | **V5 原生 C++17 串流播放核心**（`BoBoStreamPlayer.exe`，~300 KB）：Direct3D 11 Flip-Model + `ID3D11VideoProcessor` + Media Foundation D3D11VA 硬解 + `moonlight-common-c` 桥接与 IPC（见 [`docs/V5-NATIVE-STREAM-PLAN.md`](docs/V5-NATIVE-STREAM-PLAN.md)） |
+| `src/StreamToolbarOverlay.cs` | **V5 画面顶部悬浮工具条**：自动贴顶收起、悬停展开，支持会话内实时切换画质档位、开关性能浮层/防窥壁纸/全屏窗口与一键断开 |
 | `src/MainForm*.cs` | 冰川浅蓝极简主窗体与四大页面：全部设备、远程协助、防窥与显示、设置与低延迟调优 |
 | `src/RemoteTheme.cs` | 零第三方依赖自绘主题系统：冰川蓝/瓷白色板、圆角卡片、双色导航图标、胶囊徽章与细滑滚动条 |
 | `src/OnboardingTour.cs` | 7 步灰白框选新手引导：双层原生 ClearType 清晰渲染、防重叠自适应避让与完成状态持久化 |
@@ -251,7 +253,7 @@ BoBo-Remote/
 | **V2** | 内置 Foundation Sunshine 被控宿主、本机 4 位配对流与已运行实例自动复用 | ✅ 完成 |
 | **V3** | 物理屏自定义防窥壁纸、锁屏状态机守护、Zako 虚拟屏与可还原抗丢包调优 | ✅ 完成 |
 | **V4** | 冰川浅蓝新界面、奶牛猫图标、7 步 ClearType 新手引导、单文件图形化安装包与内嵌脚本 | ✅ 完成 |
-| **V5** | 原生 C++ `moonlight-common-c` + D3D11VA 内嵌串流播放窗口（悬浮工具条与会话内无感切码率） | 📋 计划中 |
+| **V5** | 原生一体化串流引擎（Phase 5.1 顶部悬浮工具条 ✅ + Phase 5.2 C++17 D3D11VA 核心 ✅ + Phase 5.3/5.4 实时 RTP/FFmpeg HEVC 硬解与音频输入） | 🚧 进行中（见 [`V5 里程碑文档`](docs/V5-NATIVE-STREAM-PLAN.md)） |
 
 ## Star History
 

@@ -31,3 +31,22 @@ jobs:
           path: ci-out/BoBoRemote.exe
           if-no-files-found: warn
           retention-days: 7
+
+  build-v5-native-core:
+    name: Build V5 native D3D11VA core
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile BoBoStreamPlayer.exe (MSVC /W4 /WX) and run --self-test
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\native\bobo-stream-player\build-native.ps1 -RunSelfTest
+
+      - name: Upload V5 native core artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoBoStreamPlayer-v5-core
+          path: native/bobo-stream-player/out/BoBoStreamPlayer.exe
+          if-no-files-found: warn
+          retention-days: 7

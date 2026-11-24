@@ -105,6 +105,9 @@ namespace DualRemote
         private Control assistPartnerCard;
         private Timer onboardingDelayTimer;
         private WindowMessageFilter windowFilter;
+        private StreamToolbarOverlay activeStreamToolbar;
+        private string activeStreamHost = "";
+        private int activeStreamPid;
 
         internal MainForm() : this(false) { }
 
@@ -402,6 +405,11 @@ namespace DualRemote
             {
                 try { activeOnboardingTour.Close(); } catch { }
                 activeOnboardingTour = null;
+            }
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.CloseSafely();
+                activeStreamToolbar = null;
             }
             localPairPreparing = false;
             Process pendingPairProcess = TakeClientPairProcess();
@@ -1304,6 +1312,87 @@ namespace DualRemote
                 profile.Height, profile.Fps, profile.BitrateKbps, UsesHevc(profile), useFoundationClient, note);
             recent.RememberMoonlightHost(host);
             Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
+            ShowOrUpdateStreamToolbar(host, profile, Engines.LastStreamProcessId);
+        }
+
+        private void ShowOrUpdateStreamToolbar(string host, QualityOption profile, int pid)
+        {
+            activeStreamHost = host ?? "";
+            activeStreamPid = pid;
+            string modeTag = profile.Height + "p" + profile.Fps + " · " + (UsesHevc(profile) ? "HEVC" : "H.264");
+            int selectedIdx = Math.Max(0, quality.SelectedIndex);
+
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.UpdateSession(pid, modeTag, selectedIdx);
+                return;
+            }
+
+            string[] labels = new string[QualityOptions.Length];
+            for (int i = 0; i < QualityOptions.Length; i++) labels[i] = QualityOptions[i].ToString();
+
+            activeStreamToolbar = new StreamToolbarOverlay(
+                pid,
+                string.IsNullOrEmpty(clientPairHostName) ? host : clientPairHostName,
+                modeTag,
+                labels,
+                selectedIdx,
+                delegate { return showStreamStats; },
+                delegate { return privacyCurtain.IsActive; },
+                delegate { return windowedStream; },
+                delegate(int newIdx) { SwitchActiveStreamQuality(newIdx); },
+                delegate
+                {
+                    showStreamStats = !showStreamStats;
+                    SavePreferences();
+                    RestartActiveStreamSession();
+                },
+                delegate { TogglePrivacyCurtain(false); },
+                delegate
+                {
+                    windowedStream = !windowedStream;
+                    SavePreferences();
+                    RestartActiveStreamSession();
+                },
+                delegate { DisconnectActiveStreamSession(); },
+                delegate
+                {
+                    activeStreamToolbar = null;
+                    activeStreamPid = 0;
+                });
+            activeStreamToolbar.StartWatching();
+        }
+
+        private void SwitchActiveStreamQuality(int newIndex)
+        {
+            if (newIndex < 0 || newIndex >= QualityOptions.Length) return;
+            quality.SelectedIndex = newIndex;
+            SavePreferences();
+            RestartActiveStreamSession();
+        }
+
+        private void RestartActiveStreamSession()
+        {
+            string target = activeStreamHost;
+            if (string.IsNullOrEmpty(target)) return;
+            int oldPid = activeStreamPid;
+            activeStreamPid = 0;
+            if (oldPid > 0) Engines.StopStreamProcess(oldPid);
+            StartStream(target);
+        }
+
+        private void DisconnectActiveStreamSession()
+        {
+            int oldPid = activeStreamPid;
+            activeStreamPid = 0;
+            if (oldPid > 0) Engines.StopStreamProcess(oldPid);
+            SetStatus("已断开远程串流会话。", Theme.PillTone.Info);
+            try
+            {
+                if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                Activate();
+            }
+            catch { }
         }
 
         private static void RestoreRecents(ComboBox combo, List<string> entries)

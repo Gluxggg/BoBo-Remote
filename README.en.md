@@ -161,6 +161,8 @@ Every download URL, file size, and SHA-256 hash is pinned in [`build.ps1`](build
 | Module / Path | Responsibility |
 | --- | --- |
 | `installer/BoBoSetup.cs` | Zero-dependency native GUI installer/uninstaller: SHA-256 check, streaming extract, shortcuts, Windows Apps registry |
+| `native/bobo-stream-player/` | **V5 Native C++17 Streaming Core** (`BoBoStreamPlayer.exe`, ~300 KB): Direct3D 11 Flip-Model + `ID3D11VideoProcessor` + Media Foundation D3D11VA + `moonlight-common-c` bridge & IPC (see [`docs/V5-NATIVE-STREAM-PLAN.md`](docs/V5-NATIVE-STREAM-PLAN.md)) |
+| `src/StreamToolbarOverlay.cs` | **V5 Floating In-Stream Toolbar**: auto-collapsing top-center pill for live quality switch, stats HUD, privacy curtain, fullscreen & disconnect |
 | `src/MainForm*.cs` | Glacier ice-blue native shell & four pages: Devices, Remote Assist, Privacy & Display, Settings |
 | `src/RemoteTheme.cs` | Hand-drawn WinForms theme: ice-blue/porcelain palette, elevated cards, two-tone icons, slim scrollbar |
 | `src/OnboardingTour.cs` | 7-step spotlight onboarding with 2-layer ClearType rendering, overlap avoidance, and state persistence |
@@ -204,7 +206,7 @@ Every performance claim in this project is strictly graded as **configuration wr
 | **V2** | Bundled Foundation Sunshine host, 4-digit local pairing flow & existing-host reuse | ✅ Done |
 | **V3** | Host privacy wallpaper, lock-screen guard state machine, virtual display & reversible anti-loss tuning | ✅ Done |
 | **V4** | Glacier ice-blue UI, tuxedo cat icon, 7-step ClearType onboarding, GUI installer & compiled-in scripts | ✅ Done |
-| **V5** | Native C++ `moonlight-common-c` + D3D11VA embedded stream viewport with floating toolbar & live bitrate toggle | 📋 Planned |
+| **V5** | Native embedded streaming engine (Phase 5.1 floating toolbar ✅ + Phase 5.2 C++17 D3D11VA core ✅ + Phase 5.3/5.4 RTP/HEVC/Audio) | 🚧 In progress ([`V5 Milestone Spec`](docs/V5-NATIVE-STREAM-PLAN.md)) |
 
 ## Star History
 

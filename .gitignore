@@ -9,5 +9,9 @@ nul
 
 # 编译输出
 ci-out/
+native/bobo-stream-player/out/
+native/bobo-stream-player/build/
+native/bobo-stream-player/third_party/
 *.exe
 *.pdb
+*.obj

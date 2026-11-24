@@ -687,6 +687,8 @@ namespace DualRemote
             return false;
         }
 
+        internal static int LastStreamProcessId { get; private set; }
+
         internal static Process StartEngine(string exePath, string arguments)
         {
             ProcessStartInfo info = new ProcessStartInfo();
@@ -694,7 +696,50 @@ namespace DualRemote
             info.Arguments = arguments;
             info.WorkingDirectory = Path.GetDirectoryName(exePath);
             info.UseShellExecute = false;
-            return Process.Start(info);
+            Process started = Process.Start(info);
+            if (started != null && string.Equals(Path.GetFileName(exePath), "Moonlight.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                LastStreamProcessId = started.Id;
+            }
+            return started;
+        }
+
+        internal static bool IsProcessAlive(int pid)
+        {
+            if (pid <= 0) return false;
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    return !p.HasExited;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static void StopStreamProcess(int pid)
+        {
+            if (pid <= 0) return;
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    if (p.HasExited) return;
+                    try { p.CloseMainWindow(); }
+                    catch { }
+                    if (!p.WaitForExit(1200))
+                    {
+                        try { p.Kill(); p.WaitForExit(1500); }
+                        catch { }
+                    }
+                }
+            }
+            catch
+            {
+            }
         }
 
         internal static bool TryOpenUrl(string url, out string error)
