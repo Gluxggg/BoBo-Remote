@@ -971,6 +971,7 @@ namespace DualRemote
             private int dragStartOffset;
 
             internal int MaxContentWidth = 1160;
+            internal bool SuspendResponsiveLayout;
             internal event Action<int> ContentWidthChanged;
 
             internal SlimScrollViewport()
@@ -1137,7 +1138,7 @@ namespace DualRemote
 
             private void LayoutContent()
             {
-                if (content == null) return;
+                if (content == null || SuspendResponsiveLayout) return;
                 float scale = DeviceDpi / 96f;
                 int reserve = Math.Max(8, (int)Math.Round(ScrollbarReserve * scale));
                 int avail = Math.Max(280, ClientSize.Width - reserve);

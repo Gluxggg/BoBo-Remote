@@ -24,6 +24,7 @@ Write-Host '=== Running self-tests on Launcher & Setup EXE ==='
 $mainExe = Join-Path $repoRoot 'dist\BoBo远程-Windows-x64\BoBo远程.exe'
 $setupExe = Join-Path $repoRoot 'dist\BoBoRemote-Setup-x64.exe'
 $portableZip = Join-Path $repoRoot 'dist\BoBo远程-Windows-x64.zip'
+$lightZip = Join-Path $repoRoot 'dist\BoBo远程-轻量更新包.zip'
 
 $p1 = Start-Process -FilePath $mainExe -ArgumentList '--self-test' -Wait -PassThru
 Write-Host "Launcher self-test exit code: $($p1.ExitCode)"
@@ -41,19 +42,23 @@ $assetDir = Join-Path $repoRoot 'release-assets'
 if (Test-Path -LiteralPath $assetDir) { Remove-Item -LiteralPath $assetDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
 
-$outSetup = Join-Path $assetDir 'BoBoRemote-Setup-x64.exe'
-$outPort  = Join-Path $assetDir 'BoBoRemote-Portable-x64.zip'
-$outV5    = Join-Path $assetDir 'BoBoStreamPlayer-v5-core-x64.exe'
+$outSetup  = Join-Path $assetDir 'BoBoRemote-Setup-x64.exe'
+$outPort   = Join-Path $assetDir 'BoBoRemote-Portable-x64.zip'
+$outUpdate = Join-Path $assetDir 'BoBoRemote-Update-x64.zip'
+$outV5     = Join-Path $assetDir 'BoBoStreamPlayer-v5-core-x64.exe'
 Copy-Item -LiteralPath $setupExe -Destination $outSetup -Force
 Copy-Item -LiteralPath $portableZip -Destination $outPort -Force
+Copy-Item -LiteralPath $lightZip -Destination $outUpdate -Force
 Copy-Item -LiteralPath $v5Exe -Destination $outV5 -Force
 
-$hSetup = (Get-FileHash -LiteralPath $outSetup -Algorithm SHA256).Hash.ToLower()
-$hPort  = (Get-FileHash -LiteralPath $outPort -Algorithm SHA256).Hash.ToLower()
-$hV5    = (Get-FileHash -LiteralPath $outV5 -Algorithm SHA256).Hash.ToLower()
+$hSetup  = (Get-FileHash -LiteralPath $outSetup -Algorithm SHA256).Hash.ToLower()
+$hPort   = (Get-FileHash -LiteralPath $outPort -Algorithm SHA256).Hash.ToLower()
+$hUpdate = (Get-FileHash -LiteralPath $outUpdate -Algorithm SHA256).Hash.ToLower()
+$hV5     = (Get-FileHash -LiteralPath $outV5 -Algorithm SHA256).Hash.ToLower()
 
+$enginesStamp = 'rd1.5.3-ml6.2.0-vp6.5.6-fs2026.1123.185102'
 $sumsPath = Join-Path $assetDir 'SHA256SUMS.txt'
-$sumsText = "$hSetup  BoBoRemote-Setup-x64.exe`n$hPort  BoBoRemote-Portable-x64.zip`n$hV5  BoBoStreamPlayer-v5-core-x64.exe`n"
+$sumsText = "# engines=$enginesStamp`n$hSetup  BoBoRemote-Setup-x64.exe`n$hPort  BoBoRemote-Portable-x64.zip`n$hUpdate  BoBoRemote-Update-x64.zip`n$hV5  BoBoStreamPlayer-v5-core-x64.exe`n"
 [System.IO.File]::WriteAllText($sumsPath, $sumsText, (New-Object System.Text.UTF8Encoding($false)))
 
 $notesPath = Join-Path $assetDir 'release-notes.md'
@@ -66,12 +71,14 @@ $notesTemplate = @'
   - 默认安装至 `%LOCALAPPDATA%\BoBoRemote`（免 UAC 弹窗，支持自定义目录）；
   - 自动创建**桌面快捷方式「BoBo Remote」**、**开始菜单入口**与 Windows **「应用和功能」卸载项**；
   - 覆盖升级时自动保留原有 Moonlight 本地配对记录；
+  - 支持**客户端内一键自动更新**（启动自动检测 GitHub Releases 新版本，SHA-256 校验后自动增量/覆盖升级，无需再手动去仓库下载安装包）；
   - 首次打开自动运行 **7 步灰白框选 ClearType 新手引导**，串流时自动停靠 **V5 顶部悬浮工具条**（实时切画质 / 防窥壁纸 / 性能浮层 / 一键断开）。
-- **`BoBoRemote-Portable-x64.zip`（绿色免安装便携版）**：解压即可运行。
+- **`BoBoRemote-Portable-x64.zip`（绿色免安装便携版）**：解压即可运行，同样支持客户端内自动更新。
+- **`BoBoRemote-Update-x64.zip`（客户端轻量增量更新包，~200 KB）**：供内置自动更新器在引擎版本未变时秒级校验覆盖升级，无需手动下载。
 - **`BoBoStreamPlayer-v5-core-x64.exe`（V5 原生 C++17 D3D11VA 播放核心预览，~300 KB）**：可运行 `--self-test` / `--probe-gpu` 检验本机 D3D11VA 硬件解码能力。
 
 ### 开箱即用与可选进阶说明
-- **下载双击即用（零额外安装）**：局域网 2K 高帧串流（内置 Foundation Sunshine + Moonlight V+ 与 4 位配对码）、跨外网 RustDesk 9 位码临时协助与文件互传、软件级物理屏防窥壁纸与锁屏守护（`Ctrl+Alt+Shift+P`）、串流顶部悬浮工具条及 7 步新手引导均已全部内置。
+- **下载双击即用（零额外安装）**：局域网 2K 高帧串流（内置 Foundation Sunshine + Moonlight V+ 与 4 位配对码）、跨外网 RustDesk 9 位码临时协助与文件互传、软件级物理屏防窥壁纸与锁屏守护（`Ctrl+Alt+Shift+P`）、串流顶部悬浮工具条、客户端内自动更新及 7 步新手引导均已全部内置。
 - **可选进阶能力（按需额外搭配）**：
   - **跨外网 2K 高帧低延迟串流**：需两台电脑安装同一异地组网工具（如 Tailscale / EasyTier），或具备公网 IPv6 直连条件；
   - **硬件级彻底熄屏防窥（关闭物理显示器信号）与虚拟屏**：需在被控端额外搭配 **Zako 虚拟屏驱动** 与 **系统安装版 Foundation Sunshine**。
@@ -81,6 +88,7 @@ $notesTemplate = @'
 ```text
 __H_SETUP__  BoBoRemote-Setup-x64.exe
 __H_PORT__  BoBoRemote-Portable-x64.zip
+__H_UPDATE__  BoBoRemote-Update-x64.zip
 __H_V5__  BoBoStreamPlayer-v5-core-x64.exe
 ```
 
@@ -97,6 +105,7 @@ $notes = $notesTemplate.
     Replace('__REPO__', $Repository).
     Replace('__H_SETUP__', $hSetup).
     Replace('__H_PORT__', $hPort).
+    Replace('__H_UPDATE__', $hUpdate).
     Replace('__H_V5__', $hV5)
 [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -110,10 +119,10 @@ try {
 if ($exists) {
     gh release edit $Tag --repo $Repository --title "BoBo Remote $Tag" --notes-file $notesPath --latest
     if ($LASTEXITCODE -ne 0) { throw "gh release edit failed ($LASTEXITCODE)" }
-    gh release upload $Tag $outSetup $outPort $outV5 $sumsPath --repo $Repository --clobber
+    gh release upload $Tag $outSetup $outPort $outUpdate $outV5 $sumsPath --repo $Repository --clobber
     if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
 } else {
-    gh release create $Tag $outSetup $outPort $outV5 $sumsPath --repo $Repository --title "BoBo Remote $Tag" --notes-file $notesPath --latest
+    gh release create $Tag $outSetup $outPort $outUpdate $outV5 $sumsPath --repo $Repository --title "BoBo Remote $Tag" --notes-file $notesPath --latest
     if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
 }
 Write-Host "OK: Release $Tag published"

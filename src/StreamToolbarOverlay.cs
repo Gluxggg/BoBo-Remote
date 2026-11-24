@@ -448,7 +448,7 @@ namespace DualRemote
                     int d = (int)Math.Round(6 * scale);
                     g.FillEllipse(dot, (int)Math.Round(14 * scale), (Height - d) / 2, d, d);
                 }
-                using (var f = new Font("Microsoft YaHei UI", Math.Max(7.5f, 8f * scale), FontStyle.Bold, GraphicsUnit.Point))
+                using (var f = new Font("Microsoft YaHei UI", 8f, FontStyle.Bold, GraphicsUnit.Point))
                 {
                     TextRenderer.DrawText(g, "BoBo ▾", f, new Rectangle((int)Math.Round(22 * scale), 0, Width - (int)Math.Round(24 * scale), Height),
                         Color.FromArgb(228, 238, 252), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);

@@ -283,8 +283,8 @@ namespace DualRemote
 
         private void ApplyPrivacyWallpaperResponsiveLayout(int contentWidth)
         {
-            if (wallpaperRootLayout == null || privacyDesk == null || wallpaperCardRow < 0 || wallpaperSplitRow < 0) return;
-            float scale = privacyDesk.DeviceDpi / 96f;
+            if (!initialScaleApplied || wallpaperRootLayout == null || privacyDesk == null || wallpaperCardRow < 0 || wallpaperSplitRow < 0) return;
+            float scale = CurrentDpiScale();
             bool compact = contentWidth < (int)Math.Round(760f * scale);
             if (compact == wallpaperCompactMode) return;
             wallpaperCompactMode = compact;
@@ -296,6 +296,7 @@ namespace DualRemote
             privacyDesk.Height = SumRows(privacyDesk);
             privacyDesk.PerformLayout();
             if (privacyViewport != null) privacyViewport.RefreshLayout();
+            NotifyOnboardingLayoutChanged();
         }
 
         private Button MakePresetChip(int presetIndex, string caption)

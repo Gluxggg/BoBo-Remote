@@ -86,6 +86,7 @@ The UI, 7-step onboarding engine, privacy curtain state machine, and core displa
 | **Host privacy wallpaper curtain** | ✅ Native | Uses `WDA_EXCLUDEFROMCAPTURE` with custom images or 3 themes, auto-enable on attach, and lock-on-exit |
 | **Virtual display & display-off privacy** | 🔧 Optional Advanced | Requires installing the Zako virtual display driver and system-installed Foundation Sunshine to turn off the physical monitor signal (auto-restores on exit) |
 | **7-step spotlight onboarding tour** | ✅ Native | Auto-opens on first launch with 2-layer native ClearType rendering; replay anytime via top-right `?` |
+| **In-app automatic updates** | ✅ Native | Silently checks GitHub Releases on launch, verifies SHA-256 via `SHA256SUMS.txt`, and applies light delta or full upgrades in place automatically |
 
 ## Interface Preview
 

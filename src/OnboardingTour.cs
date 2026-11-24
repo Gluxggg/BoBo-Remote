@@ -118,6 +118,7 @@ namespace DualRemote
         internal int Inset;
         internal int ContentWidth;
         internal int ContentHeight;
+        internal float FontScale = 1f;
         internal Rectangle HeaderRect;
         internal Rectangle TitleRect;
         internal Rectangle BodyRect;
@@ -188,6 +189,57 @@ namespace DualRemote
         [DllImport("gdi32.dll", SetLastError = true)]
         private static extern bool DeleteObject(IntPtr hObject);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+        private const int DwmwaNcRenderingPolicy = 2;
+        private const int DwmncrpDisabled = 1;
+        private const int DwmwaTransitionsForceDisabled = 3;
+        private const int DwmwaWindowCornerPreference = 33;
+        private const int DwmwcpDoNotRound = 1;
+        private const int DwmwaBorderColor = 34;
+        private const int DwmwaColorNone = unchecked((int)0xFFFFFFFE);
+        private const uint SwpNoZOrder = 0x0004;
+        private const uint SwpNoActivate = 0x0010;
+
+        private static void ConfigureWin11OverlayWindow(IntPtr handle, bool disableRounding, bool disableBorderAndShadow)
+        {
+            if (handle == IntPtr.Zero) return;
+            try
+            {
+                int disableAnim = 1;
+                DwmSetWindowAttribute(handle, DwmwaTransitionsForceDisabled, ref disableAnim, sizeof(int));
+            }
+            catch { }
+            if (disableRounding)
+            {
+                try
+                {
+                    int noRound = DwmwcpDoNotRound;
+                    DwmSetWindowAttribute(handle, DwmwaWindowCornerPreference, ref noRound, sizeof(int));
+                }
+                catch { }
+            }
+            if (disableBorderAndShadow)
+            {
+                try
+                {
+                    int noBorder = DwmwaColorNone;
+                    DwmSetWindowAttribute(handle, DwmwaBorderColor, ref noBorder, sizeof(int));
+                }
+                catch { }
+                try
+                {
+                    int noNc = DwmncrpDisabled;
+                    DwmSetWindowAttribute(handle, DwmwaNcRenderingPolicy, ref noNc, sizeof(int));
+                }
+                catch { }
+            }
+        }
+
         private readonly Form hostForm;
         private readonly IList<OnboardingStep> steps;
         private readonly Action onFinished;
@@ -228,6 +280,18 @@ namespace DualRemote
                 cp.ExStyle |= WsExLayered | WsExToolWindow;
                 return cp;
             }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ConfigureWin11OverlayWindow(Handle, true, false);
+        }
+
+        internal void NotifyHostContentChanged()
+        {
+            if (finished || IsDisposed || !Visible) return;
+            ScheduleRefreshStepVisual();
         }
 
         private float CurrentScale()
@@ -274,7 +338,12 @@ namespace DualRemote
             Point origin = hostForm.PointToScreen(Point.Empty);
             Size sz = hostForm.ClientSize;
             if (sz.Width < 100 || sz.Height < 100) return;
-            Bounds = new Rectangle(origin.X, origin.Y, sz.Width, sz.Height);
+            var exact = new Rectangle(origin.X, origin.Y, sz.Width, sz.Height);
+            Bounds = exact;
+            if (IsHandleCreated)
+            {
+                SetWindowPos(Handle, IntPtr.Zero, exact.X, exact.Y, exact.Width, exact.Height, SwpNoZOrder | SwpNoActivate);
+            }
         }
 
         private void ScheduleRefreshStepVisual()
@@ -316,6 +385,7 @@ namespace DualRemote
         private void RefreshCurrentStepTargetAndPaint()
         {
             if (finished || IsDisposed || hostForm == null || hostForm.IsDisposed) return;
+            try { hostForm.PerformLayout(); } catch { }
             SyncBoundsToHost();
             OnboardingStep step = steps[currentIndex];
             Rectangle rect = Rectangle.Empty;
@@ -336,8 +406,17 @@ namespace DualRemote
             CardMetrics metrics = MeasureCardMetrics(new Size(Width, Height), scale, step);
             CardLayoutResult layout = ComputeCardPlacement(new Size(Width, Height), targetRect, new SizeF(metrics.CardWidth, metrics.CardHeight), scale);
 
+            // 若紧凑笔记本窗口约束了卡片宽度，按实际落地宽度重新度量文字换行高度，杜绝裁剪底部按钮
+            int placedW = (int)Math.Round(layout.CardRect.Width);
+            if (placedW > 120 && Math.Abs(placedW - metrics.CardWidth) >= 4)
+            {
+                metrics = MeasureCardMetricsForWidth(new Size(Width, Height), placedW, scale, step);
+                layout = ComputeCardPlacement(new Size(Width, Height), targetRect, new SizeF(metrics.CardWidth, metrics.CardHeight), scale);
+            }
+
             // 1. Render anti-aliased scrim + spotlight cutout + soft shadow + rounded white card shell + arrow on layered window
-            using (Bitmap backdrop = RenderScrimAndShell(new Size(Width, Height), scale, targetRect, layout))
+            bool roundOuterCorners = hostForm != null && !hostForm.IsDisposed && hostForm.WindowState != FormWindowState.Maximized;
+            using (Bitmap backdrop = RenderScrimAndShell(new Size(Width, Height), scale, targetRect, layout, roundOuterCorners))
             {
                 ApplyBitmapToLayeredWindow(backdrop);
             }
@@ -349,14 +428,17 @@ namespace DualRemote
                 int cy = Top + (int)Math.Round(layout.CardRect.Y) + metrics.Inset;
                 int cw = Math.Max(40, Math.Min(metrics.ContentWidth, (int)Math.Round(layout.CardRect.Width) - metrics.Inset * 2));
                 int ch = Math.Max(40, Math.Min(metrics.ContentHeight, (int)Math.Round(layout.CardRect.Height) - metrics.Inset * 2));
-                cardWindow.UpdateStep(step, currentIndex, steps.Count, scale, metrics, new Rectangle(cx, cy, cw, ch));
+                var screenRect = new Rectangle(cx, cy, cw, ch);
+                cardWindow.UpdateStep(step, currentIndex, steps.Count, scale, metrics, screenRect);
                 if (!cardWindow.Visible)
                 {
                     cardWindow.Show(this);
+                    cardWindow.ApplyExactBounds(screenRect);
                     cardWindow.Activate();
                 }
                 else
                 {
+                    cardWindow.ApplyExactBounds(screenRect);
                     cardWindow.BringToFront();
                 }
             }
@@ -545,55 +627,97 @@ namespace DualRemote
 
         internal static CardMetrics MeasureCardMetrics(Size viewport, float scale, OnboardingStep step)
         {
-            int inset = Math.Max(7, (int)Math.Round(8f * scale));
+            int maxAllowedW = Math.Max((int)Math.Round(240f * scale), viewport.Width - (int)Math.Round(28f * scale));
+            int cardW = (int)Math.Round(Math.Min(386f * scale, Math.Max(272f * scale, Math.Min(386f * scale, maxAllowedW))));
+            cardW = Math.Min(cardW, maxAllowedW);
+            return MeasureCardMetricsForWidth(viewport, cardW, scale, step);
+        }
+
+        private static CardMetrics MeasureCardMetricsForWidth(Size viewport, int cardW, float scale, OnboardingStep step)
+        {
+            CardMetrics normal = BuildCardMetrics(cardW, scale, step, false, 1f);
+            int maxAllowedH = viewport.Height - (int)Math.Round(28f * scale);
+            if (maxAllowedH <= 120 || normal.CardHeight <= maxAllowedH)
+                return normal;
+
+            CardMetrics compact = BuildCardMetrics(cardW, scale, step, true, 1f);
+            if (compact.CardHeight <= maxAllowedH)
+                return compact;
+
+            int maxAllowedW = Math.Max(cardW, Math.Min((int)Math.Round(480f * scale), viewport.Width - (int)Math.Round(28f * scale)));
+            if (maxAllowedW > cardW + (int)Math.Round(12f * scale))
+            {
+                CardMetrics wider = BuildCardMetrics(maxAllowedW, scale, step, true, 1f);
+                if (wider.CardHeight <= maxAllowedH)
+                    return wider;
+                compact = wider;
+                cardW = maxAllowedW;
+            }
+
+            foreach (float fs in new[] { 0.92f, 0.85f, 0.78f })
+            {
+                CardMetrics scaled = BuildCardMetrics(cardW, scale, step, true, fs);
+                if (scaled.CardHeight <= maxAllowedH)
+                    return scaled;
+                compact = scaled;
+            }
+            return compact;
+        }
+
+        private static CardMetrics BuildCardMetrics(int cardW, float scale, OnboardingStep step, bool compactSpacing, float fontScale)
+        {
+            float vFactor = compactSpacing ? 0.65f : 1f;
+            float fScale = scale * fontScale;
+            int inset = Math.Max(6, (int)Math.Round((compactSpacing ? 6f : 8f) * scale));
             int padX = Math.Max(10, (int)Math.Round(12f * scale));
-            int padY = Math.Max(8, (int)Math.Round(10f * scale));
-            int cardW = (int)Math.Round(Math.Min(386f * scale, Math.Max(272f * scale, viewport.Width - 32f * scale)));
-            int contentW = cardW - inset * 2;
+            int padY = Math.Max(6, (int)Math.Round(10f * scale * vFactor));
+            int contentW = Math.Max(160, cardW - inset * 2);
             int innerW = Math.Max(140, contentW - padX * 2);
 
             int headerH = (int)Math.Round(26f * scale);
-            int footerH = (int)Math.Round(34f * scale);
-            int gapHeader = (int)Math.Round(10f * scale);
-            int gapTitle = (int)Math.Round(8f * scale);
-            int gapTip = (int)Math.Round(12f * scale);
-            int gapFooter = (int)Math.Round(16f * scale);
+            int footerH = (int)Math.Round((compactSpacing ? 30f : 34f) * scale);
+            int gapHeader = (int)Math.Round(10f * scale * vFactor);
+            int gapTitle = (int)Math.Round(8f * scale * vFactor);
+            int gapTip = (int)Math.Round(12f * scale * vFactor);
+            int gapFooter = (int)Math.Round(16f * scale * vFactor);
             int tipPadX = (int)Math.Round(10f * scale);
             int tipTextLeft = (int)Math.Round(22f * scale);
-            int tipPadY = (int)Math.Round(7f * scale);
+            int tipPadY = (int)Math.Round(7f * scale * vFactor);
 
-            using (var titleFont = CreatePixelFont(15.5f, scale, FontStyle.Bold))
-            using (var bodyFont = CreatePixelFont(13.25f, scale, FontStyle.Regular))
-            using (var tipFont = CreatePixelFont(12f, scale, FontStyle.Regular))
+            using (Graphics screenG = Graphics.FromHwnd(IntPtr.Zero))
+            using (var titleFont = CreatePixelFont(15.5f, fScale, FontStyle.Bold))
+            using (var bodyFont = CreatePixelFont(13.25f, fScale, FontStyle.Regular))
+            using (var tipFont = CreatePixelFont(12f, fScale, FontStyle.Regular))
             {
-                Size titleSz = TextRenderer.MeasureText(step.Title ?? "", titleFont, new Size(innerW, int.MaxValue), WrapFlags);
-                Size bodySz = TextRenderer.MeasureText(step.Description ?? "", bodyFont, new Size(innerW, int.MaxValue), WrapFlags);
+                Size titleSz = TextRenderer.MeasureText(screenG, step.Title ?? "", titleFont, new Size(innerW, int.MaxValue), WrapFlags);
+                Size bodySz = TextRenderer.MeasureText(screenG, step.Description ?? "", bodyFont, new Size(innerW, int.MaxValue), WrapFlags);
                 bool hasTip = !string.IsNullOrWhiteSpace(step.Tip);
                 int tipInnerW = Math.Max(80, innerW - tipTextLeft - tipPadX);
-                Size tipSz = hasTip ? TextRenderer.MeasureText(step.Tip, tipFont, new Size(tipInnerW, int.MaxValue), WrapFlags) : Size.Empty;
-                int tipBoxH = hasTip ? (tipSz.Height + tipPadY * 2 + 2) : 0;
+                Size tipSz = hasTip ? TextRenderer.MeasureText(screenG, step.Tip, tipFont, new Size(tipInnerW, int.MaxValue), WrapFlags) : Size.Empty;
+                int tipBoxH = hasTip ? (tipSz.Height + tipPadY * 2 + (int)Math.Ceiling(2f * scale)) : 0;
 
                 int y = padY;
                 var m = new CardMetrics();
                 m.Inset = inset;
                 m.CardWidth = cardW;
                 m.ContentWidth = contentW;
+                m.FontScale = fontScale;
                 m.HasTip = hasTip;
 
                 m.HeaderRect = new Rectangle(padX, y, innerW, headerH);
                 y += headerH + gapHeader;
 
-                m.TitleRect = new Rectangle(padX, y, innerW, titleSz.Height + 3);
+                m.TitleRect = new Rectangle(padX, y, innerW, titleSz.Height + (int)Math.Ceiling(3f * scale));
                 y += m.TitleRect.Height + gapTitle;
 
-                m.BodyRect = new Rectangle(padX, y, innerW, bodySz.Height + 4);
+                m.BodyRect = new Rectangle(padX, y, innerW, bodySz.Height + (int)Math.Ceiling(4f * scale));
                 y += m.BodyRect.Height;
 
                 if (hasTip)
                 {
                     y += gapTip;
                     m.TipBoxRect = new Rectangle(padX, y, innerW, tipBoxH);
-                    m.TipTextRect = new Rectangle(padX + tipTextLeft, y + tipPadY, tipInnerW, tipSz.Height + 2);
+                    m.TipTextRect = new Rectangle(padX + tipTextLeft, y + tipPadY, tipInnerW, tipSz.Height + (int)Math.Ceiling(2f * scale));
                     y += tipBoxH;
                 }
 
@@ -607,7 +731,7 @@ namespace DualRemote
             }
         }
 
-        private static Bitmap RenderScrimAndShell(Size viewport, float scale, Rectangle target, CardLayoutResult layout)
+        private static Bitmap RenderScrimAndShell(Size viewport, float scale, Rectangle target, CardLayoutResult layout, bool roundOuterCorners)
         {
             var bmp = new Bitmap(viewport.Width, viewport.Height, PixelFormat.Format32bppPArgb);
             using (Graphics g = Graphics.FromImage(bmp))
@@ -624,7 +748,15 @@ namespace DualRemote
 
                 using (var scrimPath = new GraphicsPath(FillMode.Alternate))
                 {
-                    scrimPath.AddRectangle(new RectangleF(0, 0, viewport.Width, viewport.Height));
+                    if (roundOuterCorners)
+                    {
+                        using (var outer = Theme.Round(new RectangleF(0, 0, viewport.Width, viewport.Height), 8f * scale))
+                            scrimPath.AddPath(outer, false);
+                    }
+                    else
+                    {
+                        scrimPath.AddRectangle(new RectangleF(0, 0, viewport.Width, viewport.Height));
+                    }
                     if (hasSpot)
                     {
                         using (var hole = Theme.Round(spotRect, spotRadius))
@@ -688,10 +820,11 @@ namespace DualRemote
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
+            float fScale = scale * (m != null && m.FontScale > 0.5f ? m.FontScale : 1f);
             using (var badgeFont = CreatePixelFont(11.5f, scale, FontStyle.Bold))
-            using (var titleFont = CreatePixelFont(15.5f, scale, FontStyle.Bold))
-            using (var bodyFont = CreatePixelFont(13.25f, scale, FontStyle.Regular))
-            using (var tipFont = CreatePixelFont(12f, scale, FontStyle.Regular))
+            using (var titleFont = CreatePixelFont(15.5f, fScale, FontStyle.Bold))
+            using (var bodyFont = CreatePixelFont(13.25f, fScale, FontStyle.Regular))
+            using (var tipFont = CreatePixelFont(12f, fScale, FontStyle.Regular))
             using (var btnFont = CreatePixelFont(12.75f, scale, FontStyle.Bold))
             using (var btnLightFont = CreatePixelFont(12.75f, scale, FontStyle.Regular))
             {
@@ -705,7 +838,7 @@ namespace DualRemote
                 }
 
                 string stepTag = string.Format("步骤 {0} / {1}", stepIndex + 1, totalSteps);
-                Size tagSz = TextRenderer.MeasureText(g, stepTag, badgeFont, new Size(160, m.HeaderRect.Height),
+                Size tagSz = TextRenderer.MeasureText(g, stepTag, badgeFont, new Size(int.MaxValue, m.HeaderRect.Height),
                     TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                 int tagH = Math.Max(20, m.HeaderRect.Height - (int)Math.Round(2f * scale));
                 var tagRect = new Rectangle(badgeX, m.HeaderRect.Top + (m.HeaderRect.Height - tagH) / 2, tagSz.Width + (int)Math.Round(16f * scale), tagH);
@@ -714,7 +847,7 @@ namespace DualRemote
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
                 string skipText = "跳过引导";
-                Size skipSz = TextRenderer.MeasureText(g, skipText, btnLightFont, new Size(120, m.HeaderRect.Height),
+                Size skipSz = TextRenderer.MeasureText(g, skipText, btnLightFont, new Size(int.MaxValue, m.HeaderRect.Height),
                     TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                 int skipW = skipSz.Width + (int)Math.Round(12f * scale);
                 skipRect = new Rectangle(m.HeaderRect.Right - skipW, m.HeaderRect.Top, skipW, m.HeaderRect.Height);
@@ -739,43 +872,62 @@ namespace DualRemote
                     TextRenderer.DrawText(g, step.Tip, tipFont, m.TipTextRect, Color.FromArgb(30, 74, 148), WrapFlags);
                 }
 
-                // Footer: clickable progress dots + Prev + Next/Done
-                dotRects = new Rectangle[totalSteps];
-                int dotX = m.FooterRect.Left;
-                int dotH = Math.Max(5, (int)Math.Round(6f * scale));
-                int dotY = m.FooterRect.Top + (m.FooterRect.Height - dotH) / 2;
-                int dotGap = Math.Max(4, (int)Math.Round(6f * scale));
-                for (int i = 0; i < totalSteps; i++)
-                {
-                    bool activeDot = (i == stepIndex);
-                    int dw = activeDot ? (int)Math.Round(18f * scale) : dotH;
-                    dotRects[i] = new Rectangle(dotX, dotY, dw, dotH);
-                    Color dc = activeDot ? Theme.Accent : (hover == OnboardingHitTarget.Dot && hoverDot == i) ? Theme.AccentSky : Color.FromArgb(204, 214, 226);
-                    Theme.Surface(g, dotRects[i], dotH * 0.5f, dc, Color.Transparent);
-                    dotX += dw + dotGap;
-                }
-
+                // Footer: measure action buttons first so dots never overlap Prev/Next on narrow/high-DPI screens
                 bool isLast = stepIndex >= totalSteps - 1;
                 string nextLabel = isLast ? "开始使用" : "下一步";
-                int nextW = (int)Math.Round((isLast ? 88f : 78f) * scale);
+                Size nextTextSz = TextRenderer.MeasureText(g, nextLabel, btnFont, new Size(int.MaxValue, m.FooterRect.Height),
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                int nextW = Math.Max((int)Math.Round((isLast ? 86f : 76f) * scale), nextTextSz.Width + (int)Math.Round(24f * scale));
                 nextRect = new Rectangle(m.FooterRect.Right - nextW, m.FooterRect.Top, nextW, m.FooterRect.Height);
                 Color nextBg = (pressed == OnboardingHitTarget.Next) ? Theme.AccentPressed : (hover == OnboardingHitTarget.Next) ? Theme.AccentHover : Theme.Accent;
                 Theme.Surface(g, nextRect, 7f * scale, nextBg, Color.Transparent);
                 TextRenderer.DrawText(g, nextLabel, btnFont, nextRect, Color.White,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
+                int btnLeftEdge = nextRect.Left;
                 if (stepIndex > 0)
                 {
-                    int prevW = (int)Math.Round(72f * scale);
+                    Size prevTextSz = TextRenderer.MeasureText(g, "上一步", btnLightFont, new Size(int.MaxValue, m.FooterRect.Height),
+                        TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                    int prevW = Math.Max((int)Math.Round(70f * scale), prevTextSz.Width + (int)Math.Round(20f * scale));
                     prevRect = new Rectangle(nextRect.Left - (int)Math.Round(8f * scale) - prevW, m.FooterRect.Top, prevW, m.FooterRect.Height);
                     Color prevBg = (pressed == OnboardingHitTarget.Prev) ? Theme.NavHover : (hover == OnboardingHitTarget.Prev) ? Theme.SurfaceSubtle : Color.White;
                     Theme.Surface(g, prevRect, 7f * scale, prevBg, Theme.StrokeStrong, 1f);
                     TextRenderer.DrawText(g, "上一步", btnLightFont, prevRect, Theme.Ink,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                    btnLeftEdge = prevRect.Left;
                 }
                 else
                 {
                     prevRect = Rectangle.Empty;
+                }
+
+                // Clickable progress dots (auto-compact if tight so dots never touch buttons)
+                dotRects = new Rectangle[totalSteps];
+                int availDotW = btnLeftEdge - m.FooterRect.Left - (int)Math.Round(8f * scale);
+                int dotH = Math.Max(5, (int)Math.Round(6f * scale));
+                int dotGap = Math.Max(3, (int)Math.Round(6f * scale));
+                int activeW = Math.Max(dotH + 4, (int)Math.Round(18f * scale));
+                int totalDotW = totalSteps > 0 ? activeW + Math.Max(0, totalSteps - 1) * (dotH + dotGap) : 0;
+                if (totalDotW > availDotW && totalSteps > 1)
+                {
+                    dotGap = Math.Max(2, (int)Math.Round(3f * scale));
+                    activeW = Math.Max(dotH + 2, (int)Math.Round(12f * scale));
+                    totalDotW = activeW + (totalSteps - 1) * (dotH + dotGap);
+                }
+                if (totalDotW <= availDotW)
+                {
+                    int dotX = m.FooterRect.Left;
+                    int dotY = m.FooterRect.Top + (m.FooterRect.Height - dotH) / 2;
+                    for (int i = 0; i < totalSteps; i++)
+                    {
+                        bool activeDot = (i == stepIndex);
+                        int dw = activeDot ? activeW : dotH;
+                        dotRects[i] = new Rectangle(dotX, dotY, dw, dotH);
+                        Color dc = activeDot ? Theme.Accent : (hover == OnboardingHitTarget.Dot && hoverDot == i) ? Theme.AccentSky : Color.FromArgb(204, 214, 226);
+                        Theme.Surface(g, dotRects[i], dotH * 0.5f, dc, Color.Transparent);
+                        dotX += dw + dotGap;
+                    }
                 }
             }
         }
@@ -785,7 +937,13 @@ namespace DualRemote
         {
             CardMetrics metrics = MeasureCardMetrics(viewport, scale, step);
             CardLayoutResult layout = ComputeCardPlacement(viewport, target, new SizeF(metrics.CardWidth, metrics.CardHeight), scale);
-            Bitmap result = RenderScrimAndShell(viewport, scale, target, layout);
+            int placedW = (int)Math.Round(layout.CardRect.Width);
+            if (placedW > 120 && Math.Abs(placedW - metrics.CardWidth) >= 4)
+            {
+                metrics = MeasureCardMetricsForWidth(viewport, placedW, scale, step);
+                layout = ComputeCardPlacement(viewport, target, new SizeF(metrics.CardWidth, metrics.CardHeight), scale);
+            }
+            Bitmap result = RenderScrimAndShell(viewport, scale, target, layout, false);
 
             // Render card content onto an opaque 24bpp ClearType surface, then copy cleanly into card interior (alpha=255)
             using (var cardBmp = new Bitmap(metrics.ContentWidth, metrics.ContentHeight, PixelFormat.Format24bppRgb))
@@ -900,6 +1058,8 @@ namespace DualRemote
                 this.controller = controller;
                 AutoScaleMode = AutoScaleMode.None;
                 FormBorderStyle = FormBorderStyle.None;
+                MinimumSize = Size.Empty;
+                MaximumSize = Size.Empty;
                 ShowInTaskbar = false;
                 StartPosition = FormStartPosition.Manual;
                 BackColor = Color.White;
@@ -917,6 +1077,22 @@ namespace DualRemote
                 }
             }
 
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                ConfigureWin11OverlayWindow(Handle, true, true);
+            }
+
+            internal void ApplyExactBounds(Rectangle screenBounds)
+            {
+                Bounds = screenBounds;
+                if (IsHandleCreated)
+                {
+                    SetWindowPos(Handle, IntPtr.Zero, screenBounds.X, screenBounds.Y,
+                        screenBounds.Width, screenBounds.Height, SwpNoZOrder | SwpNoActivate);
+                }
+            }
+
             internal void UpdateStep(OnboardingStep newStep, int index, int total, float dpiScale, CardMetrics newMetrics, Rectangle screenBounds)
             {
                 step = newStep;
@@ -928,7 +1104,7 @@ namespace DualRemote
                 hoverDotIndex = -1;
                 pressedTarget = OnboardingHitTarget.None;
                 Cursor = Cursors.Default;
-                Bounds = screenBounds;
+                ApplyExactBounds(screenBounds);
                 Invalidate();
             }
 

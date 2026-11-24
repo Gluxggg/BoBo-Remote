@@ -38,7 +38,6 @@ namespace DualRemote
         private bool computersExpanded = true;
         private TableLayoutPanel peerListHost;
         private int peerListRow = -1;
-        private bool pageLoaded;
 
         // Quick-access sidebar device & Detail Page state (UU Image 1)
         private string quickDeviceName = "";
@@ -120,7 +119,7 @@ namespace DualRemote
             DrawPeerRows(null);
             RecalculateDevicesDeskHeight();
 
-            Shown += async delegate { pageLoaded = true; await RefreshDashboardAsync(); };
+            Shown += async delegate { await RefreshDashboardAsync(); };
             return viewport;
         }
 
@@ -271,7 +270,10 @@ namespace DualRemote
             if (table == null) return 0;
             float height = table.Padding.Vertical;
             foreach (RowStyle style in table.RowStyles)
-                height += style.Height;
+            {
+                if (style.SizeType == SizeType.Absolute)
+                    height += style.Height;
+            }
             return (int)Math.Ceiling(height);
         }
 
@@ -284,8 +286,7 @@ namespace DualRemote
 
         private int DevicePixels(int logical)
         {
-            float scale = (hostCardLayout != null ? hostCardLayout.DeviceDpi : DeviceDpi) / 96f;
-            return (int)Math.Round(logical * scale);
+            return (int)Math.Round(logical * CurrentDpiScale());
         }
 
         private void CopyHostAddress(string label, string value)
@@ -467,7 +468,7 @@ namespace DualRemote
                 peerListHost.RowStyles.Clear();
                 peerListHost.RowCount = 0;
 
-                float scale = pageLoaded ? DeviceDpi / 96f : 1f;
+                float scale = CurrentDpiScale();
                 int totalDevices = 1; // Always includes This PC
 
                 // Row 1: This PC (UU Image 2 exact match: [Windows blue icon] MACHINE_NAME [本机] ... [i])
@@ -514,6 +515,7 @@ namespace DualRemote
             peerListHost.Visible = computersExpanded;
             devicesDesk.RowStyles[peerListRow].Height = computersExpanded ? SumRows(peerListHost) : 0;
             RecalculateDevicesDeskHeight();
+            NotifyOnboardingLayoutChanged();
         }
 
         private Control BuildThisPcRow()
@@ -755,8 +757,8 @@ namespace DualRemote
 
         private void AdjustDetailPreviewAspect(int contentWidth)
         {
-            if (detailPreviewCardLayout == null || detailDesk == null || detailPreviewRow < 0 || detailHeroCardRow < 0) return;
-            float scale = detailDesk.DeviceDpi / 96f;
+            if (!initialScaleApplied || detailPreviewCardLayout == null || detailDesk == null || detailPreviewRow < 0 || detailHeroCardRow < 0) return;
+            float scale = CurrentDpiScale();
             int innerW = Math.Max(320, contentWidth - detailDesk.Padding.Horizontal);
             int targetPreviewH = (int)Math.Round(innerW * 0.42f);
             int minH = (int)Math.Round(180 * scale);
@@ -1055,7 +1057,7 @@ namespace DualRemote
                 favoritesListHost.RowStyles.Clear();
                 favoritesListHost.RowCount = 0;
 
-                float scale = pageLoaded ? DeviceDpi / 96f : 1f;
+                float scale = CurrentDpiScale();
                 if (favorites.Count == 0)
                 {
                     var empty = new EmptyFavoritesCanvas();
@@ -1087,7 +1089,7 @@ namespace DualRemote
                 recentListHost.RowStyles.Clear();
                 recentListHost.RowCount = 0;
 
-                float scale = pageLoaded ? DeviceDpi / 96f : 1f;
+                float scale = CurrentDpiScale();
                 var all = new List<SavedDevice>();
                 foreach (string h in recent.MoonlightHosts) all.Add(new SavedDevice(true, h));
                 foreach (string r in recent.RustDeskIds) all.Add(new SavedDevice(false, r));

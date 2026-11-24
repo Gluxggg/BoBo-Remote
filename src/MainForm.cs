@@ -114,16 +114,25 @@ namespace DualRemote
         private Control assistLocalCard;
         private Control assistPartnerCard;
         private Timer onboardingDelayTimer;
+        private Timer updateCheckTimer;
         private WindowMessageFilter windowFilter;
         private StreamToolbarOverlay activeStreamToolbar;
         private string activeStreamHost = "";
         private int activeStreamPid;
+        private bool initialScaleApplied;
+        private string updatedFromVersion;
+        private bool updateBusy;
+        private UpdateCheckResult pendingUpdate;
+        private System.Threading.CancellationTokenSource updateCts;
+        private ComboBox settingsDefaultProfileCombo;
 
-        internal MainForm() : this(false) { }
+        internal MainForm() : this(false, null) { }
 
-        internal MainForm(bool forceTour)
+        internal MainForm(bool forceTour, string updatedVersion = null)
         {
             forceOnboardingOnLaunch = forceTour;
+            updatedFromVersion = updatedVersion;
+            initialScaleApplied = false;
             SuspendLayout();
             Text = "BoBo远程";
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -184,7 +193,52 @@ namespace DualRemote
             AutoScaleDimensions = new SizeF(96f, 96f);
             ResumeLayout(false);
             PerformAutoScale();
+            initialScaleApplied = true;
+            SyncAllPagesAfterScale();
             PerformLayout();
+        }
+
+        private float CurrentDpiScale()
+        {
+            if (!initialScaleApplied) return 1f;
+            int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
+            return Math.Max(1f, dpi / 96f);
+        }
+
+        private void SyncAllPagesAfterScale()
+        {
+            float scale = CurrentDpiScale();
+            quality.DropDownWidth = (int)Math.Round(370f * scale);
+            if (settingsDefaultProfileCombo != null)
+                settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(340f * scale);
+
+            for (int i = 0; i < pages.Length; i++)
+            {
+                var vp = pages[i] as Theme.SlimScrollViewport;
+                if (vp != null) vp.SuspendResponsiveLayout = false;
+            }
+            SyncNavigationSectionVisibility();
+            SelectAssistMode(activeAssistMode);
+            RecalculateDevicesDeskHeight();
+            RecalculateFavoritesDeskHeight();
+            RecalculateSettingsDeskHeight();
+            if (privacyDesk != null)
+            {
+                privacyDesk.Height = SumRows(privacyDesk);
+                privacyDesk.PerformLayout();
+            }
+            RecalculateDetailDeskHeight();
+            for (int i = 0; i < pages.Length; i++)
+            {
+                var vp = pages[i] as Theme.SlimScrollViewport;
+                if (vp != null) vp.RefreshLayout();
+            }
+        }
+
+        private void NotifyOnboardingLayoutChanged()
+        {
+            if (activeOnboardingTour != null && !activeOnboardingTour.IsDisposed)
+                activeOnboardingTour.NotifyHostContentChanged();
         }
 
         protected override CreateParams CreateParams
@@ -330,6 +384,7 @@ namespace DualRemote
         protected override void OnLoad(EventArgs args)
         {
             base.OnLoad(args);
+            ClampMinimumSizeToWorkArea();
             Rectangle area = Screen.FromControl(this).WorkingArea;
             int width = Math.Min(Width, area.Width - 20);
             int height = Math.Min(Height, area.Height - 20);
@@ -338,16 +393,55 @@ namespace DualRemote
             SyncRemoteGuardTimer();
         }
 
+        private void ClampMinimumSizeToWorkArea()
+        {
+            try
+            {
+                Rectangle area = Screen.FromControl(this).WorkingArea;
+                float scale = CurrentDpiScale();
+                int targetMinW = Math.Min((int)Math.Round(860 * scale), Math.Max(640, area.Width - 40));
+                int targetMinH = Math.Min((int)Math.Round(560 * scale), Math.Max(460, area.Height - 40));
+                MinimumSize = new Size(targetMinW, targetMinH);
+            }
+            catch { }
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            ClampMinimumSizeToWorkArea();
             ResizeToWorkingArea(false);
+
+            if (!string.IsNullOrEmpty(updatedFromVersion))
+            {
+                string msg = "已自动更新到 BoBo远程 v" + AppUpdater.CurrentVersion + "！";
+                deviceBanner.Set(msg, Theme.PillTone.Success);
+                SetStatus(msg, Theme.PillTone.Success);
+                ShowSettingsBanner(msg, Theme.PillTone.Success);
+                updatedFromVersion = null;
+            }
+
+            if (autoCheckUpdates && updateCheckTimer == null)
+            {
+                updateCheckTimer = new Timer { Interval = 2600 };
+                updateCheckTimer.Tick += async delegate
+                {
+                    if (updateCheckTimer != null)
+                    {
+                        updateCheckTimer.Stop();
+                        updateCheckTimer.Dispose();
+                        updateCheckTimer = null;
+                    }
+                    if (!IsDisposed) await CheckForUpdatesAsync(true);
+                };
+                updateCheckTimer.Start();
+            }
 
             // First launch (or --tour): run spotlight onboarding guide once initial layout & DPI settle
             if (!onboardingScheduled && (forceOnboardingOnLaunch || !OnboardingStore.IsCompleted()))
             {
                 onboardingScheduled = true;
-                onboardingDelayTimer = new Timer { Interval = 280 };
+                onboardingDelayTimer = new Timer { Interval = 320 };
                 onboardingDelayTimer.Tick += delegate
                 {
                     if (onboardingDelayTimer != null)
@@ -366,7 +460,7 @@ namespace DualRemote
         private void ResizeToWorkingArea(bool forceMaximum)
         {
             Rectangle area = Screen.FromControl(this).WorkingArea;
-            float scale = DeviceDpi / 96f;
+            float scale = CurrentDpiScale();
             int preferredW = (int)Math.Round(1060 * scale);
             int preferredH = (int)Math.Round(700 * scale);
             int width = forceMaximum ? area.Width : Math.Min(preferredW, area.Width - 24);
@@ -443,6 +537,18 @@ namespace DualRemote
                 onboardingDelayTimer.Stop();
                 onboardingDelayTimer.Dispose();
                 onboardingDelayTimer = null;
+            }
+            if (updateCheckTimer != null)
+            {
+                updateCheckTimer.Stop();
+                updateCheckTimer.Dispose();
+                updateCheckTimer = null;
+            }
+            if (updateCts != null)
+            {
+                try { updateCts.Cancel(); } catch { }
+                try { updateCts.Dispose(); } catch { }
+                updateCts = null;
             }
             if (activeOnboardingTour != null && !activeOnboardingTour.IsDisposed)
             {
@@ -552,7 +658,7 @@ namespace DualRemote
             body.Padding = new Padding(22, 16, 22, 14);
             Theme.FillColumn(body);
             Theme.FixedColumn(body, 16);
-            Theme.FixedColumn(body, 176);
+            Theme.FixedColumn(body, 184);
             Theme.FixedColumn(body, 16);
             Theme.FixedColumn(body, 116);
 
@@ -594,6 +700,7 @@ namespace DualRemote
             Theme.FixedColumn(pinLine, 6);
             Theme.FixedColumn(pinLine, 32);
             localPairCodeLabel = Theme.Text("• • • •", Theme.TextSize.BigCode, Theme.Ink);
+            localPairCodeLabel.AutoEllipsis = false;
             localPairCodeLabel.AccessibleName = "本机 4 位配对码";
             localPairEyeButton = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Eye);
             localPairEyeButton.AccessibleName = "显示或隐藏配对码";
@@ -744,7 +851,7 @@ namespace DualRemote
             assistModeHost.Controls.Add(assistStreamModePanel);
             assistModeHost.Controls.Add(assistRustDeskModePanel);
             assistModeHostRow = layout.RowCount;
-            Theme.Row(layout, 146, assistModeHost);
+            Theme.Row(layout, 166, assistModeHost);
 
             // Expandable inline 4-digit PIN pairing panel (for first-time Moonlight/Sunshine pairing)
             clientPairPanel = BuildClientPairPanel();
@@ -850,7 +957,7 @@ namespace DualRemote
 
             if (clientPairCardLayout != null && assistModeHostRow >= 0)
             {
-                clientPairCardLayout.RowStyles[assistModeHostRow].Height = DevicePixels(isStream ? 156 : 118);
+                clientPairCardLayout.RowStyles[assistModeHostRow].Height = DevicePixels(isStream ? 166 : 128);
                 if (assistDesk != null && assistStreamCardRow >= 0)
                     assistDesk.RowStyles[assistStreamCardRow].Height = ClientStreamCardHeight();
                 LayoutAssistDesk();
@@ -955,6 +1062,9 @@ namespace DualRemote
             current.Generation = ++localPairGeneration;
             localPairSession = current;
             localPairPin = current.Pin;
+            localPairPinVisible = true;
+            if (localPairEyeButton != null)
+                Theme.ChangeGlyph(localPairEyeButton, Theme.Glyph.Eye);
             RefreshLocalPairPinDisplay();
             localPairCancelButton.Enabled = true;
             localPairGenerateButton.Enabled = false;

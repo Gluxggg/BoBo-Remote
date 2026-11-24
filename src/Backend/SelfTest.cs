@@ -849,6 +849,103 @@ namespace DualRemote
                 !autoSnap.AntiLossTuned && autoSnap.Recommendations.Count == 1,
                 autoSnap.TuningSummary);
 
+            // Sunshine 配置目录解析空安全（杜绝 Path.Combine(path1=null) 异常）
+            bool resolveNoThrow = true;
+            string explicitCfg = "";
+            try
+            {
+                SunshinePairing.ResolveEffectiveConfigDirectory(null);
+                explicitCfg = SunshinePairing.ResolveEffectiveConfigDirectory(@"C:\Program Files\Sunshine\config");
+            }
+            catch { resolveNoThrow = false; }
+            Check("Sunshine 配对配置目录空安全解析",
+                resolveNoThrow && string.Equals(explicitCfg, @"C:\Program Files\Sunshine\config", StringComparison.OrdinalIgnoreCase),
+                explicitCfg ?? "null");
+
+            // 内置自动更新器核心逻辑自检
+            Check("自动更新版本比较：语义化数字顺序",
+                AppUpdater.CompareVersions("4.2.0", "4.3.0") < 0
+                && AppUpdater.CompareVersions("v4.3.0", "4.3.0") == 0
+                && AppUpdater.CompareVersions("4.10.0", "4.9.9") > 0,
+                "current=" + AppUpdater.CurrentVersion);
+            Check("自动更新域名白名单：仅允许官方 GitHub HTTPS",
+                AppUpdater.IsTrustedDownloadUrl("https://github.com/Gluxggg/BoBo-Remote/releases/download/v4.3.0/BoBoRemote-Update-x64.zip")
+                && AppUpdater.IsTrustedDownloadUrl("https://objects.githubusercontent.com/github-production-release-asset/test")
+                && !AppUpdater.IsTrustedDownloadUrl("http://github.com/Gluxggg/BoBo-Remote/releases/download/v4.3.0/BoBoRemote-Update-x64.zip")
+                && !AppUpdater.IsTrustedDownloadUrl("https://evil.example.com/BoBoRemote-Update-x64.zip"),
+                "whitelist");
+            string sampleReleaseJson =
+                "{\"tag_name\":\"v9.9.9\",\"html_url\":\"https://github.com/Gluxggg/BoBo-Remote/releases/tag/v9.9.9\",\"body\":\"- 修复 Win11 高 DPI 变形\\n- 新增自动更新\","
+                + "\"assets\":["
+                + "{\"name\":\"SHA256SUMS.txt\",\"size\":320,\"browser_download_url\":\"https://github.com/Gluxggg/BoBo-Remote/releases/download/v9.9.9/SHA256SUMS.txt\"},"
+                + "{\"name\":\"BoBoRemote-Update-x64.zip\",\"size\":204800,\"browser_download_url\":\"https://github.com/Gluxggg/BoBo-Remote/releases/download/v9.9.9/BoBoRemote-Update-x64.zip\"},"
+                + "{\"name\":\"BoBoRemote-Setup-x64.exe\",\"size\":104857600,\"browser_download_url\":\"https://github.com/Gluxggg/BoBo-Remote/releases/download/v9.9.9/BoBoRemote-Setup-x64.exe\"}"
+                + "]}";
+            ReleaseManifestInfo parsedRelease;
+            string releaseErr;
+            bool releaseOk = AppUpdater.TryParseLatestReleaseJson(sampleReleaseJson, out parsedRelease, out releaseErr);
+            string sampleHashA = new string('a', 64);
+            string sampleHashB = new string('b', 64);
+            string sampleSums = "# engines=" + AppUpdater.CurrentEnginesStamp + "\n"
+                + sampleHashA + "  BoBoRemote-Update-x64.zip\n"
+                + sampleHashB + "  BoBoRemote-Setup-x64.exe\n";
+            string parsedEngines;
+            Dictionary<string, string> parsedHashes;
+            bool sumsOk = AppUpdater.ParseSha256Sums(sampleSums, out parsedEngines, out parsedHashes);
+            var lightPlan = new UpdateCheckResult();
+            var fullPlan = new UpdateCheckResult();
+            var roPlan = new UpdateCheckResult();
+            if (releaseOk && sumsOk)
+            {
+                AppUpdater.SelectBestPlan(parsedRelease, parsedEngines, parsedHashes, true, true, lightPlan);
+                AppUpdater.SelectBestPlan(parsedRelease, "rd1.5.4-changed", parsedHashes, true, true, fullPlan);
+                AppUpdater.SelectBestPlan(parsedRelease, parsedEngines, parsedHashes, true, false, roPlan);
+            }
+            Check("自动更新计划选择：同引擎走轻量包、换引擎走安装包、只读目录降级手动",
+                releaseOk && sumsOk
+                && lightPlan.PackageKind == UpdatePackageKind.LightZip && lightPlan.ExpectedSha256 == sampleHashA
+                && fullPlan.PackageKind == UpdatePackageKind.FullSetup && fullPlan.ExpectedSha256 == sampleHashB
+                && roPlan.PackageKind == UpdatePackageKind.None,
+                releaseErr ?? (lightPlan.PackageKind + "/" + fullPlan.PackageKind + "/" + roPlan.PackageKind));
+            Check("轻量更新包 ZIP 根目录前缀剥离",
+                AppUpdater.NormalizeLightZipEntry("BoBo远程/BoBo远程.exe") == "BoBo远程.exe"
+                && AppUpdater.NormalizeLightZipEntry("BoBo远程/tools/Set-SunshineDisplay.ps1") == @"tools\Set-SunshineDisplay.ps1",
+                AppUpdater.NormalizeLightZipEntry("BoBo远程/BoBo远程.exe"));
+
+            // Win11 多档 DPI 新手引导卡片自适应度量与渲染自检
+            bool tourDpiOk = true;
+            string tourDpiDetail = "ok";
+            var sampleTourStep = new OnboardingStep
+            {
+                Title = "软件防窥壁纸与可选硬件熄屏",
+                Description = "软件防窥壁纸开箱即用：开启后物理屏立刻覆盖安全壁纸，而远程画面依然清晰可见，支持远控自动开启与退出自动锁屏。紧急解除按 Ctrl+Alt+Shift+P。",
+                Tip = "可选进阶：若要硬件级彻底熄屏（关闭物理显示器信号），需额外搭配 Zako 虚拟屏与系统安装版 Sunshine。"
+            };
+            float[] dpiScales = new[] { 1.0f, 1.25f, 1.5f, 1.75f };
+            foreach (float sc in dpiScales)
+            {
+                var vp = new System.Drawing.Size((int)Math.Round(960 * sc), (int)Math.Round(600 * sc));
+                var target = new System.Drawing.Rectangle((int)Math.Round(240 * sc), (int)Math.Round(90 * sc), (int)Math.Round(620 * sc), (int)Math.Round(260 * sc));
+                CardMetrics cm = OnboardingOverlayForm.MeasureCardMetrics(vp, sc, sampleTourStep);
+                CardLayoutResult cl = OnboardingOverlayForm.ComputeCardPlacement(vp, target, new System.Drawing.SizeF(cm.CardWidth, cm.CardHeight), sc);
+                if (cm.CardHeight > vp.Height || cm.FooterRect.Bottom > cm.ContentHeight || cl.CardRect.Width < 120)
+                {
+                    tourDpiOk = false;
+                    tourDpiDetail = "scale=" + sc + " card=" + cm.CardWidth + "x" + cm.CardHeight + " vp=" + vp.Width + "x" + vp.Height;
+                    break;
+                }
+                using (System.Drawing.Bitmap bmp = OnboardingOverlayForm.RenderPreviewBitmap(vp, sc, target, sampleTourStep, 4, 7))
+                {
+                    if (bmp == null || bmp.Width != vp.Width || bmp.Height != vp.Height)
+                    {
+                        tourDpiOk = false;
+                        tourDpiDetail = "bitmap mismatch at scale=" + sc;
+                        break;
+                    }
+                }
+            }
+            Check("Win11 高 DPI 新手引导卡片自适应度量与渲染（100%~175%）", tourDpiOk, tourDpiDetail);
+
             Log("");
             Info("RustDesk 组件：" + (Engines.RustDeskPresent ? "已找到" : "未找到") + " " + Engines.RustDeskExe);
             Info("Moonlight 组件：" + (Engines.MoonlightPresent ? "已找到" : "未找到") + " " + Engines.MoonlightExe);

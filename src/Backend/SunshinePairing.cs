@@ -546,6 +546,21 @@ namespace DualRemote
             return true;
         }
 
+        internal static string ResolveEffectiveConfigDirectory(string configDirectory)
+        {
+            if (!string.IsNullOrEmpty(configDirectory)) return configDirectory;
+            string active = BundledHost.ActiveConfigDirectory;
+            if (!string.IsNullOrEmpty(active)) return active;
+            string activeRoot = BundledHost.ActiveRoot;
+            if (!string.IsNullOrEmpty(activeRoot))
+            {
+                string fallback = Path.Combine(activeRoot, "config");
+                if (Directory.Exists(fallback)) return fallback;
+            }
+            string defaultFallback = Path.Combine(HostNetworkInfo.DefaultSunshineRoot, "config");
+            return Directory.Exists(defaultFallback) ? defaultFallback : null;
+        }
+
         private static bool TryCreateLocalRequest(string configDirectory, string method, string path,
             out HttpWebRequest request, out string error)
         {
@@ -553,7 +568,12 @@ namespace DualRemote
             error = null;
             try
             {
-                if (string.IsNullOrEmpty(configDirectory)) configDirectory = BundledHost.ActiveConfigDirectory;
+                configDirectory = ResolveEffectiveConfigDirectory(configDirectory);
+                if (string.IsNullOrEmpty(configDirectory) || !Directory.Exists(configDirectory))
+                {
+                    error = "无法定位本机 Sunshine 配置目录，请先确认被控宿主已启动。";
+                    return false;
+                }
                 string token = ReadLocalToken(Path.Combine(configDirectory, "local-auth.token"));
                 if (token.Length == 0)
                 {

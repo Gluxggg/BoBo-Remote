@@ -28,11 +28,21 @@ namespace DualRemote
         {
             bool selfTest = false;
             bool forceTour = false;
+            bool applyUpdate = false;
+            string updatedVersion = null;
             foreach (string arg in args)
             {
                 if (string.Equals(arg, "--self-test", StringComparison.OrdinalIgnoreCase))
                 {
                     selfTest = true;
+                }
+                else if (string.Equals(arg, "--apply-update", StringComparison.OrdinalIgnoreCase))
+                {
+                    applyUpdate = true;
+                }
+                else if (arg != null && arg.StartsWith("--updated-version=", StringComparison.OrdinalIgnoreCase))
+                {
+                    updatedVersion = arg.Substring(18).Trim().Trim('"');
                 }
                 else if (string.Equals(arg, "--tour", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(arg, "--reset-tour", StringComparison.OrdinalIgnoreCase))
@@ -41,6 +51,10 @@ namespace DualRemote
                     if (string.Equals(arg, "--reset-tour", StringComparison.OrdinalIgnoreCase))
                         OnboardingStore.Reset();
                 }
+            }
+            if (applyUpdate)
+            {
+                return AppUpdater.RunApplyUpdate(args);
             }
             if (selfTest)
             {
@@ -73,13 +87,24 @@ namespace DualRemote
 
             bool createdNew = true;
             Mutex instanceMutex = null;
-            try
+            int maxAttempts = string.IsNullOrEmpty(updatedVersion) ? 1 : 12;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
-                instanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
-            }
-            catch
-            {
-                createdNew = true;
+                try
+                {
+                    instanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
+                }
+                catch
+                {
+                    createdNew = true;
+                }
+                if (createdNew) break;
+                if (instanceMutex != null)
+                {
+                    try { instanceMutex.Dispose(); } catch { }
+                    instanceMutex = null;
+                }
+                if (attempt + 1 < maxAttempts) Thread.Sleep(250);
             }
             if (!createdNew)
             {
@@ -87,18 +112,15 @@ namespace DualRemote
                 {
                     try { PostMessage(HwndBroadcast, WmShowExistingInstance, IntPtr.Zero, IntPtr.Zero); } catch { }
                 }
-                if (instanceMutex != null)
-                {
-                    try { instanceMutex.Dispose(); } catch { }
-                }
                 return 0;
             }
 
+            AppUpdater.CleanupOldUpdateCacheAsync();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                Application.Run(new MainForm(forceTour));
+                Application.Run(new MainForm(forceTour, updatedVersion));
                 return 0;
             }
             catch (Exception ex)

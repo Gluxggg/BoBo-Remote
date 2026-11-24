@@ -717,7 +717,7 @@ function Invoke-CompileStage {
     $manifest = Join-Path $srcDir 'app.manifest'
     if (-not (Test-Path -LiteralPath $manifest)) { throw "缺少 Windows 应用程序清单：$manifest" }
 
-    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll')
+    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
     $refs = @()
     foreach ($name in $refNames) {
         $refPath = Join-Path $frameworkDir $name
@@ -729,6 +729,9 @@ function Invoke-CompileStage {
     if (-not (Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Force -Path $appDir | Out-Null }
     $exePath = Join-Path $appDir 'BoBo远程.exe'
     if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
+    $appVerLabel = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '4.3.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+    $appVerFile = Join-Path $appDir 'app-version.txt'
+    [System.IO.File]::WriteAllText($appVerFile, $appVerLabel, (New-Object System.Text.UTF8Encoding($false)))
 
     $appIcon = Join-Path $Root 'assets\bobo-remote.ico'
     $brandLogo = Join-Path $Root 'assets\bobo-logo.png'
@@ -751,6 +754,7 @@ function Invoke-CompileStage {
     if (Test-Path -LiteralPath $brandLogo) { $cscArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
     if (Test-Path -LiteralPath $displayTool) { $cscArgs += "/resource:$displayTool,DualRemote.tools.Set-SunshineDisplay.ps1" }
     if (Test-Path -LiteralPath $optimizeTool) { $cscArgs += "/resource:$optimizeTool,DualRemote.tools.Optimize-SunshineStream.ps1" }
+    $cscArgs += "/resource:$appVerFile,DualRemote.app-version.txt"
     $cscArgs += $csFiles | ForEach-Object { $_.FullName }
 
     Write-Info "编译器：$csc（$((Get-Item -LiteralPath $csc).VersionInfo.FileVersion)）"

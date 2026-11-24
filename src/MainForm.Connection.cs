@@ -111,6 +111,7 @@ namespace DualRemote
             if (assistDesk == null) return;
             assistDesk.Height = SumRows(assistDesk);
             assistDesk.PerformLayout();
+            NotifyOnboardingLayoutChanged();
         }
 
         private void SetClientPairStatus(string text, Color color)

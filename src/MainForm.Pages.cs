@@ -28,12 +28,15 @@ namespace DualRemote
         private int navQuickDeviceRow = -1;
         private TableLayoutPanel navRail;
         private BorderFramePanel borderFrame;
+        private Theme.WorkspaceFrame workspaceFrame;
         private Button topGuideBtn;
         private Button topPrivacyBtn;
         private Button topStatusBtn;
         private Button topMenuBtn;
         private Button maxRestoreBtn;
         private Control perfDiagCard;
+        private Label updateStatusDescLabel;
+        private Button updateActionButton;
         private OnboardingOverlayForm activeOnboardingTour;
         private bool forceOnboardingOnLaunch;
         private bool onboardingScheduled;
@@ -64,6 +67,7 @@ namespace DualRemote
         private bool enableFramePacing = false;
         private bool minimizeToTray = false;
         private bool keepThisComputerAwake = false;
+        private bool autoCheckUpdates = true;
 
         private Control BuildChrome()
         {
@@ -83,6 +87,7 @@ namespace DualRemote
             body.Controls.Add(BuildNavigation(), 0, 0);
 
             var workspace = new Theme.WorkspaceFrame();
+            workspaceFrame = workspace;
             pages[AllDevicesPage] = BuildDevicesPage();
             pages[DeviceDetailPage] = BuildDeviceDetailPage();
             pages[AssistPage] = BuildWorkspace();
@@ -315,7 +320,7 @@ namespace DualRemote
         private void SyncNavigationSectionVisibility()
         {
             if (navRail == null) return;
-            float scale = navRail.DeviceDpi / 96f;
+            float scale = CurrentDpiScale();
             float itemH = 38f * scale;
             bool showQuick = navDevicesExpanded && !string.IsNullOrEmpty(quickDeviceAddress);
 
@@ -346,6 +351,7 @@ namespace DualRemote
                 navigation[PrivacyPage].Visible = navPrivacyExpanded;
             }
             navRail.ResumeLayout(true);
+            NotifyOnboardingLayoutChanged();
         }
 
         private Button MakePageButton(int page, Theme.Glyph glyph, string title)
@@ -380,9 +386,9 @@ namespace DualRemote
             if (selected == AllDevicesPage || selected == FavoritesPage) RefreshSavedDevices();
         }
 
-        private static Theme.SlimScrollViewport CreatePage(int initialHeight, out TableLayoutPanel desk)
+        private Theme.SlimScrollViewport CreatePage(int initialHeight, out TableLayoutPanel desk)
         {
-            var viewport = new Theme.SlimScrollViewport();
+            var viewport = new Theme.SlimScrollViewport { SuspendResponsiveLayout = !initialScaleApplied };
             desk = Theme.Grid(1);
             Theme.FillColumn(desk);
             desk.Dock = DockStyle.None;
@@ -499,6 +505,7 @@ namespace DualRemote
             settingsDesk.RowStyles[settingsTabRow].Height = tabH;
             settingsDesk.Height = SumRows(settingsDesk);
             settingsDesk.PerformLayout();
+            NotifyOnboardingLayoutChanged();
         }
 
         private Control BuildGeneralSettingsTab()
@@ -522,7 +529,12 @@ namespace DualRemote
                 "自动回填最近连接过的主机地址与协助设备码，省去重复输入",
                 PreferenceToggle("启动时填入上次设备", fillLastTarget, value => fillLastTarget = value));
 
+            AddStandaloneSettingCard(page, Theme.Glyph.Network, "启动时自动检查新版本",
+                "后台静默检查 GitHub Releases 最新版，发现新版本可直接在应用内一键校验更新",
+                PreferenceToggle("自动检查更新", autoCheckUpdates, value => autoCheckUpdates = value));
+
             var defaultProfile = Theme.Choice("默认串流画质", false);
+            settingsDefaultProfileCombo = defaultProfile;
             defaultProfile.DropDownWidth = 340;
             foreach (var item in quality.Items) defaultProfile.Items.Add(item);
             defaultProfile.SelectedIndex = defaultQuality;
@@ -535,6 +547,13 @@ namespace DualRemote
             AddStandaloneSettingCard(page, Theme.Glyph.Image, "默认串流画质档位",
                 "发起低延迟桌面串流时默认采用的分辨率、帧率与码率档位",
                 Theme.WrapInput(defaultProfile), 280);
+
+            updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
+            updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
+            updateStatusDescLabel = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Bolt,
+                "软件版本与在线自动更新（当前 v" + AppUpdater.CurrentVersion + "）",
+                "无需手动去仓库下载安装包，支持 SHA-256 校验后自动增量或覆盖升级",
+                updateActionButton, 146);
 
             var replayGuide = Theme.Action("重新查看引导", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
             replayGuide.Click += delegate { StartOnboardingTour(false); };
@@ -642,7 +661,7 @@ namespace DualRemote
             Theme.Row(h, 36, btnBar);
             hostCard.Controls.Add(h);
 
-            Theme.Row(page, 212, hostCard);
+            Theme.Row(page, 220, hostCard);
             Theme.Row(page, 12);
 
             // Card 2: Architecture checklist learned from UU / Moonlight / Parsec
@@ -736,6 +755,11 @@ namespace DualRemote
         /// <summary>UU 设置页标准单列卡片行（左侧线性图标 + 标题/说明 + 右侧开关或下拉控件）。</summary>
         private static void AddStandaloneSettingCard(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 104)
         {
+            AddStandaloneSettingCardWithDesc(parent, glyph, title, description, action, actionWidth);
+        }
+
+        private static Label AddStandaloneSettingCardWithDesc(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 104)
+        {
             bool hasDesc = !string.IsNullOrEmpty(description);
             int cardH = hasDesc ? 70 : 58;
 
@@ -749,13 +773,15 @@ namespace DualRemote
 
             var icon = new Theme.IconTile(glyph, true, Color.Transparent, Theme.BodyInk, 0f);
             Control textBlock;
+            Label descLabel = null;
             if (hasDesc)
             {
                 var stack = Theme.Grid(1);
                 Theme.FillColumn(stack);
                 stack.Padding = new Padding(0, 3, 0, 3);
                 Theme.Row(stack, 24, Theme.Text(title, Theme.TextSize.Label, Theme.Ink));
-                Theme.Row(stack, 20, Theme.Text(description, Theme.TextSize.Small, Theme.Muted));
+                descLabel = Theme.Text(description, Theme.TextSize.Small, Theme.Muted);
+                Theme.Row(stack, 20, descLabel);
                 textBlock = stack;
             }
             else
@@ -771,6 +797,7 @@ namespace DualRemote
 
             Theme.Row(parent, cardH, card);
             Theme.Row(parent, 10);
+            return descLabel;
         }
 
         private void UpdateDiagnosticsUi()
@@ -811,9 +838,25 @@ namespace DualRemote
         private void ShowTopMenuPopover()
         {
             var menu = CreateCleanPopupMenu();
+            if (pendingUpdate != null && pendingUpdate.HasUpdate)
+            {
+                AddPopupItem(menu, "发现新版本 " + pendingUpdate.ReleaseTag + "（立即更新）", delegate
+                {
+                    ShowPage(SettingsPage);
+                    SelectSettingsTab(0);
+                    var _ = HandleUpdateButtonClickAsync();
+                });
+                menu.Items.Add(new ToolStripSeparator());
+            }
             AddPopupItem(menu, "刷新全部设备与本机状态", delegate { var _ = RefreshDashboardAsync(); });
             AddPopupItem(menu, "切换防窥屏壁纸 (Ctrl+Alt+Shift+P)", delegate { TogglePrivacyCurtain(false); });
             AddPopupItem(menu, "新手引导使用教程", delegate { StartOnboardingTour(false); });
+            AddPopupItem(menu, "检查软件更新（当前 v" + AppUpdater.CurrentVersion + "）", delegate
+            {
+                ShowPage(SettingsPage);
+                SelectSettingsTab(0);
+                var _ = CheckForUpdatesAsync(false);
+            });
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "打开 Moonlight V+ 管理端", delegate { OpenMoonlightGui(); });
             AddPopupItem(menu, "打开本机 RustDesk 窗口", delegate { var _ = OpenLocalRustDeskOnSettings(); });
@@ -821,7 +864,8 @@ namespace DualRemote
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "关于 BoBo远程", delegate { ShowAboutDialog(); });
 
-            Point pt = topMenuBtn.PointToScreen(new Point(topMenuBtn.Width - 208, topMenuBtn.Height + 6));
+            int menuW = Math.Max(DevicePixels(228), menu.PreferredSize.Width);
+            Point pt = topMenuBtn.PointToScreen(new Point(topMenuBtn.Width - menuW, topMenuBtn.Height + DevicePixels(6)));
             menu.Show(pt);
         }
 
@@ -843,7 +887,8 @@ namespace DualRemote
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); });
 
-            Point pt = topStatusBtn.PointToScreen(new Point(topStatusBtn.Width - 250, topStatusBtn.Height + 6));
+            int menuW = Math.Max(DevicePixels(250), menu.PreferredSize.Width);
+            Point pt = topStatusBtn.PointToScreen(new Point(topStatusBtn.Width - menuW, topStatusBtn.Height + DevicePixels(6)));
             menu.Show(pt);
         }
 
@@ -925,13 +970,15 @@ namespace DualRemote
         {
             using (var dlg = new Form())
             {
+                dlg.SuspendLayout();
                 dlg.Text = "关于 BoBo远程";
+                dlg.AutoScaleMode = AutoScaleMode.Dpi;
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.MaximizeBox = false;
                 dlg.MinimizeBox = false;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = Theme.Workspace;
-                dlg.ClientSize = new Size(460, 268);
+                dlg.ClientSize = new Size(476, 286);
                 dlg.Icon = appIcon ?? Icon;
 
                 var root = Theme.Grid(1);
@@ -947,11 +994,11 @@ namespace DualRemote
                 var logoBox = new BrandLogoPreviewBox();
                 var titleStack = Theme.Grid(1);
                 Theme.FillColumn(titleStack);
-                titleStack.Padding = new Padding(0, 4, 0, 0);
-                Theme.Row(titleStack, 28, Theme.Text("BoBo远程", Theme.TextSize.Title, Theme.Ink));
+                titleStack.Padding = new Padding(0, 2, 0, 0);
+                Theme.Row(titleStack, 34, Theme.Text("BoBo远程 v" + AppUpdater.CurrentVersion, Theme.TextSize.Title, Theme.Ink));
                 Theme.Row(titleStack, 20, Theme.Text("低延迟高帧率双端远程桌面 · 隐私防窥便携版", Theme.TextSize.Small, Theme.Muted));
-                Theme.Row(hero, 56, logoBox, null, titleStack);
-                Theme.Row(root, 56, hero);
+                Theme.Row(hero, 58, logoBox, null, titleStack);
+                Theme.Row(root, 58, hero);
                 Theme.Row(root, 14);
 
                 var infoCard = new Theme.Card { Padding = new Padding(16, 12, 16, 12) };
@@ -962,15 +1009,23 @@ namespace DualRemote
                 Theme.Row(ic, 22, Theme.Text("• 隐私保护：WDA_EXCLUDEFROMCAPTURE 物理屏防窥壁纸 + Zako 虚拟屏", Theme.TextSize.Small, Theme.BodyInk));
                 Theme.Row(ic, 22, Theme.Text("• 配置目录：" + RecentStore.DirPath, Theme.TextSize.Small, Theme.Muted));
                 infoCard.Controls.Add(ic);
-                Theme.Row(root, 114, infoCard);
-                Theme.Row(root, 14);
+                Theme.Row(root, 118, infoCard);
+                Theme.Row(root, 16);
 
-                var footer = Theme.Grid(4);
+                var footer = Theme.Grid(6);
                 Theme.FillColumn(footer);
+                Theme.FixedColumn(footer, 108);
+                Theme.FixedColumn(footer, 10);
                 Theme.FixedColumn(footer, 122);
                 Theme.FixedColumn(footer, 10);
                 Theme.FixedColumn(footer, 84);
 
+                var checkUpdBtn = Theme.Action("检查更新", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
+                checkUpdBtn.Click += delegate
+                {
+                    dlg.DialogResult = DialogResult.Yes;
+                    dlg.Close();
+                };
                 var tourBtn = Theme.Action("新手使用引导", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Help);
                 tourBtn.Click += delegate
                 {
@@ -980,12 +1035,211 @@ namespace DualRemote
                 var okBtn = Theme.Action("确定", Theme.ButtonStyle.Primary);
                 okBtn.Click += delegate { dlg.Close(); };
 
-                Theme.Row(footer, 34, null, tourBtn, null, okBtn);
+                Theme.Row(footer, 34, null, checkUpdBtn, null, tourBtn, null, okBtn);
                 Theme.Row(root, 34, footer);
                 dlg.Controls.Add(root);
 
-                if (dlg.ShowDialog(this) == DialogResult.Retry)
+                dlg.AutoScaleDimensions = new SizeF(96f, 96f);
+                dlg.ResumeLayout(false);
+                dlg.PerformAutoScale();
+                dlg.PerformLayout();
+
+                DialogResult res = dlg.ShowDialog(this);
+                if (res == DialogResult.Retry)
                     StartOnboardingTour(false);
+                else if (res == DialogResult.Yes)
+                {
+                    ShowPage(SettingsPage);
+                    SelectSettingsTab(0);
+                    var _ = CheckForUpdatesAsync(false);
+                }
+            }
+        }
+
+        private async System.Threading.Tasks.Task CheckForUpdatesAsync(bool silent)
+        {
+            if (updateBusy || IsDisposed) return;
+            updateBusy = true;
+            if (!silent)
+            {
+                if (updateActionButton != null)
+                {
+                    updateActionButton.Enabled = false;
+                    updateActionButton.Text = "检查中…";
+                }
+                if (updateStatusDescLabel != null)
+                    updateStatusDescLabel.Text = "正在连接 GitHub Releases 检查最新版本…";
+                ShowSettingsBanner("正在检查最新版本…", Theme.PillTone.Info);
+            }
+
+            UpdateCheckResult res = null;
+            try
+            {
+                res = await AppUpdater.CheckForUpdateAsync();
+            }
+            catch (Exception ex)
+            {
+                res = new UpdateCheckResult { CurrentVersion = AppUpdater.CurrentVersion, Error = ex.Message };
+            }
+            finally
+            {
+                updateBusy = false;
+            }
+
+            if (IsDisposed) return;
+            if (res == null || !res.Checked)
+            {
+                if (updateActionButton != null)
+                {
+                    updateActionButton.Enabled = true;
+                    updateActionButton.Text = "检查更新";
+                }
+                if (!silent)
+                {
+                    string err = (res != null && !string.IsNullOrEmpty(res.Error)) ? res.Error : "检查更新失败，请稍后重试。";
+                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = err;
+                    ShowSettingsBanner(err, Theme.PillTone.Warning);
+                }
+                return;
+            }
+
+            if (res.HasUpdate)
+            {
+                pendingUpdate = res;
+                if (topMenuBtn != null)
+                    Theme.SetIndicatorDot(topMenuBtn, true, Theme.Accent);
+                string kindText = res.PackageKind == UpdatePackageKind.LightZip
+                    ? "轻量增量包，秒级更新"
+                    : (res.PackageKind == UpdatePackageKind.FullSetup ? "完整覆盖包，保留本地配对" : "需前往 Releases 页面下载");
+                string desc = "发现新版本 " + res.ReleaseTag + "（" + kindText + "）"
+                    + (string.IsNullOrEmpty(res.ReleaseNotesSummary) ? "" : "：" + res.ReleaseNotesSummary);
+                if (updateStatusDescLabel != null) updateStatusDescLabel.Text = desc;
+                if (updateActionButton != null)
+                {
+                    updateActionButton.Enabled = true;
+                    updateActionButton.Text = res.PackageKind != UpdatePackageKind.None ? ("更新 " + res.ReleaseTag) : "打开发布页";
+                }
+                string banner = "发现新版本 " + res.ReleaseTag + "（当前 v" + res.CurrentVersion + "），可在右上角菜单或「设置 → 常规」一键自动更新。";
+                ShowSettingsBanner(banner, Theme.PillTone.Info);
+                if (silent)
+                {
+                    deviceBanner.Set(banner, Theme.PillTone.Info);
+                }
+            }
+            else
+            {
+                pendingUpdate = null;
+                if (topMenuBtn != null)
+                    Theme.SetIndicatorDot(topMenuBtn, false, Theme.Accent);
+                if (updateActionButton != null)
+                {
+                    updateActionButton.Enabled = true;
+                    updateActionButton.Text = "检查更新";
+                }
+                if (!silent)
+                {
+                    string upToDate = "当前已是最新版本 v" + res.CurrentVersion + "（最新发行版 " + res.ReleaseTag + "）。";
+                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = upToDate;
+                    ShowSettingsBanner(upToDate, Theme.PillTone.Success);
+                }
+            }
+        }
+
+        private async System.Threading.Tasks.Task HandleUpdateButtonClickAsync()
+        {
+            if (updateBusy || IsDisposed) return;
+            if (pendingUpdate == null || !pendingUpdate.HasUpdate)
+            {
+                await CheckForUpdatesAsync(false);
+                if (pendingUpdate == null || !pendingUpdate.HasUpdate || IsDisposed) return;
+            }
+            if (pendingUpdate.PackageKind == UpdatePackageKind.None)
+            {
+                OpenExternalUrl(pendingUpdate.ReleasePageUrl ?? AppUpdater.ReleasesWebUrl, "已打开 GitHub Releases 下载页面。");
+                return;
+            }
+            await StartDownloadAndInstallUpdateAsync(pendingUpdate);
+        }
+
+        private async System.Threading.Tasks.Task StartDownloadAndInstallUpdateAsync(UpdateCheckResult update)
+        {
+            if (updateBusy || update == null || IsDisposed) return;
+            updateBusy = true;
+            if (updateCts != null)
+            {
+                try { updateCts.Cancel(); updateCts.Dispose(); } catch { }
+            }
+            updateCts = new System.Threading.CancellationTokenSource();
+
+            if (updateActionButton != null)
+            {
+                updateActionButton.Enabled = false;
+                updateActionButton.Text = "下载中 0%";
+            }
+            if (updateStatusDescLabel != null)
+                updateStatusDescLabel.Text = "正在下载 " + update.ReleaseTag + "（将自动校验 SHA-256）…";
+            ShowSettingsBanner("正在下载新版本 " + update.ReleaseTag + "…", Theme.PillTone.Info);
+
+            try
+            {
+                string downloadedPath = await AppUpdater.DownloadAndVerifyAsync(update, delegate(int pct, string msg)
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    try
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            if (IsDisposed) return;
+                            if (updateActionButton != null)
+                                updateActionButton.Text = pct >= 100 ? "正在安装…" : ("下载中 " + pct + "%");
+                            if (updateStatusDescLabel != null && !string.IsNullOrEmpty(msg))
+                                updateStatusDescLabel.Text = msg;
+                        });
+                    }
+                    catch { }
+                }, updateCts.Token);
+
+                if (IsDisposed) return;
+                string launchErr;
+                if (!AppUpdater.TryLaunchDownloadedUpdate(update, downloadedPath, out launchErr))
+                {
+                    updateBusy = false;
+                    if (updateActionButton != null)
+                    {
+                        updateActionButton.Enabled = true;
+                        updateActionButton.Text = "重试更新";
+                    }
+                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = launchErr;
+                    ShowSettingsBanner(launchErr, Theme.PillTone.Alert);
+                    return;
+                }
+
+                // 退出当前旧实例，让新版自动覆盖并重新拉起（不触发最小化到托盘）
+                ShowSettingsBanner("校验通过，正在重启并完成自动更新…", Theme.PillTone.Success);
+                forceExit = true;
+                Close();
+            }
+            catch (OperationCanceledException)
+            {
+                updateBusy = false;
+                if (!IsDisposed && updateActionButton != null)
+                {
+                    updateActionButton.Enabled = true;
+                    updateActionButton.Text = "更新 " + update.ReleaseTag;
+                }
+            }
+            catch (Exception ex)
+            {
+                updateBusy = false;
+                if (IsDisposed) return;
+                string err = "自动更新失败：" + ex.Message;
+                if (updateActionButton != null)
+                {
+                    updateActionButton.Enabled = true;
+                    updateActionButton.Text = "重试更新";
+                }
+                if (updateStatusDescLabel != null) updateStatusDescLabel.Text = err;
+                ShowSettingsBanner(err, Theme.PillTone.Alert);
             }
         }
 
@@ -1041,10 +1295,31 @@ namespace DualRemote
 
         private Rectangle GetClientRectForControl(Control control)
         {
-            if (control == null || control.IsDisposed || !control.Visible || !control.IsHandleCreated)
+            if (control == null || control.IsDisposed || !control.Visible)
                 return Rectangle.Empty;
+            if (!control.IsHandleCreated)
+            {
+                try { control.CreateControl(); }
+                catch { return Rectangle.Empty; }
+            }
+            if (!control.IsHandleCreated) return Rectangle.Empty;
             Point topLeft = PointToClient(control.PointToScreen(Point.Empty));
-            return new Rectangle(topLeft.X, topLeft.Y, control.Width, control.Height);
+            var rect = new Rectangle(topLeft.X, topLeft.Y, control.Width, control.Height);
+            // 若目标控件位于可滚动工作区内，裁剪到工作区可见视口内，避免超长卡片撑爆新手引导框选区
+            if (workspaceFrame != null && !workspaceFrame.IsDisposed && workspaceFrame.IsHandleCreated && IsDescendantOf(control, workspaceFrame))
+            {
+                Point wsTopLeft = PointToClient(workspaceFrame.PointToScreen(Point.Empty));
+                var wsRect = new Rectangle(wsTopLeft.X, wsTopLeft.Y, workspaceFrame.Width, workspaceFrame.Height);
+                rect = Rectangle.Intersect(rect, wsRect);
+            }
+            return rect;
+        }
+
+        private static bool IsDescendantOf(Control child, Control ancestor)
+        {
+            for (Control cur = child; cur != null; cur = cur.Parent)
+                if (cur == ancestor) return true;
+            return false;
         }
 
         private Rectangle GetClientRectForSpan(Control first, Control last)
@@ -1254,6 +1529,7 @@ namespace DualRemote
             lowLatencyNoVsync = true;
             enableFramePacing = false;
             minimizeToTray = false;
+            autoCheckUpdates = true;
             defaultQuality = 0;
 
             try
@@ -1274,6 +1550,7 @@ namespace DualRemote
                     lowLatencyNoVsync = ReadFlag(lines, 8, true);
                     enableFramePacing = ReadFlag(lines, 9, false);
                     minimizeToTray = ReadFlag(lines, 10, false);
+                    autoCheckUpdates = ReadFlag(lines, 11, true);
                 }
                 else
                 {
@@ -1312,7 +1589,8 @@ namespace DualRemote
                     WriteFlag(useFoundationClient),
                     WriteFlag(lowLatencyNoVsync),
                     WriteFlag(enableFramePacing),
-                    WriteFlag(minimizeToTray)
+                    WriteFlag(minimizeToTray),
+                    WriteFlag(autoCheckUpdates)
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

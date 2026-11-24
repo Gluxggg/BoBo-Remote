@@ -33,6 +33,8 @@ namespace BoBoSetup
             bool createStartMenu = true;
             bool launchAfter = true;
             bool autoStart = false;
+            bool preserveAutoStart = false;
+            int waitPid = 0;
             string customDir = null;
 
             foreach (string raw in args)
@@ -47,6 +49,11 @@ namespace BoBoSetup
                 else if (string.Equals(arg, "--no-startmenu", StringComparison.OrdinalIgnoreCase)) createStartMenu = false;
                 else if (string.Equals(arg, "--no-launch", StringComparison.OrdinalIgnoreCase)) launchAfter = false;
                 else if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase)) autoStart = true;
+                else if (string.Equals(arg, "--preserve-autostart", StringComparison.OrdinalIgnoreCase)) preserveAutoStart = true;
+                else if (arg.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase))
+                {
+                    int.TryParse(arg.Substring(11).Trim().Trim('"'), out waitPid);
+                }
                 else if (arg.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))
                 {
                     customDir = arg.Substring(6).Trim().Trim('"');
@@ -76,6 +83,8 @@ namespace BoBoSetup
                 CreateStartMenuShortcut = createStartMenu,
                 LaunchAfterInstall = launchAfter,
                 AutoStart = autoStart,
+                PreserveAutoStart = preserveAutoStart,
+                WaitPid = waitPid,
                 PurgeUserData = purgeData
             };
 
@@ -95,7 +104,10 @@ namespace BoBoSetup
                             delegate(int pct, string msg) { SafeWriteLine("[" + pct + "%] " + msg); });
                         if (options.LaunchAfterInstall)
                         {
-                            InstallerEngine.LaunchMainApp(options.InstallDir);
+                            string launchArgs = options.PreserveAutoStart
+                                ? ("--updated-version=" + InstallerEngine.GetAppVersion())
+                                : null;
+                            InstallerEngine.LaunchMainApp(options.InstallDir, launchArgs);
                         }
                     }
                     SafeWriteLine("OK");
@@ -143,6 +155,8 @@ namespace BoBoSetup
         internal bool CreateStartMenuShortcut = true;
         internal bool LaunchAfterInstall = true;
         internal bool AutoStart;
+        internal bool PreserveAutoStart;
+        internal int WaitPid;
         internal bool PurgeUserData;
     }
 
@@ -374,7 +388,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "4.1.0";
+            return "4.3.0";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -513,6 +527,11 @@ namespace BoBoSetup
             }
 
             Report(report, 16, "正在检查并关闭旧版本运行进程…");
+            if (options.WaitPid > 0)
+            {
+                WaitForProcessExit(options.WaitPid, 10000);
+                Thread.Sleep(300);
+            }
             StopRunningProcessesInDir(installDir);
 
             // Preserve user's existing local Moonlight / MoonlightVPlus pairing folders if upgrading
@@ -595,7 +614,14 @@ namespace BoBoSetup
 
                 Report(report, 96, "正在注册 Windows 应用与卸载信息…");
                 RegisterUninstallEntry(installDir, mainExe, uninstallExe, version, totalExtractedBytes);
-                SetAutoStart(mainExe, options.AutoStart);
+                if (options.PreserveAutoStart)
+                {
+                    if (IsAutoStartEnabled()) SetAutoStart(mainExe, true);
+                }
+                else
+                {
+                    SetAutoStart(mainExe, options.AutoStart);
+                }
 
                 Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
             }
@@ -653,11 +679,11 @@ namespace BoBoSetup
             Report(report, 100, "BoBo Remote 已卸载完成。");
         }
 
-        internal static void LaunchMainApp(string installDir)
+        internal static void LaunchMainApp(string installDir, string arguments = null)
         {
             string mainExe = Path.Combine(installDir, MainExeName);
             if (!File.Exists(mainExe)) return;
-            var psi = new ProcessStartInfo(mainExe)
+            var psi = new ProcessStartInfo(mainExe, arguments ?? "")
             {
                 WorkingDirectory = installDir,
                 UseShellExecute = true
@@ -732,6 +758,42 @@ namespace BoBoSetup
                 key.SetValue("NoModify", 1, RegistryValueKind.DWord);
                 key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
             }
+        }
+
+        private static bool IsAutoStartEnabled()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegSubKey, false))
+                {
+                    if (key == null) return false;
+                    object cur = key.GetValue(RunValueName);
+                    if (cur != null && !string.IsNullOrWhiteSpace(Convert.ToString(cur))) return true;
+                    object legacy = key.GetValue(LegacyRunValueName);
+                    return legacy != null && !string.IsNullOrWhiteSpace(Convert.ToString(legacy));
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void WaitForProcessExit(int pid, int timeoutMs)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    if (!p.WaitForExit(timeoutMs))
+                    {
+                        try { p.CloseMainWindow(); }
+                        catch { }
+                        p.WaitForExit(2000);
+                    }
+                }
+            }
+            catch { }
         }
 
         private static void SetAutoStart(string mainExe, bool enabled)
@@ -912,8 +974,9 @@ namespace BoBoSetup
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Parent != null ? Parent.BackColor : SetupPalette.Workspace);
 
-            Rectangle rect = new Rectangle(1, 1, Width - 3, Height - 3);
-            using (GraphicsPath path = RoundedRect(rect, 8))
+            Rectangle rect = new Rectangle(1, 1, Math.Max(4, Width - 3), Math.Max(4, Height - 3));
+            float scale = Math.Max(1f, g.DpiX / 96f);
+            using (GraphicsPath path = RoundedRect(rect, Math.Max(2, (int)Math.Round(8f * scale))))
             {
                 Color fill = !Enabled
                     ? Color.FromArgb(214, 224, 236)
@@ -935,8 +998,15 @@ namespace BoBoSetup
 
         internal static GraphicsPath RoundedRect(Rectangle r, int radius)
         {
-            int d = radius * 2;
             var path = new GraphicsPath();
+            int maxR = Math.Min(r.Width, r.Height) / 2;
+            int rad = Math.Min(radius, maxR);
+            if (rad <= 0)
+            {
+                path.AddRectangle(r);
+                return path;
+            }
+            int d = rad * 2;
             path.AddArc(r.X, r.Y, d, d, 180, 90);
             path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
             path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
@@ -1002,6 +1072,14 @@ namespace BoBoSetup
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private static int S(int px, float scale)
+        {
+            return (int)Math.Round(px * scale);
+        }
+
         private readonly string selfExe;
         private readonly PayloadTrailer trailer;
         private readonly InstallOptions options;
@@ -1035,7 +1113,9 @@ namespace BoBoSetup
             this.logoBitmap = InstallerEngine.LoadBrandLogo();
             this.appVersion = InstallerEngine.GetAppVersion();
 
+            SuspendLayout();
             Text = "BoBo Remote 安装向导";
+            AutoScaleMode = AutoScaleMode.Dpi;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(560, 424);
@@ -1046,6 +1126,22 @@ namespace BoBoSetup
 
             BuildLayout();
             ShowPanel(welcomePage);
+
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            ResumeLayout(false);
+            PerformAutoScale();
+            PerformLayout();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int round = 2; // Win11 DWMWCP_ROUND
+                DwmSetWindowAttribute(Handle, 33, ref round, sizeof(int));
+            }
+            catch { }
         }
 
         protected override void Dispose(bool disposing)
@@ -1080,16 +1176,22 @@ namespace BoBoSetup
             topBar.MouseDown += DragWindow;
             topBar.Paint += delegate(object s, PaintEventArgs e)
             {
+                float sc = Math.Max(1f, e.Graphics.DpiX / 96f);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 if (logoBitmap != null)
                 {
                     e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    e.Graphics.DrawImage(logoBitmap, new Rectangle(16, 11, 24, 24));
+                    int iconSz = S(24, sc);
+                    e.Graphics.DrawImage(logoBitmap, new Rectangle(S(16, sc), (topBar.Height - iconSz) / 2, iconSz, iconSz));
                 }
-                TextRenderer.DrawText(e.Graphics, "BoBo Remote 安装向导", new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold),
-                    new Rectangle(48, 0, 320, 46), SetupPalette.Ink, TextFormatFlags.VerticalCenter);
+                using (var titleFont = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(e.Graphics, "BoBo Remote 安装向导", titleFont,
+                        new Rectangle(S(48, sc), 0, Math.Max(120, topBar.Width - S(150, sc)), topBar.Height),
+                        SetupPalette.Ink, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                }
                 using (var pen = new Pen(SetupPalette.Border, 1f))
-                    e.Graphics.DrawLine(pen, 0, 45, topBar.Width, 45);
+                    e.Graphics.DrawLine(pen, 0, topBar.Height - 1, topBar.Width, topBar.Height - 1);
             };
 
             var closeBtn = new Label
@@ -1153,25 +1255,44 @@ namespace BoBoSetup
             };
             hero.Paint += delegate(object s, PaintEventArgs e)
             {
+                float sc = Math.Max(1f, e.Graphics.DpiX / 96f);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 if (logoBitmap != null)
                 {
                     e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    e.Graphics.DrawImage(logoBitmap, new Rectangle(4, 8, 58, 58));
+                    e.Graphics.DrawImage(logoBitmap, new Rectangle(S(4, sc), S(8, sc), S(58, sc), S(58, sc)));
                 }
-                TextRenderer.DrawText(e.Graphics, "BoBo Remote", new Font("Microsoft YaHei UI", 16f, FontStyle.Bold),
-                    new Rectangle(76, 8, 220, 32), SetupPalette.Ink, TextFormatFlags.VerticalCenter);
+                using (var brandFont = new Font("Microsoft YaHei UI", 16f, FontStyle.Bold))
+                using (var pillFont = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold))
+                using (var subFont = new Font("Microsoft YaHei UI", 9f))
+                {
+                    string brandText = "BoBo Remote";
+                    int titleX = S(76, sc);
+                    int titleY = S(8, sc);
+                    int titleH = S(32, sc);
+                    Size brandSz = TextRenderer.MeasureText(e.Graphics, brandText, brandFont, new Size(int.MaxValue, titleH),
+                        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    TextRenderer.DrawText(e.Graphics, brandText, brandFont,
+                        new Rectangle(titleX, titleY, brandSz.Width + S(8, sc), titleH), SetupPalette.Ink,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
 
-                // Version pill
-                Rectangle pill = new Rectangle(248, 15, 112, 22);
-                using (GraphicsPath pp = RoundedButton.RoundedRect(pill, 11))
-                using (var pb = new SolidBrush(SetupPalette.SoftBlue))
-                    e.Graphics.FillPath(pb, pp);
-                TextRenderer.DrawText(e.Graphics, "v" + appVersion + " · x64", new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold),
-                    pill, SetupPalette.Accent, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    // Version pill placed dynamically after title width
+                    string pillText = "v" + appVersion + " · x64";
+                    Size pillSz = TextRenderer.MeasureText(e.Graphics, pillText, pillFont, new Size(int.MaxValue, S(22, sc)),
+                        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    int pillH = S(22, sc);
+                    int pillW = Math.Max(S(96, sc), pillSz.Width + S(20, sc));
+                    Rectangle pill = new Rectangle(titleX + brandSz.Width + S(12, sc), titleY + (titleH - pillH) / 2, pillW, pillH);
+                    using (GraphicsPath pp = RoundedButton.RoundedRect(pill, pillH / 2))
+                    using (var pb = new SolidBrush(SetupPalette.SoftBlue))
+                        e.Graphics.FillPath(pb, pp);
+                    TextRenderer.DrawText(e.Graphics, pillText, pillFont,
+                        pill, SetupPalette.Accent, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
 
-                TextRenderer.DrawText(e.Graphics, "双端低延迟远程桌面与高清串流 · 一键安装、免账号直连",
-                    new Font("Microsoft YaHei UI", 9f), new Rectangle(76, 42, 430, 24), SetupPalette.Muted, TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(e.Graphics, "双端低延迟远程桌面与高清串流 · 一键安装、免账号直连",
+                        subFont, new Rectangle(titleX, S(42, sc), Math.Max(120, hero.Width - titleX - S(4, sc)), S(26, sc)),
+                        SetupPalette.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                }
             };
             page.Controls.Add(hero);
 
@@ -1183,8 +1304,9 @@ namespace BoBoSetup
             };
             card.Paint += delegate(object s, PaintEventArgs e)
             {
+                float sc = Math.Max(1f, e.Graphics.DpiX / 96f);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), 10))
+                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), S(10, sc)))
                 using (var pen = new Pen(SetupPalette.Border, 1f))
                     e.Graphics.DrawPath(pen, path);
             };
@@ -1271,14 +1393,16 @@ namespace BoBoSetup
             };
             card.Paint += delegate(object s, PaintEventArgs e)
             {
+                float sc = Math.Max(1f, e.Graphics.DpiX / 96f);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), 12))
+                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), S(12, sc)))
                 using (var pen = new Pen(SetupPalette.Border, 1f))
                     e.Graphics.DrawPath(pen, path);
                 if (logoBitmap != null)
                 {
                     e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    e.Graphics.DrawImage(logoBitmap, new Rectangle(219, 22, 56, 56));
+                    int iconSz = S(56, sc);
+                    e.Graphics.DrawImage(logoBitmap, new Rectangle((card.Width - iconSz) / 2, S(22, sc), iconSz, iconSz));
                 }
             };
 
@@ -1331,24 +1455,28 @@ namespace BoBoSetup
             };
             card.Paint += delegate(object s, PaintEventArgs e)
             {
+                float sc = Math.Max(1f, e.Graphics.DpiX / 96f);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), 12))
+                using (GraphicsPath path = RoundedButton.RoundedRect(new Rectangle(0, 0, card.Width - 1, card.Height - 1), S(12, sc)))
                 using (var pen = new Pen(SetupPalette.Border, 1f))
                     e.Graphics.DrawPath(pen, path);
 
-                // Clean green checkmark circle
+                // Clean green checkmark circle (centered horizontally at any DPI)
+                int d = S(60, sc);
+                int cx = (card.Width - d) / 2;
+                int cy = S(22, sc);
                 using (var br = new SolidBrush(Color.FromArgb(232, 249, 240)))
-                    e.Graphics.FillEllipse(br, 217, 22, 60, 60);
-                using (var pen = new Pen(SetupPalette.Success, 4f))
+                    e.Graphics.FillEllipse(br, cx, cy, d, d);
+                using (var pen = new Pen(SetupPalette.Success, Math.Max(2.5f, 4f * sc)))
                 {
                     pen.StartCap = LineCap.Round;
                     pen.EndCap = LineCap.Round;
                     pen.LineJoin = LineJoin.Round;
                     e.Graphics.DrawLines(pen, new[]
                     {
-                        new Point(234, 53),
-                        new Point(244, 63),
-                        new Point(262, 43)
+                        new Point(cx + S(17, sc), cy + S(31, sc)),
+                        new Point(cx + S(27, sc), cy + S(41, sc)),
+                        new Point(cx + S(45, sc), cy + S(21, sc))
                     });
                 }
             };
@@ -1492,7 +1620,9 @@ namespace BoBoSetup
         internal UninstallForm(string installDir)
         {
             this.installDir = installDir;
+            SuspendLayout();
             Text = "卸载 BoBo Remote";
+            AutoScaleMode = AutoScaleMode.Dpi;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1542,6 +1672,11 @@ namespace BoBoSetup
             Controls.Add(purgeChk);
             Controls.Add(uninstallBtn);
             Controls.Add(cancelBtn);
+
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            ResumeLayout(false);
+            PerformAutoScale();
+            PerformLayout();
         }
 
         private void DoUninstall()

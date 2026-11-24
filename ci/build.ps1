@@ -37,7 +37,7 @@ $brandLogo = Join-Path $repoRoot 'assets\bobo-logo.png'
 $displayTool = Join-Path $repoRoot 'tools\Set-SunshineDisplay.ps1'
 $optimizeTool = Join-Path $repoRoot 'tools\Optimize-SunshineStream.ps1'
 
-$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll')
+$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
 $references = @($referenceNames | ForEach-Object { Join-Path $framework $_ })
 
 $outputRoot = Join-Path $repoRoot $OutputDirectory

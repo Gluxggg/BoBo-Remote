@@ -277,7 +277,21 @@ namespace DualRemote
                 if (IsPathUnder(running, LocalRoot)) { path = LocalConfigDirectory; return true; }
                 string explicitConf;
                 if (TryGetExplicitConfigPath(running, out explicitConf)) { path = Path.GetDirectoryName(explicitConf); return true; }
-                error = "检测到本机已运行的 Sunshine，但无法确认其配置目录；不会读取用户安装的 config/证书。";
+                // 系统安装版 Sunshine（例如 Windows 服务启动的 C:\Program Files\Sunshine\sunshine.exe）
+                // 默认使用同级 config 目录，不带 .conf 命令行参数（且非管理员无法读 SYSTEM 进程 CommandLine）。
+                string runningDir = Path.GetDirectoryName(running);
+                if (!string.IsNullOrEmpty(runningDir))
+                {
+                    string siblingConfig = Path.Combine(runningDir, ConfigName);
+                    if (Directory.Exists(siblingConfig)
+                        && (File.Exists(Path.Combine(siblingConfig, TokenName))
+                            || File.Exists(Path.Combine(siblingConfig, ConfigFileName))))
+                    {
+                        path = siblingConfig;
+                        return true;
+                    }
+                }
+                error = "检测到本机已运行的 Sunshine，但无法确认其配置目录；请确认其 config 目录存在。";
                 return false;
             }
             if (LocalPrepared) { path = LocalConfigDirectory; return true; }
