@@ -89,6 +89,9 @@ bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outErr
                     caps_.adapterName = WideToUtf8(desc.Description);
                     caps_.vendorId = desc.VendorId;
                     caps_.deviceId = desc.DeviceId;
+                    if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || desc.VendorId == 0x1414) {
+                        caps_.isSoftwareWarp = true;
+                    }
                 }
             }
         }
