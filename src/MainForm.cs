@@ -120,6 +120,7 @@ namespace DualRemote
         private string activeStreamHost = "";
         private int activeStreamPid;
         private bool initialScaleApplied;
+        private float appliedDpiScale = 1f;
         private string updatedFromVersion;
         private bool updateBusy;
         private UpdateCheckResult pendingUpdate;
@@ -140,8 +141,8 @@ namespace DualRemote
             ControlBox = false;
             MinimizeBox = true;
             MaximizeBox = true;
-            ClientSize = new Size(1060, 700);
-            MinimumSize = new Size(860, 560);
+            ClientSize = new Size(1160, 730);
+            MinimumSize = new Size(880, 560);
             Padding = Padding.Empty;
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = Theme.ChromeBg;
@@ -193,24 +194,25 @@ namespace DualRemote
             AutoScaleDimensions = new SizeF(96f, 96f);
             ResumeLayout(false);
             PerformAutoScale();
+            float autoScale = AutoScaleDimensions.Width >= 72f ? (AutoScaleDimensions.Width / 96f) : 1f;
+            appliedDpiScale = Math.Max(1f, Math.Max(autoScale, Theme.GetDpiScale(this)));
             initialScaleApplied = true;
             SyncAllPagesAfterScale();
             PerformLayout();
         }
 
-        private float CurrentDpiScale()
+        internal float CurrentDpiScale()
         {
             if (!initialScaleApplied) return 1f;
-            int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
-            return Math.Max(1f, dpi / 96f);
+            return Math.Max(1f, appliedDpiScale);
         }
 
         private void SyncAllPagesAfterScale()
         {
             float scale = CurrentDpiScale();
-            quality.DropDownWidth = (int)Math.Round(370f * scale);
+            quality.DropDownWidth = (int)Math.Round(400f * scale);
             if (settingsDefaultProfileCombo != null)
-                settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(340f * scale);
+                settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(380f * scale);
 
             for (int i = 0; i < pages.Length; i++)
             {
@@ -399,7 +401,7 @@ namespace DualRemote
             {
                 Rectangle area = Screen.FromControl(this).WorkingArea;
                 float scale = CurrentDpiScale();
-                int targetMinW = Math.Min((int)Math.Round(860 * scale), Math.Max(640, area.Width - 40));
+                int targetMinW = Math.Min((int)Math.Round(880 * scale), Math.Max(640, area.Width - 40));
                 int targetMinH = Math.Min((int)Math.Round(560 * scale), Math.Max(460, area.Height - 40));
                 MinimumSize = new Size(targetMinW, targetMinH);
             }
@@ -461,8 +463,8 @@ namespace DualRemote
         {
             Rectangle area = Screen.FromControl(this).WorkingArea;
             float scale = CurrentDpiScale();
-            int preferredW = (int)Math.Round(1060 * scale);
-            int preferredH = (int)Math.Round(700 * scale);
+            int preferredW = (int)Math.Round(1160 * scale);
+            int preferredH = (int)Math.Round(730 * scale);
             int width = forceMaximum ? area.Width : Math.Min(preferredW, area.Width - 24);
             int height = forceMaximum ? area.Height : Math.Min(preferredH, area.Height - 24);
             if (forceMaximum || Width > area.Width || Height > area.Height)
@@ -612,7 +614,7 @@ namespace DualRemote
             // Card 1: 本设备 (exact UU Image 3 structure!)
             var localCard = BuildLocalDeviceAssistCard();
             assistLocalCard = localCard;
-            Theme.Row(desk, 198, localCard);
+            Theme.Row(desk, 208, localCard);
             Theme.Row(desk, 16);
 
             // Card 2: 远控伙伴设备 (exact UU Image 3 structure with clean Stream / RustDesk toggle!)
@@ -621,7 +623,7 @@ namespace DualRemote
             assistStreamCardRow = desk.RowCount;
             Theme.Row(desk, ClientStreamCardHeight(), partnerCard);
             Theme.Row(desk, 16);
-            Theme.Row(desk, 40, assistBanner);
+            Theme.Row(desk, 42, assistBanner);
 
             SelectAssistMode(0);
             LayoutAssistDesk();
@@ -639,9 +641,9 @@ namespace DualRemote
             header.Padding = new Padding(22, 12, 22, 12);
             Theme.FillColumn(header);
             Theme.FixedColumn(header, 12);
-            Theme.FixedColumn(header, 118);
+            Theme.FixedColumn(header, 128);
             Theme.FixedColumn(header, 8);
-            Theme.FixedColumn(header, 76);
+            Theme.FixedColumn(header, 84);
 
             localPairGenerateButton = Theme.Action("生成配对码", Theme.ButtonStyle.Primary);
             localPairGenerateButton.Click += async delegate { await LocalPairPrimaryActionAsync(); };
@@ -649,28 +651,28 @@ namespace DualRemote
             localPairCancelButton.Enabled = false;
             localPairCancelButton.Click += delegate { CancelLocalPairing(); };
 
-            Theme.Row(header, 34, Theme.Text("本设备", Theme.TextSize.Section, Theme.Ink), null, localPairGenerateButton, null, localPairCancelButton);
-            Theme.Row(root, 58, header);
+            Theme.Row(header, 36, Theme.Text("本设备", Theme.TextSize.Section, Theme.Ink), null, localPairGenerateButton, null, localPairCancelButton);
+            Theme.Row(root, 60, header);
             Theme.Row(root, 1, Theme.Rule());
 
-            // Card body: Left 本机地址, Middle 一次性 4 位配对码 + eye button, Right stacked actions (never squishes IP at 860px)
+            // Card body: Left 本机地址, Middle 一次性 4 位配对码 + eye button, Right stacked actions (never squishes IP at 880px)
             var body = Theme.Grid(5);
             body.Padding = new Padding(22, 16, 22, 14);
             Theme.FillColumn(body);
             Theme.FixedColumn(body, 16);
-            Theme.FixedColumn(body, 184);
+            Theme.FixedColumn(body, 198);
             Theme.FixedColumn(body, 16);
-            Theme.FixedColumn(body, 116);
+            Theme.FixedColumn(body, 126);
 
             var addrCol = Theme.Grid(1);
             Theme.FillColumn(addrCol);
-            Theme.Row(addrCol, 20, Theme.Text("本机连接地址（推荐直连）", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(addrCol, 22, Theme.Text("本机连接地址（推荐直连）", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(addrCol, 6);
 
             var addrLine = Theme.Grid(3);
             Theme.FillColumn(addrLine);
             Theme.FixedColumn(addrLine, 6);
-            Theme.FixedColumn(addrLine, 32);
+            Theme.FixedColumn(addrLine, 34);
             localAssistAddressLabel = Theme.Text("正在检测地址…", Theme.TextSize.BigCode, Theme.Ink);
             localAssistAddressLabel.AutoEllipsis = true;
             localAssistAddressLabel.AccessibleName = "本机连接地址";
@@ -682,23 +684,23 @@ namespace DualRemote
                 Theme.ChangeGlyph(localAssistAddressEyeButton, localAssistAddressVisible ? Theme.Glyph.Eye : Theme.Glyph.EyeOff);
                 UpdateLocalAssistAddressLabel();
             };
-            Theme.Row(addrLine, 34, localAssistAddressLabel, null, localAssistAddressEyeButton);
-            Theme.Row(addrCol, 34, addrLine);
+            Theme.Row(addrLine, 38, localAssistAddressLabel, null, localAssistAddressEyeButton);
+            Theme.Row(addrCol, 38, addrLine);
 
             localPairStatusLabel = Theme.Text("点击右上角「生成配对码」允许新电脑首次连接本机", Theme.TextSize.Small, Theme.Muted);
             localPairStatusLabel.AutoEllipsis = true;
-            Theme.Row(addrCol, 22, localPairStatusLabel);
+            Theme.Row(addrCol, 24, localPairStatusLabel);
             Theme.FillRow(addrCol);
 
             var pinCol = Theme.Grid(1);
             Theme.FillColumn(pinCol);
-            Theme.Row(pinCol, 20, Theme.Text("临时配对码（120 秒有效）", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(pinCol, 22, Theme.Text("临时配对码（120 秒有效）", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(pinCol, 6);
 
             var pinLine = Theme.Grid(3);
             Theme.FillColumn(pinLine);
             Theme.FixedColumn(pinLine, 6);
-            Theme.FixedColumn(pinLine, 32);
+            Theme.FixedColumn(pinLine, 34);
             localPairCodeLabel = Theme.Text("• • • •", Theme.TextSize.BigCode, Theme.Ink);
             localPairCodeLabel.AutoEllipsis = false;
             localPairCodeLabel.AccessibleName = "本机 4 位配对码";
@@ -710,9 +712,9 @@ namespace DualRemote
                 Theme.ChangeGlyph(localPairEyeButton, localPairPinVisible ? Theme.Glyph.Eye : Theme.Glyph.EyeOff);
                 RefreshLocalPairPinDisplay();
             };
-            Theme.Row(pinLine, 34, localPairCodeLabel, null, localPairEyeButton);
-            Theme.Row(pinCol, 34, pinLine);
-            Theme.Row(pinCol, 22, Theme.Text("每次生成自动刷新", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(pinLine, 38, localPairCodeLabel, null, localPairEyeButton);
+            Theme.Row(pinCol, 38, pinLine);
+            Theme.Row(pinCol, 24, Theme.Text("每次生成自动刷新", Theme.TextSize.Small, Theme.Muted));
             Theme.FillRow(pinCol);
 
             var actionCol = Theme.Grid(1);
@@ -722,14 +724,14 @@ namespace DualRemote
             var openRdBtn = Theme.Action("RustDesk 码", Theme.ButtonStyle.Secondary);
             openRdBtn.Click += async delegate { await OpenLocalRustDeskOnAssist(openRdBtn); };
             Theme.FillRow(actionCol);
-            Theme.Row(actionCol, 34, copyShareBtn);
+            Theme.Row(actionCol, 36, copyShareBtn);
             Theme.Row(actionCol, 8);
-            Theme.Row(actionCol, 34, openRdBtn);
+            Theme.Row(actionCol, 36, openRdBtn);
             Theme.FillRow(actionCol);
 
-            Theme.Row(body, 96, addrCol, null, pinCol, null, actionCol);
+            Theme.Row(body, 104, addrCol, null, pinCol, null, actionCol);
             Theme.FillRow(body);
-            Theme.Row(root, 128, body);
+            Theme.Row(root, 138, body);
             Theme.FillRow(root);
 
             card.Controls.Add(root);
@@ -821,28 +823,28 @@ namespace DualRemote
             var header = Theme.Grid(1);
             header.Padding = new Padding(22, 16, 22, 14);
             Theme.FillColumn(header);
-            Theme.Row(header, 24, Theme.Text("远控伙伴设备", Theme.TextSize.Section, Theme.Ink));
+            Theme.Row(header, 28, Theme.Text("远控伙伴设备", Theme.TextSize.Section, Theme.Ink));
             Theme.Row(header, 4);
-            Theme.Row(header, 20, Theme.Text("输入伙伴的局域网/组网地址（高清高帧率串流），或 9 位设备码（临时协助与文件互传）", Theme.TextSize.Small, Theme.Muted));
-            Theme.Row(layout, 78, header);
+            Theme.Row(header, 24, Theme.Text("输入伙伴的局域网/组网地址（高清高帧率串流），或 9 位设备码（临时协助与文件互传）", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(layout, 86, header);
             Theme.Row(layout, 1, Theme.Rule());
 
             // Clean underline mode switcher inside card body
             var modeStrip = Theme.Grid(5);
             modeStrip.Padding = new Padding(22, 12, 22, 0);
-            Theme.FixedColumn(modeStrip, 136);
+            Theme.FixedColumn(modeStrip, 148);
             Theme.FixedColumn(modeStrip, 18);
-            Theme.FixedColumn(modeStrip, 174);
+            Theme.FixedColumn(modeStrip, 188);
             Theme.FillColumn(modeStrip);
-            Theme.FixedColumn(modeStrip, 184);
+            Theme.FixedColumn(modeStrip, 198);
 
             assistModeStreamTab = Theme.Action("低延迟高清串流", Theme.ButtonStyle.UnderlineTab);
             assistModeRustDeskTab = Theme.Action("临时协助 / 文件传输", Theme.ButtonStyle.UnderlineTab);
             assistModeStreamTab.Click += delegate { SelectAssistMode(0); };
             assistModeRustDeskTab.Click += delegate { SelectAssistMode(1); };
 
-            Theme.Row(modeStrip, 32, assistModeStreamTab, null, assistModeRustDeskTab, null, streamModeBadge);
-            Theme.Row(layout, 44, modeStrip);
+            Theme.Row(modeStrip, 36, assistModeStreamTab, null, assistModeRustDeskTab, null, streamModeBadge);
+            Theme.Row(layout, 48, modeStrip);
 
             // Mode content host
             assistModeHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Paper };
@@ -851,7 +853,7 @@ namespace DualRemote
             assistModeHost.Controls.Add(assistStreamModePanel);
             assistModeHost.Controls.Add(assistRustDeskModePanel);
             assistModeHostRow = layout.RowCount;
-            Theme.Row(layout, 166, assistModeHost);
+            Theme.Row(layout, 178, assistModeHost);
 
             // Expandable inline 4-digit PIN pairing panel (for first-time Moonlight/Sunshine pairing)
             clientPairPanel = BuildClientPairPanel();
@@ -871,15 +873,15 @@ namespace DualRemote
             panel.Padding = new Padding(22, 14, 22, 8);
             Theme.FillColumn(panel);
 
-            Theme.Row(panel, 20, Theme.Text("伙伴设备地址", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 22, Theme.Text("伙伴设备地址", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(panel, 8);
 
             var row = Theme.Grid(5);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 118);
+            Theme.FixedColumn(row, 124);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 116);
+            Theme.FixedColumn(row, 124);
 
             streamConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary);
             streamConnectBtn.Click += async delegate { await ConnectToDeviceAsync(SelectedHost(), null); };
@@ -887,25 +889,25 @@ namespace DualRemote
             streamHost.KeyDown += delegate(object sender, KeyEventArgs args) { RunOnEnter(streamHost, streamConnectBtn, args); };
             streamHost.TextChanged += delegate { UpdateAssistConnectButtons(); };
 
-            Theme.Row(row, 38, Theme.WrapInput(streamHost), null, streamConnectBtn, null, discover);
-            Theme.Row(panel, 38, row);
+            Theme.Row(row, 40, Theme.WrapInput(streamHost), null, streamConnectBtn, null, discover);
+            Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
 
-            // Compact quality selector + hint row
+            // Responsive quality selector + hint row
             var qRow = Theme.Grid(5);
-            Theme.FixedColumn(qRow, 64);
+            Theme.FixedColumn(qRow, 72);
             Theme.FixedColumn(qRow, 8);
-            Theme.FixedColumn(qRow, 330);
-            Theme.FixedColumn(qRow, 12);
             Theme.FillColumn(qRow);
+            Theme.FixedColumn(qRow, 14);
+            Theme.FixedColumn(qRow, 92);
 
             var probeBtn = Theme.Action("链路测速", Theme.ButtonStyle.Link);
             probeBtn.Click += async delegate { await ProbeLink(); };
 
-            Theme.Row(qRow, 36, Theme.Text("画质档位", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(quality), null, probeBtn);
-            Theme.Row(panel, 36, qRow);
-            Theme.Row(panel, 6);
-            Theme.Row(panel, 20, streamHint);
+            Theme.Row(qRow, 38, Theme.Text("画质档位", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(quality), null, probeBtn);
+            Theme.Row(panel, 38, qRow);
+            Theme.Row(panel, 8);
+            Theme.Row(panel, 24, streamHint);
 
             UpdateAssistConnectButtons();
             return panel;
@@ -918,15 +920,15 @@ namespace DualRemote
             panel.Padding = new Padding(22, 14, 22, 8);
             Theme.FillColumn(panel);
 
-            Theme.Row(panel, 20, Theme.Text("伙伴的 9 位设备码", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 22, Theme.Text("伙伴的 9 位设备码", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(panel, 8);
 
             var row = Theme.Grid(5);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 118);
+            Theme.FixedColumn(row, 124);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 116);
+            Theme.FixedColumn(row, 124);
 
             rustDeskConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary);
             var transferBtn = Theme.Action("文件传输", Theme.ButtonStyle.Secondary, Theme.Glyph.Folder);
@@ -935,10 +937,10 @@ namespace DualRemote
             remoteId.KeyDown += delegate(object sender, KeyEventArgs args) { RunOnEnter(remoteId, rustDeskConnectBtn, args); };
             remoteId.TextChanged += delegate { UpdateAssistConnectButtons(); };
 
-            Theme.Row(row, 38, Theme.WrapInput(remoteId), null, rustDeskConnectBtn, null, transferBtn);
-            Theme.Row(panel, 38, row);
+            Theme.Row(row, 40, Theme.WrapInput(remoteId), null, rustDeskConnectBtn, null, transferBtn);
+            Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
-            Theme.Row(panel, 24, Theme.Text("通过内置 RustDesk 1.5.3 发起跨网通用桌面协助或直接传输文件，权限由被控端确认。", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 26, Theme.Text("通过内置 RustDesk 1.5.3 发起跨网通用桌面协助或直接传输文件，权限由被控端确认。", Theme.TextSize.Small, Theme.Muted));
 
             UpdateAssistConnectButtons();
             return panel;
@@ -957,7 +959,10 @@ namespace DualRemote
 
             if (clientPairCardLayout != null && assistModeHostRow >= 0)
             {
-                clientPairCardLayout.RowStyles[assistModeHostRow].Height = DevicePixels(isStream ? 166 : 128);
+                Control activePanel = isStream ? assistStreamModePanel : assistRustDeskModePanel;
+                int panelH = activePanel != null ? SumRows(activePanel) : 0;
+                if (panelH <= 0) panelH = DevicePixels(isStream ? 178 : 138);
+                clientPairCardLayout.RowStyles[assistModeHostRow].Height = panelH;
                 if (assistDesk != null && assistStreamCardRow >= 0)
                     assistDesk.RowStyles[assistStreamCardRow].Height = ClientStreamCardHeight();
                 LayoutAssistDesk();
@@ -1470,7 +1475,7 @@ namespace DualRemote
             Remember(remoteId, recent.RustDeskIds, message);
         }
 
-        private void StartStream(string confirmedHost)
+        private async Task StartStreamAsync(string confirmedHost)
         {
             string message;
             string host = Engines.NormalizeHost(confirmedHost, out message);
@@ -1480,35 +1485,59 @@ namespace DualRemote
                 streamHost.Focus();
                 return;
             }
+            StreamEngine engine = FoundationClient.SelectEngine(true);
+            if (engine == StreamEngine.Unavailable)
+            {
+                SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
+                var p0 = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+                ConnectionTelemetry.RecordFailed("unavailable", host, p0.Width, p0.Height, p0.Fps,
+                    p0.BitrateKbps, UsesHevc(p0), useFoundationClient, MissingStreamEngineMessage);
+                return;
+            }
+
+            string resolvedApp = Engines.MoonlightAppName;
+            try
+            {
+                resolvedApp = await Task.Run(delegate
+                {
+                    return engine == StreamEngine.Enhanced
+                        ? FoundationClient.ResolveDesktopAppName(host)
+                        : Engines.ResolveOfficialDesktopAppName(host);
+                });
+            }
+            catch
+            {
+                resolvedApp = Engines.MoonlightAppName;
+            }
+            if (IsDisposed) return;
+
             var profile = quality.SelectedItem as QualityOption ?? QualityOptions[0];
             string note;
             bool started;
-            switch (FoundationClient.SelectEngine(true))
+            switch (engine)
             {
                 case StreamEngine.Enhanced:
-                    started = FoundationClient.Launch(host, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
+                    started = FoundationClient.LaunchWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
                         showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile), useFoundationClient,
                         lowLatencyNoVsync, enableFramePacing, false, out note);
                     break;
                 case StreamEngine.Official:
-                    started = Engines.StreamMoonlight(host, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
+                    started = Engines.StreamMoonlightWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
                         showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile),
                         lowLatencyNoVsync, enableFramePacing, out note);
                     break;
                 default:
                     SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
-                    ConnectionTelemetry.RecordFailed("unavailable", host, profile.Width, profile.Height, profile.Fps,
-                        profile.BitrateKbps, UsesHevc(profile), useFoundationClient, MissingStreamEngineMessage);
                     return;
             }
             if (!started)
             {
                 SetStatus(note, Theme.PillTone.Alert);
-                ConnectionTelemetry.RecordFailed(FoundationClient.SelectEngine(true).ToString(), host, profile.Width,
+                ConnectionTelemetry.RecordFailed(engine.ToString(), host, profile.Width,
                     profile.Height, profile.Fps, profile.BitrateKbps, UsesHevc(profile), useFoundationClient, note);
                 return;
             }
-            ConnectionTelemetry.RecordSubmitted(FoundationClient.SelectEngine(true).ToString(), host, profile.Width,
+            ConnectionTelemetry.RecordSubmitted(engine.ToString(), host, profile.Width,
                 profile.Height, profile.Fps, profile.BitrateKbps, UsesHevc(profile), useFoundationClient, note);
             recent.RememberMoonlightHost(host);
             Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
@@ -1571,7 +1600,7 @@ namespace DualRemote
             RestartActiveStreamSession();
         }
 
-        private void RestartActiveStreamSession()
+        private async void RestartActiveStreamSession()
         {
             string target = activeStreamHost;
             if (string.IsNullOrEmpty(target)) return;
@@ -1579,8 +1608,14 @@ namespace DualRemote
             activeStreamPid = 0;
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
                 activeStreamToolbar.PauseWatchingForRestart();
-            if (oldPid > 0) Engines.StopStreamProcess(oldPid);
-            StartStream(target);
+            if (oldPid > 0)
+            {
+                await Task.Run(delegate { Engines.StopStreamProcess(oldPid); });
+            }
+            if (!IsDisposed)
+            {
+                await StartStreamAsync(target);
+            }
         }
 
         private void DisconnectActiveStreamSession()
@@ -2102,7 +2137,7 @@ namespace DualRemote
             {
                 Rectangle bounds = owner.Bounds;
                 if (!bounds.Contains(screenPt)) return ResizeEdge.None;
-                float scale = owner.DeviceDpi / 96f;
+                float scale = Theme.GetDpiScale(owner);
                 int grip = Math.Max(4, (int)Math.Round(5 * scale));
                 int corner = Math.Max(9, (int)Math.Round(10 * scale));
                 int dxL = screenPt.X - bounds.Left;

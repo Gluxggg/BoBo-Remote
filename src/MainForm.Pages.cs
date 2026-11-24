@@ -35,7 +35,7 @@ namespace DualRemote
         private Button topMenuBtn;
         private Button maxRestoreBtn;
         private Control perfDiagCard;
-        private Label updateStatusDescLabel;
+        private Theme.TwoLineText updateStatusCardText;
         private Button updateActionButton;
         private OnboardingOverlayForm activeOnboardingTour;
         private bool forceOnboardingOnLaunch;
@@ -80,7 +80,7 @@ namespace DualRemote
             Theme.Row(frame, 48, BuildTopBar());
 
             var body = Theme.Grid(2);
-            Theme.FixedColumn(body, 224);
+            Theme.FixedColumn(body, 232);
             Theme.FillColumn(body);
             Theme.FillRow(body);
             body.BackColor = Theme.ChromeBg;
@@ -121,7 +121,7 @@ namespace DualRemote
         private Control BuildTopBar()
         {
             var bar = Theme.Grid(13);
-            Theme.FixedColumn(bar, 224);
+            Theme.FixedColumn(bar, 232);
             Theme.FillColumn(bar);
             Theme.FixedColumn(bar, 36);
             Theme.FixedColumn(bar, 4);
@@ -389,24 +389,38 @@ namespace DualRemote
         private Theme.SlimScrollViewport CreatePage(int initialHeight, out TableLayoutPanel desk)
         {
             var viewport = new Theme.SlimScrollViewport { SuspendResponsiveLayout = !initialScaleApplied };
-            desk = Theme.Grid(1);
-            Theme.FillColumn(desk);
-            desk.Dock = DockStyle.None;
-            desk.Height = initialHeight;
-            desk.Padding = new Padding(36, 26, 36, 28);
-            desk.BackColor = Theme.Workspace;
-            viewport.Controls.Add(desk);
+            var pageDesk = Theme.Grid(1);
+            Theme.FillColumn(pageDesk);
+            pageDesk.Dock = DockStyle.None;
+            pageDesk.Height = initialHeight;
+            pageDesk.Padding = new Padding(32, 26, 32, 28);
+            pageDesk.BackColor = Theme.Workspace;
+            viewport.ContentWidthChanged += delegate(int contentW)
+            {
+                if (!initialScaleApplied) return;
+                float scale = CurrentDpiScale();
+                float logicalW = contentW / Math.Max(1f, scale);
+                int hPadLogical = logicalW < 720f ? 22 : (logicalW < 1100f ? 30 : 38);
+                int hPad = (int)Math.Round(hPadLogical * scale);
+                int topPad = (int)Math.Round(26 * scale);
+                int botPad = (int)Math.Round(28 * scale);
+                Padding next = new Padding(hPad, topPad, hPad, botPad);
+                if (pageDesk.Padding != next)
+                    pageDesk.Padding = next;
+            };
+            viewport.Controls.Add(pageDesk);
+            desk = pageDesk;
             return viewport;
         }
 
-        private static void AddPageHeader(TableLayoutPanel grid, string title, string subtitle, Control trailing = null, int actionWidth = 118)
+        private static void AddPageHeader(TableLayoutPanel grid, string title, string subtitle, Control trailing = null, int actionWidth = 122)
         {
             bool hasSub = !string.IsNullOrEmpty(subtitle);
-            int headerH = hasSub ? 56 : 38;
+            int headerH = hasSub ? 64 : 44;
             var titles = Theme.Grid(1);
             Theme.FillColumn(titles);
-            Theme.Row(titles, 36, Theme.Text(title, Theme.TextSize.Title, Theme.Ink));
-            if (hasSub) Theme.Row(titles, 20, Theme.Text(subtitle, Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(titles, 42, Theme.Text(title, Theme.TextSize.Title, Theme.Ink));
+            if (hasSub) Theme.Row(titles, 22, Theme.Text(subtitle, Theme.TextSize.Small, Theme.Muted));
 
             if (trailing == null)
             {
@@ -417,7 +431,7 @@ namespace DualRemote
             Theme.FillColumn(heading);
             Theme.FixedColumn(heading, 12);
             Theme.FixedColumn(heading, actionWidth);
-            int vPad = hasSub ? 11 : 3;
+            int vPad = hasSub ? 14 : 4;
             trailing.Margin = new Padding(0, vPad, 0, vPad);
             Theme.Row(heading, headerH, titles, null, trailing);
             Theme.Row(grid, headerH, heading);
@@ -436,13 +450,13 @@ namespace DualRemote
 
             // UU-style clean horizontal text tabs with short blue underline indicator
             var tabBar = Theme.Grid(9);
-            Theme.FixedColumn(tabBar, 58);
+            Theme.FixedColumn(tabBar, 64);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 102);
+            Theme.FixedColumn(tabBar, 112);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 128);
+            Theme.FixedColumn(tabBar, 140);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 102);
+            Theme.FixedColumn(tabBar, 112);
             Theme.FillColumn(tabBar);
             Theme.FixedColumn(tabBar, 1);
 
@@ -451,8 +465,8 @@ namespace DualRemote
             var tabPerf = Theme.Action("低延迟与抗丢包", Theme.ButtonStyle.UnderlineTab);
             var tabNetwork = Theme.Action("引擎与网络", Theme.ButtonStyle.UnderlineTab);
 
-            Theme.Row(tabBar, 34, tabGeneral, null, tabStream, null, tabPerf, null, tabNetwork, null, null);
-            Theme.Row(desk, 34, tabBar);
+            Theme.Row(tabBar, 38, tabGeneral, null, tabStream, null, tabPerf, null, tabNetwork, null, null);
+            Theme.Row(desk, 38, tabBar);
             Theme.Row(desk, 18);
 
             settingsTabHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Workspace };
@@ -477,7 +491,7 @@ namespace DualRemote
             settingsTabRow = desk.RowCount;
             Theme.Row(desk, 460, settingsTabHost);
             Theme.Row(desk, 16);
-            Theme.Row(desk, 40, settingsBanner);
+            Theme.Row(desk, 42, settingsBanner);
 
             SelectSettingsTab(0);
             return viewport;
@@ -546,26 +560,26 @@ namespace DualRemote
             };
             AddStandaloneSettingCard(page, Theme.Glyph.Image, "默认串流画质档位",
                 "发起低延迟桌面串流时默认采用的分辨率、帧率与码率档位",
-                Theme.WrapInput(defaultProfile), 280);
+                Theme.WrapInput(defaultProfile), 336);
 
             updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
             updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
-            updateStatusDescLabel = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Bolt,
+            updateStatusCardText = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Bolt,
                 "软件版本与在线自动更新（当前 v" + AppUpdater.CurrentVersion + "）",
                 "无需手动去仓库下载安装包，支持 SHA-256 校验后自动增量或覆盖升级",
-                updateActionButton, 146);
+                updateActionButton, 156);
 
             var replayGuide = Theme.Action("重新查看引导", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
             replayGuide.Click += delegate { StartOnboardingTour(false); };
             AddStandaloneSettingCard(page, Theme.Glyph.Help, "新手引导使用教程",
                 "以灰白框选高亮方式分步回顾设备连接、远程协助、防窥壁纸与低延迟调优",
-                replayGuide, 134);
+                replayGuide, 148);
 
             var clear = Theme.Action("清空记录", Theme.ButtonStyle.Secondary);
             clear.Click += delegate { ClearRecents(); };
             AddStandaloneSettingCard(page, Theme.Glyph.Trash, "清除最近连接历史",
                 "清除本机保存的设备码与主机地址历史记录（不影响收藏与配对）",
-                clear, 112);
+                clear, 120);
 
             return page;
         }
@@ -624,24 +638,25 @@ namespace DualRemote
             var head = Theme.Grid(3);
             Theme.FillColumn(head);
             Theme.FixedColumn(head, 12);
-            Theme.FixedColumn(head, 176);
-            Theme.Row(head, 28, Theme.Text("被控端抗丢包诊断与一键调优", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
-            Theme.Row(h, 28, head);
+            Theme.FixedColumn(head, 188);
+            Theme.Row(head, 30, Theme.Text("被控端抗丢包诊断与一键调优", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
+            Theme.Row(h, 30, head);
             Theme.Row(h, 4);
-            Theme.Row(h, 22, diagVersionLabel);
+            Theme.Row(h, 24, diagVersionLabel);
             Theme.Row(h, 8);
             diagDetailsLabel.TextAlign = ContentAlignment.TopLeft;
             diagDetailsLabel.AutoEllipsis = false;
-            Theme.Row(h, 66, diagDetailsLabel);
+            Theme.Row(h, 74, diagDetailsLabel);
             Theme.Row(h, 12);
 
-            var btnBar = Theme.Grid(7);
-            Theme.FixedColumn(btnBar, 152);
+            var btnBar = Theme.Grid(8);
+            Theme.FixedColumn(btnBar, 160);
             Theme.FixedColumn(btnBar, 8);
-            Theme.FixedColumn(btnBar, 124);
+            Theme.FixedColumn(btnBar, 132);
             Theme.FixedColumn(btnBar, 8);
-            Theme.FixedColumn(btnBar, 110);
+            Theme.FixedColumn(btnBar, 118);
             Theme.FixedColumn(btnBar, 8);
+            Theme.FixedColumn(btnBar, 118);
             Theme.FillColumn(btnBar);
 
             var applyWan = Theme.Action("外网抗丢包调优", Theme.ButtonStyle.Primary, Theme.Glyph.Bolt);
@@ -657,30 +672,30 @@ namespace DualRemote
                 try { await RefreshHostDiagnosticsAsync(); }
                 finally { if (!IsDisposed) refreshDiag.Enabled = true; }
             };
-            Theme.Row(btnBar, 36, applyWan, null, applyLan, null, restoreCfg, null, refreshDiag);
-            Theme.Row(h, 36, btnBar);
+            Theme.Row(btnBar, 38, applyWan, null, applyLan, null, restoreCfg, null, refreshDiag, null);
+            Theme.Row(h, 38, btnBar);
             hostCard.Controls.Add(h);
 
-            Theme.Row(page, 220, hostCard);
+            Theme.Row(page, 232, hostCard);
             Theme.Row(page, 12);
 
             // Card 2: Architecture checklist learned from UU / Moonlight / Parsec
-            var guideCard = new Theme.Card { Padding = new Padding(22, 16, 22, 16) };
+            var guideCard = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
             var g = Theme.Grid(1);
             Theme.FillColumn(g);
-            Theme.Row(g, 26, Theme.Text("高清高帧率 · 抗丢包架构要点", Theme.TextSize.Section, Theme.Ink));
+            Theme.Row(g, 28, Theme.Text("高清高帧率 · 抗丢包架构要点", Theme.TextSize.Section, Theme.Ink));
             Theme.Row(g, 8);
-            Theme.Row(g, 24, Theme.Text("• 编码层：硬编零拷贝 + CBR & HRD 硬码率约束 + LTR 参考帧 + 按需 GOP，杜绝突发大帧拖垮 Wi-Fi 缓冲。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 24, Theme.Text("• 传输层：UDP 动态 Auto-FEC（0 额外 RTT 本地纠错）+ Moonlight V+ ABR 实时降码率防花屏断流。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 24, Theme.Text("• 网络层：同局域网直连或双端公网 IPv6 / Tailscale 直连优先；高跳数中继时可搭配 EasyTier。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 26, Theme.Text("• 编码层：硬编零拷贝 + CBR & HRD 硬码率约束 + LTR 参考帧 + 按需 GOP，杜绝突发大帧拖垮 Wi-Fi 缓冲。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 26, Theme.Text("• 传输层：UDP 动态 Auto-FEC（0 额外 RTT 本地纠错）+ Moonlight V+ ABR 实时降码率防花屏断流。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 26, Theme.Text("• 网络层：同局域网直连或双端公网 IPv6 / Tailscale 直连优先；高跳数中继时可搭配 EasyTier。", Theme.TextSize.Small, Theme.BodyInk));
             Theme.Row(g, 12);
 
             var links = Theme.Grid(7);
-            Theme.FixedColumn(links, 144);
+            Theme.FixedColumn(links, 150);
             Theme.FixedColumn(links, 10);
-            Theme.FixedColumn(links, 156);
+            Theme.FixedColumn(links, 162);
             Theme.FixedColumn(links, 10);
-            Theme.FixedColumn(links, 160);
+            Theme.FixedColumn(links, 166);
             Theme.FixedColumn(links, 10);
             Theme.FillColumn(links);
 
@@ -690,11 +705,11 @@ namespace DualRemote
             openGuide.Click += delegate { OpenGuide(); };
             openFs.Click += delegate { OpenExternalUrl(HostNetworkInfo.FoundationReleasesUrl, "已打开 Foundation Sunshine Releases 页。"); };
             openEt.Click += delegate { OpenExternalUrl(HostNetworkInfo.EasyTierReleasesUrl, "已打开 EasyTier 开源异地组网 Releases 页。"); };
-            Theme.Row(links, 34, openGuide, null, openFs, null, openEt, null, null);
-            Theme.Row(g, 34, links);
+            Theme.Row(links, 36, openGuide, null, openFs, null, openEt, null, null);
+            Theme.Row(g, 36, links);
             guideCard.Controls.Add(g);
 
-            Theme.Row(page, 182, guideCard);
+            Theme.Row(page, 198, guideCard);
             return page;
         }
 
@@ -705,24 +720,24 @@ namespace DualRemote
 
             AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "Moonlight V+ 6.5.6",
                 "主力低延迟串流引擎，原生支持 Foundation ABR 自适应抗丢包",
-                BuildEngineActionRow(FoundationClient.IsAvailable, "打开 V+", delegate { OpenMoonlightGui(); }), 176);
+                BuildEngineActionRow(FoundationClient.IsAvailable, "打开 V+", delegate { OpenMoonlightGui(); }), 186);
 
             AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "Moonlight 6.2.0",
                 "官方标准便携串流引擎，可作为独立备用客户端",
-                EngineAvailability(Engines.MoonlightPresent), 92);
+                EngineAvailability(Engines.MoonlightPresent), 98);
 
             AddStandaloneSettingCard(page, Theme.Glyph.Assist, "RustDesk 1.5.3",
                 "通用远程协助、9 位设备码接入与双向文件互传引擎",
-                BuildEngineActionRow(Engines.RustDeskPresent, "打开窗口", async delegate { await OpenLocalRustDeskOnSettings(); }), 176);
+                BuildEngineActionRow(Engines.RustDeskPresent, "打开窗口", async delegate { await OpenLocalRustDeskOnSettings(); }), 186);
 
             sunshineComponentBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
             AddStandaloneSettingCard(page, Theme.Glyph.Network, "Foundation Sunshine 被控宿主",
                 "支持便携版内置宿主与系统安装版，负责硬编采集与 Zako 虚拟屏",
-                sunshineComponentBadge, 108);
+                sunshineComponentBadge, 114);
 
             AddStandaloneSettingCard(page, Theme.Glyph.Link, "Tailscale 异地组网 CLI",
                 "自动发现同账号 Windows 设备并区分直连与 DERP 中继路径",
-                EngineAvailability(Engines.TailscalePresent), 92);
+                EngineAvailability(Engines.TailscalePresent), 98);
 
             return page;
         }
@@ -742,28 +757,28 @@ namespace DualRemote
         private static Control BuildEngineActionRow(bool ready, string buttonText, EventHandler onClick)
         {
             var box = Theme.Grid(3);
-            Theme.FixedColumn(box, 74);
+            Theme.FixedColumn(box, 78);
             Theme.FixedColumn(box, 8);
-            Theme.FixedColumn(box, 92);
+            Theme.FixedColumn(box, 98);
             var btn = Theme.Action(buttonText, Theme.ButtonStyle.Secondary);
             btn.Enabled = ready;
             btn.Click += onClick;
-            Theme.Row(box, 32, EngineAvailability(ready), null, btn);
+            Theme.Row(box, 34, EngineAvailability(ready), null, btn);
             return box;
         }
 
         /// <summary>UU 设置页标准单列卡片行（左侧线性图标 + 标题/说明 + 右侧开关或下拉控件）。</summary>
-        private static void AddStandaloneSettingCard(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 104)
+        private static void AddStandaloneSettingCard(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 108)
         {
             AddStandaloneSettingCardWithDesc(parent, glyph, title, description, action, actionWidth);
         }
 
-        private static Label AddStandaloneSettingCardWithDesc(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 104)
+        private static Theme.TwoLineText AddStandaloneSettingCardWithDesc(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 108)
         {
             bool hasDesc = !string.IsNullOrEmpty(description);
-            int cardH = hasDesc ? 70 : 58;
+            int cardH = hasDesc ? 76 : 62;
 
-            var card = new Theme.Card { Padding = new Padding(18, 10, 18, 10) };
+            var card = new Theme.Card { Padding = new Padding(20, 12, 20, 12) };
             var row = Theme.Grid(5);
             Theme.FixedColumn(row, 26);
             Theme.FixedColumn(row, 14);
@@ -772,32 +787,17 @@ namespace DualRemote
             Theme.FixedColumn(row, actionWidth);
 
             var icon = new Theme.IconTile(glyph, true, Color.Transparent, Theme.BodyInk, 0f);
-            Control textBlock;
-            Label descLabel = null;
-            if (hasDesc)
-            {
-                var stack = Theme.Grid(1);
-                Theme.FillColumn(stack);
-                stack.Padding = new Padding(0, 3, 0, 3);
-                Theme.Row(stack, 24, Theme.Text(title, Theme.TextSize.Label, Theme.Ink));
-                descLabel = Theme.Text(description, Theme.TextSize.Small, Theme.Muted);
-                Theme.Row(stack, 20, descLabel);
-                textBlock = stack;
-            }
-            else
-            {
-                textBlock = Theme.Text(title, Theme.TextSize.Label, Theme.Ink);
-            }
+            var textBlock = new Theme.TwoLineText(title, description, Theme.TextSize.Label, Theme.Ink, Theme.Muted);
 
-            int innerH = cardH - 20;
-            int actionPad = Math.Max(0, (innerH - 34) / 2);
+            int innerH = cardH - 24;
+            int actionPad = Math.Max(0, (innerH - 36) / 2);
             action.Margin = new Padding(0, actionPad, 0, actionPad);
             Theme.Row(row, innerH, icon, null, textBlock, null, action);
             card.Controls.Add(row);
 
             Theme.Row(parent, cardH, card);
             Theme.Row(parent, 10);
-            return descLabel;
+            return textBlock;
         }
 
         private void UpdateDiagnosticsUi()
@@ -978,7 +978,7 @@ namespace DualRemote
                 dlg.MinimizeBox = false;
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.BackColor = Theme.Workspace;
-                dlg.ClientSize = new Size(476, 286);
+                dlg.ClientSize = new Size(524, 316);
                 dlg.Icon = appIcon ?? Icon;
 
                 var root = Theme.Grid(1);
@@ -987,7 +987,7 @@ namespace DualRemote
                 root.BackColor = Theme.Workspace;
 
                 var hero = Theme.Grid(3);
-                Theme.FixedColumn(hero, 56);
+                Theme.FixedColumn(hero, 58);
                 Theme.FixedColumn(hero, 14);
                 Theme.FillColumn(hero);
 
@@ -995,30 +995,30 @@ namespace DualRemote
                 var titleStack = Theme.Grid(1);
                 Theme.FillColumn(titleStack);
                 titleStack.Padding = new Padding(0, 2, 0, 0);
-                Theme.Row(titleStack, 34, Theme.Text("BoBo远程 v" + AppUpdater.CurrentVersion, Theme.TextSize.Title, Theme.Ink));
-                Theme.Row(titleStack, 20, Theme.Text("低延迟高帧率双端远程桌面 · 隐私防窥便携版", Theme.TextSize.Small, Theme.Muted));
-                Theme.Row(hero, 58, logoBox, null, titleStack);
-                Theme.Row(root, 58, hero);
+                Theme.Row(titleStack, 40, Theme.Text("BoBo远程 v" + AppUpdater.CurrentVersion, Theme.TextSize.Title, Theme.Ink));
+                Theme.Row(titleStack, 22, Theme.Text("低延迟高帧率双端远程桌面 · 隐私防窥便携版", Theme.TextSize.Small, Theme.Muted));
+                Theme.Row(hero, 64, logoBox, null, titleStack);
+                Theme.Row(root, 64, hero);
                 Theme.Row(root, 14);
 
                 var infoCard = new Theme.Card { Padding = new Padding(16, 12, 16, 12) };
                 var ic = Theme.Grid(1);
                 Theme.FillColumn(ic);
-                Theme.Row(ic, 22, Theme.Text("• 串流引擎：Foundation Sunshine + Moonlight V+ (ABR + Auto-FEC + HEVC)", Theme.TextSize.Small, Theme.BodyInk));
-                Theme.Row(ic, 22, Theme.Text("• 通用协助与文件传输：RustDesk 1.5.3", Theme.TextSize.Small, Theme.BodyInk));
-                Theme.Row(ic, 22, Theme.Text("• 隐私保护：WDA_EXCLUDEFROMCAPTURE 物理屏防窥壁纸 + Zako 虚拟屏", Theme.TextSize.Small, Theme.BodyInk));
-                Theme.Row(ic, 22, Theme.Text("• 配置目录：" + RecentStore.DirPath, Theme.TextSize.Small, Theme.Muted));
+                Theme.Row(ic, 25, Theme.Text("• 串流引擎：Foundation Sunshine + Moonlight V+ (ABR + Auto-FEC + HEVC)", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 通用协助与文件传输：RustDesk 1.5.3", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 隐私保护：WDA_EXCLUDEFROMCAPTURE 物理屏防窥壁纸 + Zako 虚拟屏", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 配置目录：" + RecentStore.DirPath, Theme.TextSize.Small, Theme.Muted));
                 infoCard.Controls.Add(ic);
-                Theme.Row(root, 118, infoCard);
+                Theme.Row(root, 130, infoCard);
                 Theme.Row(root, 16);
 
                 var footer = Theme.Grid(6);
                 Theme.FillColumn(footer);
-                Theme.FixedColumn(footer, 108);
+                Theme.FixedColumn(footer, 116);
                 Theme.FixedColumn(footer, 10);
-                Theme.FixedColumn(footer, 122);
+                Theme.FixedColumn(footer, 132);
                 Theme.FixedColumn(footer, 10);
-                Theme.FixedColumn(footer, 84);
+                Theme.FixedColumn(footer, 88);
 
                 var checkUpdBtn = Theme.Action("检查更新", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
                 checkUpdBtn.Click += delegate
@@ -1035,8 +1035,8 @@ namespace DualRemote
                 var okBtn = Theme.Action("确定", Theme.ButtonStyle.Primary);
                 okBtn.Click += delegate { dlg.Close(); };
 
-                Theme.Row(footer, 34, null, checkUpdBtn, null, tourBtn, null, okBtn);
-                Theme.Row(root, 34, footer);
+                Theme.Row(footer, 36, null, checkUpdBtn, null, tourBtn, null, okBtn);
+                Theme.Row(root, 36, footer);
                 dlg.Controls.Add(root);
 
                 dlg.AutoScaleDimensions = new SizeF(96f, 96f);
@@ -1067,8 +1067,8 @@ namespace DualRemote
                     updateActionButton.Enabled = false;
                     updateActionButton.Text = "检查中…";
                 }
-                if (updateStatusDescLabel != null)
-                    updateStatusDescLabel.Text = "正在连接 GitHub Releases 检查最新版本…";
+                if (updateStatusCardText != null)
+                    updateStatusCardText.SubtitleText = "正在连接 GitHub Releases 检查最新版本…";
                 ShowSettingsBanner("正在检查最新版本…", Theme.PillTone.Info);
             }
 
@@ -1097,7 +1097,7 @@ namespace DualRemote
                 if (!silent)
                 {
                     string err = (res != null && !string.IsNullOrEmpty(res.Error)) ? res.Error : "检查更新失败，请稍后重试。";
-                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = err;
+                    if (updateStatusCardText != null) updateStatusCardText.SubtitleText = err;
                     ShowSettingsBanner(err, Theme.PillTone.Warning);
                 }
                 return;
@@ -1113,7 +1113,7 @@ namespace DualRemote
                     : (res.PackageKind == UpdatePackageKind.FullSetup ? "完整覆盖包，保留本地配对" : "需前往 Releases 页面下载");
                 string desc = "发现新版本 " + res.ReleaseTag + "（" + kindText + "）"
                     + (string.IsNullOrEmpty(res.ReleaseNotesSummary) ? "" : "：" + res.ReleaseNotesSummary);
-                if (updateStatusDescLabel != null) updateStatusDescLabel.Text = desc;
+                if (updateStatusCardText != null) updateStatusCardText.SubtitleText = desc;
                 if (updateActionButton != null)
                 {
                     updateActionButton.Enabled = true;
@@ -1139,7 +1139,7 @@ namespace DualRemote
                 if (!silent)
                 {
                     string upToDate = "当前已是最新版本 v" + res.CurrentVersion + "（最新发行版 " + res.ReleaseTag + "）。";
-                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = upToDate;
+                    if (updateStatusCardText != null) updateStatusCardText.SubtitleText = upToDate;
                     ShowSettingsBanner(upToDate, Theme.PillTone.Success);
                 }
             }
@@ -1176,8 +1176,8 @@ namespace DualRemote
                 updateActionButton.Enabled = false;
                 updateActionButton.Text = "下载中 0%";
             }
-            if (updateStatusDescLabel != null)
-                updateStatusDescLabel.Text = "正在下载 " + update.ReleaseTag + "（将自动校验 SHA-256）…";
+            if (updateStatusCardText != null)
+                updateStatusCardText.SubtitleText = "正在下载 " + update.ReleaseTag + "（将自动校验 SHA-256）…";
             ShowSettingsBanner("正在下载新版本 " + update.ReleaseTag + "…", Theme.PillTone.Info);
 
             try
@@ -1192,8 +1192,8 @@ namespace DualRemote
                             if (IsDisposed) return;
                             if (updateActionButton != null)
                                 updateActionButton.Text = pct >= 100 ? "正在安装…" : ("下载中 " + pct + "%");
-                            if (updateStatusDescLabel != null && !string.IsNullOrEmpty(msg))
-                                updateStatusDescLabel.Text = msg;
+                            if (updateStatusCardText != null && !string.IsNullOrEmpty(msg))
+                                updateStatusCardText.SubtitleText = msg;
                         });
                     }
                     catch { }
@@ -1209,7 +1209,7 @@ namespace DualRemote
                         updateActionButton.Enabled = true;
                         updateActionButton.Text = "重试更新";
                     }
-                    if (updateStatusDescLabel != null) updateStatusDescLabel.Text = launchErr;
+                    if (updateStatusCardText != null) updateStatusCardText.SubtitleText = launchErr;
                     ShowSettingsBanner(launchErr, Theme.PillTone.Alert);
                     return;
                 }
@@ -1238,7 +1238,7 @@ namespace DualRemote
                     updateActionButton.Enabled = true;
                     updateActionButton.Text = "重试更新";
                 }
-                if (updateStatusDescLabel != null) updateStatusDescLabel.Text = err;
+                if (updateStatusCardText != null) updateStatusCardText.SubtitleText = err;
                 ShowSettingsBanner(err, Theme.PillTone.Alert);
             }
         }

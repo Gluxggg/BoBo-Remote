@@ -27,11 +27,17 @@ namespace DualRemote
         private Button refreshDevices;
 
         private TableLayoutPanel devicesDesk;
+        private Theme.SlimScrollViewport devicesViewport;
         private TableLayoutPanel hostCardLayout;
         private Control hostCardControl;
+        private Label heroSubtitleLabel;
+        private HostActionBarPanel hostActionsBar;
         private int hostCardRow = -1;
+        private int hostSubtitleRow = -1;
+        private int hostActionsRow = -1;
         private int hostDetailsRow = -1;
         private Control hostCardDetails;
+        private TableLayoutPanel hostCardDetailsLayout;
         private bool hostDetailsExpanded;
 
         private Button computersGroupBtn;
@@ -80,12 +86,13 @@ namespace DualRemote
         {
             TableLayoutPanel desk;
             var viewport = CreatePage(740, out desk);
+            devicesViewport = viewport;
             devicesDesk = desk;
             LoadFavorites();
 
             refreshDevices = Theme.Action("刷新状态", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
             refreshDevices.Click += async delegate { await RefreshDashboardAsync(); };
-            AddPageHeader(desk, "全部设备", null, refreshDevices, 108);
+            AddPageHeader(desk, "全部设备", null, refreshDevices, 118);
             Theme.Row(desk, 18);
 
             // Top Info & Quick Connect Card (matches UU Image 2 top banner card)
@@ -96,7 +103,7 @@ namespace DualRemote
 
             // Collapsible "电脑 N" section header
             var groupRow = Theme.Grid(2);
-            Theme.FixedColumn(groupRow, 140);
+            Theme.FixedColumn(groupRow, 150);
             Theme.FillColumn(groupRow);
             computersGroupBtn = Theme.Action("电脑 1", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronDown);
             computersGroupBtn.Click += delegate
@@ -105,17 +112,18 @@ namespace DualRemote
                 Theme.ChangeGlyph(computersGroupBtn, computersExpanded ? Theme.Glyph.ChevronDown : Theme.Glyph.ChevronRight);
                 SyncPeerListLayout();
             };
-            Theme.Row(groupRow, 28, computersGroupBtn, null);
-            Theme.Row(desk, 28, groupRow);
+            Theme.Row(groupRow, 30, computersGroupBtn, null);
+            Theme.Row(desk, 30, groupRow);
             Theme.Row(desk, 10);
 
             peerListHost = Theme.Grid(1);
             Theme.FillColumn(peerListHost);
             peerListRow = desk.RowCount;
-            Theme.Row(desk, 140, peerListHost);
+            Theme.Row(desk, 156, peerListHost);
             Theme.Row(desk, 16);
-            Theme.Row(desk, 40, deviceBanner);
+            Theme.Row(desk, 42, deviceBanner);
 
+            viewport.ContentWidthChanged += delegate(int contentW) { SyncHostCardResponsiveMetrics(contentW); };
             DrawPeerRows(null);
             RecalculateDevicesDeskHeight();
 
@@ -125,51 +133,45 @@ namespace DualRemote
 
         private Control BuildHostInfoCard()
         {
-            var card = new Theme.Card { Padding = new Padding(20, 16, 20, 16) };
+            var card = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
             hostCardControl = card;
             var content = Theme.Grid(1);
             Theme.FillColumn(content);
             hostCardLayout = content;
 
             var top = Theme.Grid(5);
-            Theme.FixedColumn(top, 24);
+            Theme.FixedColumn(top, 26);
             Theme.FixedColumn(top, 10);
             Theme.FillColumn(top);
             Theme.FixedColumn(top, 10);
-            Theme.FixedColumn(top, 232);
+            Theme.FixedColumn(top, 252);
 
-            var infoIcon = new Theme.IconTile(Theme.Glyph.InfoMark, false, Theme.Accent, Theme.Paper, 12f);
+            var infoIcon = new Theme.IconTile(Theme.Glyph.InfoMark, false, Theme.Accent, Theme.Paper, 13f);
             heroSunshineBadge.AlignRight = true;
             heroPrivacyBadge.AlignRight = true;
             var badges = Theme.Grid(3);
-            Theme.FixedColumn(badges, 114);
+            Theme.FixedColumn(badges, 126);
             Theme.FixedColumn(badges, 8);
-            Theme.FixedColumn(badges, 110);
-            Theme.Row(badges, 24, heroSunshineBadge, null, heroPrivacyBadge);
-            Theme.Row(top, 24, infoIcon, null, Theme.Text("添加或连接你的其他设备", Theme.TextSize.LabelBold, Theme.Ink), null, badges);
-            Theme.Row(content, 24, top);
+            Theme.FixedColumn(badges, 118);
+            Theme.Row(badges, 28, heroSunshineBadge, null, heroPrivacyBadge);
+            Theme.Row(top, 28, infoIcon, null, Theme.Text("添加或连接你的其他设备", Theme.TextSize.LabelBold, Theme.Ink), null, badges);
+            Theme.Row(content, 28, top);
             Theme.Row(content, 6);
 
             var subWrap = Theme.Grid(2);
-            Theme.FixedColumn(subWrap, 34);
+            Theme.FixedColumn(subWrap, 36);
             Theme.FillColumn(subWrap);
-            Theme.Row(subWrap, 22, null, Theme.Text("在笔记本或另一台电脑直接解压运行 BoBo远程，登录同账号 Tailscale 或输入本机 IP 即可秒连。", Theme.TextSize.Small, Theme.Muted));
-            Theme.Row(content, 22, subWrap);
-            Theme.Row(content, 14);
+            heroSubtitleLabel = Theme.Text("在笔记本或另一台电脑直接解压运行 BoBo远程，登录同账号 Tailscale 或输入本机 IP 即可秒连。", Theme.TextSize.Small, Theme.Muted);
+            heroSubtitleLabel.AutoEllipsis = false;
+            Theme.FillRow(subWrap);
+            subWrap.Controls.Add(heroSubtitleLabel, 1, 0);
+            hostSubtitleRow = content.RowCount;
+            Theme.Row(content, 26, subWrap);
+            Theme.Row(content, 12);
 
             var actionsWrap = Theme.Grid(2);
-            Theme.FixedColumn(actionsWrap, 34);
+            Theme.FixedColumn(actionsWrap, 36);
             Theme.FillColumn(actionsWrap);
-
-            var actions = Theme.Grid(8);
-            Theme.FixedColumn(actions, 122);
-            Theme.FixedColumn(actions, 8);
-            Theme.FixedColumn(actions, 122);
-            Theme.FixedColumn(actions, 8);
-            Theme.FixedColumn(actions, 122);
-            Theme.FixedColumn(actions, 10);
-            Theme.FixedColumn(actions, 104);
-            Theme.FillColumn(actions);
 
             var manualBtn = Theme.Action("手动连接设备", Theme.ButtonStyle.AccentSoft);
             manualBtn.Click += delegate { OpenStreamPage(null); };
@@ -187,15 +189,18 @@ namespace DualRemote
             var addrBtn = Theme.Action("查看本机地址", Theme.ButtonStyle.Link);
             addrBtn.Click += delegate { ToggleHostDetails(addrBtn); };
 
-            Theme.Row(actions, 34, manualBtn, null, pairBtn, null, heroPrivacyToggle, null, addrBtn, null);
-            Theme.Row(actionsWrap, 34, null, actions);
-            Theme.Row(content, 34, actionsWrap);
+            hostActionsBar = new HostActionBarPanel(manualBtn, pairBtn, heroPrivacyToggle, addrBtn);
+            Theme.FillRow(actionsWrap);
+            actionsWrap.Controls.Add(hostActionsBar, 1, 0);
+            hostActionsRow = content.RowCount;
+            Theme.Row(content, 36, actionsWrap);
 
             // Expandable local addresses drawer
             var details = Theme.Grid(1);
             Theme.FillColumn(details);
-            details.Padding = new Padding(34, 10, 0, 0);
+            details.Padding = new Padding(36, 12, 0, 0);
             hostCardDetails = details;
+            hostCardDetailsLayout = details;
 
             heroLanLabel.AutoEllipsis = true;
             heroTsLabel.AutoEllipsis = true;
@@ -206,11 +211,11 @@ namespace DualRemote
 
             Theme.Row(details, 1, Theme.Rule());
             Theme.Row(details, 8);
-            Theme.Row(details, 28, BuildAddressRow("局域网 IPv4", heroLanLabel, heroCopyLan));
+            Theme.Row(details, 30, BuildAddressRow("局域网 IPv4", heroLanLabel, heroCopyLan));
             Theme.Row(details, 4);
-            Theme.Row(details, 28, BuildAddressRow("Tailscale 组网", heroTsLabel, heroCopyTs));
+            Theme.Row(details, 30, BuildAddressRow("Tailscale 组网", heroTsLabel, heroCopyTs));
             Theme.Row(details, 4);
-            Theme.Row(details, 28, BuildAddressRow("公网 IPv6", heroV6Label, heroCopyV6));
+            Theme.Row(details, 30, BuildAddressRow("公网 IPv6", heroV6Label, heroCopyV6));
 
             details.Visible = false;
             hostDetailsRow = content.RowCount;
@@ -220,14 +225,120 @@ namespace DualRemote
             return card;
         }
 
+        /// <summary>
+        /// 顶部引导卡 4 按钮自适应排布容器：宽窗口单行舒展排布，窄窗口自动折行，绝不裁切「查看本机地址」。
+        /// </summary>
+        private sealed class HostActionBarPanel : Panel
+        {
+            private readonly Button b1;
+            private readonly Button b2;
+            private readonly Button b3;
+            private readonly Button linkBtn;
+
+            internal HostActionBarPanel(Button b1, Button b2, Button b3, Button linkBtn)
+            {
+                this.b1 = b1;
+                this.b2 = b2;
+                this.b3 = b3;
+                this.linkBtn = linkBtn;
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                BackColor = Theme.Paper;
+                DoubleBuffered = true;
+                foreach (Button b in new[] { b1, b2, b3, linkBtn })
+                {
+                    b.Dock = DockStyle.None;
+                    Controls.Add(b);
+                }
+            }
+
+            internal int ComputeRequiredHeight(int availableWidth, float scale)
+            {
+                int w1 = (int)Math.Round(128 * scale);
+                int gap = (int)Math.Round(8 * scale);
+                int linkGap = (int)Math.Round(14 * scale);
+                int wLink = (int)Math.Round(118 * scale);
+                int btnH = (int)Math.Round(36 * scale);
+                int rowGap = (int)Math.Round(8 * scale);
+
+                int singleRowW = w1 * 3 + gap * 2 + linkGap + wLink;
+                if (availableWidth >= singleRowW) return btnH;
+                int threeBtnsW = w1 * 3 + gap * 2;
+                if (availableWidth >= threeBtnsW) return btnH * 2 + rowGap;
+                return btnH * 2 + rowGap;
+            }
+
+            protected override void OnLayout(LayoutEventArgs levent)
+            {
+                base.OnLayout(levent);
+                float scale = Theme.GetDpiScale(this);
+                int availW = Math.Max(180, ClientSize.Width);
+                int wBtn = (int)Math.Round(128 * scale);
+                int gap = (int)Math.Round(8 * scale);
+                int linkGap = (int)Math.Round(14 * scale);
+                int wLink = (int)Math.Round(118 * scale);
+                int btnH = (int)Math.Round(36 * scale);
+                int rowGap = (int)Math.Round(8 * scale);
+
+                Button[] items = new[] { b1, b2, b3, linkBtn };
+                int[] widths = new[] { wBtn, wBtn, wBtn, wLink };
+                int[] gaps = new[] { gap, gap, linkGap, 0 };
+
+                int x = 0;
+                int y = 0;
+                for (int i = 0; i < items.Length; i++)
+                {
+                    int bw = Math.Min(widths[i], availW);
+                    if (x > 0 && x + bw > availW)
+                    {
+                        x = 0;
+                        y += btnH + rowGap;
+                    }
+                    items[i].Bounds = new Rectangle(x, y, bw, btnH);
+                    x += bw + gaps[i];
+                }
+            }
+        }
+
+        private void SyncHostCardResponsiveMetrics(int contentWidth)
+        {
+            if (!initialScaleApplied || hostCardLayout == null || hostCardControl == null || devicesDesk == null || hostCardRow < 0)
+                return;
+            float scale = CurrentDpiScale();
+            int innerCardW = Math.Max(260, contentWidth - devicesDesk.Padding.Horizontal - hostCardControl.Padding.Horizontal);
+            int rightColW = Math.Max(200, innerCardW - (int)Math.Round(36 * scale));
+
+            if (hostSubtitleRow >= 0 && heroSubtitleLabel != null)
+            {
+                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                {
+                    Size sz = TextRenderer.MeasureText(g, heroSubtitleLabel.Text, Theme.GetFont(Theme.TextSize.Small),
+                        new Size(rightColW, int.MaxValue),
+                        TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                    int subH = Math.Max((int)Math.Round(24 * scale), sz.Height + (int)Math.Ceiling(6 * scale));
+                    hostCardLayout.RowStyles[hostSubtitleRow].Height = subH;
+                }
+            }
+            if (hostActionsRow >= 0 && hostActionsBar != null)
+            {
+                hostCardLayout.RowStyles[hostActionsRow].Height = hostActionsBar.ComputeRequiredHeight(rightColW, scale);
+            }
+            if (hostDetailsRow >= 0 && hostCardDetailsLayout != null)
+            {
+                hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded ? SumRows(hostCardDetailsLayout) : 0;
+            }
+            devicesDesk.RowStyles[hostCardRow].Height = HostCardHeight();
+            RecalculateDevicesDeskHeight();
+        }
+
         private static Control BuildAddressRow(string label, Label value, Button copy)
         {
             var row = Theme.Grid(4);
-            Theme.FixedColumn(row, 96);
+            Theme.FixedColumn(row, 102);
             Theme.FixedColumn(row, 8);
             Theme.FillColumn(row);
-            Theme.FixedColumn(row, 68);
-            Theme.Row(row, 28, Theme.Text(label, Theme.TextSize.Small, Theme.Muted), null, value, copy);
+            Theme.FixedColumn(row, 74);
+            Theme.Row(row, 30, Theme.Text(label, Theme.TextSize.Small, Theme.Muted), null, value, copy);
             return row;
         }
 
@@ -244,7 +355,9 @@ namespace DualRemote
         {
             if (hostCardLayout == null || hostCardDetails == null) return;
             hostDetailsExpanded = !hostDetailsExpanded;
-            hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded ? DevicePixels(112) : 0;
+            hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded
+                ? (hostCardDetailsLayout != null ? SumRows(hostCardDetailsLayout) : DevicePixels(120))
+                : 0;
             hostCardDetails.Visible = hostDetailsExpanded;
             if (devicesDesk != null && hostCardRow >= 0)
             {
@@ -474,7 +587,7 @@ namespace DualRemote
                 // Row 1: This PC (UU Image 2 exact match: [Windows blue icon] MACHINE_NAME [本机] ... [i])
                 var selfCard = BuildThisPcRow();
                 if (scale != 1f) selfCard.Scale(new SizeF(scale, scale));
-                Theme.Row(peerListHost, 64f * scale, selfCard);
+                Theme.Row(peerListHost, 72f * scale, selfCard);
                 Theme.Row(peerListHost, 10f * scale);
 
                 int peerCount = 0;
@@ -486,7 +599,7 @@ namespace DualRemote
                         peerCount++;
                         var card = BuildPeerCardRow(peer);
                         if (scale != 1f) card.Scale(new SizeF(scale, scale));
-                        Theme.Row(peerListHost, 64f * scale, card);
+                        Theme.Row(peerListHost, 76f * scale, card);
                         Theme.Row(peerListHost, 10f * scale);
                     }
                 }
@@ -496,7 +609,7 @@ namespace DualRemote
                 {
                     var hintCard = BuildEmptyPeersHintRow(issue);
                     if (scale != 1f) hintCard.Scale(new SizeF(scale, scale));
-                    Theme.Row(peerListHost, 64f * scale, hintCard);
+                    Theme.Row(peerListHost, 76f * scale, hintCard);
                 }
 
                 if (computersGroupBtn != null)
@@ -520,96 +633,94 @@ namespace DualRemote
 
         private Control BuildThisPcRow()
         {
-            var card = new Theme.Card { Padding = new Padding(16, 10, 16, 10) };
+            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12) };
             var row = Theme.Grid(6);
-            Theme.FixedColumn(row, 38);
+            Theme.FixedColumn(row, 40);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 34);
-            Theme.FixedColumn(row, 28);
+            Theme.FixedColumn(row, 36);
+            Theme.FixedColumn(row, 32);
 
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 7f);
-
-            var nameLine = Theme.Grid(3);
-            Theme.FixedColumn(nameLine, Math.Min(260, Math.Max(110, Environment.MachineName.Length * 11 + 14)));
-            Theme.FixedColumn(nameLine, 54);
-            Theme.FillColumn(nameLine);
-            Theme.Row(nameLine, 26,
-                Theme.Text(Environment.MachineName, Theme.TextSize.LabelBold, Theme.Ink),
-                new Theme.Badge("本机", Theme.PillTone.Info),
-                null);
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 7.5f);
+            var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, "本机");
 
             var infoBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Info);
             infoBtn.AccessibleName = "查看本机网络与宿主信息";
+            infoBtn.Margin = new Padding(0, 6, 0, 6);
             infoBtn.Click += delegate { ToggleHostDetails(null); };
 
             var openBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
             openBtn.AccessibleName = "前往本机协助设置";
+            openBtn.Margin = new Padding(0, 6, 0, 6);
             openBtn.Click += delegate { ShowPage(AssistPage); };
 
-            Theme.Row(row, 42, icon, null, nameLine, null, infoBtn, openBtn);
+            Theme.Row(row, 48, icon, null, selfTitle, null, infoBtn, openBtn);
             card.Controls.Add(row);
             return card;
         }
 
         private Control BuildPeerCardRow(TsPeer peer)
         {
-            var card = new Theme.Card { Padding = new Padding(16, 10, 16, 10) };
+            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12) };
             var row = Theme.Grid(7);
-            Theme.FixedColumn(row, 38);
+            Theme.FixedColumn(row, 42);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
-            Theme.FixedColumn(row, 12);
-            Theme.FixedColumn(row, 82);
+            Theme.FixedColumn(row, 14);
+            Theme.FixedColumn(row, 88);
             Theme.FixedColumn(row, 8);
-            Theme.FixedColumn(row, 32);
+            Theme.FixedColumn(row, 34);
 
             Color tileBg = peer.Online ? Theme.Accent : Color.FromArgb(164, 171, 182);
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, tileBg, Theme.Paper, 7f);
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, tileBg, Theme.Paper, 7.5f);
 
-            var identity = Theme.Grid(1);
-            Theme.FillColumn(identity);
             string displayName = PeerName(peer);
-            Theme.Row(identity, 22, Theme.Text(displayName, Theme.TextSize.LabelBold, peer.Online ? Theme.Ink : Theme.Muted));
-            Theme.Row(identity, 19, Theme.Text(peer.Ip + "  ·  " + peer.LinkText, Theme.TextSize.Small, Theme.Muted));
+            var identity = new Theme.TwoLineText(
+                displayName,
+                peer.Ip + "  ·  " + peer.LinkText,
+                Theme.TextSize.LabelBold,
+                peer.Online ? Theme.Ink : Theme.Muted,
+                Theme.Muted);
 
             var connectBtn = Theme.Action(peer.Online ? "连接" : "离线", peer.Online ? Theme.ButtonStyle.Primary : Theme.ButtonStyle.Secondary);
             connectBtn.Enabled = peer.Online;
-            connectBtn.Margin = new Padding(0, 5, 0, 5);
+            connectBtn.Margin = new Padding(0, 8, 0, 8);
             connectBtn.Click += async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); };
 
             var detailBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
             detailBtn.AccessibleName = "查看设备详情";
-            detailBtn.Margin = new Padding(0, 5, 0, 5);
+            detailBtn.Margin = new Padding(0, 8, 0, 8);
             detailBtn.Click += delegate { OpenDeviceDetail(displayName, peer.Ip, peer.Online, peer.LinkText, true); };
 
-            Theme.Row(row, 42, icon, null, identity, null, connectBtn, null, detailBtn);
+            Theme.Row(row, 52, icon, null, identity, null, connectBtn, null, detailBtn);
             card.Controls.Add(row);
             return card;
         }
 
         private Control BuildEmptyPeersHintRow(string issue)
         {
-            var card = new Theme.Card { Padding = new Padding(16, 10, 16, 10), DashedBorder = true };
+            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12), DashedBorder = true };
             var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 38);
+            Theme.FixedColumn(row, 42);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
-            Theme.FixedColumn(row, 12);
-            Theme.FixedColumn(row, 104);
+            Theme.FixedColumn(row, 14);
+            Theme.FixedColumn(row, 110);
 
-            var icon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.SurfaceSubtle, Theme.Muted, 7f);
-            var text = Theme.Grid(1);
-            Theme.FillColumn(text);
-            Theme.Row(text, 22, Theme.Text(issue == null ? "暂未发现同网 Tailscale 远端电脑" : "未读取到 Tailscale 设备列表", Theme.TextSize.Label, Theme.Ink));
-            Theme.Row(text, 19, Theme.Text("可直接点右侧「手动连接」输入局域网 IP、公网 IPv6 或 9 位协助设备码。", Theme.TextSize.Small, Theme.Muted));
+            var icon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.SurfaceSubtle, Theme.Muted, 7.5f);
+            var text = new Theme.TwoLineText(
+                issue == null ? "暂未发现同网 Tailscale 远端电脑" : "未读取到 Tailscale 设备列表",
+                "可直接点右侧「手动连接」输入局域网 IP、公网 IPv6 或 9 位协助设备码。",
+                Theme.TextSize.Label,
+                Theme.Ink,
+                Theme.Muted);
 
             var manual = Theme.Action("手动连接", Theme.ButtonStyle.Secondary);
-            manual.Margin = new Padding(0, 4, 0, 4);
+            manual.Margin = new Padding(0, 8, 0, 8);
             manual.Click += delegate { OpenStreamPage(null); };
 
-            Theme.Row(row, 42, icon, null, text, null, manual);
+            Theme.Row(row, 52, icon, null, text, null, manual);
             card.Controls.Add(row);
             return card;
         }
@@ -624,20 +735,20 @@ namespace DualRemote
 
             // Header: [在线/离线] DEVICE-NAME  ...  [收藏]
             var head = Theme.Grid(5);
-            Theme.FixedColumn(head, 56);
-            Theme.FixedColumn(head, 10);
+            Theme.FixedColumn(head, 62);
+            Theme.FixedColumn(head, 12);
             Theme.FillColumn(head);
-            Theme.FixedColumn(head, 10);
-            Theme.FixedColumn(head, 92);
+            Theme.FixedColumn(head, 12);
+            Theme.FixedColumn(head, 102);
 
             detailStatusBadge = new Theme.Badge("在线", Theme.PillTone.Success);
             detailTitleLabel = Theme.Text("未选择设备", Theme.TextSize.Title, Theme.Ink);
             detailFavButton = Theme.Action("收藏", Theme.ButtonStyle.Secondary, Theme.Glyph.Star);
-            detailFavButton.Margin = new Padding(0, 3, 0, 3);
+            detailFavButton.Margin = new Padding(0, 4, 0, 4);
             detailFavButton.Click += delegate { ToggleDetailDeviceFavorite(); };
 
-            Theme.Row(head, 38, detailStatusBadge, null, detailTitleLabel, null, detailFavButton);
-            Theme.Row(desk, 38, head);
+            Theme.Row(head, 44, detailStatusBadge, null, detailTitleLabel, null, detailFavButton);
+            Theme.Row(desk, 44, head);
             Theme.Row(desk, 18);
 
             // Hero Preview Card with attached clean bottom toolbar (EXACT UU Image 1!)
@@ -654,7 +765,7 @@ namespace DualRemote
                     await ConnectToDeviceAsync(detailDeviceAddress, detailDeviceName);
             };
             detailPreviewRow = hc.RowCount;
-            Theme.Row(hc, 232, detailPreviewCanvas);
+            Theme.Row(hc, 228, detailPreviewCanvas);
             Theme.Row(hc, 1, Theme.Rule());
 
             // Attached 4-slot action strip: 低延迟串流 | 通用桌面 | 文件传输 | 画质设置
@@ -696,8 +807,8 @@ namespace DualRemote
                 SelectSettingsTab(1);
             };
 
-            Theme.Row(strip, 48, actStream, MakeToolbarDivider(), actDesktop, MakeToolbarDivider(), actFile, MakeToolbarDivider(), actSettings);
-            Theme.Row(hc, 48, strip);
+            Theme.Row(strip, 52, actStream, MakeToolbarDivider(), actDesktop, MakeToolbarDivider(), actFile, MakeToolbarDivider(), actSettings);
+            Theme.Row(hc, 52, strip);
             heroCard.Controls.Add(hc);
 
             detailHeroCardRow = desk.RowCount;
@@ -708,25 +819,25 @@ namespace DualRemote
             Theme.Row(desk, 26, Theme.Text("快速启动画质档位", Theme.TextSize.Label, Theme.Muted));
             Theme.Row(desk, 10);
 
-            var quickCard = new Theme.Card { Padding = new Padding(16, 16, 16, 16), DashedBorder = true };
+            var quickCard = new Theme.Card { Padding = new Padding(18, 18, 18, 18), DashedBorder = true };
             var qGrid = Theme.Grid(5);
             Theme.FillColumn(qGrid);
-            Theme.FixedColumn(qGrid, 10);
+            Theme.FixedColumn(qGrid, 12);
             Theme.FillColumn(qGrid);
-            Theme.FixedColumn(qGrid, 10);
+            Theme.FixedColumn(qGrid, 12);
             Theme.FillColumn(qGrid);
 
-            Theme.Row(qGrid, 40,
+            Theme.Row(qGrid, 44,
                 MakeQuickPresetButton("外网流畅 1080p60", WanWideProfile), null,
                 MakeQuickPresetButton("外网高清 2K60", 2), null,
                 MakeQuickPresetButton("弱网抗丢包 720p60", WeakNetProfile));
-            Theme.Row(qGrid, 10);
-            Theme.Row(qGrid, 40,
+            Theme.Row(qGrid, 12);
+            Theme.Row(qGrid, 44,
                 MakeQuickPresetButton("局域网 2K120 高刷", 6), null,
                 MakeQuickPresetButton("电竞高刷 2K144", 7), null,
                 MakeQuickPresetButton("4K60 超清办公", 8));
             quickCard.Controls.Add(qGrid);
-            Theme.Row(desk, 124, quickCard);
+            Theme.Row(desk, 136, quickCard);
 
             detailViewport.ContentWidthChanged += delegate(int contentW) { AdjustDetailPreviewAspect(contentW); };
             RecalculateDetailDeskHeight();
@@ -735,7 +846,7 @@ namespace DualRemote
 
         private static Control MakeToolbarDivider()
         {
-            var wrap = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Paper, Padding = new Padding(0, 12, 0, 12), Margin = Padding.Empty };
+            var wrap = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Paper, Padding = new Padding(0, 14, 0, 14), Margin = Padding.Empty };
             wrap.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = Theme.Divider });
             return wrap;
         }
@@ -760,9 +871,9 @@ namespace DualRemote
             if (!initialScaleApplied || detailPreviewCardLayout == null || detailDesk == null || detailPreviewRow < 0 || detailHeroCardRow < 0) return;
             float scale = CurrentDpiScale();
             int innerW = Math.Max(320, contentWidth - detailDesk.Padding.Horizontal);
-            int targetPreviewH = (int)Math.Round(innerW * 0.42f);
-            int minH = (int)Math.Round(180 * scale);
-            int maxH = (int)Math.Round(280 * scale);
+            int targetPreviewH = (int)Math.Round(innerW * 0.28f);
+            int minH = (int)Math.Round(196 * scale);
+            int maxH = (int)Math.Round(268 * scale);
             targetPreviewH = Math.Max(minH, Math.Min(maxH, targetPreviewH));
 
             detailPreviewCardLayout.RowStyles[detailPreviewRow].Height = targetPreviewH;
@@ -946,7 +1057,7 @@ namespace DualRemote
 
             var addBtn = Theme.Action("添加收藏设备", Theme.ButtonStyle.Secondary);
             addBtn.Click += delegate { ToggleAddFavoriteBar(); };
-            AddPageHeader(desk, "收藏设备", null, addBtn, 130);
+            AddPageHeader(desk, "收藏设备", null, addBtn, 138);
             Theme.Row(desk, 18);
 
             addFavoriteCard = BuildAddFavoriteCard();
@@ -957,10 +1068,10 @@ namespace DualRemote
             favoritesListHost = Theme.Grid(1);
             Theme.FillColumn(favoritesListHost);
             favoritesListRow = desk.RowCount;
-            Theme.Row(desk, 220, favoritesListHost);
-            Theme.Row(desk, 22);
+            Theme.Row(desk, 190, favoritesListHost);
+            Theme.Row(desk, 20);
 
-            Theme.Row(desk, 26, Theme.Text("最近连接", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(desk, 28, Theme.Text("最近连接", Theme.TextSize.Label, Theme.Muted));
             Theme.Row(desk, 10);
 
             recentListHost = Theme.Grid(1);
@@ -968,7 +1079,7 @@ namespace DualRemote
             recentListRow = desk.RowCount;
             Theme.Row(desk, 90, recentListHost);
             Theme.Row(desk, 16);
-            Theme.Row(desk, 40, favoritesBanner);
+            Theme.Row(desk, 42, favoritesBanner);
 
             RefreshSavedDevices();
             return viewport;
@@ -976,20 +1087,20 @@ namespace DualRemote
 
         private Control BuildAddFavoriteCard()
         {
-            var card = new Theme.Card { Padding = new Padding(18, 14, 18, 14) };
+            var card = new Theme.Card { Padding = new Padding(20, 16, 20, 16) };
             var grid = Theme.Grid(1);
             Theme.FillColumn(grid);
-            Theme.Row(grid, 22, Theme.Text("添加新的收藏设备", Theme.TextSize.LabelBold, Theme.Ink));
+            Theme.Row(grid, 26, Theme.Text("添加新的收藏设备", Theme.TextSize.LabelBold, Theme.Ink));
             Theme.Row(grid, 10);
 
             var row = Theme.Grid(7);
-            Theme.FixedColumn(row, 134);
+            Theme.FixedColumn(row, 158);
             Theme.FixedColumn(row, 10);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 84);
+            Theme.FixedColumn(row, 88);
             Theme.FixedColumn(row, 8);
-            Theme.FixedColumn(row, 68);
+            Theme.FixedColumn(row, 76);
 
             addFavoriteKind = Theme.Choice("收藏类型", false);
             addFavoriteKind.Items.Add("高速串流主机");
@@ -1004,8 +1115,8 @@ namespace DualRemote
             var cancelBtn = Theme.Action("取消", Theme.ButtonStyle.Secondary);
             cancelBtn.Click += delegate { ToggleAddFavoriteBar(false); };
 
-            Theme.Row(row, 36, Theme.WrapInput(addFavoriteKind), null, Theme.WrapInput(addFavoriteInput), null, saveBtn, null, cancelBtn);
-            Theme.Row(grid, 36, row);
+            Theme.Row(row, 38, Theme.WrapInput(addFavoriteKind), null, Theme.WrapInput(addFavoriteInput), null, saveBtn, null, cancelBtn);
+            Theme.Row(grid, 38, row);
             card.Controls.Add(grid);
             return card;
         }
@@ -1016,7 +1127,13 @@ namespace DualRemote
             if (addFavoriteCard != null) addFavoriteCard.Visible = addFavoriteOpen;
             if (favoritesDesk != null && addFavoriteRow >= 0)
             {
-                favoritesDesk.RowStyles[addFavoriteRow].Height = addFavoriteOpen ? DevicePixels(112) : 0;
+                int openH = DevicePixels(120);
+                if (addFavoriteCard != null && addFavoriteCard.Controls.Count > 0)
+                {
+                    int inner = SumRows(addFavoriteCard.Controls[0]);
+                    if (inner > 0) openH = inner + addFavoriteCard.Padding.Vertical + DevicePixels(12);
+                }
+                favoritesDesk.RowStyles[addFavoriteRow].Height = addFavoriteOpen ? openH : 0;
                 RecalculateFavoritesDeskHeight();
             }
             if (addFavoriteOpen && addFavoriteInput != null) addFavoriteInput.Focus();
@@ -1061,7 +1178,7 @@ namespace DualRemote
                 if (favorites.Count == 0)
                 {
                     var empty = new EmptyFavoritesCanvas();
-                    Theme.Row(favoritesListHost, 210f * scale, empty);
+                    Theme.Row(favoritesListHost, 180f * scale, empty);
                 }
                 else
                 {
@@ -1070,7 +1187,7 @@ namespace DualRemote
                         var item = fav;
                         var card = BuildSavedDeviceCard(item, true);
                         if (scale != 1f) card.Scale(new SizeF(scale, scale));
-                        Theme.Row(favoritesListHost, 64f * scale, card);
+                        Theme.Row(favoritesListHost, 76f * scale, card);
                         Theme.Row(favoritesListHost, 10f * scale);
                     }
                 }
@@ -1099,7 +1216,7 @@ namespace DualRemote
                     var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12), DashedBorder = true };
                     card.Controls.Add(Theme.Text("暂无最近连接记录，完成一次远程连接后会自动记录在这里。", Theme.TextSize.Small, Theme.Muted));
                     if (scale != 1f) card.Scale(new SizeF(scale, scale));
-                    Theme.Row(recentListHost, 52f * scale, card);
+                    Theme.Row(recentListHost, 58f * scale, card);
                 }
                 else
                 {
@@ -1107,7 +1224,7 @@ namespace DualRemote
                     {
                         var card = BuildSavedDeviceCard(rec, false);
                         if (scale != 1f) card.Scale(new SizeF(scale, scale));
-                        Theme.Row(recentListHost, 64f * scale, card);
+                        Theme.Row(recentListHost, 76f * scale, card);
                         Theme.Row(recentListHost, 10f * scale);
                     }
                 }
@@ -1118,26 +1235,28 @@ namespace DualRemote
 
         private Control BuildSavedDeviceCard(SavedDevice device, bool isFavoriteList)
         {
-            var card = new Theme.Card { Padding = new Padding(16, 10, 16, 10) };
+            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12) };
             var row = Theme.Grid(7);
-            Theme.FixedColumn(row, 38);
+            Theme.FixedColumn(row, 42);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
-            Theme.FixedColumn(row, 12);
-            Theme.FixedColumn(row, 78);
+            Theme.FixedColumn(row, 14);
+            Theme.FixedColumn(row, 86);
             Theme.FixedColumn(row, 8);
-            Theme.FixedColumn(row, 78);
+            Theme.FixedColumn(row, 88);
 
             var icon = new Theme.IconTile(device.Stream ? Theme.Glyph.WindowsTile : Theme.Glyph.Assist,
-                false, device.Stream ? Theme.Accent : Color.FromArgb(56, 142, 238), Theme.Paper, 7f);
+                false, device.Stream ? Theme.Accent : Color.FromArgb(56, 142, 238), Theme.Paper, 7.5f);
 
-            var info = Theme.Grid(1);
-            Theme.FillColumn(info);
-            Theme.Row(info, 22, Theme.Text(device.Address, Theme.TextSize.LabelBold, Theme.Ink));
-            Theme.Row(info, 19, Theme.Text(device.Stream ? "低延迟高速串流主机" : "临时协助 / 文件传输设备码", Theme.TextSize.Small, Theme.Muted));
+            var info = new Theme.TwoLineText(
+                device.Address,
+                device.Stream ? "低延迟高速串流主机" : "临时协助 / 文件传输设备码",
+                Theme.TextSize.LabelBold,
+                Theme.Ink,
+                Theme.Muted);
 
             var connect = Theme.Action("连接", Theme.ButtonStyle.Primary);
-            connect.Margin = new Padding(0, 4, 0, 4);
+            connect.Margin = new Padding(0, 8, 0, 8);
             connect.Click += async delegate { await ConnectSavedDeviceAsync(device); };
 
             Button second;
@@ -1160,9 +1279,9 @@ namespace DualRemote
                     }
                 };
             }
-            second.Margin = new Padding(0, 4, 0, 4);
+            second.Margin = new Padding(0, 8, 0, 8);
 
-            Theme.Row(row, 42, icon, null, info, null, connect, null, second);
+            Theme.Row(row, 52, icon, null, info, null, connect, null, second);
             card.Controls.Add(row);
             return card;
         }
@@ -1171,9 +1290,9 @@ namespace DualRemote
         {
             if (favoritesDesk == null) return;
             if (favoritesListRow >= 0 && favoritesListHost != null)
-                favoritesDesk.RowStyles[favoritesListRow].Height = Math.Max(DevicePixels(64), SumRows(favoritesListHost));
+                favoritesDesk.RowStyles[favoritesListRow].Height = Math.Max(DevicePixels(76), SumRows(favoritesListHost));
             if (recentListRow >= 0 && recentListHost != null)
-                favoritesDesk.RowStyles[recentListRow].Height = Math.Max(DevicePixels(54), SumRows(recentListHost));
+                favoritesDesk.RowStyles[recentListRow].Height = Math.Max(DevicePixels(58), SumRows(recentListHost));
             favoritesDesk.Height = SumRows(favoritesDesk);
             favoritesDesk.PerformLayout();
         }

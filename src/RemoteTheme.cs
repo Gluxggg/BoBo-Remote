@@ -120,19 +120,273 @@ namespace DualRemote
 
         internal enum PillTone { Neutral, Success, Warning, Alert, Info }
 
-        internal static Label Text(string content, TextSize size, Color color)
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate uint GetDpiForWindowDelegate(IntPtr hwnd);
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate uint GetDpiForSystemDelegate();
+
+        private const int LogPixelsX = 88;
+        private static bool dpiApiProbed;
+        private static GetDpiForWindowDelegate pGetDpiForWindow;
+        private static GetDpiForSystemDelegate pGetDpiForSystem;
+        private static float cachedSystemDpiScale;
+
+        private static void EnsureDpiApisProbed()
         {
-            Font font = BodyFont;
+            if (dpiApiProbed) return;
+            dpiApiProbed = true;
+            try
+            {
+                IntPtr user32 = GetModuleHandle("user32.dll");
+                if (user32 != IntPtr.Zero)
+                {
+                    IntPtr fnWin = GetProcAddress(user32, "GetDpiForWindow");
+                    if (fnWin != IntPtr.Zero)
+                        pGetDpiForWindow = (GetDpiForWindowDelegate)Marshal.GetDelegateForFunctionPointer(fnWin, typeof(GetDpiForWindowDelegate));
+                    IntPtr fnSys = GetProcAddress(user32, "GetDpiForSystem");
+                    if (fnSys != IntPtr.Zero)
+                        pGetDpiForSystem = (GetDpiForSystemDelegate)Marshal.GetDelegateForFunctionPointer(fnSys, typeof(GetDpiForSystemDelegate));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 跨 Windows 10 / 11 全版本可靠获取真实系统/窗口 DPI 缩放倍率（彻底绕开 csc.exe .NET 4.0 兼容模式下 Control.DeviceDpi 恒返回 96 的缺陷）。
+        /// 与 AutoScaleMode.Dpi (GetDeviceCaps LOGPIXELSX) 严格 1:1 对齐，确保静态与动态控件缩放完全一致。
+        /// </summary>
+        internal static float GetDpiScale(Control control = null)
+        {
+            EnsureDpiApisProbed();
+            try
+            {
+                if (control != null && !control.IsDisposed && control.IsHandleCreated && pGetDpiForWindow != null)
+                {
+                    uint winDpi = pGetDpiForWindow(control.Handle);
+                    if (winDpi >= 72 && winDpi <= 960)
+                        return Math.Max(1f, winDpi / 96f);
+                }
+            }
+            catch { }
+
+            if (cachedSystemDpiScale >= 1f)
+                return cachedSystemDpiScale;
+
+            float resolved = 1f;
+            try
+            {
+                IntPtr screenDc = GetDC(IntPtr.Zero);
+                if (screenDc != IntPtr.Zero)
+                {
+                    try
+                    {
+                        int dpiX = GetDeviceCaps(screenDc, LogPixelsX);
+                        if (dpiX >= 72 && dpiX <= 960)
+                            resolved = Math.Max(1f, dpiX / 96f);
+                    }
+                    finally
+                    {
+                        ReleaseDC(IntPtr.Zero, screenDc);
+                    }
+                }
+            }
+            catch { }
+
+            if (resolved <= 1f && pGetDpiForSystem != null)
+            {
+                try
+                {
+                    uint sysDpi = pGetDpiForSystem();
+                    if (sysDpi >= 72 && sysDpi <= 960)
+                        resolved = Math.Max(1f, sysDpi / 96f);
+                }
+                catch { }
+            }
+
+            cachedSystemDpiScale = resolved;
+            return resolved;
+        }
+
+        internal static Font GetFont(TextSize size)
+        {
             switch (size)
             {
-                case TextSize.Small: font = SmallFont; break;
-                case TextSize.Label: font = LabelFont; break;
-                case TextSize.LabelBold: font = LabelBoldFont; break;
-                case TextSize.Section: font = SectionFont; break;
-                case TextSize.Title: font = TitleFont; break;
-                case TextSize.Code: font = CodeFont; break;
-                case TextSize.BigCode: font = BigCodeFont; break;
+                case TextSize.Small: return SmallFont;
+                case TextSize.Label: return LabelFont;
+                case TextSize.LabelBold: return LabelBoldFont;
+                case TextSize.Section: return SectionFont;
+                case TextSize.Title: return TitleFont;
+                case TextSize.Code: return CodeFont;
+                case TextSize.BigCode: return BigCodeFont;
+                default: return BodyFont;
             }
+        }
+
+        /// <summary>
+        /// 双行自适应居中排版控件（主标题 + 副标题）：
+        /// 在 OnPaint 时基于当前 Graphics 真实物理 DPI 即时度量两行文字高度并垂直居中绘制，
+        /// 从根源上杜绝 Win10/Win11 任意高分屏缩放（100%~250%）下出现切底、挤字或上下偏移。
+        /// </summary>
+        internal sealed class TwoLineText : Control
+        {
+            private string titleText;
+            private string subtitleText;
+            private TextSize titleSize;
+            private Color titleColor;
+            private Color subtitleColor;
+
+            internal TwoLineText(string title, string subtitle, TextSize titleFontKind = TextSize.LabelBold,
+                Color? customTitleColor = null, Color? customSubtitleColor = null)
+            {
+                this.titleText = title ?? "";
+                this.subtitleText = subtitle ?? "";
+                this.titleSize = titleFontKind;
+                this.titleColor = customTitleColor.HasValue ? customTitleColor.Value : Ink;
+                this.subtitleColor = customSubtitleColor.HasValue ? customSubtitleColor.Value : Muted;
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                TabStop = false;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                BackColor = Paper;
+            }
+
+            internal string TitleText
+            {
+                get { return titleText; }
+                set { titleText = value ?? ""; Invalidate(); }
+            }
+
+            internal string SubtitleText
+            {
+                get { return subtitleText; }
+                set { subtitleText = value ?? ""; Invalidate(); }
+            }
+
+            internal void SetTitleColor(Color color)
+            {
+                titleColor = color;
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                Color bg = ResolveSurface(this, Paper);
+                g.Clear(bg);
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                float scale = Math.Max(1f, g.DpiX / 96f);
+                Font fTitle = GetFont(titleSize);
+                Font fSub = SmallFont;
+                int availW = Math.Max(16, Width - 2);
+
+                TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+                TextFormatFlags drawFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+
+                Size szTitle = TextRenderer.MeasureText(g, string.IsNullOrEmpty(titleText) ? "Ag" : titleText, fTitle, new Size(int.MaxValue, Height), measureFlags);
+                bool hasSub = !string.IsNullOrEmpty(subtitleText);
+                if (!hasSub)
+                {
+                    int h1 = szTitle.Height + (int)Math.Ceiling(4f * scale);
+                    var r1 = new Rectangle(0, (Height - h1) / 2, availW, h1);
+                    TextRenderer.DrawText(g, titleText, fTitle, r1, titleColor, drawFlags);
+                    return;
+                }
+
+                Size szSub = TextRenderer.MeasureText(g, subtitleText, fSub, new Size(int.MaxValue, Height), measureFlags);
+                int row1H = szTitle.Height + (int)Math.Ceiling(3f * scale);
+                int row2H = szSub.Height + (int)Math.Ceiling(3f * scale);
+                int gap = Math.Max(1, (int)Math.Round(2f * scale));
+                int totalH = row1H + gap + row2H;
+                int startY = Math.Max(0, (Height - totalH) / 2);
+
+                var rectTitle = new Rectangle(0, startY, availW, row1H);
+                var rectSub = new Rectangle(0, startY + row1H + gap, availW, row2H);
+                TextRenderer.DrawText(g, titleText, fTitle, rectTitle, titleColor, drawFlags);
+                TextRenderer.DrawText(g, subtitleText, fSub, rectSub, subtitleColor, drawFlags);
+            }
+        }
+
+        /// <summary>
+        /// 本机设备名 + 紧随其后的胶囊标签（如「DESKTOP-EXAMPLE01 [本机]」）：
+        /// 基于真实渲染 DPI 动态测量主机名宽度并紧贴绘制胶囊，彻底杜绝固定列宽截断主机名。
+        /// </summary>
+        internal sealed class SelfDeviceTitle : Control
+        {
+            private readonly string hostTitle;
+            private readonly string pillText;
+
+            internal SelfDeviceTitle(string hostTitle, string pillText)
+            {
+                this.hostTitle = hostTitle ?? "";
+                this.pillText = pillText ?? "本机";
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                TabStop = false;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                BackColor = Paper;
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                Color bg = ResolveSurface(this, Paper);
+                g.Clear(bg);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                float scale = Math.Max(1f, g.DpiX / 96f);
+                Font nameFont = LabelBoldFont;
+                Font badgeFont = SmallFont;
+                TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+
+                Size pillTextSz = TextRenderer.MeasureText(g, pillText, badgeFont, new Size(int.MaxValue, Height), measureFlags);
+                int pillW = Math.Max((int)Math.Round(42 * scale), pillTextSz.Width + (int)Math.Round(18 * scale));
+                int pillH = Math.Max((int)Math.Round(20 * scale), pillTextSz.Height + (int)Math.Round(5 * scale));
+                int gap = (int)Math.Round(10 * scale);
+
+                int maxNameW = Math.Max(40, Width - pillW - gap - 4);
+                Size fullNameSz = TextRenderer.MeasureText(g, hostTitle, nameFont, new Size(int.MaxValue, Height), measureFlags);
+                int drawNameW = Math.Min(maxNameW, fullNameSz.Width + (int)Math.Ceiling(4 * scale));
+
+                var nameRect = new Rectangle(0, 0, drawNameW, Height);
+                TextRenderer.DrawText(g, hostTitle, nameFont, nameRect, Ink,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                float pillX = drawNameW + gap;
+                float pillY = (Height - pillH) / 2f;
+                var pillBox = new RectangleF(pillX, pillY, pillW, pillH);
+                Surface(g, pillBox, pillH * 0.5f, AccentLight, Color.Transparent);
+                TextRenderer.DrawText(g, pillText, badgeFont, Rectangle.Round(pillBox), Accent,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            }
+        }
+
+        internal static Label Text(string content, TextSize size, Color color)
+        {
+            Font font = GetFont(size);
             return new Label
             {
                 AutoEllipsis = true,
@@ -370,7 +624,7 @@ namespace DualRemote
             {
                 base.OnLayout(levent);
                 if (inner == null) return;
-                float scale = DeviceDpi / 96f;
+                float scale = GetDpiScale(this);
                 int padX = Math.Max(8, (int)Math.Round(10 * scale));
                 int w = Math.Max(16, ClientSize.Width - padX * 2);
                 var tb = inner as TextBoxBase;
@@ -970,7 +1224,7 @@ namespace DualRemote
             private int dragStartY;
             private int dragStartOffset;
 
-            internal int MaxContentWidth = 1160;
+            internal int MaxContentWidth = 1680;
             internal bool SuspendResponsiveLayout;
             internal event Action<int> ContentWidthChanged;
 
@@ -1139,7 +1393,7 @@ namespace DualRemote
             private void LayoutContent()
             {
                 if (content == null || SuspendResponsiveLayout) return;
-                float scale = DeviceDpi / 96f;
+                float scale = GetDpiScale(this);
                 int reserve = Math.Max(8, (int)Math.Round(ScrollbarReserve * scale));
                 int avail = Math.Max(280, ClientSize.Width - reserve);
                 int targetWidth = MaxContentWidth > 0
@@ -1200,7 +1454,7 @@ namespace DualRemote
 
             private void GetScrollbarGeometry(out RectangleF track, out RectangleF thumb)
             {
-                float scale = DeviceDpi / 96f;
+                float scale = GetDpiScale(this);
                 float width = (dragging || thumbHot ? 4.5f : 3f) * scale;
                 float rightEdge = Width - 7.5f * scale;
                 float top = 8f * scale;
@@ -1391,33 +1645,29 @@ namespace DualRemote
             }
         }
 
-        internal sealed class StatusBanner : Panel
+        internal sealed class StatusBanner : Control
         {
-            private readonly Label label;
+            private string messageText;
             private PillTone tone = PillTone.Info;
 
             internal StatusBanner(string initial)
             {
+                messageText = initial ?? "";
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
-                Padding = new Padding(32, 6, 14, 6);
+                TabStop = false;
                 BackColor = Workspace;
-                DoubleBuffered = true;
-                ResizeRedraw = true;
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-                label = Text(initial, TextSize.Small, BodyInk);
-                label.AutoEllipsis = true;
-                ApplyToneColors();
-                Controls.Add(label);
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             }
 
-            internal string Message { get { return label.Text; } }
+            internal string Message { get { return messageText; } }
 
             internal void Set(string message, PillTone newTone = PillTone.Info)
             {
-                label.Text = message ?? "";
+                messageText = message ?? "";
                 tone = newTone;
-                ApplyToneColors();
+                AccessibleName = messageText;
                 Invalidate();
             }
 
@@ -1457,17 +1707,8 @@ namespace DualRemote
                 }
             }
 
-            private void ApplyToneColors()
-            {
-                Color bg, border, dotColor, textColor;
-                GetTonePalette(out bg, out border, out dotColor, out textColor);
-                label.ForeColor = textColor;
-                label.BackColor = bg;
-            }
-
             protected override void OnPaintBackground(PaintEventArgs e)
             {
-                // Paint everything cleanly inside OnPaint with double buffering to prevent any black L-edge artifact
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -1477,7 +1718,8 @@ namespace DualRemote
                 g.Clear(parentBg);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                float scale = g.DpiX / 96f;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                float scale = Math.Max(1f, g.DpiX / 96f);
                 Color bg, border, dotColor, textColor;
                 GetTonePalette(out bg, out border, out dotColor, out textColor);
 
@@ -1485,6 +1727,13 @@ namespace DualRemote
                 float d = 7f * scale;
                 using (var dot = new SolidBrush(dotColor))
                     g.FillEllipse(dot, 14f * scale, (Height - d) / 2f, d, d);
+
+                int leftPad = (int)Math.Round(30 * scale);
+                int rightPad = (int)Math.Round(14 * scale);
+                var textRect = new Rectangle(leftPad, 0, Math.Max(16, Width - leftPad - rightPad), Height);
+                TextRenderer.DrawText(g, messageText, SmallFont, textRect, textColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
             }
         }
 

@@ -36,6 +36,9 @@ namespace DualRemote
         internal const int PairTimeoutMs = 20000;
         private const int MaxSettingsBytes = 2 * 1024 * 1024;
         private static readonly object RuntimeGate = new object();
+        private static readonly object AppCacheGate = new object();
+        private static readonly Dictionary<string, string> ResolvedAppCache =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         internal static string AppDir
         {
@@ -137,6 +140,14 @@ namespace DualRemote
             bool showStats, bool playOnHost, bool windowed, bool useHevc, bool useAbr,
             bool disableVsync, bool framePacing, bool pair, out string message)
         {
+            return LaunchWithApp(host, null, width, height, fps, bitrateKbps, showStats, playOnHost,
+                windowed, useHevc, useAbr, disableVsync, framePacing, pair, out message);
+        }
+
+        internal static bool LaunchWithApp(string host, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool useAbr,
+            bool disableVsync, bool framePacing, bool pair, out string message)
+        {
             message = null;
             if (!IsAvailable)
             {
@@ -149,6 +160,7 @@ namespace DualRemote
             if (cleanHost == null) return false;
 
             string args;
+            string resolvedApp = Engines.MoonlightAppName;
             if (pair)
             {
                 args = Engines.BuildMoonlightPairArgs(cleanHost);
@@ -162,7 +174,10 @@ namespace DualRemote
                     return false;
                 }
                 if (!ApplyAbrSetting(useAbr, out message)) return false;
-                args = Engines.BuildMoonlightStreamArgs(cleanHost, width, height, fps, bitrateKbps,
+                resolvedApp = string.IsNullOrWhiteSpace(appName)
+                    ? ResolveDesktopAppName(cleanHost)
+                    : Engines.NormalizeAppName(appName);
+                args = Engines.BuildMoonlightStreamArgsWithApp(cleanHost, resolvedApp, width, height, fps, bitrateKbps,
                     showStats, playOnHost, windowed, useHevc, disableVsync, framePacing);
             }
 
@@ -181,7 +196,7 @@ namespace DualRemote
             }
             else
             {
-                message = "已提交 Moonlight V+ 串流请求（" + width + "×" + height + " · " + fps + "fps · "
+                message = "已提交 Moonlight V+ 串流请求（" + resolvedApp + " · " + width + "×" + height + " · " + fps + "fps · "
                         + (useHevc ? "HEVC" : "H.264") + " · " + (bitrateKbps / 1000) + " Mbps · "
                         + (useAbr ? "ABR 自适应开" : "固定码率") + (disableVsync ? " · 极速低延迟" : "")
                         + "）。等待客户端首帧，启动进程不代表串流已经稳定。";
@@ -339,6 +354,214 @@ namespace DualRemote
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// 自动解析远程已配对 Sunshine 主机上的桌面应用名（兼容系统安装版中文「桌面」、随包版英文「Desktop」及自定义名称）。
+        /// 优先读取 Moonlight.ini 已缓存的该主机应用列表（0 延迟）；若首次配对尚未缓存应用列表，则无窗口调用 `Moonlight.exe list` 同步拉取。
+        /// </summary>
+        internal static string ResolveDesktopAppName(string host)
+        {
+            string err;
+            string cleanHost = Engines.NormalizeHost(host, out err);
+            if (cleanHost == null) return Engines.MoonlightAppName;
+
+            lock (AppCacheGate)
+            {
+                string cached;
+                if (ResolvedAppCache.TryGetValue(cleanHost, out cached) && !string.IsNullOrEmpty(cached))
+                    return cached;
+            }
+
+            string prepErr;
+            TryPrepareRuntime(out prepErr);
+            EnsureSettingsMigrated(out prepErr);
+
+            List<string> iniApps = ReadAppsFromIniFile(SettingsPath, cleanHost);
+            if (iniApps.Count > 0)
+            {
+                string pickedIni = Engines.SelectBestDesktopAppName(iniApps);
+                lock (AppCacheGate) { ResolvedAppCache[cleanHost] = pickedIni; }
+                return pickedIni;
+            }
+
+            string busyMsg;
+            if (File.Exists(EngineExe) && !IsPathEngineRunning(out busyMsg))
+            {
+                // 首次配对后 INI 尚未写入 apps 列表时，留足 8.5s 兼容异地 DERP 中继与多网卡探测耗时
+                List<string> liveApps = Engines.QueryMoonlightAppList(EngineExe, cleanHost, 8500);
+                if (liveApps.Count > 0)
+                {
+                    string pickedLive = Engines.SelectBestDesktopAppName(liveApps);
+                    lock (AppCacheGate) { ResolvedAppCache[cleanHost] = pickedLive; }
+                    return pickedLive;
+                }
+                List<string> refreshedIni = ReadAppsFromIniFile(SettingsPath, cleanHost);
+                if (refreshedIni.Count > 0)
+                {
+                    string pickedRefreshed = Engines.SelectBestDesktopAppName(refreshedIni);
+                    lock (AppCacheGate) { ResolvedAppCache[cleanHost] = pickedRefreshed; }
+                    return pickedRefreshed;
+                }
+            }
+
+            return Engines.MoonlightAppName;
+        }
+
+        internal static List<string> ReadAppsFromIniFile(string iniPath, string host)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(iniPath) || !File.Exists(iniPath))
+                    return new List<string>();
+                FileInfo fi = new FileInfo(iniPath);
+                if (fi.Length <= 0 || fi.Length > MaxSettingsBytes)
+                    return new List<string>();
+                string text = File.ReadAllText(iniPath, Encoding.UTF8);
+                return ReadHostAppsFromIniText(text, host);
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        internal static List<string> ReadHostAppsFromIniText(string iniText, string host)
+        {
+            List<string> result = new List<string>();
+            if (string.IsNullOrEmpty(iniText)) return result;
+            string error;
+            string normalHost = Engines.NormalizeHost(host, out error);
+            if (normalHost == null) return result;
+
+            Dictionary<int, Dictionary<string, string>> records = ReadHostsSection(iniText);
+            string[] addressFields = new string[] { "manualaddress", "remoteaddress", "ipv6address", "localaddress" };
+            foreach (Dictionary<string, string> record in records.Values)
+            {
+                string serviceCertificate;
+                if (!record.TryGetValue("srvcert", out serviceCertificate)
+                    || !HasCertificateCandidate(serviceCertificate))
+                    continue;
+
+                bool matched = false;
+                foreach (string field in addressFields)
+                {
+                    string value;
+                    if (record.TryGetValue(field, out value) && AddressMatches(value, normalHost))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) continue;
+
+                SortedDictionary<int, string> indexedApps = new SortedDictionary<int, string>();
+                foreach (KeyValuePair<string, string> kv in record)
+                {
+                    // key format inside [hosts]: apps\<appIndex>\name
+                    string k = kv.Key.Replace('/', '\\');
+                    if (!k.StartsWith("apps\\", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!k.EndsWith("\\name", StringComparison.OrdinalIgnoreCase)) continue;
+                    string mid = k.Substring(5, k.Length - 10);
+                    int appIdx;
+                    if (!int.TryParse(mid, System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out appIdx))
+                        continue;
+                    string decoded = UnescapeQtIniString(kv.Value);
+                    if (!string.IsNullOrWhiteSpace(decoded))
+                        indexedApps[appIdx] = decoded.Trim();
+                }
+                foreach (string appName in indexedApps.Values)
+                {
+                    result.Add(appName);
+                }
+                if (result.Count > 0) return result;
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 解码 Qt QSettings::IniFormat 转义字符串（例如 `\x684c\x9762`、`"@String(\x684c\x9762)"` 或 UTF-8 原文 `桌面`）。
+        /// </summary>
+        internal static string UnescapeQtIniString(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            string s = raw.Trim();
+            if (s.Length >= 2 && s[0] == '"' && s[s.Length - 1] == '"')
+                s = s.Substring(1, s.Length - 2);
+            const string qtStringPrefix = "@String(";
+            if (s.StartsWith(qtStringPrefix, StringComparison.OrdinalIgnoreCase) && s.EndsWith(")", StringComparison.Ordinal))
+                s = s.Substring(qtStringPrefix.Length, s.Length - qtStringPrefix.Length - 1);
+
+            StringBuilder sb = new StringBuilder(s.Length);
+            int i = 0;
+            while (i < s.Length)
+            {
+                char c = s[i];
+                if (c != '\\' || i + 1 >= s.Length)
+                {
+                    sb.Append(c);
+                    i++;
+                    continue;
+                }
+                char next = s[i + 1];
+                if (next == 'x' || next == 'X' || next == 'u' || next == 'U')
+                {
+                    int maxDigits = (next == 'U') ? 8 : 4;
+                    int hexStart = i + 2;
+                    int count = 0;
+                    int code = 0;
+                    while (count < maxDigits && hexStart + count < s.Length)
+                    {
+                        int hv = HexDigitValue(s[hexStart + count]);
+                        if (hv < 0) break;
+                        code = (code << 4) | hv;
+                        count++;
+                    }
+                    if (count > 0)
+                    {
+                        if (code >= 0 && code <= 0xFFFF)
+                            sb.Append((char)code);
+                        else if (code <= 0x10FFFF)
+                            sb.Append(char.ConvertFromUtf32(code));
+                        i = hexStart + count;
+                        continue;
+                    }
+                }
+                switch (next)
+                {
+                    case '0': sb.Append('\0'); i += 2; break;
+                    case 'a': sb.Append('\a'); i += 2; break;
+                    case 'b': sb.Append('\b'); i += 2; break;
+                    case 'f': sb.Append('\f'); i += 2; break;
+                    case 'n': sb.Append('\n'); i += 2; break;
+                    case 'r': sb.Append('\r'); i += 2; break;
+                    case 't': sb.Append('\t'); i += 2; break;
+                    case 'v': sb.Append('\v'); i += 2; break;
+                    case '\\':
+                    case '"':
+                    case '\'':
+                    case ';':
+                    case '#':
+                    case '=':
+                        sb.Append(next);
+                        i += 2;
+                        break;
+                    default:
+                        sb.Append(next);
+                        i += 2;
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static int HexDigitValue(char ch)
+        {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
         }
 
         private static Dictionary<int, Dictionary<string, string>> ReadHostsSection(string iniText)

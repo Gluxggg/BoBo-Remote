@@ -228,17 +228,7 @@ namespace DualRemote
 
         private float CurrentScale()
         {
-            try
-            {
-                using (Graphics g = CreateGraphics())
-                {
-                    return Math.Max(1f, g.DpiX / 96f);
-                }
-            }
-            catch
-            {
-                return 1f;
-            }
+            return Theme.GetDpiScale(this);
         }
 
         private void SetExpanded(bool value)

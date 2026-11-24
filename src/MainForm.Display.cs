@@ -49,15 +49,15 @@ namespace DualRemote
 
             curtainStateBadge.AlignRight = true;
             displayModeBadge.AlignRight = true;
-            AddPageHeader(desk, "防窥与显示", "自定义被控端物理屏防窥壁纸，以及虚拟屏与硬件级熄屏防窥", curtainStateBadge, 152);
+            AddPageHeader(desk, "防窥与显示", "自定义被控端物理屏防窥壁纸，以及虚拟屏与硬件级熄屏防窥", curtainStateBadge, 164);
             Theme.Row(desk, 18);
 
             var wallpaperCard = BuildPrivacyWallpaperCard();
             wallpaperCardRow = desk.RowCount;
-            Theme.Row(desk, 314, wallpaperCard);
+            Theme.Row(desk, 330, wallpaperCard);
             Theme.Row(desk, 16);
 
-            Theme.Row(desk, 24, Theme.Text("防窥保护选项", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(desk, 26, Theme.Text("防窥保护选项", Theme.TextSize.Label, Theme.Muted));
             Theme.Row(desk, 10);
 
             var autoSwitch = BuildToggle("远控自动防窥", privacyConfig.AutoOnRemote);
@@ -107,27 +107,27 @@ namespace DualRemote
             preserve.AccessibleName = "启用虚拟屏，保留实体屏";
             preserve.Click += delegate { OpenDisplayTool("Apply", "Virtual"); };
             AddStandaloneSettingCard(desk, Theme.Glyph.Desktop, "铺满 16:10 虚拟屏（保留实体屏）",
-                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，自动匹配 16:10 比例并保留物理屏", preserve, 124);
+                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，自动匹配 16:10 比例并保留物理屏", preserve, 132);
 
             var privacy = Theme.Action("启用熄屏防窥", Theme.ButtonStyle.Primary);
             privacy.Click += delegate { OpenDisplayTool("Apply", "Privacy"); };
             AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "硬件级熄屏防窥（关闭物理屏信号）",
-                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，远程关闭物理显示器信号，断开自动恢复", privacy, 124);
+                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，远程关闭物理显示器信号，断开自动恢复", privacy, 132);
 
             var restoreRow = Theme.Grid(3);
             Theme.FillColumn(restoreRow);
             Theme.FixedColumn(restoreRow, 8);
-            Theme.FixedColumn(restoreRow, 92);
+            Theme.FixedColumn(restoreRow, 98);
             var undo = Theme.Action("恢复原设置", Theme.ButtonStyle.Secondary);
             undo.Click += delegate { OpenDisplayTool("Restore", "Privacy"); };
             var inspect = Theme.Action("详细状态", Theme.ButtonStyle.Secondary);
             inspect.Click += delegate { OpenDisplayTool("Status", "Privacy"); };
-            Theme.Row(restoreRow, 34, undo, null, inspect);
+            Theme.Row(restoreRow, 36, undo, null, inspect);
             AddStandaloneSettingCard(desk, Theme.Glyph.Refresh, "显示拓扑还原与诊断",
-                "一键还原 Sunshine 显示配置备份，或检查 Zako 虚拟屏驱动状态", restoreRow, 214);
+                "一键还原 Sunshine 显示配置备份，或检查 Zako 虚拟屏驱动状态", restoreRow, 224);
 
             Theme.Row(desk, 6);
-            Theme.Row(desk, 40, displayBanner);
+            Theme.Row(desk, 42, displayBanner);
 
             ReloadPreviewImage();
             viewport.ContentWidthChanged += delegate(int contentW) { ApplyPrivacyWallpaperResponsiveLayout(contentW); };
@@ -149,7 +149,7 @@ namespace DualRemote
             Theme.FillColumn(controls);
             wallpaperControlsPanel = controls;
 
-            Theme.Row(controls, 22, Theme.Text("防窥壁纸主题", Theme.TextSize.LabelBold, Theme.Ink));
+            Theme.Row(controls, 24, Theme.Text("防窥壁纸主题", Theme.TextSize.LabelBold, Theme.Ink));
             Theme.Row(controls, 8);
 
             var presetRow = Theme.Grid(7);
@@ -164,13 +164,13 @@ namespace DualRemote
             presetButtons[1] = MakePresetChip(1, "极简磨砂");
             presetButtons[2] = MakePresetChip(2, "纯黑零光");
             presetButtons[3] = MakePresetChip(3, "自定义图片");
-            Theme.Row(presetRow, 34, presetButtons[0], null, presetButtons[1], null, presetButtons[2], null, presetButtons[3]);
-            Theme.Row(controls, 34, presetRow);
+            Theme.Row(presetRow, 36, presetButtons[0], null, presetButtons[1], null, presetButtons[2], null, presetButtons[3]);
+            Theme.Row(controls, 36, presetRow);
             Theme.Row(controls, 12);
 
             // Custom file + Fit mode
             var imgRow = Theme.Grid(3);
-            Theme.FixedColumn(imgRow, 144);
+            Theme.FixedColumn(imgRow, 150);
             Theme.FixedColumn(imgRow, 10);
             Theme.FillColumn(imgRow);
             var chooseImg = Theme.Action("选择本地图片", Theme.ButtonStyle.Secondary, Theme.Glyph.Image);
@@ -185,13 +185,13 @@ namespace DualRemote
                 SavePrivacyConfig();
                 if (wallpaperPreview != null) wallpaperPreview.Invalidate();
             };
-            Theme.Row(imgRow, 36, chooseImg, null, Theme.WrapInput(wallpaperFitCombo));
-            Theme.Row(controls, 36, imgRow);
+            Theme.Row(imgRow, 38, chooseImg, null, Theme.WrapInput(wallpaperFitCombo));
+            Theme.Row(controls, 38, imgRow);
             Theme.Row(controls, 12);
 
             // Caption input
             var capRow = Theme.Grid(3);
-            Theme.FixedColumn(capRow, 64);
+            Theme.FixedColumn(capRow, 70);
             Theme.FixedColumn(capRow, 8);
             Theme.FillColumn(capRow);
             wallpaperCaptionBox = Theme.InputBox("防窥提示文案", privacyConfig.Caption);
@@ -202,15 +202,15 @@ namespace DualRemote
                 if (wallpaperPreview != null) wallpaperPreview.Invalidate();
             };
             wallpaperCaptionBox.LostFocus += delegate { SavePrivacyConfigSilent(); };
-            Theme.Row(capRow, 36, Theme.Text("提示文案", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(wallpaperCaptionBox));
-            Theme.Row(controls, 36, capRow);
+            Theme.Row(capRow, 38, Theme.Text("提示文案", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(wallpaperCaptionBox));
+            Theme.Row(controls, 38, capRow);
             Theme.Row(controls, 12);
 
             // Primary actions
             var actRow = Theme.Grid(5);
-            Theme.FixedColumn(actRow, 132);
+            Theme.FixedColumn(actRow, 138);
             Theme.FixedColumn(actRow, 10);
-            Theme.FixedColumn(actRow, 116);
+            Theme.FixedColumn(actRow, 122);
             Theme.FixedColumn(actRow, 10);
             Theme.FillColumn(actRow);
 
@@ -224,20 +224,20 @@ namespace DualRemote
                 bool ok = privacyCurtain.Activate(privacyConfig, true, out msg);
                 ShowDisplayBanner(msg, ok ? Theme.PillTone.Info : Theme.PillTone.Alert);
             };
-            Theme.Row(actRow, 36, toggleCurtainBtn, null, previewBtn, null, null);
-            Theme.Row(controls, 36, actRow);
+            Theme.Row(actRow, 38, toggleCurtainBtn, null, previewBtn, null, null);
+            Theme.Row(controls, 38, actRow);
             Theme.FillRow(controls);
 
             wallpaperSplitHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Paper };
             BuildWallpaperSplitContainer(false, 1f);
             wallpaperSplitRow = root.RowCount;
-            Theme.Row(root, 224, wallpaperSplitHost);
+            Theme.Row(root, 236, wallpaperSplitHost);
             Theme.Row(root, 14);
             Theme.Row(root, 1, Theme.Rule());
             Theme.Row(root, 10);
 
             customImageHint = Theme.Text(DescribeWallpaperSource(), Theme.TextSize.Small, Theme.Muted);
-            Theme.Row(root, 22, customImageHint);
+            Theme.Row(root, 24, customImageHint);
 
             SyncPresetButtonHighlights();
             card.Controls.Add(root);
@@ -260,18 +260,18 @@ namespace DualRemote
                 {
                     var stack = Theme.Grid(1);
                     Theme.FillColumn(stack);
-                    Theme.Row(stack, 176f * scale, wallpaperPreview);
+                    Theme.Row(stack, 180f * scale, wallpaperPreview);
                     Theme.Row(stack, 14f * scale);
-                    Theme.Row(stack, 214f * scale, wallpaperControlsPanel);
+                    Theme.Row(stack, 226f * scale, wallpaperControlsPanel);
                     wallpaperSplitHost.Controls.Add(stack);
                 }
                 else
                 {
                     var split = Theme.Grid(3);
-                    Theme.FixedColumn(split, (int)Math.Round(264f * scale));
-                    Theme.FixedColumn(split, (int)Math.Round(20f * scale));
+                    Theme.FixedColumn(split, (int)Math.Round(272f * scale));
+                    Theme.FixedColumn(split, (int)Math.Round(22f * scale));
                     Theme.FillColumn(split);
-                    Theme.Row(split, 224f * scale, wallpaperPreview, null, wallpaperControlsPanel);
+                    Theme.Row(split, 236f * scale, wallpaperPreview, null, wallpaperControlsPanel);
                     wallpaperSplitHost.Controls.Add(split);
                 }
             }
@@ -290,7 +290,7 @@ namespace DualRemote
             wallpaperCompactMode = compact;
 
             BuildWallpaperSplitContainer(compact, scale);
-            wallpaperRootLayout.RowStyles[wallpaperSplitRow].Height = (compact ? 404f : 224f) * scale;
+            wallpaperRootLayout.RowStyles[wallpaperSplitRow].Height = (compact ? 420f : 236f) * scale;
             privacyDesk.RowStyles[wallpaperCardRow].Height = SumRows(wallpaperRootLayout)
                 + (wallpaperCardControl == null ? 0 : wallpaperCardControl.Padding.Vertical);
             privacyDesk.Height = SumRows(privacyDesk);

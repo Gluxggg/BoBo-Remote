@@ -41,7 +41,7 @@ namespace DualRemote
             Theme.Row(panel, 14);
 
             clientPairTargetLabel = Theme.Text("这台电脑首次连接，需要完成一次授权。", Theme.TextSize.LabelBold, Theme.Ink);
-            Theme.Row(panel, 22, clientPairTargetLabel);
+            Theme.Row(panel, 26, clientPairTargetLabel);
             Theme.Row(panel, 8);
 
             clientPairPinText = Theme.InputBox("4 位配对码", "");
@@ -54,18 +54,18 @@ namespace DualRemote
             };
 
             var pinRow = Theme.Grid(3);
-            Theme.FixedColumn(pinRow, 160);
+            Theme.FixedColumn(pinRow, 168);
             Theme.FixedColumn(pinRow, 12);
             Theme.FillColumn(pinRow);
-            Theme.Row(pinRow, 40, Theme.WrapInput(clientPairPinText), null,
+            Theme.Row(pinRow, 42, Theme.WrapInput(clientPairPinText), null,
                 Theme.Text("请输入被控端窗口显示的 4 位数字配对码。", Theme.TextSize.Small, Theme.Muted));
-            Theme.Row(panel, 40, pinRow);
+            Theme.Row(panel, 42, pinRow);
             Theme.Row(panel, 10);
 
             var actions = Theme.Grid(4);
-            Theme.FixedColumn(actions, 138);
+            Theme.FixedColumn(actions, 148);
             Theme.FixedColumn(actions, 10);
-            Theme.FixedColumn(actions, 86);
+            Theme.FixedColumn(actions, 92);
             Theme.FillColumn(actions);
             clientPairStartButton = Theme.Action("配对并连接", Theme.ButtonStyle.Primary, Theme.Glyph.Pin);
             clientPairCancelButton = Theme.Action("取消", Theme.ButtonStyle.Secondary);
@@ -79,8 +79,8 @@ namespace DualRemote
                     if (clientPairStartButton.Enabled) clientPairStartButton.PerformClick();
                 }
             };
-            Theme.Row(actions, 36, clientPairStartButton, null, clientPairCancelButton);
-            Theme.Row(panel, 36, actions);
+            Theme.Row(actions, 38, clientPairStartButton, null, clientPairCancelButton);
+            Theme.Row(panel, 38, actions);
             Theme.Row(panel, 8);
 
             clientPairStatusLabel = Theme.Text("等待输入配对码。", Theme.TextSize.Small, Theme.Muted);
@@ -182,7 +182,7 @@ namespace DualRemote
             if (readable && paired)
             {
                 SetStatus("已完成授权，正在打开桌面…", Theme.PillTone.Success);
-                StartStream(cleanHost);
+                await StartStreamAsync(cleanHost);
                 return;
             }
 
@@ -316,7 +316,7 @@ namespace DualRemote
                         SetClientPairPanelVisible(false);
                         SetClientPairStatus("授权完成。", Theme.Success);
                         SetStatus("授权完成，正在打开桌面…", Theme.PillTone.Success);
-                        StartStream(host);
+                        await StartStreamAsync(host);
                         return;
                     }
 

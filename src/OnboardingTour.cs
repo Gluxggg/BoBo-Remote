@@ -296,8 +296,7 @@ namespace DualRemote
 
         private float CurrentScale()
         {
-            int dpi = (hostForm != null && !hostForm.IsDisposed) ? hostForm.DeviceDpi : DeviceDpi;
-            return Math.Max(1f, dpi / 96f);
+            return Theme.GetDpiScale((hostForm != null && !hostForm.IsDisposed) ? hostForm : (Control)this);
         }
 
         internal void StartTour()

@@ -948,7 +948,7 @@ namespace DualRemote
                 Description = "软件防窥壁纸开箱即用：开启后物理屏立刻覆盖安全壁纸，而远程画面依然清晰可见，支持远控自动开启与退出自动锁屏。紧急解除按 Ctrl+Alt+Shift+P。",
                 Tip = "可选进阶：若要硬件级彻底熄屏（关闭物理显示器信号），需额外搭配 Zako 虚拟屏与系统安装版 Sunshine。"
             };
-            float[] dpiScales = new[] { 1.0f, 1.25f, 1.5f, 1.75f };
+            float[] dpiScales = new[] { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.25f };
             foreach (float sc in dpiScales)
             {
                 var vp = new System.Drawing.Size((int)Math.Round(960 * sc), (int)Math.Round(600 * sc));
@@ -971,7 +971,103 @@ namespace DualRemote
                     }
                 }
             }
-            Check("Win11 高 DPI 新手引导卡片自适应度量与渲染（100%~175%）", tourDpiOk, tourDpiDetail);
+            Check("Win10/Win11 高 DPI 新手引导卡片自适应度量与渲染（100%~225%）", tourDpiOk, tourDpiDetail);
+
+            // 验证真实 DPI 获取与多缩放倍率下双行卡片高度绝不裁切文字（覆盖 100%~225% 缩放）
+            float gdiScale = 1f;
+            using (System.Drawing.Graphics sg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+            {
+                if (sg.DpiX >= 72f) gdiScale = Math.Max(1f, sg.DpiX / 96f);
+            }
+            float themeScale = RemoteTheme.GetDpiScale();
+            Check("Win10/Win11 DPI 引擎：GetDpiScale 与真实系统 GDI DPI 严格一致（不退化为 96）",
+                Math.Abs(themeScale - gdiScale) < 0.05f && themeScale >= 1f,
+                "themeScale=" + themeScale + " gdiScale=" + gdiScale);
+
+            bool cardMetricsOk = true;
+            string cardMetricsDetail = "";
+            foreach (float sc in dpiScales)
+            {
+                int innerH = (int)Math.Round(52f * sc);
+                using (var testBmp = new System.Drawing.Bitmap(480, Math.Max(40, innerH)))
+                {
+                    testBmp.SetResolution(96f * sc, 96f * sc);
+                    using (var tg = System.Drawing.Graphics.FromImage(testBmp))
+                    {
+                        var flags = System.Windows.Forms.TextFormatFlags.SingleLine
+                            | System.Windows.Forms.TextFormatFlags.NoPrefix
+                            | System.Windows.Forms.TextFormatFlags.NoPadding;
+                        var sz1 = System.Windows.Forms.TextRenderer.MeasureText(tg, "Desktop-Host-01",
+                            RemoteTheme.GetFont(RemoteTheme.TextSize.LabelBold), new System.Drawing.Size(2000, innerH), flags);
+                        var sz2 = System.Windows.Forms.TextRenderer.MeasureText(tg, "198.51.100.42  ·  DERP(tok)（最近记录）",
+                            RemoteTheme.GetFont(RemoteTheme.TextSize.Small), new System.Drawing.Size(2000, innerH), flags);
+                        int neededH = sz1.Height + sz2.Height + (int)Math.Ceiling(6f * sc) + (int)Math.Round(2f * sc);
+                        if (neededH > innerH)
+                        {
+                            cardMetricsOk = false;
+                            cardMetricsDetail = "scale=" + sc + " neededH=" + neededH + " > innerH=" + innerH;
+                            break;
+                        }
+                    }
+                }
+            }
+            Check("Win10/Win11 双行设备卡片与设置行高度在 100%~225% DPI 下零切字", cardMetricsOk, cardMetricsDetail);
+
+            using (var vpTest = new RemoteTheme.SlimScrollViewport())
+            {
+                Check("宽屏工作区自适应容器：MaxContentWidth 支持高分屏舒展排布（消除左右大面积留白）",
+                    vpTest.MaxContentWidth >= 1500, "MaxContentWidth=" + vpTest.MaxContentWidth);
+            }
+
+            // 验证 Sunshine / Moonlight 远程桌面应用名称自动匹配（修复「找不到应用程序 Desktop」）
+            Check("应用名匹配：中文 Foundation Sunshine 优先命中「桌面」并排除「大屏」/Steam/Xbox",
+                Engines.SelectBestDesktopAppName(new[] { "Steam Big Picture 模式", "Xbox 游戏", "大屏", "桌面" }) == "桌面",
+                "Chinese Foundation Sunshine");
+            Check("应用名匹配：英文随包 Sunshine 命中「Desktop」",
+                Engines.SelectBestDesktopAppName(new[] { "Big Screen", "Desktop", "Steam Big Picture" }) == "Desktop",
+                "English Sunshine");
+            Check("应用名匹配：用户自定义命名兜底跳过启动器选择首个桌面项",
+                Engines.SelectBestDesktopAppName(new[] { "Big Screen", "Steam Big Picture", "远程办公主屏" }) == "远程办公主屏",
+                "Custom desktop name");
+            Check("应用名匹配：空列表安全回退 Desktop",
+                Engines.SelectBestDesktopAppName(new string[0]) == "Desktop",
+                "Empty fallback");
+
+            Check("Qt INI 转义解码：支持 \\x684c\\x9762 与 @String(...) 还原「桌面」",
+                FoundationClient.UnescapeQtIniString("\\x684c\\x9762") == "桌面"
+                && FoundationClient.UnescapeQtIniString("\"@String(\\x684c\\x9762)\"") == "桌面"
+                && FoundationClient.UnescapeQtIniString("Desktop") == "Desktop",
+                "Qt QSettings INI unescape");
+
+            string iniWithApps =
+                "[General]\nsunshineabr=true\n\n[hosts]\n"
+                + "1\\hostname=Office-PC\n1\\manualaddress=198.51.100.25\n"
+                + "1\\srvcert=" + certificate + "\n"
+                + "1\\apps\\1\\name=\\x684c\\x9762\n"
+                + "1\\apps\\2\\name=Steam Big Picture \\x6a21\\x5f0f\n"
+                + "1\\apps\\3\\name=\\x5927\\x5c4f\n"
+                + "1\\apps\\size=3\n"
+                + "2\\hostname=Unpaired-PC\n2\\manualaddress=198.51.100.99\n"
+                + "2\\apps\\1\\name=ShouldIgnore\n";
+            List<string> parsedIniApps = FoundationClient.ReadHostAppsFromIniText(iniWithApps, "198.51.100.25");
+            Check("Moonlight.ini 应用列表解析：读取已配对主机的中文应用并自动选出「桌面」",
+                parsedIniApps.Count == 3
+                && parsedIniApps[0] == "桌面"
+                && Engines.SelectBestDesktopAppName(parsedIniApps) == "桌面"
+                && FoundationClient.ReadHostAppsFromIniText(iniWithApps, "198.51.100.99").Count == 0,
+                "count=" + parsedIniApps.Count);
+
+            byte[] utf8CliBytes = Encoding.UTF8.GetBytes("Loading app list...\r\n桌面\r\n大屏\r\n");
+            List<string> parsedCliApps = Engines.ParseAppListOutput(Engines.DecodeCliOutputBytes(utf8CliBytes));
+            Check("Moonlight list CLI 解析：过滤状态行并准确提取 UTF-8 中文应用名",
+                parsedCliApps.Count == 2 && parsedCliApps[0] == "桌面" && parsedCliApps[1] == "大屏",
+                "cliApps=" + string.Join(",", parsedCliApps.ToArray()));
+
+            string customStreamArgs = Engines.BuildMoonlightStreamArgsWithApp(
+                "198.51.100.25", "桌面\" --evil\n", 1920, 1080, 60, 10000, false, false, false, true, true, false);
+            Check("Moonlight stream 参数：支持中文「桌面」并剥离引号/换行防参数注入",
+                customStreamArgs == "stream \"198.51.100.25\" \"桌面 --evil\" --resolution 1920x1080 --fps 60 --bitrate 10000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
+                customStreamArgs);
 
             Log("");
             Info("RustDesk 组件：" + (Engines.RustDeskPresent ? "已找到" : "未找到") + " " + Engines.RustDeskExe);

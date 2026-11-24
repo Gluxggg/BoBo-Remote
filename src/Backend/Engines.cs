@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -248,10 +249,224 @@ namespace DualRemote
         /// 是否真的有该显示模式由 Foundation/Sunshine 侧决定，这里只做产品侧安全范围校验。
         /// 不显式传 --frame-pacing：上游默认关闭，保持低延迟与既有默认行为。
         /// </summary>
+        internal static string NormalizeAppName(string appName)
+        {
+            if (string.IsNullOrWhiteSpace(appName)) return MoonlightAppName;
+            StringBuilder clean = new StringBuilder();
+            foreach (char c in appName.Trim())
+            {
+                if (c == '"' || c == '\r' || c == '\n' || char.IsControl(c)) continue;
+                clean.Append(c);
+            }
+            return clean.Length == 0 ? MoonlightAppName : clean.ToString();
+        }
+
+        private static readonly string[] PreferredDesktopAppNames = new string[]
+        {
+            "Desktop",
+            "桌面",
+            "Windows 桌面",
+            "Windows Desktop",
+            "远程桌面",
+            "遠端桌面",
+            "Remote Desktop",
+            "Full Desktop",
+            "完整桌面"
+        };
+
+        /// <summary>
+        /// 从目标 Sunshine 主机返回的应用名列表中智能选择桌面应用（自动兼容系统版中文「桌面」、随包英文「Desktop」等）。
+        /// </summary>
+        internal static string SelectBestDesktopAppName(IEnumerable<string> availableApps)
+        {
+            List<string> candidates = new List<string>();
+            if (availableApps != null)
+            {
+                foreach (string raw in availableApps)
+                {
+                    if (string.IsNullOrWhiteSpace(raw)) continue;
+                    string clean = NormalizeAppName(raw);
+                    if (!string.IsNullOrEmpty(clean)) candidates.Add(clean);
+                }
+            }
+            if (candidates.Count == 0) return MoonlightAppName;
+
+            // 1. 精确匹配主流中英文桌面名称（例如 Foundation Sunshine 中文安装版默认名「桌面」与英文版「Desktop」）
+            foreach (string preferred in PreferredDesktopAppNames)
+            {
+                foreach (string candidate in candidates)
+                {
+                    if (string.Equals(candidate, preferred, StringComparison.OrdinalIgnoreCase))
+                        return candidate;
+                }
+            }
+
+            // 2. 包含「桌面」或「Desktop」且不属于大屏/游戏启动器的应用项
+            foreach (string candidate in candidates)
+            {
+                if (IsNonDesktopLauncher(candidate)) continue;
+                if (candidate.IndexOf("桌面", StringComparison.OrdinalIgnoreCase) >= 0
+                    || candidate.IndexOf("desktop", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return candidate;
+            }
+
+            // 3. 兜底取第一个非 Steam / Xbox / 大屏 的应用项，防止用户自定义改名后报「找不到应用程序 Desktop」
+            foreach (string candidate in candidates)
+            {
+                if (!IsNonDesktopLauncher(candidate))
+                    return candidate;
+            }
+
+            return candidates[0];
+        }
+
+        private static bool IsNonDesktopLauncher(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return true;
+            if (string.Equals(name, "大屏", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "Big Screen", StringComparison.OrdinalIgnoreCase)
+                || name.IndexOf("bigscreen", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("big screen", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("steam", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("xbox", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("playnite", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        internal static string DecodeCliOutputBytes(byte[] raw)
+        {
+            if (raw == null || raw.Length == 0) return "";
+            try
+            {
+                UTF8Encoding strictUtf8 = new UTF8Encoding(false, true);
+                return strictUtf8.GetString(raw);
+            }
+            catch (DecoderFallbackException)
+            {
+                try { return Encoding.Default.GetString(raw); }
+                catch { return Encoding.UTF8.GetString(raw); }
+            }
+        }
+
+        internal static List<string> ParseAppListOutput(string stdout)
+        {
+            List<string> result = new List<string>();
+            if (string.IsNullOrEmpty(stdout)) return result;
+            string[] lines = stdout.Replace("\r\n", "\n").Split('\n');
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+                if (line.StartsWith("Loading app list", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("Establishing connection", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string clean = NormalizeAppName(line);
+                if (!string.IsNullOrEmpty(clean)) result.Add(clean);
+            }
+            return result;
+        }
+
+        internal static List<string> QueryMoonlightAppList(string exePath, string cleanHost, int timeoutMs)
+        {
+            List<string> empty = new List<string>();
+            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath) || string.IsNullOrEmpty(cleanHost))
+                return empty;
+
+            Process proc = null;
+            try
+            {
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = exePath;
+                info.Arguments = "list " + Quote(cleanHost);
+                info.WorkingDirectory = Path.GetDirectoryName(exePath);
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+                info.WindowStyle = ProcessWindowStyle.Hidden;
+                info.RedirectStandardOutput = true;
+                info.RedirectStandardError = true;
+
+                proc = Process.Start(info);
+                if (proc == null) return empty;
+
+                byte[] stdoutBytes = null;
+                ManualResetEvent stdoutDone = new ManualResetEvent(false);
+                Thread outReader = new Thread(new ThreadStart(delegate
+                {
+                    try
+                    {
+                        using (MemoryStream ms = new MemoryStream())
+                        {
+                            byte[] buf = new byte[4096];
+                            int n;
+                            while ((n = proc.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0)
+                                ms.Write(buf, 0, n);
+                            stdoutBytes = ms.ToArray();
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        try { stdoutDone.Set(); } catch { }
+                    }
+                }));
+                outReader.IsBackground = true;
+                outReader.Start();
+
+                Thread errDrainer = new Thread(new ThreadStart(delegate
+                {
+                    try
+                    {
+                        byte[] buf = new byte[2048];
+                        while (proc.StandardError.BaseStream.Read(buf, 0, buf.Length) > 0) { }
+                    }
+                    catch { }
+                }));
+                errDrainer.IsBackground = true;
+                errDrainer.Start();
+
+                bool exited = proc.WaitForExit(Math.Max(800, timeoutMs));
+                if (!exited)
+                {
+                    try { proc.Kill(); } catch { }
+                    try { stdoutDone.WaitOne(300); } catch { }
+                    return empty;
+                }
+
+                try { stdoutDone.WaitOne(800); } catch { }
+                if (proc.ExitCode != 0 || stdoutBytes == null || stdoutBytes.Length == 0)
+                    return empty;
+
+                string text = DecodeCliOutputBytes(stdoutBytes);
+                return ParseAppListOutput(text);
+            }
+            catch
+            {
+                return empty;
+            }
+            finally
+            {
+                if (proc != null)
+                {
+                    try { proc.Dispose(); } catch { }
+                }
+            }
+        }
+
         internal static string BuildMoonlightStreamArgs(string host, int width, int height, int fps, int bitrateKbps,
             bool showStats, bool playOnHost, bool windowed, bool useHevc)
         {
-            return "stream " + Quote(host) + " " + Quote(MoonlightAppName)
+            return BuildMoonlightStreamArgsWithApp(host, MoonlightAppName, width, height, fps, bitrateKbps,
+                showStats, playOnHost, windowed, useHevc);
+        }
+
+        internal static string BuildMoonlightStreamArgsWithApp(string host, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc)
+        {
+            string resolvedApp = NormalizeAppName(appName);
+            return "stream " + Quote(host) + " " + Quote(resolvedApp)
                  + " --resolution " + width.ToString(System.Globalization.CultureInfo.InvariantCulture)
                  + "x" + height.ToString(System.Globalization.CultureInfo.InvariantCulture)
                  + " --fps " + fps.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -269,7 +484,14 @@ namespace DualRemote
         internal static string BuildMoonlightStreamArgs(string host, int width, int height, int fps, int bitrateKbps,
             bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing)
         {
-            return BuildMoonlightStreamArgs(host, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc)
+            return BuildMoonlightStreamArgsWithApp(host, MoonlightAppName, width, height, fps, bitrateKbps,
+                showStats, playOnHost, windowed, useHevc, disableVsync, framePacing);
+        }
+
+        internal static string BuildMoonlightStreamArgsWithApp(string host, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing)
+        {
+            return BuildMoonlightStreamArgsWithApp(host, appName, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc)
                  + (disableVsync ? " --no-vsync" : " --vsync")
                  + (framePacing ? " --frame-pacing" : " --no-frame-pacing");
         }
@@ -574,7 +796,36 @@ namespace DualRemote
                 useHevc, false, false, out message);
         }
 
+        internal static string ResolveOfficialDesktopAppName(string rawHost)
+        {
+            string err;
+            string host = NormalizeHost(rawHost, out err);
+            if (host == null) return MoonlightAppName;
+
+            List<string> iniApps = FoundationClient.ReadAppsFromIniFile(FoundationClient.BaseSettingsPath, host);
+            if (iniApps.Count > 0)
+                return SelectBestDesktopAppName(iniApps);
+            if (MoonlightPresent)
+            {
+                List<string> liveApps = QueryMoonlightAppList(MoonlightExe, host, 8500);
+                if (liveApps.Count > 0)
+                    return SelectBestDesktopAppName(liveApps);
+                iniApps = FoundationClient.ReadAppsFromIniFile(FoundationClient.BaseSettingsPath, host);
+                if (iniApps.Count > 0)
+                    return SelectBestDesktopAppName(iniApps);
+            }
+            return MoonlightAppName;
+        }
+
         internal static bool StreamMoonlight(string rawHost, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing,
+            out string message)
+        {
+            return StreamMoonlightWithApp(rawHost, null, width, height, fps, bitrateKbps,
+                showStats, playOnHost, windowed, useHevc, disableVsync, framePacing, out message);
+        }
+
+        internal static bool StreamMoonlightWithApp(string rawHost, string appName, int width, int height, int fps, int bitrateKbps,
             bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing,
             out string message)
         {
@@ -587,12 +838,15 @@ namespace DualRemote
                 message = MissingComponentMessage("Moonlight", MoonlightExe);
                 return false;
             }
+            string resolvedApp = string.IsNullOrWhiteSpace(appName)
+                ? ResolveOfficialDesktopAppName(host)
+                : NormalizeAppName(appName);
             string detail = (useHevc ? "HEVC" : "H.264") + " · " + (bitrateKbps / 1000) + " Mbps"
                 + (disableVsync ? " · 极速低延迟" : "")
                 + (showStats ? " · 统计开" : "");
             return StartMoonlightStream(
-                BuildMoonlightStreamArgs(host, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc, disableVsync, framePacing),
-                "已提交 Moonlight 串流请求（" + width + "×" + height + " · " + fps + "fps · " + detail
+                BuildMoonlightStreamArgsWithApp(host, resolvedApp, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc, disableVsync, framePacing),
+                "已提交 Moonlight 串流请求（" + resolvedApp + " · " + width + "×" + height + " · " + fps + "fps · " + detail
                 + "）。等待客户端首帧，启动进程不代表串流已经稳定。",
                 out message);
         }
