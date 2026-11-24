@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -497,6 +498,33 @@ namespace DualRemote
         }
 
         /// <summary>
+        /// 桌面远控增强参数版本：
+        /// - 全屏时采用 --display-mode borderless（无边框全屏，不抢独占模式、不遮挡顶部悬浮工具条、切屏不黑屏）；
+        /// - --absolute-mouse：将控制端指针精确映射到被控串流屏，并默认 --capture-system-keys never 让本机 Win/Alt+Tab 随时可用；
+        /// - --quit-after：关闭串流窗口或退出软件时通知 Sunshine 立即结束远程会话并还原显示拓扑。
+        /// </summary>
+        internal static string BuildMoonlightStreamArgsWithApp(string host, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing,
+            bool absoluteMouse, bool quitAfter)
+        {
+            string resolvedApp = NormalizeAppName(appName);
+            return "stream " + Quote(host) + " " + Quote(resolvedApp)
+                 + " --resolution " + width.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                 + "x" + height.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                 + " --fps " + fps.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                 + " --bitrate " + bitrateKbps.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                 + (useHevc ? " --video-codec HEVC" : " --video-codec H.264")
+                 + (showStats ? " --performance-overlay" : " --no-performance-overlay")
+                 + (playOnHost ? " --audio-on-host" : " --no-audio-on-host")
+                 + (windowed ? " --display-mode windowed" : " --display-mode borderless")
+                 + (disableVsync ? " --no-vsync" : " --vsync")
+                 + (framePacing ? " --frame-pacing" : " --no-frame-pacing")
+                 + (absoluteMouse ? " --capture-system-keys never" : " --capture-system-keys fullscreen")
+                 + (absoluteMouse ? " --absolute-mouse" : " --no-absolute-mouse")
+                 + (quitAfter ? " --quit-after" : " --no-quit-after");
+        }
+
+        /// <summary>
         /// 显式设置版本：性能浮层、主机播放声音、窗口模式、HEVC。
         /// 这些开关均已用 Moonlight PC v6.2.0 的 CLI 帮助核实。
         /// </summary>
@@ -829,6 +857,14 @@ namespace DualRemote
             bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing,
             out string message)
         {
+            return StreamMoonlightWithApp(rawHost, appName, width, height, fps, bitrateKbps, showStats, playOnHost,
+                windowed, useHevc, disableVsync, framePacing, true, true, out message);
+        }
+
+        internal static bool StreamMoonlightWithApp(string rawHost, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool disableVsync, bool framePacing,
+            bool absoluteMouse, bool quitAfter, out string message)
+        {
             message = null;
             string host = NormalizeHost(rawHost, out message);
             if (host == null) return false;
@@ -845,7 +881,7 @@ namespace DualRemote
                 + (disableVsync ? " · 极速低延迟" : "")
                 + (showStats ? " · 统计开" : "");
             return StartMoonlightStream(
-                BuildMoonlightStreamArgsWithApp(host, resolvedApp, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc, disableVsync, framePacing),
+                BuildMoonlightStreamArgsWithApp(host, resolvedApp, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc, disableVsync, framePacing, absoluteMouse, quitAfter),
                 "已提交 Moonlight 串流请求（" + resolvedApp + " · " + width + "×" + height + " · " + fps + "fps · " + detail
                 + "）。等待客户端首帧，启动进程不代表串流已经稳定。",
                 out message);
@@ -974,25 +1010,208 @@ namespace DualRemote
             }
         }
 
-        internal static void StopStreamProcess(int pid)
+        private const uint WmClose = 0x0010;
+        private const int SwRestore = 9;
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ClipCursor(IntPtr lpRect);
+
+        internal static void ReleaseCursorClip()
+        {
+            try { ClipCursor(IntPtr.Zero); }
+            catch { }
+        }
+
+        internal static bool TryFocusProcessWindow(int pid)
+        {
+            if (pid <= 0) return false;
+            IntPtr found = IntPtr.Zero;
+            try
+            {
+                EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+                {
+                    uint winPid;
+                    GetWindowThreadProcessId(hWnd, out winPid);
+                    if ((int)winPid == pid && IsWindowVisible(hWnd))
+                    {
+                        found = hWnd;
+                        return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+                if (found != IntPtr.Zero)
+                {
+                    if (IsIconic(found)) ShowWindow(found, SwRestore);
+                    return SetForegroundWindow(found);
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static void PostCloseToAllProcessWindows(int pid)
         {
             if (pid <= 0) return;
             try
             {
-                using (Process p = Process.GetProcessById(pid))
+                EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
                 {
-                    if (p.HasExited) return;
-                    try { p.CloseMainWindow(); }
-                    catch { }
-                    if (!p.WaitForExit(1200))
+                    uint winPid;
+                    GetWindowThreadProcessId(hWnd, out winPid);
+                    if ((int)winPid == pid)
                     {
-                        try { p.Kill(); p.WaitForExit(1500); }
+                        try { PostMessage(hWnd, WmClose, IntPtr.Zero, IntPtr.Zero); }
                         catch { }
                     }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+        }
+
+        internal static void StopStreamProcess(int pid)
+        {
+            ReleaseCursorClip();
+            StopProcessGracefully(pid, 2500);
+            ReleaseCursorClip();
+        }
+
+        /// <summary>
+        /// 退出软件或断开远控时，优雅关闭主串流进程以及由 BoBo 托管路径启动的 Moonlight / RustDesk 进程。
+        /// 向目标进程全部顶层窗口发送 WM_CLOSE，确保 Moonlight SDL 串流窗口完成 --quit-after 会话收尾再退出，
+        /// 超时后兜底结束；绝不触碰用户自行安装的外部版本。
+        /// </summary>
+        internal static int StopManagedClientProcesses(int primaryStreamPid, params string[] managedExePaths)
+        {
+            ReleaseCursorClip();
+            int stoppedCount = 0;
+            HashSet<int> handledPids = new HashSet<int>();
+            if (primaryStreamPid > 0)
+            {
+                handledPids.Add(primaryStreamPid);
+                if (StopProcessGracefully(primaryStreamPid, 2500))
+                    stoppedCount++;
+            }
+
+            List<string> managedRoots = new List<string>();
+            if (managedExePaths != null)
+            {
+                foreach (string m in managedExePaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(m)) managedRoots.Add(m);
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(AppDir)) managedRoots.Add(AppDir);
+            if (!string.IsNullOrWhiteSpace(RecentStore.DirPath)) managedRoots.Add(RecentStore.DirPath);
+            if (managedRoots.Count == 0)
+                return stoppedCount;
+
+            string[] processNames = new string[] { "Moonlight", "rustdesk" };
+            foreach (string procName in processNames)
+            {
+                int gracefulWaitMs = string.Equals(procName, "Moonlight", StringComparison.OrdinalIgnoreCase) ? 2500 : 700;
+                Process[] list = null;
+                try { list = Process.GetProcessesByName(procName); }
+                catch { list = null; }
+                if (list == null) continue;
+                try
+                {
+                    foreach (Process proc in list)
+                    {
+                        try
+                        {
+                            if (handledPids.Contains(proc.Id)) continue;
+                            string exePath = BundledHost.TryGetProcessExecutablePath(proc);
+                            if (string.IsNullOrEmpty(exePath)) continue;
+                            bool matched = false;
+                            foreach (string managed in managedRoots)
+                            {
+                                if (BundledHost.IsManagedProcessPath(exePath, managed))
+                                {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if (!matched) continue;
+                            handledPids.Add(proc.Id);
+                            if (StopProcessInstanceGracefully(proc, gracefulWaitMs))
+                                stoppedCount++;
+                        }
+                        catch { }
+                    }
+                }
+                finally
+                {
+                    foreach (Process proc in list)
+                    {
+                        try { proc.Dispose(); } catch { }
+                    }
+                }
+            }
+            ReleaseCursorClip();
+            return stoppedCount;
+        }
+
+        private static bool StopProcessGracefully(int pid, int gracefulWaitMs)
+        {
+            if (pid <= 0) return false;
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    return StopProcessInstanceGracefully(p, gracefulWaitMs);
                 }
             }
             catch
             {
+                return false;
+            }
+        }
+
+        private static bool StopProcessInstanceGracefully(Process p, int gracefulWaitMs)
+        {
+            if (p == null) return false;
+            try
+            {
+                if (p.HasExited) return false;
+                ReleaseCursorClip();
+                PostCloseToAllProcessWindows(p.Id);
+                try { p.CloseMainWindow(); }
+                catch { }
+                if (!p.WaitForExit(Math.Max(300, gracefulWaitMs)))
+                {
+                    try { p.Kill(); p.WaitForExit(1500); }
+                    catch { }
+                }
+                ReleaseCursorClip();
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 

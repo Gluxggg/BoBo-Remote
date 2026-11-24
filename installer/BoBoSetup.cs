@@ -388,7 +388,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "4.3.2";
+            return "4.4.0";
         }
 
         internal static Bitmap LoadBrandLogo()

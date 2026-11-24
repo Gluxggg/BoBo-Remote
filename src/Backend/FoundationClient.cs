@@ -148,6 +148,14 @@ namespace DualRemote
             bool showStats, bool playOnHost, bool windowed, bool useHevc, bool useAbr,
             bool disableVsync, bool framePacing, bool pair, out string message)
         {
+            return LaunchWithApp(host, appName, width, height, fps, bitrateKbps, showStats, playOnHost,
+                windowed, useHevc, useAbr, disableVsync, framePacing, true, true, pair, out message);
+        }
+
+        internal static bool LaunchWithApp(string host, string appName, int width, int height, int fps, int bitrateKbps,
+            bool showStats, bool playOnHost, bool windowed, bool useHevc, bool useAbr,
+            bool disableVsync, bool framePacing, bool absoluteMouse, bool quitAfter, bool pair, out string message)
+        {
             message = null;
             if (!IsAvailable)
             {
@@ -178,12 +186,12 @@ namespace DualRemote
                     ? ResolveDesktopAppName(cleanHost)
                     : Engines.NormalizeAppName(appName);
                 args = Engines.BuildMoonlightStreamArgsWithApp(cleanHost, resolvedApp, width, height, fps, bitrateKbps,
-                    showStats, playOnHost, windowed, useHevc, disableVsync, framePacing);
+                    showStats, playOnHost, windowed, useHevc, disableVsync, framePacing, absoluteMouse, quitAfter);
             }
 
             try
             {
-                Engines.StartEngine(EngineExe, args);
+                using (Engines.StartEngine(EngineExe, args)) { }
             }
             catch (Exception ex)
             {

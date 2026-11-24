@@ -771,10 +771,13 @@ namespace DualRemote
                 EmbeddedTools.ResolveOptimizeTool());
             var barExpanded = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), true, 1f);
             var barCollapsed = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), false, 1f);
-            Check("V5 顶部悬浮工具条几何：展开与收起均居中贴顶且不越界",
-                barExpanded.Width > 500 && barExpanded.Top == 8 && Math.Abs((barExpanded.Left + barExpanded.Width / 2) - 960) <= 1
-                && barCollapsed.Width < 140 && barCollapsed.Top == 0 && Math.Abs((barCollapsed.Left + barCollapsed.Width / 2) - 960) <= 1,
-                "exp=" + barExpanded + " col=" + barCollapsed);
+            var barDraggedLeft = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), false, 1f, 40);
+            Check("V5 顶部悬浮小浮窗几何：展开/收起居中且含快捷退出区，拖动边界自动钳制",
+                barExpanded.Width >= 700 && barExpanded.Top == 8 && Math.Abs((barExpanded.Left + barExpanded.Width / 2) - 960) <= 1
+                && barCollapsed.Width >= 180 && barCollapsed.Width <= 240 && barCollapsed.Height >= 28 && barCollapsed.Top == 6
+                && Math.Abs((barCollapsed.Left + barCollapsed.Width / 2) - 960) <= 1
+                && barDraggedLeft.Left >= 10,
+                "exp=" + barExpanded + " col=" + barCollapsed + " drag=" + barDraggedLeft);
 
             Check("本机地址隐私脱敏：默认隐藏 IPv4 后两段与完整 IPv6 前缀",
                 MainForm.MaskAddressForDisplay("192.0.2.88") == "192.0.•••.•••"
@@ -1068,6 +1071,99 @@ namespace DualRemote
             Check("Moonlight stream 参数：支持中文「桌面」并剥离引号/换行防参数注入",
                 customStreamArgs == "stream \"198.51.100.25\" \"桌面 --evil\" --resolution 1920x1080 --fps 60 --bitrate 10000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
                 customStreamArgs);
+
+            string desktopMouseQuitArgs = Engines.BuildMoonlightStreamArgsWithApp(
+                "198.51.100.25", "桌面", 2560, 1440, 90, 22000, false, false, false, true, true, false, true, true);
+            string relativeNoQuitArgs = Engines.BuildMoonlightStreamArgsWithApp(
+                "198.51.100.25", "Desktop", 1920, 1080, 60, 10000, false, false, true, false, true, false, false, false);
+            Check("Moonlight stream 参数：桌面远控默认无边框全屏、不劫持系统键、绝对鼠标与 --quit-after",
+                desktopMouseQuitArgs.IndexOf(" --display-mode borderless", StringComparison.Ordinal) >= 0
+                && desktopMouseQuitArgs.IndexOf(" --capture-system-keys never", StringComparison.Ordinal) >= 0
+                && desktopMouseQuitArgs.EndsWith(" --absolute-mouse --quit-after", StringComparison.Ordinal)
+                && relativeNoQuitArgs.IndexOf(" --display-mode windowed", StringComparison.Ordinal) >= 0
+                && relativeNoQuitArgs.IndexOf(" --capture-system-keys fullscreen", StringComparison.Ordinal) >= 0
+                && relativeNoQuitArgs.EndsWith(" --no-absolute-mouse --no-quit-after", StringComparison.Ordinal),
+                desktopMouseQuitArgs);
+
+            DateTime procStart = new DateTime(2026, 11, 24, 23, 30, 0);
+            string activeLog = "[2026-11-24 23:20:00.000]: Info: CLIENT CONNECTED\r\n"
+                + "[2026-11-24 23:43:48.388]: Info: New streaming session started [active sessions: 1]\r\n"
+                + "[2026-11-24 23:43:48.721]: Info: CLIENT CONNECTED\r\n";
+            string closedLog = activeLog
+                + "[2026-11-24 23:52:06.435]: Info: CLIENT DISCONNECTED\r\n";
+            string staleLog = "[2026-11-24 23:10:00.000]: Info: New streaming session started [active sessions: 1]\r\n"
+                + "[2026-11-24 23:10:01.000]: Info: CLIENT CONNECTED\r\n";
+            string twoThenOneLog = "[2026-11-24 23:43:48.388]: Info: New streaming session started [active sessions: 1]\r\n"
+                + "[2026-11-24 23:44:00.000]: Info: New streaming session started [active sessions: 2]\r\n"
+                + "[2026-11-24 23:45:00.000]: Info: CLIENT DISCONNECTED\r\n";
+            Check("Sunshine 日志兜底被控检测：精准识别活跃、断开、多会话与重启前旧日志",
+                HostNetworkInfo.ParseSunshineLogSessionActive(activeLog, procStart)
+                && !HostNetworkInfo.ParseSunshineLogSessionActive(closedLog, procStart)
+                && !HostNetworkInfo.ParseSunshineLogSessionActive(staleLog, procStart)
+                && HostNetworkInfo.ParseSunshineLogSessionActive(twoThenOneLog, procStart),
+                "log-session-parser");
+
+            var defaultPrivacy = new PrivacyWallpaperConfig();
+            Check("自动防窥守护默认策略：新安装默认开启被控自动防窥，防窥壁纸透明穿透不挡远控",
+                defaultPrivacy.AutoOnRemote,
+                "AutoOnRemote=" + defaultPrivacy.AutoOnRemote);
+
+            int wp1 = DeviceWallpaperGallery.GetOrAssignIndex("198.51.100.25");
+            int wp2 = DeviceWallpaperGallery.CycleRandomIndex("198.51.100.25");
+            bool renderedSceneOk = false;
+            using (var testBmp = new System.Drawing.Bitmap(320, 160))
+            using (var testG = System.Drawing.Graphics.FromImage(testBmp))
+            {
+                DeviceWallpaperGallery.DrawBuiltInWindowsLandscape(testG, new System.Drawing.RectangleF(0, 0, 320, 160), 0, true);
+                DeviceWallpaperGallery.DrawWallpaper(testG, new System.Drawing.RectangleF(0, 0, 320, 160), wp2, true);
+                renderedSceneOk = testBmp.GetPixel(160, 80).A == 255;
+            }
+            DeviceWallpaperGallery.DisposeCache();
+            Check("设备预览窗随机 Windows 风景壁纸图库：支持随机分配、切换与离屏渲染",
+                DeviceWallpaperGallery.TotalCount >= 1
+                && (DeviceWallpaperGallery.TotalCount == 1 || wp1 != wp2)
+                && renderedSceneOk,
+                "count=" + DeviceWallpaperGallery.TotalCount + " wp=" + wp1 + "->" + wp2);
+
+            var primaryVddSnap = new HostSnapshot { SunshineInstalled = true };
+            var primaryVddMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            primaryVddMap["output_name"] = "ZakoHDR";
+            primaryVddMap["display_device_prep"] = "ensure_primary";
+            primaryVddMap["fec_auto"] = "enabled";
+            HostNetworkInfo.AnalyzeConfig(primaryVddSnap, primaryVddMap);
+            Check("显示拓扑诊断：识别 ZakoHDR + ensure_primary 为主屏虚拟屏且无扩展告警",
+                primaryVddSnap.DisplayModeLabel.IndexOf("主屏", StringComparison.Ordinal) >= 0
+                && primaryVddSnap.AntiLossTuned,
+                primaryVddSnap.DisplayModeLabel);
+
+            var secondaryVddSnap = new HostSnapshot { SunshineInstalled = true };
+            var secondaryVddMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            secondaryVddMap["output_name"] = "ZakoHDR";
+            secondaryVddMap["display_device_prep"] = "ensure_secondary";
+            secondaryVddMap["fec_auto"] = "enabled";
+            HostNetworkInfo.AnalyzeConfig(secondaryVddSnap, secondaryVddMap);
+            Check("显示拓扑诊断：检出旧版 ensure_secondary 副屏扩展并给出修复建议",
+                secondaryVddSnap.DisplayModeLabel.IndexOf("副屏扩展", StringComparison.Ordinal) >= 0
+                && !secondaryVddSnap.AntiLossTuned
+                && secondaryVddSnap.Recommendations.Count >= 1,
+                secondaryVddSnap.DisplayModeLabel);
+
+            int parsedSessions;
+            Check("Sunshine 活跃会话解析：支持 total_sessions、sessions 数组并拒绝畸形 JSON",
+                SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[],\"total_sessions\":0}", out parsedSessions) && parsedSessions == 0
+                && SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[{\"id\":1},{\"id\":2}],\"total_sessions\":2}", out parsedSessions) && parsedSessions == 2
+                && SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[{\"id\":1}]}", out parsedSessions) && parsedSessions == 1
+                && !SunshinePairing.TryParseActiveSessionCount("{bad", out parsedSessions),
+                "sessions=" + parsedSessions);
+
+            string sampleBundledSun = Path.Combine(BundledHost.LocalRoot, BundledHost.ExecutableName);
+            string sampleInstalledSun = Path.Combine(BundledHost.DefaultInstalledRoot, BundledHost.ExecutableName);
+            Check("退出清理进程边界：精准命中 BoBo 托管路径，绝不误伤系统安装版",
+                BundledHost.IsManagedProcessPath(sampleBundledSun, BundledHost.LocalRoot)
+                && BundledHost.IsManagedProcessPath(FoundationClient.EngineExe, FoundationClient.EngineExe)
+                && !BundledHost.IsManagedProcessPath(sampleInstalledSun, BundledHost.LocalRoot)
+                && !BundledHost.IsManagedProcessPath(@"C:\Program Files\RustDesk\rustdesk.exe", Engines.RustDeskExe),
+                sampleBundledSun);
 
             Log("");
             Info("RustDesk 组件：" + (Engines.RustDeskPresent ? "已找到" : "未找到") + " " + Engines.RustDeskExe);

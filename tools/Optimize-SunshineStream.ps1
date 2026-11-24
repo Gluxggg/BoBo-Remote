@@ -129,6 +129,14 @@ function Get-CertThumbprint([string] $Root) {
     return $res
 }
 
+function Get-LocalAuthToken([string] $Root) {
+    if ([string]::IsNullOrWhiteSpace($Root)) { return '' }
+    $tokenPath = Join-Path $Root 'config\local-auth.token'
+    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) { return '' }
+    try { return ([IO.File]::ReadAllText($tokenPath, [Text.Encoding]::UTF8)).Trim() }
+    catch { return '' }
+}
+
 function Invoke-PinnedApi([string] $Path, [int] $Port, [string] $Thumbprint) {
     $res = [ordered]@{ ok = $false; status = 0; body = ''; error = '' }
     $prevCb = [Net.ServicePointManager]::ServerCertificateValidationCallback
@@ -143,6 +151,10 @@ function Invoke-PinnedApi([string] $Path, [int] $Port, [string] $Thumbprint) {
         }
         $req = [Net.HttpWebRequest]::Create(('https://localhost:{0}{1}' -f $Port, $Path))
         $req.Proxy = $null; $req.Timeout = 5000; $req.ReadWriteTimeout = 5000; $req.Method = 'GET'
+        $localToken = Get-LocalAuthToken $SunshineRoot
+        if (-not [string]::IsNullOrWhiteSpace($localToken)) {
+            $req.Headers['X-Sunshine-Local-Token'] = $localToken
+        }
         $resp = $req.GetResponse()
         try {
             $reader = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)

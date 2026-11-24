@@ -103,6 +103,7 @@ namespace DualRemote
         private NotifyIcon trayIcon;
         private Icon appIcon;
         private bool forceExit;
+        private bool remoteSessionsTornDown;
         private bool guardPollBusy;
         private bool hotkeyRegistered;
         private bool wtsRegistered;
@@ -119,6 +120,7 @@ namespace DualRemote
         private StreamToolbarOverlay activeStreamToolbar;
         private string activeStreamHost = "";
         private int activeStreamPid;
+        private bool hostCurrentlyControlled;
         private bool initialScaleApplied;
         private float appliedDpiScale = 1f;
         private string updatedFromVersion;
@@ -181,7 +183,7 @@ namespace DualRemote
             privacyCurtain.StateChanged += OnPrivacyCurtainStateChanged;
             SystemEvents.SessionSwitch += OnSessionSwitch;
             sessionEventsHooked = true;
-            remoteGuardTimer.Interval = 2500;
+            remoteGuardTimer.Interval = 1500;
             remoteGuardTimer.Tick += async delegate { await PollRemoteGuardTick(); };
             localPairTimer.Interval = 1200;
             localPairTimer.Tick += async delegate { await PollLocalPairingAsync(); };
@@ -479,8 +481,9 @@ namespace DualRemote
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开 BoBo远程", null, delegate { RestoreFromTray(); });
             menu.Items.Add("开启/关闭防窥壁纸 (Ctrl+Alt+Shift+P)", null, delegate { TogglePrivacyCurtain(false); });
+            menu.Items.Add("断开当前远控会话", null, delegate { DisconnectAllRemoteSessionsFromUi(); });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("彻底退出 BoBo远程", null, delegate { forceExit = true; Close(); });
+            menu.Items.Add("彻底退出 BoBo远程（断开远控）", null, delegate { forceExit = true; Close(); });
 
             trayIcon = new NotifyIcon
             {
@@ -509,8 +512,10 @@ namespace DualRemote
                 Hide();
                 if (trayIcon != null)
                 {
-                    trayIcon.ShowBalloonTip(2000, "BoBo远程 仍在后台运行",
-                        privacyConfig.AutoOnRemote ? "防窥屏壁纸守护运行中，双击托盘图标可打开主界面。" : "双击右下角托盘图标可随时恢复窗口。",
+                    trayIcon.ShowBalloonTip(2200, "BoBo远程 仍在后台运行",
+                        privacyConfig.AutoOnRemote
+                            ? "防窥屏守护运行中；双击托盘恢复窗口，右键「彻底退出」将同时断开远控。"
+                            : "双击托盘可恢复窗口；右键「彻底退出」将同时断开远控。",
                         ToolTipIcon.Info);
                 }
                 return;
@@ -557,11 +562,7 @@ namespace DualRemote
                 try { activeOnboardingTour.Close(); } catch { }
                 activeOnboardingTour = null;
             }
-            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
-            {
-                activeStreamToolbar.CloseSafely();
-                activeStreamToolbar = null;
-            }
+            TeardownRemoteSessionsOnExit();
             localPairPreparing = false;
             Process pendingPairProcess = TakeClientPairProcess();
             if (pendingPairProcess != null)
@@ -581,6 +582,7 @@ namespace DualRemote
             }
             privacyCurtain.Dispose();
             DisposePreviewImage();
+            DeviceWallpaperGallery.DisposeCache();
             if (trayIcon != null)
             {
                 trayIcon.Visible = false;
@@ -1519,12 +1521,12 @@ namespace DualRemote
                 case StreamEngine.Enhanced:
                     started = FoundationClient.LaunchWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
                         showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile), useFoundationClient,
-                        lowLatencyNoVsync, enableFramePacing, false, out note);
+                        lowLatencyNoVsync, enableFramePacing, useAbsoluteMouse, true, false, out note);
                     break;
                 case StreamEngine.Official:
                     started = Engines.StreamMoonlightWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
                         showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile),
-                        lowLatencyNoVsync, enableFramePacing, out note);
+                        lowLatencyNoVsync, enableFramePacing, useAbsoluteMouse, true, out note);
                     break;
                 default:
                     SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
@@ -1550,6 +1552,7 @@ namespace DualRemote
             activeStreamPid = pid;
             string modeTag = profile.Height + "p" + profile.Fps + " · " + (UsesHevc(profile) ? "HEVC" : "H.264");
             int selectedIdx = Math.Max(0, quality.SelectedIndex);
+            SyncActiveControlIndicators();
 
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
             {
@@ -1569,6 +1572,7 @@ namespace DualRemote
                 delegate { return showStreamStats; },
                 delegate { return privacyCurtain.IsActive; },
                 delegate { return windowedStream; },
+                delegate { return useAbsoluteMouse; },
                 delegate(int newIdx) { SwitchActiveStreamQuality(newIdx); },
                 delegate
                 {
@@ -1583,13 +1587,58 @@ namespace DualRemote
                     SavePreferences();
                     RestartActiveStreamSession();
                 },
+                delegate
+                {
+                    useAbsoluteMouse = !useAbsoluteMouse;
+                    SavePreferences();
+                    if (useAbsoluteMouse) Engines.ReleaseCursorClip();
+                    RestartActiveStreamSession();
+                },
+                delegate { RestoreFromTray(); },
                 delegate { DisconnectActiveStreamSession(); },
                 delegate
                 {
                     activeStreamToolbar = null;
                     activeStreamPid = 0;
+                    activeStreamHost = "";
+                    SyncActiveControlIndicators();
                 });
             activeStreamToolbar.StartWatching();
+        }
+
+        private void SyncActiveControlIndicators()
+        {
+            if (IsDisposed) return;
+            bool controlling = activeStreamPid > 0 && Engines.IsProcessAlive(activeStreamPid);
+            if (!controlling && activeStreamPid > 0)
+            {
+                activeStreamPid = 0;
+                activeStreamHost = "";
+            }
+            bool anyActive = controlling || hostCurrentlyControlled;
+
+            if (topDisconnectBtn != null && topBarGrid != null && topDisconnectCol >= 0 && topDisconnectGapCol >= 0)
+            {
+                string label = controlling ? "退出控制" : "断开被控";
+                if (topDisconnectBtn.Text != label) topDisconnectBtn.Text = label;
+                if (topDisconnectBtn.Visible != anyActive)
+                {
+                    topDisconnectBtn.Visible = anyActive;
+                    float scale = CurrentDpiScale();
+                    topBarGrid.SuspendLayout();
+                    topBarGrid.ColumnStyles[topDisconnectCol].Width = anyActive ? (float)Math.Round(102f * scale) : 0f;
+                    topBarGrid.ColumnStyles[topDisconnectGapCol].Width = anyActive ? (float)Math.Round(6f * scale) : 0f;
+                    topBarGrid.ResumeLayout(true);
+                }
+            }
+
+            if (detailPreviewCanvas != null)
+            {
+                bool controllingDetail = controlling
+                    && !string.IsNullOrEmpty(detailDeviceAddress)
+                    && string.Equals(activeStreamHost, detailDeviceAddress, StringComparison.OrdinalIgnoreCase);
+                detailPreviewCanvas.SetControlling(controllingDetail);
+            }
         }
 
         private void SwitchActiveStreamQuality(int newIndex)
@@ -1622,11 +1671,134 @@ namespace DualRemote
         {
             int oldPid = activeStreamPid;
             activeStreamPid = 0;
-            if (oldPid > 0) Engines.StopStreamProcess(oldPid);
-            SetStatus("已断开远程串流会话。", Theme.PillTone.Info);
+            activeStreamHost = "";
+            Engines.ReleaseCursorClip();
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.CloseSafely();
+                activeStreamToolbar = null;
+            }
+            SyncActiveControlIndicators();
+            SetStatus("正在断开远程串流会话…", Theme.PillTone.Info);
+            Task.Run(delegate
+            {
+                Engines.StopManagedClientProcesses(oldPid, FoundationClient.EngineExe, Engines.MoonlightExe);
+            }).ContinueWith(delegate
+            {
+                if (IsDisposed) return;
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (!IsDisposed)
+                        {
+                            SyncActiveControlIndicators();
+                            SetStatus("已退出远程控制，双端会话已断开。", Theme.PillTone.Info);
+                            deviceBanner.Set("已退出远程控制，双端会话已断开。", Theme.PillTone.Info);
+                            RestoreFromTray();
+                        }
+                    }));
+                }
+                catch { }
+            });
+        }
+
+        private void DisconnectAllRemoteSessionsFromUi()
+        {
+            int oldPid = activeStreamPid;
+            activeStreamPid = 0;
+            activeStreamHost = "";
+            Engines.ReleaseCursorClip();
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.CloseSafely();
+                activeStreamToolbar = null;
+            }
+            SyncActiveControlIndicators();
+            Task.Run(delegate
+            {
+                int stoppedClients = Engines.StopManagedClientProcesses(oldPid,
+                    FoundationClient.EngineExe, Engines.MoonlightExe, Engines.RustDeskExe);
+                bool hadHostSessions = false;
+                string hostDetail;
+                bool hostStopped = SunshinePairing.TryDisconnectActiveSessions(out hadHostSessions, out hostDetail);
+                if (!IsDisposed)
+                {
+                    try
+                    {
+                        BeginInvoke(new Action(delegate
+                        {
+                            if (IsDisposed) return;
+                            if (hostStopped && hadHostSessions) hostCurrentlyControlled = false;
+                            SyncActiveControlIndicators();
+                            string msg;
+                            Theme.PillTone tone = Theme.PillTone.Info;
+                            if (stoppedClients > 0 || (hadHostSessions && hostStopped))
+                            {
+                                msg = "已断开当前远控会话。";
+                                tone = Theme.PillTone.Success;
+                            }
+                            else if (hadHostSessions && !hostStopped)
+                            {
+                                msg = string.IsNullOrEmpty(hostDetail)
+                                    ? "无法以当前权限断开系统安装版 Sunshine 会话，请在主控端点击「退出控制」或以管理员身份运行。"
+                                    : hostDetail;
+                                tone = Theme.PillTone.Warning;
+                            }
+                            else
+                            {
+                                msg = "当前没有进行中的远控会话。";
+                            }
+                            SetStatus(msg, tone);
+                            deviceBanner.Set(msg, tone);
+                        }));
+                    }
+                    catch { }
+                }
+            });
+        }
+
+        /// <summary>
+        /// 退出 BoBo远程 时，双端同步收尾远控会话：
+        /// 1. 主控端：优雅关闭 BoBo 托管的 Moonlight / RustDesk 进程（配合 --quit-after 通知被控端立即退出会话）；
+        /// 2. 被控端：通过 CA 证书固定的本机 Sunshine API 主动结束所有活跃会话并关闭远程应用（兼容系统安装版与内置宿主）；
+        /// 3. 内置宿主：若本机运行的是 BoBo 自带内置 Sunshine，发出断开指令后安全停止该内置进程（绝不触碰系统安装版）。
+        /// </summary>
+        private void TeardownRemoteSessionsOnExit()
+        {
+            if (remoteSessionsTornDown) return;
+            remoteSessionsTornDown = true;
+
+            int pid = activeStreamPid;
+            activeStreamPid = 0;
+            activeStreamHost = "";
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.CloseSafely();
+                activeStreamToolbar = null;
+            }
+
             try
             {
-                RestoreFromTray();
+                Engines.StopManagedClientProcesses(pid, FoundationClient.EngineExe, Engines.MoonlightExe, Engines.RustDeskExe);
+            }
+            catch { }
+
+            bool hadHostSessions = false;
+            try
+            {
+                string ignoredDetail;
+                SunshinePairing.TryDisconnectActiveSessions(out hadHostSessions, out ignoredDetail);
+            }
+            catch { }
+
+            try
+            {
+                if (BundledHost.RunningFromLocalRoot)
+                {
+                    if (hadHostSessions) System.Threading.Thread.Sleep(350);
+                    BundledHost.StopBundledHostOnExit();
+                }
             }
             catch { }
         }
@@ -1936,13 +2108,10 @@ namespace DualRemote
 
         private void SyncRemoteGuardTimer()
         {
-            if (privacyConfig.AutoOnRemote)
+            // 始终保持轻量轮询以实时同步主控/被控状态与顶部「退出控制」按钮；自动防窥仅在 AutoOnRemote 开启时触发
+            if (!remoteGuardTimer.Enabled) remoteGuardTimer.Start();
+            if (!privacyConfig.AutoOnRemote)
             {
-                if (!remoteGuardTimer.Enabled) remoteGuardTimer.Start();
-            }
-            else
-            {
-                remoteGuardTimer.Stop();
                 bool wasAuto = privacyGuard.AutoActivated;
                 privacyGuard.OnAutoGuardDisabled();
                 if (wasAuto && privacyCurtain.IsActive && !privacyCurtain.IsPreview)
@@ -1951,17 +2120,26 @@ namespace DualRemote
                 }
             }
             UpdatePrivacyIndicators();
+            SyncActiveControlIndicators();
         }
 
         private async Task PollRemoteGuardTick()
         {
-            if (guardPollBusy || !privacyConfig.AutoOnRemote || privacyGuard.SessionLocked || IsDisposed) return;
+            if (guardPollBusy || IsDisposed) return;
             guardPollBusy = true;
             long pollGeneration = privacyGuard.Generation;
             try
             {
                 bool activeSession = await Task.Run(() => HostNetworkInfo.IsHostBeingControlled());
-                if (IsDisposed || !privacyConfig.AutoOnRemote) return;
+                if (IsDisposed) return;
+
+                if (hostCurrentlyControlled != activeSession)
+                {
+                    hostCurrentlyControlled = activeSession;
+                }
+                SyncActiveControlIndicators();
+
+                if (!privacyConfig.AutoOnRemote || privacyGuard.SessionLocked) return;
 
                 PrivacyGuardAction action = privacyGuard.EvaluateAutoGuardPoll(
                     pollGeneration, activeSession, privacyCurtain.IsActive, privacyCurtain.IsPreview,

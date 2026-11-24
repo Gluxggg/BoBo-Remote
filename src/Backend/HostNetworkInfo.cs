@@ -60,7 +60,6 @@ namespace DualRemote
             string configError;
             if (!BundledHost.TryGetActiveConfigDirectory(out bundlingConfig, out configError))
                 bundlingConfig = null;
-            if (!BundledHost.ActiveUsesBundledRuntime) bundlingConfig = null;
             snap.ActiveUsesBundledRuntime = BundledHost.ActiveUsesBundledRuntime;
             snap.ActiveRoot = bundlingRoot;
             snap.ActiveConfigDirectory = bundlingConfig ?? "";
@@ -155,8 +154,11 @@ namespace DualRemote
             if (!string.IsNullOrEmpty(configDirectory))
             {
                 string localRoot = Path.GetFullPath(BundledHost.LocalRoot).TrimEnd('\\') + "\\";
-                string configFull = Path.GetFullPath(configDirectory);
-                if (!configFull.StartsWith(localRoot, StringComparison.OrdinalIgnoreCase)) configDirectory = null;
+                string installedConfig = Path.GetFullPath(Path.Combine(BundledHost.DefaultInstalledRoot, BundledHost.ConfigName)).TrimEnd('\\');
+                string configFull = Path.GetFullPath(configDirectory).TrimEnd('\\');
+                bool allowed = configFull.StartsWith(localRoot, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(configFull, installedConfig, StringComparison.OrdinalIgnoreCase);
+                if (!allowed) configDirectory = null;
             }
             snap.SunshineRunningExecutable = BundledHost.RunningExecutablePath ?? "";
             snap.SunshinePathUnknown = BundledHost.AnySunshineProcessRunning
@@ -236,12 +238,19 @@ namespace DualRemote
         {
             string outputName = GetVal(map, "output_name");
             string prep = GetVal(map, "display_device_prep");
+            bool legacySecondaryVdd = false;
             if (string.Equals(outputName, "ZakoHDR", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(prep, "ensure_only_display", StringComparison.OrdinalIgnoreCase))
                 snap.DisplayModeLabel = "熄屏防窥（仅虚拟屏）";
             else if (string.Equals(outputName, "ZakoHDR", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(prep, "ensure_primary", StringComparison.OrdinalIgnoreCase))
+                snap.DisplayModeLabel = "虚拟屏为主屏（保留实体屏）";
+            else if (string.Equals(outputName, "ZakoHDR", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(prep, "ensure_secondary", StringComparison.OrdinalIgnoreCase))
-                snap.DisplayModeLabel = "虚拟屏扩展（保留实体屏）";
+            {
+                snap.DisplayModeLabel = "副屏扩展（可能导致远控只见壁纸）";
+                legacySecondaryVdd = true;
+            }
             else
                 snap.DisplayModeLabel = "默认实体屏";
 
@@ -278,6 +287,11 @@ namespace DualRemote
             {
                 configGood = false;
                 snap.Recommendations.Add("未开启自动 FEC 动态前向纠错（fec_auto）");
+            }
+            if (legacySecondaryVdd)
+            {
+                configGood = false;
+                snap.Recommendations.Add("显示拓扑为副屏扩展（ensure_secondary），远控端可能只看到空白副屏壁纸且鼠标留在实体屏；请在「防窥与显示」点「恢复原设置」或「启用熄屏防窥 / 启用虚拟屏」。");
             }
             snap.AntiLossTuned = configGood;
             string readyItems = amdChecked ? "AMD CBR + HRD + LTR + Auto-FEC" : "Auto-FEC";
@@ -335,25 +349,67 @@ namespace DualRemote
             return map.TryGetValue(key, out val) ? val : "";
         }
 
+        private static readonly Regex LogTimestampRegex = new Regex(@"^\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})(?:\.\d+)?\]", RegexOptions.CultureInvariant);
+        private static readonly Regex LogActiveSessionsRegex = new Regex(@"New streaming session started\s*\[active sessions:\s*(\d+)\]", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
         /// <summary>
-        /// 检测本机当前是否正处于 Sunshine/Moonlight 远控会话中（只读，供防窥壁纸自动守护使用）。
-        /// 优先通过本机 CA 证书指纹校验的 /api/runtime/sessions 接口查询；若接口暂不可用则检查活动串流连接。
+        /// 检测本机当前是否正处于远控被控会话中（只读，供防窥壁纸自动守护与顶部「断开被控」指示使用）：
+        /// 1. 优先通过 CA 证书固定 + local-auth.token 查询本机 Sunshine /api/runtime/sessions（内置宿主与可读令牌的系统宿主）；
+        /// 2. 若因系统安装版 local-auth.token 权限受限（非管理员常见）无法调接口，则联合本机无鉴权 /serverinfo 与只读 sunshine.log 尾部精准判定；
+        /// 3. 检查动态端口 RTSP 握手连接（含 48010 与内置宿主回退端口）；
+        /// 4. 检查 RustDesk 入站连接管理器进程（--cm）。
         /// </summary>
         internal static bool IsHostBeingControlled()
         {
-            int sessions;
             string configDirectory;
             string configError;
-            if (BundledHost.ActiveUsesBundledRuntime
-                && BundledHost.TryGetActiveConfigDirectory(out configDirectory, out configError)
-                && TryQuerySunshineSessionCount(configDirectory, out sessions))
+            if (!BundledHost.TryGetActiveConfigDirectory(out configDirectory, out configError))
+                configDirectory = null;
+
+            int basePort = ResolveSunshineBasePort(configDirectory);
+
+            if (BundledHost.AnySunshineProcessRunning)
             {
-                return sessions > 0;
+                int sessions;
+                if (!string.IsNullOrEmpty(configDirectory) && TryQuerySunshineSessionCount(configDirectory, basePort + 1, out sessions))
+                {
+                    if (sessions > 0) return true;
+                }
+                else if (IsSunshineLogShowingActiveSession(configDirectory, basePort))
+                {
+                    return true;
+                }
             }
-            return HasActiveRemoteTcpConnection();
+
+            if (HasActiveRemoteTcpConnection(basePort))
+                return true;
+
+            if (HasActiveRustDeskIncomingSession())
+                return true;
+
+            return false;
         }
 
-        private static bool TryQuerySunshineSessionCount(string configDirectory, out int count)
+        internal static int ResolveSunshineBasePort(string configDirectory)
+        {
+            int basePort = 47989;
+            if (string.IsNullOrEmpty(configDirectory)) return basePort;
+            try
+            {
+                string conf = Path.Combine(configDirectory, "sunshine.conf");
+                if (File.Exists(conf))
+                {
+                    Dictionary<string, string> map = ParseKeyValues(conf);
+                    int parsed;
+                    if (int.TryParse(GetVal(map, "port"), out parsed) && parsed > 0 && parsed < 65500)
+                        basePort = parsed;
+                }
+            }
+            catch { }
+            return basePort;
+        }
+
+        private static bool TryQuerySunshineSessionCount(string configDirectory, int webPort, out int count)
         {
             count = 0;
             if (string.IsNullOrEmpty(configDirectory)) return false;
@@ -371,24 +427,25 @@ namespace DualRemote
             catch { return false; }
             if (string.IsNullOrEmpty(expectedThumbprint)) return false;
 
-            int webPort = 47990;
-            string conf = Path.Combine(configDirectory, "sunshine.conf");
-            if (File.Exists(conf))
+            string localToken = null;
+            try
             {
-                Dictionary<string, string> map = ParseKeyValues(conf);
-                int basePort;
-                if (int.TryParse(GetVal(map, "port"), out basePort) && basePort > 0 && basePort < 65534)
-                    webPort = basePort + 1;
+                string tokenPath = Path.Combine(configDirectory, BundledHost.TokenName);
+                if (File.Exists(tokenPath))
+                    localToken = File.ReadAllText(tokenPath, Encoding.UTF8).Trim();
             }
+            catch { }
 
             try
             {
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 var req = (HttpWebRequest)WebRequest.Create("https://localhost:" + webPort + "/api/runtime/sessions");
                 req.Proxy = null;
-                req.Timeout = 1800;
-                req.ReadWriteTimeout = 1800;
+                req.Timeout = 1600;
+                req.ReadWriteTimeout = 1600;
                 req.Method = "GET";
+                if (!string.IsNullOrEmpty(localToken))
+                    req.Headers["X-Sunshine-Local-Token"] = localToken;
                 req.ServerCertificateValidationCallback = delegate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
                 {
                     if (certificate == null) return false;
@@ -410,8 +467,159 @@ namespace DualRemote
             return false;
         }
 
-        private static bool HasActiveRemoteTcpConnection()
+        /// <summary>
+        /// 无鉴权读取本机 Sunshine /serverinfo（HTTP basePort），判定主机是否明确处于空闲态（SUNSHINE_SERVER_FREE）。
+        /// </summary>
+        internal static bool TryQuerySunshineServerBusy(int basePort, out bool serverBusy)
         {
+            serverBusy = false;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create("http://localhost:" + basePort + "/serverinfo");
+                req.Proxy = null;
+                req.Timeout = 1000;
+                req.ReadWriteTimeout = 1000;
+                req.Method = "GET";
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var stream = resp.GetResponseStream())
+                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                {
+                    string xml = reader.ReadToEnd();
+                    if (string.IsNullOrEmpty(xml)) return false;
+                    if (xml.IndexOf("SUNSHINE_SERVER_FREE", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        serverBusy = false;
+                        return true;
+                    }
+                    if (xml.IndexOf("SUNSHINE_SERVER_BUSY", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        serverBusy = true;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool IsSunshineLogShowingActiveSession(string configDirectory, int basePort)
+        {
+            bool serverBusy;
+            if (TryQuerySunshineServerBusy(basePort, out serverBusy) && !serverBusy)
+                return false;
+
+            string dir = configDirectory;
+            if (string.IsNullOrEmpty(dir))
+            {
+                string defaultDir = Path.Combine(DefaultSunshineRoot, "config");
+                if (Directory.Exists(defaultDir)) dir = defaultDir;
+            }
+            if (string.IsNullOrEmpty(dir)) return false;
+
+            string logPath = Path.Combine(dir, "sunshine.log");
+            string tail = ReadLogTail(logPath, 65536);
+            if (string.IsNullOrEmpty(tail)) return false;
+
+            DateTime procStart = BundledHost.TryGetRunningSunshineStartTimeLocal();
+            return ParseSunshineLogSessionActive(tail, procStart);
+        }
+
+        private static string ReadLogTail(string path, int maxBytes)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long len = fs.Length;
+                    if (len <= 0) return null;
+                    int toRead = (int)Math.Min(len, maxBytes);
+                    fs.Seek(len - toRead, SeekOrigin.Begin);
+                    byte[] buf = new byte[toRead];
+                    int offset = 0;
+                    while (offset < toRead)
+                    {
+                        int n = fs.Read(buf, offset, toRead - offset);
+                        if (n <= 0) break;
+                        offset += n;
+                    }
+                    return Encoding.UTF8.GetString(buf, 0, offset);
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 解析 sunshine.log 尾部事件流，判断是否仍有活跃远控会话（纯逻辑，供非管理员兜底与 SelfTest 校验）。
+        /// </summary>
+        internal static bool ParseSunshineLogSessionActive(string logTail, DateTime processStartLocal)
+        {
+            if (string.IsNullOrEmpty(logTail)) return false;
+            DateTime cutoff = processStartLocal == DateTime.MinValue
+                ? DateTime.MinValue
+                : processStartLocal.AddSeconds(-3);
+
+            int active = 0;
+            string[] lines = logTail.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+
+                if (cutoff != DateTime.MinValue)
+                {
+                    Match tm = LogTimestampRegex.Match(line);
+                    if (tm.Success)
+                    {
+                        DateTime stamp;
+                        if (DateTime.TryParseExact(tm.Groups[1].Value, "yyyy-MM-dd HH:mm:ss",
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.None, out stamp))
+                        {
+                            if (stamp < cutoff) continue;
+                        }
+                    }
+                }
+
+                Match started = LogActiveSessionsRegex.Match(line);
+                if (started.Success)
+                {
+                    int n;
+                    if (int.TryParse(started.Groups[1].Value, out n) && n >= 0)
+                        active = n;
+                    continue;
+                }
+                if (line.IndexOf("CLIENT CONNECTED", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (active < 1) active = 1;
+                    continue;
+                }
+                if (line.IndexOf("CLIENT DISCONNECTED", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    active = Math.Max(0, active - 1);
+                    continue;
+                }
+                if (line.IndexOf("SessionListener", StringComparison.OrdinalIgnoreCase) >= 0
+                    && (line.IndexOf("清理完成", StringComparison.Ordinal) >= 0
+                        || line.IndexOf("cleanup", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    active = 0;
+                }
+            }
+            return active > 0;
+        }
+
+        internal static bool HasActiveRemoteTcpConnection()
+        {
+            return HasActiveRemoteTcpConnection(47989);
+        }
+
+        internal static bool HasActiveRemoteTcpConnection(int sunshineBasePort)
+        {
+            int dynamicRtspPort = (sunshineBasePort > 0 && sunshineBasePort < 65500) ? (sunshineBasePort + 21) : 48010;
             try
             {
                 var props = IPGlobalProperties.GetIPGlobalProperties();
@@ -419,12 +627,51 @@ namespace DualRemote
                 {
                     if (conn.State != TcpState.Established) continue;
                     int localPort = conn.LocalEndPoint.Port;
-                    // Sunshine RTSP/Control (48010) 仅在活跃串流期间保持连接
-                    if (localPort == 48010 && !IPAddress.IsLoopback(conn.RemoteEndPoint.Address))
+                    // Sunshine RTSP 握手端口（默认 48010 或 basePort + 21，如回退端口 48210）
+                    if ((localPort == 48010 || localPort == dynamicRtspPort || localPort == 48210)
+                        && !IPAddress.IsLoopback(conn.RemoteEndPoint.Address))
                         return true;
                 }
             }
             catch { }
+            return false;
+        }
+
+        /// <summary>检测 RustDesk 是否有活跃的入站被控连接（RustDesk 在被控期间会拉起 --cm 连接管理子进程）。</summary>
+        internal static bool HasActiveRustDeskIncomingSession()
+        {
+            Process[] list = null;
+            try
+            {
+                list = Process.GetProcessesByName("rustdesk");
+                if (list == null || list.Length == 0) return false;
+                foreach (Process p in list)
+                {
+                    try
+                    {
+                        if (p.HasExited) continue;
+                        string cmd = BundledHost.TryGetWmiCommandLine(p.Id);
+                        if (!string.IsNullOrEmpty(cmd)
+                            && (cmd.IndexOf(" --cm", StringComparison.OrdinalIgnoreCase) >= 0
+                                || cmd.EndsWith("--cm", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            return true;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (list != null)
+                {
+                    foreach (Process p in list)
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
+            }
             return false;
         }
     }

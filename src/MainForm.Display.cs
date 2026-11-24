@@ -104,15 +104,15 @@ namespace DualRemote
             Theme.Row(desk, 10);
 
             var preserve = Theme.Action("启用虚拟屏", Theme.ButtonStyle.Secondary);
-            preserve.AccessibleName = "启用虚拟屏，保留实体屏";
+            preserve.AccessibleName = "启用虚拟屏为主屏，保留实体屏";
             preserve.Click += delegate { OpenDisplayTool("Apply", "Virtual"); };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Desktop, "铺满 16:10 虚拟屏（保留实体屏）",
-                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，自动匹配 16:10 比例并保留物理屏", preserve, 132);
+            AddStandaloneSettingCard(desk, Theme.Glyph.Desktop, "铺满 16:10 虚拟屏（设为主屏 · 保留实体屏）",
+                "将 Zako 虚拟屏设为远程主屏（任务栏与新窗口直出，避免只见副屏壁纸）；已打开的旧窗口若需自动迁入请改用下方「熄屏防窥」或恢复实体屏", preserve, 132);
 
             var privacy = Theme.Action("启用熄屏防窥", Theme.ButtonStyle.Primary);
             privacy.Click += delegate { OpenDisplayTool("Apply", "Privacy"); };
-            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "硬件级熄屏防窥（关闭物理屏信号）",
-                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，远程关闭物理显示器信号，断开自动恢复", privacy, 132);
+            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "硬件级熄屏防窥（仅虚拟屏 · 窗口自动迁入）",
+                "远程时关闭物理屏信号，全部已打开窗口、桌面图标与鼠标自动集中到远控虚拟屏，断开自动恢复物理屏", privacy, 132);
 
             var restoreRow = Theme.Grid(3);
             Theme.FillColumn(restoreRow);
@@ -415,7 +415,14 @@ namespace DualRemote
             if (displayModeBadge != null)
             {
                 string mode = string.IsNullOrEmpty(hostSnapshot.DisplayModeLabel) ? "未检测到宿主" : hostSnapshot.DisplayModeLabel;
-                displayModeBadge.UpdateStatus(mode, hostSnapshot.SunshineInstalled ? Theme.PillTone.Info : Theme.PillTone.Neutral);
+                bool legacySecondary = mode.IndexOf("副屏扩展", StringComparison.Ordinal) >= 0;
+                displayModeBadge.UpdateStatus(mode, legacySecondary
+                    ? Theme.PillTone.Warning
+                    : (hostSnapshot.SunshineInstalled ? Theme.PillTone.Info : Theme.PillTone.Neutral));
+                if (legacySecondary)
+                {
+                    ShowDisplayBanner("检测到当前为旧版副屏扩展（ensure_secondary），远控端可能只显示壁纸且鼠标停在实体屏；建议点击「恢复原设置」或「启用熄屏防窥 / 启用虚拟屏」。", Theme.PillTone.Warning);
+                }
             }
         }
 

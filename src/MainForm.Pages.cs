@@ -27,13 +27,18 @@ namespace DualRemote
         private Button navQuickDevice;
         private int navQuickDeviceRow = -1;
         private TableLayoutPanel navRail;
+        private TableLayoutPanel topBarGrid;
         private BorderFramePanel borderFrame;
         private Theme.WorkspaceFrame workspaceFrame;
+        private Button topDisconnectBtn;
+        private int topDisconnectCol = -1;
+        private int topDisconnectGapCol = -1;
         private Button topGuideBtn;
         private Button topPrivacyBtn;
         private Button topStatusBtn;
         private Button topMenuBtn;
         private Button maxRestoreBtn;
+        private Button navExitBtn;
         private Control perfDiagCard;
         private Theme.TwoLineText updateStatusCardText;
         private Button updateActionButton;
@@ -65,6 +70,7 @@ namespace DualRemote
         private bool useFoundationClient = true;
         private bool lowLatencyNoVsync = true;
         private bool enableFramePacing = false;
+        private bool useAbsoluteMouse = true;
         private bool minimizeToTray = false;
         private bool keepThisComputerAwake = false;
         private bool autoCheckUpdates = true;
@@ -120,9 +126,14 @@ namespace DualRemote
 
         private Control BuildTopBar()
         {
-            var bar = Theme.Grid(13);
+            var bar = Theme.Grid(15);
+            topBarGrid = bar;
             Theme.FixedColumn(bar, 232);
             Theme.FillColumn(bar);
+            topDisconnectCol = bar.ColumnStyles.Count;
+            Theme.FixedColumn(bar, 0);
+            topDisconnectGapCol = bar.ColumnStyles.Count;
+            Theme.FixedColumn(bar, 0);
             Theme.FixedColumn(bar, 36);
             Theme.FixedColumn(bar, 4);
             Theme.FixedColumn(bar, 36);
@@ -141,6 +152,12 @@ namespace DualRemote
 
             var dragSpace = new Panel { Dock = DockStyle.Fill, BackColor = Theme.ChromeBg, Margin = Padding.Empty };
             AttachDragHandlers(dragSpace);
+
+            topDisconnectBtn = Theme.Action("退出控制", Theme.ButtonStyle.DangerPill, Theme.Glyph.Close);
+            topDisconnectBtn.AccessibleName = "退出当前远控控制";
+            topDisconnectBtn.Margin = new Padding(0, 9, 0, 9);
+            topDisconnectBtn.Visible = false;
+            topDisconnectBtn.Click += delegate { DisconnectAllRemoteSessionsFromUi(); };
 
             topGuideBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Help);
             topGuideBtn.AccessibleName = "新手使用引导";
@@ -178,7 +195,7 @@ namespace DualRemote
             closeBtn.AccessibleName = "关闭";
             closeBtn.Click += delegate { Close(); };
 
-            Theme.Row(bar, 48, brand, dragSpace, topGuideBtn, null, topPrivacyBtn, null, topStatusBtn, null, topMenuBtn, sepWrap, minBtn, maxRestoreBtn, closeBtn);
+            Theme.Row(bar, 48, brand, dragSpace, topDisconnectBtn, null, topGuideBtn, null, topPrivacyBtn, null, topStatusBtn, null, topMenuBtn, sepWrap, minBtn, maxRestoreBtn, closeBtn);
             return bar;
         }
 
@@ -307,13 +324,21 @@ namespace DualRemote
 
             Theme.FillRow(rail);
 
-            // Bottom pinned divider + Settings (exact UU layout)
+            // Bottom pinned divider + Settings + Direct Exit button (clear frontend exit!)
             Theme.Row(rail, 1, Theme.Rule());
             Theme.Row(rail, 8);
             var settingsBtn = MakePageButton(SettingsPage, Theme.Glyph.Gear, "设置");
             Theme.SetNavIndent(settingsBtn, 0);
             Theme.SetGlyphTint(settingsBtn, Theme.BodyInk);
             Theme.Row(rail, 38, settingsBtn);
+
+            Theme.Row(rail, 4);
+            navExitBtn = Theme.Action("退出 BoBo远程", Theme.ButtonStyle.Navigation, Theme.Glyph.Close);
+            navExitBtn.AccessibleName = "退出 BoBo远程并断开远控";
+            Theme.SetNavIndent(navExitBtn, 0);
+            Theme.SetGlyphTint(navExitBtn, Theme.Alert);
+            navExitBtn.Click += delegate { forceExit = true; Close(); };
+            Theme.Row(rail, 38, navExitBtn);
             return rail;
         }
 
@@ -608,6 +633,10 @@ namespace DualRemote
                 "关闭时端到端延迟最低；若高刷屏拖动窗口有微抖动可开启平滑",
                 PreferenceToggle("帧节奏平滑", enableFramePacing, value => enableFramePacing = value));
 
+            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "自由出框桌面鼠标（绝对坐标 · 推荐）",
+                "鼠标精确映射到远控画面并可自由滑出窗口或触碰顶部悬浮条，不锁死本机键鼠；玩 3D FPS 时可在悬浮条切为「锁鼠模式」",
+                PreferenceToggle("绝对坐标鼠标", useAbsoluteMouse, value => useAbsoluteMouse = value));
+
             AddStandaloneSettingCard(page, Theme.Glyph.Info, "串流实时性能浮层（OSD）",
                 "连接后实时显示帧率、网络丢帧、RTT 延迟与解码耗时（会话中可按 Ctrl+Alt+Shift+S）",
                 PreferenceToggle("串流统计", showStreamStats, value => showStreamStats = value));
@@ -617,7 +646,7 @@ namespace DualRemote
                 PreferenceToggle("在被控端同时播放声音", playAudioOnHost, value => playAudioOnHost = value));
 
             AddStandaloneSettingCard(page, Theme.Glyph.Maximize, "使用窗口模式打开串流",
-                "开启后以可自由拖拽拉伸的窗口显示远程桌面；关闭时默认全屏",
+                "开启后以可自由拖拽拉伸的窗口显示远程桌面；关闭时默认无边框全屏（不遮挡悬浮条、切屏不黑屏）",
                 PreferenceToggle("使用窗口模式", windowedStream, value => windowedStream = value));
 
             return page;
@@ -862,7 +891,9 @@ namespace DualRemote
             AddPopupItem(menu, "打开本机 RustDesk 窗口", delegate { var _ = OpenLocalRustDeskOnSettings(); });
             AddPopupItem(menu, "低延迟调优与防窥指南", delegate { OpenGuide(); });
             menu.Items.Add(new ToolStripSeparator());
+            AddPopupItem(menu, "断开当前远控会话", delegate { DisconnectAllRemoteSessionsFromUi(); });
             AddPopupItem(menu, "关于 BoBo远程", delegate { ShowAboutDialog(); });
+            AddPopupItem(menu, "退出 BoBo远程（断开远控）", delegate { forceExit = true; Close(); });
 
             int menuW = Math.Max(DevicePixels(228), menu.PreferredSize.Width);
             Point pt = topMenuBtn.PointToScreen(new Point(topMenuBtn.Width - menuW, topMenuBtn.Height + DevicePixels(6)));
@@ -1528,6 +1559,7 @@ namespace DualRemote
             preferHevc = true;
             lowLatencyNoVsync = true;
             enableFramePacing = false;
+            useAbsoluteMouse = true;
             minimizeToTray = false;
             autoCheckUpdates = true;
             defaultQuality = 0;
@@ -1551,6 +1583,7 @@ namespace DualRemote
                     enableFramePacing = ReadFlag(lines, 9, false);
                     minimizeToTray = ReadFlag(lines, 10, false);
                     autoCheckUpdates = ReadFlag(lines, 11, true);
+                    useAbsoluteMouse = ReadFlag(lines, 12, true);
                 }
                 else
                 {
@@ -1590,7 +1623,8 @@ namespace DualRemote
                     WriteFlag(lowLatencyNoVsync),
                     WriteFlag(enableFramePacing),
                     WriteFlag(minimizeToTray),
-                    WriteFlag(autoCheckUpdates)
+                    WriteFlag(autoCheckUpdates),
+                    WriteFlag(useAbsoluteMouse)
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

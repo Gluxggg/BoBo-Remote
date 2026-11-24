@@ -759,10 +759,14 @@ namespace DualRemote
             detailPreviewCardLayout = hc;
 
             detailPreviewCanvas = new DevicePreviewCanvas();
-            detailPreviewCanvas.Click += async delegate
+            detailPreviewCanvas.ConnectRequested += async delegate
             {
                 if (!string.IsNullOrEmpty(detailDeviceAddress))
                     await ConnectToDeviceAsync(detailDeviceAddress, detailDeviceName);
+            };
+            detailPreviewCanvas.DisconnectRequested += delegate
+            {
+                DisconnectActiveStreamSession();
             };
             detailPreviewRow = hc.RowCount;
             Theme.Row(hc, 228, detailPreviewCanvas);
@@ -902,6 +906,7 @@ namespace DualRemote
             if (detailPreviewCanvas != null)
                 detailPreviewCanvas.SetDevice(detailDeviceName, detailDeviceAddress, detailDeviceLink, online);
             SyncDetailFavoriteButton();
+            SyncActiveControlIndicators();
             ShowPage(DeviceDetailPage);
         }
 
@@ -931,7 +936,14 @@ namespace DualRemote
             private string deviceAddress = "";
             private string linkText = "";
             private bool online = true;
+            private bool controlling;
             private bool hovered;
+            private bool hoverShuffle;
+            private int wallpaperIndex;
+            private RectangleF shuffleRect = RectangleF.Empty;
+
+            internal event Action ConnectRequested;
+            internal event Action DisconnectRequested;
 
             internal DevicePreviewCanvas()
             {
@@ -940,6 +952,7 @@ namespace DualRemote
                 Cursor = Cursors.Hand;
                 DoubleBuffered = true;
                 ResizeRedraw = true;
+                wallpaperIndex = DeviceWallpaperGallery.GetOrAssignIndex("__init__");
             }
 
             internal void SetDevice(string name, string address, string link, bool isOnline)
@@ -948,11 +961,59 @@ namespace DualRemote
                 deviceAddress = address ?? "";
                 linkText = link ?? "";
                 online = isOnline;
+                string key = !string.IsNullOrEmpty(deviceAddress) ? deviceAddress : deviceName;
+                wallpaperIndex = DeviceWallpaperGallery.GetOrAssignIndex(key);
+                Invalidate();
+            }
+
+            internal void SetControlling(bool active)
+            {
+                if (controlling == active) return;
+                controlling = active;
                 Invalidate();
             }
 
             protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
-            protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hovered = false;
+                hoverShuffle = false;
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                base.OnMouseMove(e);
+                bool overShuffle = !shuffleRect.IsEmpty && shuffleRect.Contains(e.Location);
+                if (overShuffle != hoverShuffle)
+                {
+                    hoverShuffle = overShuffle;
+                    Invalidate();
+                }
+            }
+
+            protected override void OnMouseClick(MouseEventArgs e)
+            {
+                base.OnMouseClick(e);
+                if (e.Button != MouseButtons.Left) return;
+                if (!shuffleRect.IsEmpty && shuffleRect.Contains(e.Location))
+                {
+                    string key = !string.IsNullOrEmpty(deviceAddress) ? deviceAddress : deviceName;
+                    wallpaperIndex = DeviceWallpaperGallery.CycleRandomIndex(key);
+                    Invalidate();
+                    return;
+                }
+                if (controlling)
+                {
+                    var handler = DisconnectRequested;
+                    if (handler != null) handler();
+                    return;
+                }
+                var connectHandler = ConnectRequested;
+                if (connectHandler != null) connectHandler();
+            }
 
             protected override void OnPaint(PaintEventArgs e)
             {
@@ -964,53 +1025,49 @@ namespace DualRemote
                 float scale = g.DpiX / 96f;
 
                 var rect = new RectangleF(1f, 1f, Math.Max(2f, Width - 2f), Math.Max(2f, Height - 1f));
-                Color c1 = online ? Color.FromArgb(224, 240, 255) : Color.FromArgb(234, 240, 246);
-                Color c2 = online ? Color.FromArgb(188, 220, 252) : Color.FromArgb(217, 225, 235);
-
                 var clipState = g.Save();
                 using (var topClip = Theme.RoundTop(rect, 7.5f * scale))
                 {
                     g.SetClip(topClip);
-                    using (var bg = new LinearGradientBrush(rect, c1, c2, 32f))
-                        g.FillRectangle(bg, rect);
 
-                    // Serene frosted-aurora horizon mist + layered alpine silhouettes
+                    // 随机 Windows 系统风景图（或内置高质感 Windows 风景场景）
+                    DeviceWallpaperGallery.DrawWallpaper(g, rect, wallpaperIndex, online);
+
                     float h = Height;
                     float w = Width;
-                    using (var glow = new SolidBrush(online ? Color.FromArgb(95, 255, 255, 255) : Color.FromArgb(60, 255, 255, 255)))
-                        g.FillEllipse(glow, w * 0.56f, -h * 0.25f, w * 0.52f, h * 0.92f);
-                    using (var hill1 = new GraphicsPath())
+
+                    // Top-left live status badge when actively controlling this device
+                    if (controlling)
                     {
-                        hill1.AddPolygon(new[]
+                        string liveText = "● 正在远程控制中";
+                        using (var lf = new Font("Microsoft YaHei UI", 8.4f, FontStyle.Bold))
                         {
-                            new PointF(0, h),
-                            new PointF(0, h * 0.72f),
-                            new PointF(w * 0.26f, h * 0.46f),
-                            new PointF(w * 0.56f, h * 0.67f),
-                            new PointF(w * 0.84f, h * 0.40f),
-                            new PointF(w, h * 0.54f),
-                            new PointF(w, h)
-                        });
-                        using (var b = new SolidBrush(online ? Color.FromArgb(46, 51, 122, 255) : Color.FromArgb(38, 100, 114, 134)))
-                            g.FillPath(b, hill1);
-                    }
-                    using (var hill2 = new GraphicsPath())
-                    {
-                        hill2.AddPolygon(new[]
-                        {
-                            new PointF(0, h),
-                            new PointF(0, h * 0.84f),
-                            new PointF(w * 0.34f, h * 0.65f),
-                            new PointF(w * 0.66f, h * 0.80f),
-                            new PointF(w, h * 0.60f),
-                            new PointF(w, h)
-                        });
-                        using (var b = new SolidBrush(online ? Color.FromArgb(64, 34, 102, 236) : Color.FromArgb(50, 96, 110, 128)))
-                            g.FillPath(b, hill2);
+                            Size lsz = TextRenderer.MeasureText(g, liveText, lf, new Size(260, 26),
+                                TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                            var livePill = new RectangleF(16f * scale, 14f * scale, lsz.Width + 22f * scale, 26f * scale);
+                            Theme.Surface(g, livePill, 13f * scale, Color.FromArgb(215, 16, 136, 72), Color.FromArgb(110, 255, 255, 255), 1f);
+                            TextRenderer.DrawText(g, liveText, lf, Rectangle.Round(livePill), Color.White,
+                                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                        }
                     }
 
-                    // Centered clean connect CTA pill (symmetric icon + text centering)
-                    string ctaText = online ? "进入远程桌面" : "设备离线";
+                    // Top-right frosted "换壁纸" mini pill
+                    using (var sf = new Font("Microsoft YaHei UI", 8.1f, FontStyle.Regular))
+                    {
+                        const string shuffleLabel = "换风景图";
+                        Size ssz = TextRenderer.MeasureText(g, shuffleLabel, sf, new Size(160, 24),
+                            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                        float sw = ssz.Width + 22f * scale;
+                        float sh = 24f * scale;
+                        shuffleRect = new RectangleF(w - sw - 14f * scale, 14f * scale, sw, sh);
+                        Color sBg = hoverShuffle ? Color.FromArgb(215, 22, 34, 52) : Color.FromArgb(148, 18, 28, 44);
+                        Theme.Surface(g, shuffleRect, sh * 0.5f, sBg, Color.FromArgb(95, 255, 255, 255), 1f);
+                        TextRenderer.DrawText(g, shuffleLabel, sf, Rectangle.Round(shuffleRect), Color.FromArgb(245, 249, 255),
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                    }
+
+                    // Centered clean CTA pill (connect or exit remote control)
+                    string ctaText = controlling ? "退出远程控制" : (online ? "进入远程桌面" : "设备离线");
                     float ctaH = 42f * scale;
                     float iconSz = (float)Math.Round(16f * scale);
                     float gap = (float)Math.Round(8f * scale);
@@ -1019,26 +1076,38 @@ namespace DualRemote
                         Size textSz = TextRenderer.MeasureText(g, ctaText, f, new Size(int.MaxValue, (int)ctaH),
                             TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                         float contentW = iconSz + gap + textSz.Width;
-                        float ctaW = Math.Max(148f * scale, contentW + 44f * scale);
-                        var ctaRect = new RectangleF((w - ctaW) / 2f, (h - ctaH) / 2f - 6f * scale, ctaW, ctaH);
-                        Color ctaBg = !online ? Color.FromArgb(196, 116, 124, 138) : hovered ? Theme.AccentHover : Theme.Accent;
-                        Theme.Surface(g, ctaRect, ctaH * 0.5f, ctaBg, Color.FromArgb(90, 255, 255, 255), 1f);
+                        float ctaW = Math.Max(154f * scale, contentW + 46f * scale);
+                        var ctaRect = new RectangleF((w - ctaW) / 2f, (h - ctaH) / 2f - 4f * scale, ctaW, ctaH);
+                        // Soft elevation shadow so pill stands out crisply over bright scenic photos
+                        var shadowRect = new RectangleF(ctaRect.X, ctaRect.Y + 3f * scale, ctaRect.Width, ctaRect.Height);
+                        Theme.Surface(g, shadowRect, ctaH * 0.5f, Color.FromArgb(72, 10, 18, 32), Color.Transparent, 0f);
+
+                        Color ctaBg;
+                        if (controlling)
+                            ctaBg = (hovered && !hoverShuffle) ? Color.FromArgb(232, 52, 64) : Theme.Alert;
+                        else if (!online)
+                            ctaBg = Color.FromArgb(204, 102, 112, 128);
+                        else
+                            ctaBg = (hovered && !hoverShuffle) ? Theme.AccentHover : Theme.Accent;
+
+                        Theme.Surface(g, ctaRect, ctaH * 0.5f, ctaBg, Color.FromArgb(130, 255, 255, 255), 1.1f);
 
                         float startX = (float)Math.Round(ctaRect.X + (ctaW - contentW) / 2f);
-                        Theme.DrawGlyph(g, Theme.Glyph.Desktop, new RectangleF(startX, (float)Math.Round(ctaRect.Y + (ctaH - iconSz) / 2f), iconSz, iconSz), Theme.Paper);
+                        Theme.Glyph ctaGlyph = controlling ? Theme.Glyph.Close : Theme.Glyph.Desktop;
+                        Theme.DrawGlyph(g, ctaGlyph, new RectangleF(startX, (float)Math.Round(ctaRect.Y + (ctaH - iconSz) / 2f), iconSz, iconSz), Theme.Paper);
                         TextRenderer.DrawText(g, ctaText, f,
                             new Rectangle((int)Math.Round(startX + iconSz + gap), (int)Math.Round(ctaRect.Y), textSz.Width + 6, (int)Math.Round(ctaH)),
                             Theme.Paper, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                     }
 
-                    // Bottom-left crisp address & path chip
+                    // Bottom-left crisp frosted address & path chip
                     string meta = string.IsNullOrEmpty(deviceAddress) ? "请选择一台设备" : (deviceAddress + (string.IsNullOrEmpty(linkText) ? "" : "  ·  " + linkText));
                     using (var mf = new Font("Consolas", 8.75f))
                     {
                         Size sz = TextRenderer.MeasureText(g, meta, mf, new Size((int)(w - 40), 26),
                             TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                         var chip = new RectangleF(16f * scale, h - 36f * scale, Math.Min(w - 32f * scale, sz.Width + 22f * scale), 24f * scale);
-                        Theme.Surface(g, chip, 4f * scale, Color.FromArgb(224, 255, 255, 255), Color.FromArgb(52, 29, 33, 41), 1f);
+                        Theme.Surface(g, chip, 5f * scale, Color.FromArgb(230, 255, 255, 255), Color.FromArgb(72, 20, 28, 40), 1f);
                         TextRenderer.DrawText(g, meta, mf, Rectangle.Round(chip), Theme.Ink,
                             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                     }

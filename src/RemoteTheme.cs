@@ -73,7 +73,8 @@ namespace DualRemote
             UnderlineTab,
             Chip,
             ToolbarAction,
-            IconGhost
+            IconGhost,
+            DangerPill
         }
 
         internal enum Glyph
@@ -958,7 +959,8 @@ namespace DualRemote
                 try
                 {
                     Color defaultParent = (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection
-                        || style == ButtonStyle.Caption || style == ButtonStyle.Close || style == ButtonStyle.IconGhost)
+                        || style == ButtonStyle.Caption || style == ButtonStyle.Close || style == ButtonStyle.IconGhost
+                        || style == ButtonStyle.DangerPill)
                         ? ChromeBg : Paper;
                     Color surface = ResolveSurface(this, defaultParent);
                     g.Clear(surface);
@@ -1042,8 +1044,13 @@ namespace DualRemote
                         background = glow ? NavHover : surface;
                         text = BodyInk;
                     }
+                    else if (style == ButtonStyle.DangerPill)
+                    {
+                        background = !Enabled ? DisabledBg : pressed ? Color.FromArgb(172, 32, 42) : glow ? Color.FromArgb(232, 52, 64) : Alert;
+                        text = Paper;
+                    }
 
-                    if (!Enabled && style != ButtonStyle.Primary) text = Muted;
+                    if (!Enabled && style != ButtonStyle.Primary && style != ButtonStyle.DangerPill) text = Muted;
                     if (SystemInformation.HighContrast)
                     {
                         background = Active ? SystemColors.Highlight : SystemColors.ButtonFace;
@@ -1054,7 +1061,7 @@ namespace DualRemote
 
                     float radius = (style == ButtonStyle.Caption || style == ButtonStyle.Close || style == ButtonStyle.UnderlineTab
                         || style == ButtonStyle.Link || style == ButtonStyle.ToolbarAction)
-                        ? 0f : (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection) ? 8f * scale : 6.5f * scale;
+                        ? 0f : style == ButtonStyle.DangerPill ? (Height - 2f) * 0.5f : (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection) ? 8f * scale : 6.5f * scale;
 
                     if (style != ButtonStyle.UnderlineTab && style != ButtonStyle.Link)
                     {
@@ -1082,7 +1089,7 @@ namespace DualRemote
 
                     glyphColor = CustomGlyphColor.IsEmpty ? text : CustomGlyphColor;
                     if (!Enabled) glyphColor = Muted;
-                    if (style == ButtonStyle.Primary) glyphColor = text;
+                    if (style == ButtonStyle.Primary || style == ButtonStyle.DangerPill) glyphColor = text;
 
                     Font drawFont = Font;
                     if (style == ButtonStyle.UnderlineTab && Active)

@@ -7,9 +7,9 @@
     output_name / display_device_prep / resolution_change / refresh_rate_change
 
     Privacy（防窥）  = ZakoHDR + ensure_only_display + automatic + automatic
-                       会话期间关闭物理显示器，只保留 Zako 虚拟显示器。
-    Virtual（铺满保留实体屏） = ZakoHDR + ensure_secondary + automatic + automatic
-                       物理显示器保留为主屏，Zako 虚拟显示器作为副屏扩展并作为捕获目标。
+                       会话期间关闭物理显示器，只保留 Zako 虚拟显示器（原有窗口与鼠标全部自动迁入）。
+    Virtual（虚拟屏主屏） = ZakoHDR + ensure_primary + automatic + automatic
+                       启用 Zako 虚拟显示器并设为远程主屏（避免仅看到空白副屏壁纸与鼠标停在实体屏），同时保留物理显示器。
 
   Status 默认只读；Preview 只读预览；Apply 先备份再原子写入；Restore 只按备份还原这 4 个键。
   默认不重启 Sunshine；只有显式 -RestartSunshine 才重启服务并验证运行中的配置。
@@ -84,7 +84,7 @@ $script:ModeValues = @{
     }
     Virtual = [ordered]@{
         output_name         = 'ZakoHDR'
-        display_device_prep = 'ensure_secondary'
+        display_device_prep = 'ensure_primary'
         resolution_change   = 'automatic'
         refresh_rate_change = 'automatic'
     }
@@ -219,6 +219,14 @@ function Get-SunshineCertificateThumbprint([string] $Root) {
     return $result
 }
 
+function Get-SunshineLocalAuthToken([string] $Root) {
+    if ([string]::IsNullOrWhiteSpace($Root)) { return '' }
+    $tokenPath = Join-Path $Root 'config\local-auth.token'
+    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) { return '' }
+    try { return ([IO.File]::ReadAllText($tokenPath, [Text.Encoding]::UTF8)).Trim() }
+    catch { return '' }
+}
+
 function Invoke-SunshinePinnedApi([string] $Path, [int] $Port, [string] $ExpectedThumbprint) {
     $result = [ordered]@{ ok = $false; status = 0; body = ''; error = '' }
     if ([string]::IsNullOrWhiteSpace($ExpectedThumbprint)) { $result.error = '缺少固定证书指纹，拒绝请求。'; return $result }
@@ -244,6 +252,10 @@ function Invoke-SunshinePinnedApi([string] $Path, [int] $Port, [string] $Expecte
         $request.ReadWriteTimeout = 5000
         $request.Method = 'GET'
         $request.Accept = 'application/json'
+        $localToken = Get-SunshineLocalAuthToken $SunshineRoot
+        if (-not [string]::IsNullOrWhiteSpace($localToken)) {
+            $request.Headers['X-Sunshine-Local-Token'] = $localToken
+        }
         $response = $request.GetResponse()
         try {
             $reader = New-Object IO.StreamReader($response.GetResponseStream(), [Text.Encoding]::UTF8)
@@ -425,7 +437,8 @@ function Get-DisplayModeFromValues($Values) {
     $output = Get-EffectiveConfigValue $Values 'output_name'
     $prep = Get-EffectiveConfigValue $Values 'display_device_prep'
     if ($output -eq 'ZakoHDR' -and $prep -eq 'ensure_only_display') { return 'Privacy' }
-    if ($output -eq 'ZakoHDR' -and $prep -eq 'ensure_secondary') { return 'Virtual' }
+    if ($output -eq 'ZakoHDR' -and $prep -eq 'ensure_primary') { return 'Virtual' }
+    if ($output -eq 'ZakoHDR' -and $prep -eq 'ensure_secondary') { return 'VirtualSecondary' }
     if ($output -eq 'ZakoHDR') { return 'ZakoVdd' }
     if ($output -eq '' -and $prep -eq 'no_operation') { return 'Default' }
     return 'Custom'
@@ -433,12 +446,13 @@ function Get-DisplayModeFromValues($Values) {
 
 function Get-DisplayModeLabel([string] $ModeName) {
     switch ($ModeName) {
-        'Privacy'  { return '防窥（Privacy）' }
-        'Virtual'  { return '铺满保留实体屏（Virtual）' }
-        'ZakoVdd'  { return 'ZakoHDR 其他显示准备' }
-        'Default'  { return '默认（未指定输出）' }
-        'Custom'   { return '自定义/其他' }
-        default    { return $ModeName }
+        'Privacy'          { return '防窥（Privacy · 仅虚拟屏）' }
+        'Virtual'          { return '铺满虚拟屏为主屏（Virtual · 保留实体屏）' }
+        'VirtualSecondary' { return '副屏扩展（旧配置：远控仅见空副屏壁纸，建议改为主屏或恢复原设置）' }
+        'ZakoVdd'          { return 'ZakoHDR 其他显示准备' }
+        'Default'          { return '默认（未指定输出）' }
+        'Custom'           { return '自定义/其他' }
+        default            { return $ModeName }
     }
 }
 

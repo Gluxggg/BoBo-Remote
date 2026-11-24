@@ -613,6 +613,61 @@ namespace DualRemote
             }
         }
 
+        /// <summary>
+        /// 程序退出时安全停止运行自稳定内置目录（%LOCALAPPDATA%\双端远程\host）的包内 Sunshine 进程。
+        /// 绝不触碰用户自行安装的系统版（如 C:\Program Files\Sunshine）。
+        /// </summary>
+        internal static bool StopBundledHostOnExit()
+        {
+            string ignored;
+            bool stoppedAny = TryStopBundled(out ignored);
+            Process[] processes = null;
+            try
+            {
+                processes = GetSunshineProcesses();
+                foreach (Process process in processes)
+                {
+                    try
+                    {
+                        string executable = TryGetProcessExecutablePath(process);
+                        if (!IsManagedProcessPath(executable, LocalRoot)) continue;
+                        if (!process.HasExited)
+                        {
+                            try { process.CloseMainWindow(); } catch { }
+                            if (!process.WaitForExit(1200))
+                            {
+                                try { process.Kill(); process.WaitForExit(2000); } catch { }
+                            }
+                        }
+                        stoppedAny = true;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (processes != null)
+                {
+                    foreach (Process process in processes)
+                    {
+                        try { process.Dispose(); } catch { }
+                    }
+                }
+            }
+            if (stoppedAny)
+            {
+                lock (LaunchLock) { ClearOwnedProcess(); }
+            }
+            return stoppedAny;
+        }
+
+        internal static bool IsManagedProcessPath(string processPath, string managedTarget)
+        {
+            if (string.IsNullOrEmpty(processPath) || string.IsNullOrEmpty(managedTarget)) return false;
+            return SamePath(processPath, managedTarget) || IsPathUnder(processPath, managedTarget);
+        }
+
         private static void ClearOwnedProcess()
         {
             ownedProcessId = 0;
@@ -920,7 +975,7 @@ namespace DualRemote
             }
         }
 
-        private static string TryGetProcessExecutablePath(Process process)
+        internal static string TryGetProcessExecutablePath(Process process)
         {
             IntPtr handle = IntPtr.Zero;
             try
@@ -994,7 +1049,36 @@ namespace DualRemote
             return false;
         }
 
-        private static string TryGetWmiCommandLine(int processId)
+        internal static DateTime TryGetRunningSunshineStartTimeLocal()
+        {
+            Process[] list = null;
+            try
+            {
+                list = GetSunshineProcesses();
+                foreach (Process process in list)
+                {
+                    try
+                    {
+                        if (!process.HasExited) return process.StartTime;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (list != null)
+                {
+                    foreach (Process process in list)
+                    {
+                        try { process.Dispose(); } catch { }
+                    }
+                }
+            }
+            return DateTime.MinValue;
+        }
+
+        internal static string TryGetWmiCommandLine(int processId)
         {
             object locator = null;
             object service = null;

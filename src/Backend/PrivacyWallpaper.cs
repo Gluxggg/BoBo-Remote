@@ -179,7 +179,7 @@ namespace DualRemote
         internal int Preset = PresetDeepSpace;
         internal string CustomImagePath = "";
         internal int FitMode = FitCover;
-        internal bool AutoOnRemote = false;
+        internal bool AutoOnRemote = true;
         internal bool ShowOverlayBadge = true;
         internal bool LockOnLocalExit = false;
         internal string Caption = "远程安全防窥保护中";

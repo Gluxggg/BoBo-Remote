@@ -47,6 +47,9 @@ namespace DualRemote
         private const string PinPath = "/api/pairing/pin";
         private const string PendingPathPrefix = "/api/pairing/pending/";
         private const string ClientsPath = "/api/clients/list";
+        private const string RuntimeSessionsPath = "/api/runtime/sessions";
+        private const string StopSessionsPath = "/api/runtime/sessions/stop";
+        private const string CloseAppPath = "/api/apps/close";
 
         /// <summary>
         /// 只读检查本机 Sunshine 配对接口。先验证构件、令牌、证书和端口，再对 pending
@@ -499,6 +502,159 @@ namespace DualRemote
             }
             port = basePort + 1;
             return true;
+        }
+
+        internal static bool TryParseActiveSessionCount(string json, out int totalSessions)
+        {
+            totalSessions = 0;
+            if (string.IsNullOrEmpty(json)) return false;
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> root = serializer.Deserialize<Dictionary<string, object>>(json);
+                if (root == null) return false;
+                object countObj;
+                if (root.TryGetValue("total_sessions", out countObj) && countObj != null)
+                {
+                    int parsed;
+                    if (int.TryParse(Convert.ToString(countObj, CultureInfo.InvariantCulture),
+                        NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) && parsed >= 0)
+                    {
+                        totalSessions = parsed;
+                        return true;
+                    }
+                }
+                object sessionsObj;
+                if (root.TryGetValue("sessions", out sessionsObj) && sessionsObj != null)
+                {
+                    ArrayList list = sessionsObj as ArrayList;
+                    if (list != null)
+                    {
+                        totalSessions = list.Count;
+                        return true;
+                    }
+                    object[] arr = sessionsObj as object[];
+                    if (arr != null)
+                    {
+                        totalSessions = arr.Length;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 退出软件或手动断开时，通过本机 CA 证书固定 + local-auth.token 的受信任本地 API，
+        /// 主动断开本机 Sunshine 正在进行的全部远控串流并关闭已拉起的远程应用（同时兼容系统安装版与包内宿主）。
+        /// 无 Sunshine 运行或无活跃会话时零副作用并立即返回。
+        /// </summary>
+        internal static bool TryDisconnectActiveSessions(out bool hadActiveSessions, out string detail)
+        {
+            return TryDisconnectActiveSessions(null, 2200, out hadActiveSessions, out detail);
+        }
+
+        internal static bool TryDisconnectActiveSessions(string configDirectory, int timeoutMs,
+            out bool hadActiveSessions, out string detail)
+        {
+            hadActiveSessions = false;
+            detail = null;
+            if (!BundledHost.AnySunshineProcessRunning)
+            {
+                detail = "本机未运行 Sunshine。";
+                return true;
+            }
+
+            string effectiveConfig = ResolveEffectiveConfigDirectory(configDirectory);
+            if (string.IsNullOrEmpty(effectiveConfig))
+            {
+                detail = "未定位到本机 Sunshine 配置目录。";
+                return false;
+            }
+
+            int activeCount = -1;
+            string queryBody;
+            string queryErr;
+            if (TryInvokeLocalApi(effectiveConfig, "GET", RuntimeSessionsPath, null, Math.Min(timeoutMs, 1800), out queryBody, out queryErr))
+            {
+                int parsed;
+                if (TryParseActiveSessionCount(queryBody, out parsed))
+                    activeCount = parsed;
+            }
+
+            int basePort = HostNetworkInfo.ResolveSunshineBasePort(effectiveConfig);
+            bool serverBusy = false;
+            HostNetworkInfo.TryQuerySunshineServerBusy(basePort, out serverBusy);
+            bool hostControlledFallback = activeCount < 0 && HostNetworkInfo.IsHostBeingControlled();
+
+            if (activeCount == 0 && !serverBusy)
+            {
+                detail = "本机当前无活跃远控会话。";
+                return true;
+            }
+            if (activeCount < 0 && !hostControlledFallback && !serverBusy)
+            {
+                detail = queryErr ?? "未检测到活跃远控会话。";
+                return false;
+            }
+
+            hadActiveSessions = true;
+            string stopBody, stopErr;
+            bool stoppedSessions = TryInvokeLocalApi(effectiveConfig, "POST", StopSessionsPath, "{}", timeoutMs, out stopBody, out stopErr);
+            string closeBody, closeErr;
+            bool closedApp = TryInvokeLocalApi(effectiveConfig, "POST", CloseAppPath, "{}", timeoutMs, out closeBody, out closeErr);
+            if (stoppedSessions || closedApp)
+            {
+                detail = "已通知本机 Sunshine 结束当前远控会话并恢复显示状态。";
+                return true;
+            }
+            detail = !string.IsNullOrEmpty(stopErr) ? stopErr : (closeErr ?? "无法断开本机远控会话（若使用系统安装版 Sunshine，请以管理员身份运行或在主控端点击「退出控制」）。");
+            return false;
+        }
+
+        private static bool TryInvokeLocalApi(string configDirectory, string method, string path,
+            string jsonBody, int timeoutMs, out string body, out string error)
+        {
+            body = null;
+            error = null;
+            HttpWebRequest request;
+            if (!TryCreateLocalRequest(configDirectory, method, path, out request, out error))
+                return false;
+            int clampedTimeout = Math.Max(800, Math.Min(timeoutMs, RequestTimeoutMs));
+            request.Timeout = clampedTimeout;
+            request.ReadWriteTimeout = clampedTimeout;
+            try
+            {
+                if (string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    byte[] payload = Encoding.UTF8.GetBytes(jsonBody ?? "{}");
+                    request.ContentType = "application/json; charset=utf-8";
+                    request.ContentLength = payload.Length;
+                    using (Stream reqStream = request.GetRequestStream())
+                    {
+                        reqStream.Write(payload, 0, payload.Length);
+                    }
+                }
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                {
+                    TryReadBoundedBody(response, out body, out error);
+                    return true;
+                }
+            }
+            catch (WebException ex)
+            {
+                error = DescribeHttpFailure(ex, "调用本机 Sunshine 接口");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = "调用本机 Sunshine 接口失败：" + SafeText(ex.Message);
+                return false;
+            }
         }
 
         internal static string BuildConfirmBody(string pin, string name, string id)
