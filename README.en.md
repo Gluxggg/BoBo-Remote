@@ -154,7 +154,7 @@ Every download URL, file size, and SHA-256 hash is pinned in [`build.ps1`](build
 | **RustDesk** | `1.5.3` | Official MSI extracted via `msiexec /a` (no install, no service) | 9-digit temporary assist & file transfer |
 | **Moonlight** | `6.2.0` | Official Windows portable zip (keeps Authenticode signature) | Fallback streaming client |
 | **Moonlight V+** | `6.5.6` | Official Windows portable zip (GPL-3.0 fork, unsigned) | Primary client with Foundation ABR |
-| **Foundation Sunshine** | `v2026.1123.35314` | Official Windows x64 portable zip (GPL-3.0 pre-release, unsigned) | Bundled host with Desktop app & local pairing API |
+| **Foundation Sunshine** | `v2026.1123.185102` | Official Windows x64 portable zip (GPL-3.0, unsigned) | Bundled host with Desktop app & local pairing API |
 
 ## Core Modules & Layout
 
@@ -238,7 +238,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch # ful
 Launcher code (`src\`), installer (`installer\`), scripts (`tools\`, `ci\`, `build.ps1`), and docs are released under [MIT](LICENSE). The four bundled upstream components retain their original licences:
 
 - **RustDesk 1.5.3**: AGPL-3.0 (`LICENSES\AGPL-3.0.txt`)
-- **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.35314**: GPL-3.0 (`LICENSES\GPL-3.0.txt`, `engines\Sunshine\LICENSE`)
+- **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.185102**: GPL-3.0 (`LICENSES\GPL-3.0.txt`, `engines\Sunshine\LICENSE`)
 
 See [THIRD-PARTY.md](THIRD-PARTY.md) and [NOTICE.md](NOTICE.md) for full digests, source links, and attribution notices. This project is not an official distribution of any upstream or commercial product.
 

@@ -12,7 +12,7 @@
 | RustDesk | 1.5.3 | AGPL-3.0 | <https://github.com/rustdesk/rustdesk/tree/1.5.3> |
 | Moonlight | 6.2.0 | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-qt/tree/v6.2.0> |
 | Moonlight V+ | 6.5.6 | GPL-3.0 | <https://github.com/qiin2333/moonlight-qt/tree/v6.5.6> |
-| Foundation Sunshine | v2026.1123.35314（预发布） | GPL-3.0 | <https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.35314.%E6%9D%82%E9%B1%BC> |
+| Foundation Sunshine | v2026.1123.185102 | GPL-3.0 | <https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.185102.%E6%9D%82%E9%B1%BC> |
 
 许可证全文随构建产物放在：
 

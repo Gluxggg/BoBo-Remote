@@ -19,15 +19,15 @@
 | Moonlight（展开后） | 6.2.0 | 包内 `engines\Moonlight\` | 284 个文件，106,505,953 字节 | `Moonlight.exe` 2,860,296 字节，SHA256 `2f2536a5670a9c3f2a2a9c5e9fb46dfd684ccd9721be8f2d5ac590b81b7cb0db` |
 | Moonlight V+ | 6.5.6 | `Moonlight-VPlus-Portable-x64-6.5.6.zip`（官方发布资产） | 48,208,826 | `e02447be08eca5ddd2555fd7669a114f6c896fda3b70866401881026c27314e5` |
 | Moonlight V+（展开后） | 6.5.6 | 包内 `engines\MoonlightVPlus\` | 1307 个文件，133,622,279 字节 | 关键文件见 §3 |
-| Foundation Sunshine | v2026.1123.35314 | `Sunshine.v2026.1123.Portable-x64.zip`（官方预发布便携包，资产 ID 781486852） | 51,411,142 | `b9b3fcdbbb9d7f85fc5b96d5bab464ea341ffea2801ea476e10373db0e5c14b0` |
-| Foundation Sunshine（展开后） | v2026.1123.35314 | 包内 `engines\Sunshine\` | `sunshine.exe` 53,040,640 字节 | 关键文件见 §4 |
+| Foundation Sunshine | v2026.1123.185102 | `Sunshine.v2026.1123.Portable-x64.zip`（官方正式便携包，资产 ID 784208027） | 51,644,454 | `610788d951fe9ba0ba74f370c4bb83d535a61531f17937cd0a4644f00eabba49` |
+| Foundation Sunshine（展开后） | v2026.1123.185102 | 包内 `engines\Sunshine\` | `sunshine.exe` 53,252,608 字节 | 关键文件见 §4 |
 
 官方来源：
 
 - RustDesk Release：<https://github.com/rustdesk/rustdesk/releases/tag/1.5.3>（MSI 资产 ID 727209108）
 - Moonlight Release：<https://github.com/moonlight-stream/moonlight-qt/releases/tag/v6.2.0>（资产 ID 608780016）
 - Moonlight V+ Release：<https://github.com/qiin2333/moonlight-qt/releases/tag/v6.5.6>；二进制资产 <https://github.com/qiin2333/moonlight-qt/releases/download/v6.5.6/Moonlight-VPlus-Portable-x64-6.5.6.zip>；源码 tag <https://github.com/qiin2333/moonlight-qt/tree/v6.5.6>
-- Foundation Sunshine Release：<https://github.com/AlkaidLab/foundation-sunshine/releases/tag/v2026.1123.35314.%E6%9D%82%E9%B1%BC>；官方资产摘要为 `sha256:b9b3fcdbbb9d7f85fc5b96d5bab464ea341ffea2801ea476e10373db0e5c14b0`；源码 tag <https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.35314.%E6%9D%82%E9%B1%BC>
+- Foundation Sunshine Release：<https://github.com/AlkaidLab/foundation-sunshine/releases/tag/v2026.1123.185102.%E6%9D%82%E9%B1%BC>；官方资产摘要为 `sha256:610788d951fe9ba0ba74f370c4bb83d535a61531f17937cd0a4644f00eabba49`；源码 tag <https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.185102.%E6%9D%82%E9%B1%BC>
 
 RustDesk MSI 和官方 Moonlight 安装介质在本机核验 Authenticode 为 `Valid`（RustDesk 由 PURSLANE 签发，Moonlight 由 Cameron Gutman 签发），构建脚本要求官方 Moonlight 必须保持 `Valid`。Moonlight V+ 与 Foundation Sunshine 的 Windows 二进制为 `NotSigned`（无 Authenticode 签名），构建脚本明确校验这一状态，不会把它们当作已签名软件。
 
@@ -64,16 +64,16 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 
 - V+ 是独立进程；官方 Moonlight 6.2.0 仍完整保留在 `engines\Moonlight\`，两者不互相覆盖。启动器是否使用 V+ 由用户/设置 opt-in，默认不改变官方 Moonlight 的配对与设置。
 
-## 4. Foundation Sunshine v2026.1123.35314（内置宿主，预发布）
+## 4. Foundation Sunshine v2026.1123.185102（内置宿主，正式版）
 
 - 上游：`AlkaidLab/foundation-sunshine`，许可证 GPL-3.0。选择该版本的原因是它的官方 portable 二进制包含 Foundation 的本机配对能力：二进制字符串可确认 `local-auth.token`、`/api/pairing/pending`、`config-directory`、`apps.json` 与 `credentials/cacert.pem`；隔离运行还确认配置、令牌、证书和日志均落在启动工作目录，而不是 `C:\Program Files\Sunshine\config`。
-- 资产：`Sunshine.v2026.1123.Portable-x64.zip`，51,411,142 字节，SHA256 `b9b3fcdbbb9d7f85fc5b96d5bab464ea341ffea2801ea476e10373db0e5c14b0`。GitHub Release API 记录 `prerelease=true`、`published_at=2026-11-23T04:14:43Z`，资产摘要与缓存逐字节一致；本包如实标注“预发布”，不把它写成 latest/stable。
-- 源码：tag `v2026.1123.35314.杂鱼`，commit `138946ee8506882936bfbf7569525ebf08506e9f`；该仓库 `.gitmodules` 含源码依赖，GitHub 自动 tag 归档不含对应子模块，不能单独当作完整对应源码。
+- 资产：`Sunshine.v2026.1123.Portable-x64.zip`，51,644,454 字节，SHA256 `610788d951fe9ba0ba74f370c4bb83d535a61531f17937cd0a4644f00eabba49`。GitHub Release API 记录 `prerelease=false`、`published_at=2026-11-23T19:13:06Z`，资产摘要与缓存逐字节一致；本包如实标注“预发布”，不把它写成 latest/stable。
+- 源码：tag `v2026.1123.185102.杂鱼`，commit `19ca6c8c484ab5f52bdc4c7f9315fa7c98321377`；该仓库 `.gitmodules` 含源码依赖，GitHub 自动 tag 归档不含对应子模块，不能单独当作完整对应源码。
 - 关键文件（构建时逐个校验）：
 
 | 文件 | 字节数 | SHA256 |
 | --- | --- | --- |
-| `sunshine.exe`（FileVersion `v2026.1123.35314...`，NotSigned） | 53,040,640 | `005623e247bdfa52ae30a26681e89198bd4d43e222b2d7e1094510dbd5057474` |
+| `sunshine.exe`（FileVersion `v2026.1123.185102...`，NotSigned） | 53,252,608 | `87b4d685e23d843ad8d6cd19678eb468159cb3c45479e2f997b358220fe359c7` |
 | `zlib1.dll` | 187,392 | `6d6a2429c74e2a659917c7d87037ef7f377036bb8d115de96a645d8e6b184916` |
 | `assets/apps.json`（默认 Desktop 应用表） | 1,764 | `449f0816e37140f0ed40aacc21cb05b14e53dddfb3ac6f4cb0bd6db6c86f394b` |
 | `LICENSE`（GPL-3.0 全文） | 35,149 | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
@@ -89,9 +89,9 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 | --- | --- | --- | --- | --- |
 | `LICENSES\AGPL-3.0.txt` | RustDesk 1.5.3 | `https://raw.githubusercontent.com/rustdesk/rustdesk/1.5.3/LICENCE` | 34,523 | `8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef` |
 | `LICENSES\GPL-3.0.txt` | Moonlight 6.2.0 与 Moonlight V+ 6.5.6 共用 | `https://raw.githubusercontent.com/moonlight-stream/moonlight-qt/v6.2.0/LICENSE` | 35,141 | `589ed823e9a84c56feb95ac58e7cf384626b9cbf4fda2a907bc36e103de1bad2` |
-| `engines\Sunshine\LICENSE` | Foundation Sunshine v2026.1123.35314 | 官方 portable zip 原样保留 | 35,149 | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
-| `LICENSES\Sunshine-LICENSE.txt` | Foundation Sunshine v2026.1123.35314 | 同一官方 portable zip 的 `LICENSE` 原样复制 | 35,149 | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
-| `LICENSES\Sunshine-NOTICE.txt` | Foundation Sunshine v2026.1123.35314 | 同一官方 portable zip 的 `NOTICE` 原样复制 | 3,414 | `a3676180c504a10ca85563eb781c5f2574ad0e244054dcf3741184ee60463b0a` |
+| `engines\Sunshine\LICENSE` | Foundation Sunshine v2026.1123.185102 | 官方 portable zip 原样保留 | 35,149 | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
+| `LICENSES\Sunshine-LICENSE.txt` | Foundation Sunshine v2026.1123.185102 | 同一官方 portable zip 的 `LICENSE` 原样复制 | 35,149 | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
+| `LICENSES\Sunshine-NOTICE.txt` | Foundation Sunshine v2026.1123.185102 | 同一官方 portable zip 的 `NOTICE` 原样复制 | 3,414 | `a3676180c504a10ca85563eb781c5f2574ad0e244054dcf3741184ee60463b0a` |
 
 官方 Moonlight 便携 zip **没有附带**许可证文本，V+ 便携 zip **也没有**附带许可证文本；两者的 GPL-3.0 全文由本包从官方 tag 的 `LICENSE` 获取，并按上表校验后放入 `LICENSES\`，内容未改。V+ 源码包内的 `LICENSE` 与上表 GPL-3.0 哈希完全一致。
 
@@ -118,7 +118,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 
 **公开分发前必须重新检查**（本文件不代替法律意见）：
 
-1. **GPL-3.0（Moonlight 6.2.0、Moonlight V+ 6.5.6 与 Foundation Sunshine）**：分发二进制通常需同时提供对应源码，或提供符合 GPL 第 6 条的书面要约；只给下载链接一般不够。对应源码 tag：`moonlight-stream/moonlight-qt` 的 `v6.2.0`、`qiin2333/moonlight-qt` 的 `v6.5.6` 与 `AlkaidLab/foundation-sunshine` 的 `v2026.1123.35314.杂鱼`。
+1. **GPL-3.0（Moonlight 6.2.0、Moonlight V+ 6.5.6 与 Foundation Sunshine）**：分发二进制通常需同时提供对应源码，或提供符合 GPL 第 6 条的书面要约；只给下载链接一般不够。对应源码 tag：`moonlight-stream/moonlight-qt` 的 `v6.2.0`、`qiin2333/moonlight-qt` 的 `v6.5.6` 与 `AlkaidLab/foundation-sunshine` 的 `v2026.1123.185102.杂鱼`。
 2. **AGPL-3.0（RustDesk）**：除分发义务外，若作为网络服务提供给他人使用，第 13 条要求向使用者提供 Corresponding Source。源码 tag 为 `1.5.3`。
 3. **Qt（LGPL-3.0）**：动态链接通常可行，但必须允许最终用户替换 Qt 库、保留版权声明，并按 LGPL 要求提供 Qt 源码获取方式；本包未修改或封装这些 DLL。
 4. **FFmpeg、SDL、OpenSSL、dav1d、libplacebo、opus、Discord RPC 等**：各自再分发条款不同，公开分发请逐项核对，必要时随附对应源码/许可文本。
@@ -139,8 +139,8 @@ git clone --depth 1 --branch v6.2.0 https://github.com/moonlight-stream/moonligh
 # Moonlight V+ 6.5.6
 git clone --depth 1 --branch v6.5.6 https://github.com/qiin2333/moonlight-qt.git moonlight-qt-6.5.6
 
-# Foundation Sunshine v2026.1123.35314.杂鱼
-git clone --depth 1 --branch "v2026.1123.35314.杂鱼" https://github.com/AlkaidLab/foundation-sunshine.git foundation-sunshine-2026.1123
+# Foundation Sunshine v2026.1123.185102.杂鱼
+git clone --depth 1 --branch "v2026.1123.185102.杂鱼" https://github.com/AlkaidLab/foundation-sunshine.git foundation-sunshine-2026.1123
 cd foundation-sunshine-2026.1123
 git submodule update --init --recursive
 ```
@@ -150,7 +150,7 @@ git submodule update --init --recursive
 - `https://github.com/rustdesk/rustdesk/archive/refs/tags/1.5.3.zip`
 - `https://github.com/moonlight-stream/moonlight-qt/archive/refs/tags/v6.2.0.zip`
 - `https://github.com/qiin2333/moonlight-qt/archive/refs/tags/v6.5.6.zip`（本机校验 SHA256 见 §3）
-- `https://github.com/AlkaidLab/foundation-sunshine/archive/refs/tags/v2026.1123.35314.%E6%9D%82%E9%B1%BC.zip`
+- `https://github.com/AlkaidLab/foundation-sunshine/archive/refs/tags/v2026.1123.185102.%E6%9D%82%E9%B1%BC.zip`
 
 启动器源码在本仓库 `src\`（`src\*.cs` 与 `src\app.manifest`），不来自上述上游项目。
 
@@ -169,8 +169,8 @@ Get-FileHash .\engines\MoonlightVPlus\Moonlight.exe -Algorithm SHA256
 # Authenticode 应为 NotSigned
 
 Get-FileHash .\engines\Sunshine\sunshine.exe -Algorithm SHA256
-# 应为 005623e247bdfa52ae30a26681e89198bd4d43e222b2d7e1094510dbd5057474
-# Authenticode 应为 NotSigned；版本应为 v2026.1123.35314*
+# 应为 87b4d685e23d843ad8d6cd19678eb468159cb3c45479e2f997b358220fe359c7
+# Authenticode 应为 NotSigned；版本应为 v2026.1123.185102*
 
 Get-FileHash .\engines\Sunshine\LICENSE -Algorithm SHA256
 # 应为 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986

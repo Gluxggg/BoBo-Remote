@@ -173,30 +173,30 @@ $VPlusAsset = [pscustomobject]@{
     Version      = '6.5.6.0'
 }
 
-# Foundation Sunshine v2026.1123.35314（预发布）官方 Windows x64 便携包，作为内置被控宿主。
+# Foundation Sunshine v2026.1123.185102（正式发布）官方 Windows x64 便携包，作为内置被控宿主。
 # 只取官方 portable zip；不使用 standardLizardByte 或 Windows Installer，也不复制本机
 # Program Files\Sunshine\config 的私人证书、令牌、配对状态或日志。
 # GitHub Release 资产摘要与本地 zip 已交叉校验；资产签名未提供 Authenticode（NotSigned）。
 $SunshineAsset = [pscustomobject]@{
-    Label        = 'Foundation Sunshine v2026.1123.35314（官方 Windows x64 便携包，内置宿主）'
-    File         = 'Sunshine.v2026.1123.Portable-x64.zip'
-    Url          = 'https://github.com/AlkaidLab/foundation-sunshine/releases/download/v2026.1123.35314.%E6%9D%82%E9%B1%BC/Sunshine.v2026.1123.Portable-x64.zip'
-    ApiFallback  = 'https://api.github.com/repos/AlkaidLab/foundation-sunshine/releases/assets/781486852'
-    Size         = 51411142
-    Sha256       = 'B9B3FCDBBB9D7F85FC5B96D5BAB464EA341FFEA2801EA476E10373DB0E5C14B0'
-    Version      = 'v2026.1123.35314'
-    ReleaseTag   = 'v2026.1123.35314.杂鱼'
-    Prerelease   = $true
-    PublishedAt  = '2026-11-23T04:14:43Z'
-    Commit       = '138946ee8506882936bfbf7569525ebf08506e9f'
-    SourceTagUrl = 'https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.35314.杂鱼'
-    SourceArchiveUrl = 'https://github.com/AlkaidLab/foundation-sunshine/archive/refs/tags/v2026.1123.35314.%E6%9D%82%E9%B1%BC.zip'
-    ExeSize      = 53040640
-    ExeSha256    = '005623E247BDFA52AE30A26681E89198BD4D43E222B2D7E1094510DBD5057474'
+    Label        = 'Foundation Sunshine v2026.1123.185102（官方 Windows x64 便携包，内置宿主）'
+    File         = 'Sunshine.v2026.1123.185102.Portable-x64.zip'
+    Url          = 'https://github.com/AlkaidLab/foundation-sunshine/releases/download/v2026.1123.185102.%E6%9D%82%E9%B1%BC/Sunshine.v2026.1123.Portable-x64.zip'
+    ApiFallback  = 'https://api.github.com/repos/AlkaidLab/foundation-sunshine/releases/assets/784208027'
+    Size         = 51644454
+    Sha256       = '610788D951FE9BA0BA74F370C4BB83D535A61531F17937CD0A4644F00EABBA49'
+    Version      = 'v2026.1123.185102'
+    ReleaseTag   = 'v2026.1123.185102.杂鱼'
+    Prerelease   = $false
+    PublishedAt  = '2026-11-23T19:13:06Z'
+    Commit       = '19ca6c8c484ab5f52bdc4c7f9315fa7c98321377'
+    SourceTagUrl = 'https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.185102.杂鱼'
+    SourceArchiveUrl = 'https://github.com/AlkaidLab/foundation-sunshine/archive/refs/tags/v2026.1123.185102.%E6%9D%82%E9%B1%BC.zip'
+    ExeSize      = 53252608
+    ExeSha256    = '87B4D685E23D843AD8D6CD19678EB468159CB3C45479E2F997B358220FE359C7'
 }
 
 $SunshineKeyFiles = @(
-    [pscustomobject]@{ Path = 'sunshine.exe'; Size = 53040640; Sha256 = '005623E247BDFA52AE30A26681E89198BD4D43E222B2D7E1094510DBD5057474' },
+    [pscustomobject]@{ Path = 'sunshine.exe'; Size = 53252608; Sha256 = '87B4D685E23D843AD8D6CD19678EB468159CB3C45479E2F997B358220FE359C7' },
     [pscustomobject]@{ Path = 'zlib1.dll'; Size = 187392; Sha256 = '6D6A2429C74E2A659917C7D87037EF7F377036BB8D115DE96A645D8E6B184916' },
     [pscustomobject]@{ Path = 'assets\apps.json'; Size = 1764; Sha256 = '449F0816E37140F0ED40AACC21CB05B14E53DDDFB3AC6F4CB0BD6DB6C86F394B' },
     [pscustomobject]@{ Path = 'LICENSE'; Size = 35149; Sha256 = '3972DC9744F6499F0F9B2DBF76696F2AE7AD8AF9B23DDE66D6AF86C9DFB36986' },

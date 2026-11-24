@@ -162,7 +162,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch -NoPu
 | **RustDesk** | `1.5.3` | 官方 MSI（`msiexec /a` **仅提取原版文件**，不安装、不注册服务） | 9 位设备码临时远控与文件互传 |
 | **Moonlight** | `6.2.0` | 官方 Windows 便携 zip（保留官方 Authenticode 签名） | 备用串流客户端 |
 | **Moonlight V+** | `6.5.6` | 官方 Windows 便携 zip（GPL-3.0 增强分支，未签名） | 主力串流客户端，支持 Foundation ABR |
-| **Foundation Sunshine** | `v2026.1123.35314` | 官方 Windows x64 便携 zip（GPL-3.0 预发布，未签名） | 内置被控宿主，含 Desktop 应用表与本机配对 API |
+| **Foundation Sunshine** | `v2026.1123.185102` | 官方 Windows x64 便携 zip（GPL-3.0，未签名） | 内置被控宿主，含 Desktop 应用表与本机配对 API |
 
 ## 核心模块与目录结构
 
@@ -285,7 +285,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch # 离
 启动器源码（`src\`）、安装向导（`installer\`）、脚本（`tools\`、`ci\`、`build.ps1`）与文档以 [MIT](LICENSE) 发布。随构建产物分发的四个上游组件各自保留原始开源许可：
 
 - **RustDesk 1.5.3**：AGPL-3.0（全文见 `LICENSES\AGPL-3.0.txt`）
-- **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.35314**：GPL-3.0（全文见 `LICENSES\GPL-3.0.txt` 与 `engines\Sunshine\LICENSE`）
+- **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.185102**：GPL-3.0（全文见 `LICENSES\GPL-3.0.txt` 与 `engines\Sunshine\LICENSE`）
 
 完整版本摘要、校验值与署名义务见 [THIRD-PARTY.md](THIRD-PARTY.md) 和 [NOTICE.md](NOTICE.md)。本项目不是任何上游项目或商业远控产品的官方发行版。
 
