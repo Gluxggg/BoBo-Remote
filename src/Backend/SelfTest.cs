@@ -798,6 +798,14 @@ namespace DualRemote
                     !bundledAvailable && BundledHost.BundledSourceExecutable == null,
                     "absent-safe");
             }
+            int allocBasePort;
+            int allocWebPort;
+            string allocPortErr;
+            bool allocPortOk = BundledHost.TryFindFreePortPair(out allocBasePort, out allocWebPort, out allocPortErr);
+            Check("内置宿主端口分配：优先标准 47989 或回退可用端口组",
+                allocPortOk && allocWebPort == allocBasePort + 1
+                && (allocBasePort == BundledHost.StandardBasePort || (allocBasePort >= 48989 && allocBasePort <= 59989)),
+                allocPortOk ? ("base=" + allocBasePort + " web=" + allocWebPort) : (allocPortErr ?? "fail"));
 
             var badSnap = new HostSnapshot { SunshineInstalled = true };
             var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

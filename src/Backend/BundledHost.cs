@@ -772,21 +772,53 @@ namespace DualRemote
             return false;
         }
 
-        private static bool TryFindFreePortPair(out int basePort, out int webPort, out string error)
+        internal const int StandardBasePort = 47989;
+
+        internal static bool TryFindFreePortPair(out int basePort, out int webPort, out string error)
         {
             error = null;
             basePort = 0;
             webPort = 0;
+            // 优先使用 Sunshine/Moonlight 标准端口 47989（对应 HTTPS 47984、WebUI 47990、RTSP 48010），
+            // 确保开箱即用时对端 Moonlight 直接输入 IP 即可免端口直连配对与串流；仅在标准端口被占用时才回退至独立端口段。
+            if (IsSunshinePortGroupFree(StandardBasePort))
+            {
+                basePort = StandardBasePort;
+                webPort = StandardBasePort + 1;
+                return true;
+            }
             for (int candidate = 48989; candidate <= 59989; candidate += 2)
             {
-                if (!CanBindPort(candidate)) continue;
-                if (!CanBindPort(candidate + 1)) continue;
+                if (!IsSunshinePortGroupFree(candidate)) continue;
                 basePort = candidate;
                 webPort = candidate + 1;
                 return true;
             }
-            error = "未找到连续两个可用的本机端口（范围 48989-59989）。";
+            error = "未找到可用的本机端口组（标准端口 47989 与备选范围 48989-59989 均被占用）。";
             return false;
+        }
+
+        private static bool IsSunshinePortGroupFree(int basePort)
+        {
+            return IsTcpPortFree(basePort - 5)
+                && IsTcpPortFree(basePort)
+                && IsTcpPortFree(basePort + 1)
+                && IsTcpPortFree(basePort + 21);
+        }
+
+        private static bool IsTcpPortFree(int port)
+        {
+            if (port <= 0 || port > 65535) return false;
+            try
+            {
+                var props = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties();
+                foreach (IPEndPoint ep in props.GetActiveTcpListeners())
+                {
+                    if (ep.Port == port) return false;
+                }
+            }
+            catch { }
+            return CanBindPort(port);
         }
 
         private static bool CanBindPort(int port)
