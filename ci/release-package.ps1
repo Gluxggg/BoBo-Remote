@@ -57,9 +57,8 @@ $sumsText = "$hSetup  BoBoRemote-Setup-x64.exe`n$hPort  BoBoRemote-Portable-x64.
 [System.IO.File]::WriteAllText($sumsPath, $sumsText, (New-Object System.Text.UTF8Encoding($false)))
 
 $notesPath = Join-Path $assetDir 'release-notes.md'
-$fence = '```'
-$notes = @"
-## BoBo Remote $Tag (Windows x64)
+$notesTemplate = @'
+## BoBo Remote __TAG__ (Windows x64)
 
 ### 推荐下载
 - **`BoBoRemote-Setup-x64.exe`（标准图形化安装包，像 UU 远程一样一键安装）**：
@@ -79,20 +78,26 @@ $notes = @"
 - **首次运行提示**：未购买商业 EV 代码签名，Windows SmartScreen 首次提示时点击「更多信息 → 仍要运行」即可（可先核对下方 SHA-256）；首次被控开启局域网串流若弹出 Windows 防火墙提示，请点击「允许访问」。
 
 ### SHA-256 校验值
-${fence}text
-$hSetup  BoBoRemote-Setup-x64.exe
-$hPort  BoBoRemote-Portable-x64.zip
-$hV5  BoBoStreamPlayer-v5-core-x64.exe
-${fence}
+```text
+__H_SETUP__  BoBoRemote-Setup-x64.exe
+__H_PORT__  BoBoRemote-Portable-x64.zip
+__H_V5__  BoBoStreamPlayer-v5-core-x64.exe
+```
 
 ### 开源许可与上游源码对应说明
 - BoBo Remote 启动器、图形化安装向导与脚本以 **MIT** 许可发布。
-- 随发行包封装的上游组件以独立进程方式调用、未修改上游源码，各自保留原许可（完整哈希、许可文本与源码说明见 [`NOTICE.md`](https://github.com/$Repository/blob/main/NOTICE.md) 与 [`THIRD-PARTY.md`](https://github.com/$Repository/blob/main/THIRD-PARTY.md)）：
+- 随发行包封装的上游组件以独立进程方式调用、未修改上游源码，各自保留原许可（完整哈希、许可文本与源码说明见 [`NOTICE.md`](https://github.com/__REPO__/blob/main/NOTICE.md) 与 [`THIRD-PARTY.md`](https://github.com/__REPO__/blob/main/THIRD-PARTY.md)）：
   - RustDesk `1.5.3` (AGPL-3.0): https://github.com/rustdesk/rustdesk/tree/1.5.3
   - Moonlight `6.2.0` (GPL-3.0): https://github.com/moonlight-stream/moonlight-qt/tree/v6.2.0
   - Moonlight V+ `6.5.6` (GPL-3.0): https://github.com/qiin2333/moonlight-qt/tree/v6.5.6
   - Foundation Sunshine `v2026.1123.185102` (GPL-3.0, NotSigned): https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.185102.%E6%9D%82%E9%B1%BC
-"@
+'@
+$notes = $notesTemplate.
+    Replace('__TAG__', $Tag).
+    Replace('__REPO__', $Repository).
+    Replace('__H_SETUP__', $hSetup).
+    Replace('__H_PORT__', $hPort).
+    Replace('__H_V5__', $hV5)
 [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host "=== Publishing GitHub Release $Tag ==="
