@@ -57,22 +57,37 @@ namespace DualRemote
             if (host.IndexOf(':') >= 0) return "ipv6_or_hostname";
             if (host.StartsWith("192.168.", StringComparison.OrdinalIgnoreCase)
                 || host.StartsWith("10.", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.16.", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.17.", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.18.", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.19.", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.2", StringComparison.OrdinalIgnoreCase)
-                || host.StartsWith("172.3", StringComparison.OrdinalIgnoreCase))
+                || IsRfc1918_172(host))
                 return "private_ipv4";
             if (host.StartsWith("100.", StringComparison.OrdinalIgnoreCase)) return "overlay_ipv4";
             return "ipv4_or_hostname";
         }
 
+        private static bool IsRfc1918_172(string host)
+        {
+            if (string.IsNullOrEmpty(host) || !host.StartsWith("172.", StringComparison.Ordinal)) return false;
+            int dot = host.IndexOf('.', 4);
+            if (dot <= 4) return false;
+            int second;
+            return int.TryParse(host.Substring(4, dot - 4), NumberStyles.None, CultureInfo.InvariantCulture, out second)
+                && second >= 16 && second <= 31;
+        }
+
         private static string Escape(string value)
         {
-            if (value == null) return "";
-            return value.Replace("\\", "\\\\").Replace("\"", "\\\"")
-                .Replace("\r", "\\r").Replace("\n", "\\n");
+            if (string.IsNullOrEmpty(value)) return "";
+            StringBuilder sb = new StringBuilder(value.Length + 8);
+            foreach (char c in value)
+            {
+                if (c == '\\') sb.Append("\\\\");
+                else if (c == '"') sb.Append("\\\"");
+                else if (c == '\r') sb.Append("\\r");
+                else if (c == '\n') sb.Append("\\n");
+                else if (c == '\t') sb.Append("\\t");
+                else if (c < 0x20) sb.AppendFormat(CultureInfo.InvariantCulture, "\\u{0:x4}", (int)c);
+                else sb.Append(c);
+            }
+            return sb.ToString();
         }
     }
 }

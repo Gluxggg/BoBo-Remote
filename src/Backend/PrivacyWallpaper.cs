@@ -16,19 +16,22 @@ namespace DualRemote
 
     /// <summary>
     /// 防窥屏状态机（纯逻辑，供 MainForm 与 SelfTest 共用）：
-    /// - 手动退出（尤其触发自动锁屏后）立即屏蔽当前远控会话的自动重拉起，确保输入锁屏密码回到桌面时不会再次被防窥屏覆盖；
-    /// - 锁屏期间与解锁后短时间防抖窗口内绝不触发快捷键回弹或自动拉起；
-    /// - 仅在观测到远控会话真正结束后重新武装自动防窥，或由用户手动再次开启。
+    /// - 任何锁屏事件（快捷键自动锁屏、Win+L、Ctrl+Alt+Del 或系统息屏锁屏）均会同步记录锁屏并关闭物理屏幕布；
+    /// - 用户通过 Windows 锁屏解锁进入桌面后无条件保持防窥关闭，屏蔽本轮远控自动重拉起，并拦截解锁瞬间的快捷键/回车键回弹；
+    /// - 解锁保护窗口（5s）结束后，仅在连续多次（≥3 次）观测到远控断开后才重新武装自动防窥，防止桌面切换瞬间网络/状态抖动误拉起。
     /// </summary>
     internal sealed class PrivacyGuardState
     {
-        internal const int HotkeyExitDebounceMs = 1500;
-        internal const int PostUnlockSuppressMs = 2500;
+        internal const int HotkeyExitDebounceMs = 2000;
+        internal const int PostUnlockKeyboardGuardMs = 2500;
+        internal const int PostUnlockSuppressMs = 5000;
+        internal const int RearmRequiredInactivePolls = 3;
 
         internal bool SessionLocked { get; private set; }
         internal bool ManualDismissSuppressed { get; private set; }
         internal bool AutoActivated { get; private set; }
         internal long Generation { get; private set; }
+        internal int ConsecutiveInactivePolls { get; private set; }
         internal DateTime LastManualExitUtc { get; private set; }
         internal DateTime LastUnlockUtc { get; private set; }
 
@@ -37,6 +40,7 @@ namespace DualRemote
             Generation++;
             ManualDismissSuppressed = false;
             AutoActivated = false;
+            ConsecutiveInactivePolls = 0;
         }
 
         internal void OnManualExit(DateTime nowUtc)
@@ -44,6 +48,7 @@ namespace DualRemote
             Generation++;
             ManualDismissSuppressed = true;
             AutoActivated = false;
+            ConsecutiveInactivePolls = 0;
             LastManualExitUtc = nowUtc;
         }
 
@@ -52,17 +57,34 @@ namespace DualRemote
             Generation++;
             AutoActivated = false;
             ManualDismissSuppressed = false;
+            ConsecutiveInactivePolls = 0;
         }
 
         internal void OnSessionLock()
         {
+            OnSessionLock(false);
+        }
+
+        internal void OnSessionLock(bool curtainWasActive)
+        {
             Generation++;
             SessionLocked = true;
+            AutoActivated = false;
+            ConsecutiveInactivePolls = 0;
+            if (curtainWasActive)
+            {
+                ManualDismissSuppressed = true;
+            }
         }
 
         internal void OnSessionUnlock(DateTime nowUtc)
         {
+            Generation++;
             SessionLocked = false;
+            AutoActivated = false;
+            // 用户已通过 Windows 锁屏解锁返回桌面：必须保持防窥关闭，屏蔽当前远控会话自动重拉起
+            ManualDismissSuppressed = true;
+            ConsecutiveInactivePolls = 0;
             LastUnlockUtc = nowUtc;
         }
 
@@ -78,28 +100,61 @@ namespace DualRemote
             return true;
         }
 
+        internal bool CanActivateFromUi(DateTime nowUtc, bool pointerTriggered)
+        {
+            if (SessionLocked) return false;
+            if (pointerTriggered) return true;
+            // 拦截非鼠标点击触发（例如锁屏输入密码按 Enter/Space 后残留按键落到原焦点按钮上）
+            if (LastManualExitUtc != DateTime.MinValue
+                && (nowUtc - LastManualExitUtc).TotalMilliseconds < PostUnlockKeyboardGuardMs)
+                return false;
+            if (LastUnlockUtc != DateTime.MinValue
+                && (nowUtc - LastUnlockUtc).TotalMilliseconds < PostUnlockKeyboardGuardMs)
+                return false;
+            return true;
+        }
+
         internal PrivacyGuardAction EvaluateAutoGuardPoll(long pollGeneration, bool activeSession,
             bool curtainActive, bool curtainIsPreview, bool autoOnRemote, DateTime nowUtc)
         {
             if (!autoOnRemote || pollGeneration != Generation) return PrivacyGuardAction.NoOp;
             if (SessionLocked) return PrivacyGuardAction.NoOp;
 
+            bool inPostUnlockGrace = LastUnlockUtc != DateTime.MinValue
+                && (nowUtc - LastUnlockUtc).TotalMilliseconds < PostUnlockSuppressMs;
+
             if (!activeSession)
             {
-                ManualDismissSuppressed = false;
                 if (AutoActivated && curtainActive && !curtainIsPreview)
                 {
                     AutoActivated = false;
+                    ConsecutiveInactivePolls = 0;
                     return PrivacyGuardAction.DeactivateAuto;
                 }
                 AutoActivated = false;
+
+                if (ManualDismissSuppressed)
+                {
+                    // 解锁冷静期内不解除屏蔽；冷静期结束后须连续多次观测到真正无远控会话才重新武装
+                    if (!inPostUnlockGrace)
+                    {
+                        ConsecutiveInactivePolls++;
+                        if (ConsecutiveInactivePolls >= RearmRequiredInactivePolls)
+                        {
+                            ManualDismissSuppressed = false;
+                            ConsecutiveInactivePolls = 0;
+                        }
+                    }
+                }
                 return PrivacyGuardAction.NoOp;
             }
 
-            if (ManualDismissSuppressed) return PrivacyGuardAction.NoOp;
-            if (LastUnlockUtc != DateTime.MinValue
-                && (nowUtc - LastUnlockUtc).TotalMilliseconds < PostUnlockSuppressMs)
+            // 远控会话仍处于连接状态，重置连续断开计数，防止瞬时抖动清零屏蔽标记
+            ConsecutiveInactivePolls = 0;
+
+            if (ManualDismissSuppressed || inPostUnlockGrace)
                 return PrivacyGuardAction.NoOp;
+
             if (!curtainActive)
             {
                 AutoActivated = true;

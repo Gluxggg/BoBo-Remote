@@ -116,7 +116,7 @@ static int RunProbeGpu() {
 }
 
 int main(int argc, char** argv) {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     bool selfTest = false;
     bool probeGpu = false;
@@ -164,6 +164,8 @@ int main(int argc, char** argv) {
                   << "  BoBoStreamPlayer.exe --preview --parent-hwnd=<HWND> --width=<W> --height=<H>\n";
     }
 
-    CoUninitialize();
+    if (SUCCEEDED(hrCo)) {
+        CoUninitialize();
+    }
     return exitCode;
 }

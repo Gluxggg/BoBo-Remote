@@ -23,6 +23,8 @@ namespace DualRemote
         private readonly Timer localPairTimer = new Timer();
 
         private Label localAssistAddressLabel;
+        private Button localAssistAddressEyeButton;
+        private bool localAssistAddressVisible = false;
         private Label localPairCodeLabel;
         private Label localPairStatusLabel;
         private Button localPairGenerateButton;
@@ -58,6 +60,10 @@ namespace DualRemote
         private const uint ModNoRepeat = 0x4000;
         private const uint VkP = 0x50;
         private const int WmHotkey = 0x0312;
+        private const int WmWtsSessionChange = 0x02B1;
+        private const int WtsSessionLock = 0x7;
+        private const int WtsSessionUnlock = 0x8;
+        private const uint NotifyForThisSession = 0;
         private const int WmGetMinMaxInfo = 0x0024;
         private const int WmNcLButtonDown = 0x00A1;
         private const int HtCaption = 2;
@@ -99,7 +105,11 @@ namespace DualRemote
         private bool forceExit;
         private bool guardPollBusy;
         private bool hotkeyRegistered;
+        private bool wtsRegistered;
         private bool sessionEventsHooked;
+        private DateTime lastSessionUnlockUtc = DateTime.MinValue;
+        private DateTime lastPrivacyPointerDownUtc = DateTime.MinValue;
+        private Control lastPrivacyPointerControl;
         private TableLayoutPanel assistDesk;
         private Control assistLocalCard;
         private Control assistPartnerCard;
@@ -200,6 +210,12 @@ namespace DualRemote
             }
             catch { hotkeyRegistered = false; }
 
+            try
+            {
+                wtsRegistered = WTSRegisterSessionNotification(Handle, NotifyForThisSession);
+            }
+            catch { wtsRegistered = false; }
+
             // Windows 11 crisp rounded window corners + native OS drop shadow (gracefully ignored on Win10)
             try
             {
@@ -209,11 +225,38 @@ namespace DualRemote
             catch { }
         }
 
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            if (wtsRegistered && IsHandleCreated)
+            {
+                try { WTSUnRegisterSessionNotification(Handle); } catch { }
+                wtsRegistered = false;
+            }
+            if (hotkeyRegistered && IsHandleCreated)
+            {
+                try { UnregisterHotKey(Handle, HotkeyPrivacyId); } catch { }
+                hotkeyRegistered = false;
+            }
+            base.OnHandleDestroyed(e);
+        }
+
         protected override void WndProc(ref Message m)
         {
+            if (Program.WmShowExistingInstance != 0 && m.Msg == Program.WmShowExistingInstance)
+            {
+                RestoreFromTray();
+                m.Result = IntPtr.Zero;
+                return;
+            }
+            if (m.Msg == WmWtsSessionChange)
+            {
+                int reason = m.WParam.ToInt32();
+                if (reason == WtsSessionLock) HandleSessionLocked();
+                else if (reason == WtsSessionUnlock) HandleSessionUnlocked();
+            }
             if (m.Msg == WmHotkey && m.WParam.ToInt32() == HotkeyPrivacyId)
             {
-                TogglePrivacyCurtain(true);
+                TogglePrivacyCurtain(true, false);
                 return;
             }
             if (m.Msg == WmGetMinMaxInfo)
@@ -418,6 +461,11 @@ namespace DualRemote
                 try { if (!pendingPairProcess.HasExited) pendingPairProcess.Kill(); } catch { }
                 try { pendingPairProcess.Dispose(); } catch { }
             }
+            if (wtsRegistered && IsHandleCreated)
+            {
+                try { WTSUnRegisterSessionNotification(Handle); } catch { }
+                wtsRegistered = false;
+            }
             if (hotkeyRegistered && IsHandleCreated)
             {
                 try { UnregisterHotKey(Handle, HotkeyPrivacyId); } catch { }
@@ -512,9 +560,25 @@ namespace DualRemote
             Theme.FillColumn(addrCol);
             Theme.Row(addrCol, 20, Theme.Text("本机连接地址（推荐直连）", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(addrCol, 6);
+
+            var addrLine = Theme.Grid(3);
+            Theme.FillColumn(addrLine);
+            Theme.FixedColumn(addrLine, 6);
+            Theme.FixedColumn(addrLine, 32);
             localAssistAddressLabel = Theme.Text("正在检测地址…", Theme.TextSize.BigCode, Theme.Ink);
             localAssistAddressLabel.AutoEllipsis = true;
-            Theme.Row(addrCol, 34, localAssistAddressLabel);
+            localAssistAddressLabel.AccessibleName = "本机连接地址";
+            localAssistAddressEyeButton = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.EyeOff);
+            localAssistAddressEyeButton.AccessibleName = "显示或隐藏本机 IP 地址";
+            localAssistAddressEyeButton.Click += delegate
+            {
+                localAssistAddressVisible = !localAssistAddressVisible;
+                Theme.ChangeGlyph(localAssistAddressEyeButton, localAssistAddressVisible ? Theme.Glyph.Eye : Theme.Glyph.EyeOff);
+                UpdateLocalAssistAddressLabel();
+            };
+            Theme.Row(addrLine, 34, localAssistAddressLabel, null, localAssistAddressEyeButton);
+            Theme.Row(addrCol, 34, addrLine);
+
             localPairStatusLabel = Theme.Text("点击右上角「生成配对码」允许新电脑首次连接本机", Theme.TextSize.Small, Theme.Muted);
             localPairStatusLabel.AutoEllipsis = true;
             Theme.Row(addrCol, 22, localPairStatusLabel);
@@ -575,7 +639,29 @@ namespace DualRemote
                     : !string.IsNullOrEmpty(hostSnapshot.PublicIpv6)
                         ? ShortenIpv6(hostSnapshot.PublicIpv6)
                         : "未获取到网络地址";
-            localAssistAddressLabel.Text = preferred;
+            if (!localAssistAddressVisible && preferred != "未获取到网络地址")
+            {
+                localAssistAddressLabel.Text = MaskAddressForDisplay(
+                    !string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4) ? hostSnapshot.TailscaleIpv4
+                    : !string.IsNullOrEmpty(hostSnapshot.LanIpv4) ? hostSnapshot.LanIpv4
+                    : hostSnapshot.PublicIpv6);
+            }
+            else
+            {
+                localAssistAddressLabel.Text = preferred;
+            }
+        }
+
+        internal static string MaskAddressForDisplay(string address)
+        {
+            if (string.IsNullOrWhiteSpace(address)) return "未获取到网络地址";
+            string trimmed = address.Trim();
+            if (trimmed.IndexOf(':') >= 0)
+                return "IPv6 ••••:••••";
+            string[] parts = trimmed.Split('.');
+            if (parts.Length == 4)
+                return parts[0] + "." + parts[1] + ".•••.•••";
+            return "••••••••";
         }
 
         private void RefreshLocalPairPinDisplay()
@@ -599,16 +685,20 @@ namespace DualRemote
                 SetStatus("暂未检测到本机可用网络地址，请先刷新或使用 RustDesk 设备码。", Theme.PillTone.Warning);
                 return;
             }
+            bool hasPin = !string.IsNullOrEmpty(localPairPin);
             string share = "BoBo远程连接地址：" + addr
-                + (string.IsNullOrEmpty(localPairPin) ? "" : "  配对码：" + localPairPin);
+                + (hasPin ? "  配对码：" + localPairPin : "");
             try
             {
                 Clipboard.SetText(share);
-                SetStatus("已复制到剪贴板：" + share, Theme.PillTone.Success);
+                SetStatus(hasPin
+                    ? "已将本机连接地址与临时配对码复制到剪贴板（为保护隐私，状态栏不回显明文）。"
+                    : "已将本机连接地址复制到剪贴板（为保护隐私，状态栏不回显明文）。",
+                    Theme.PillTone.Success);
             }
             catch
             {
-                SetStatus("无法写入剪贴板，请手动记录：" + share, Theme.PillTone.Warning);
+                SetStatus("无法写入剪贴板，请点击地址或配对码右侧眼睛图标查看并手动复制。", Theme.PillTone.Warning);
             }
         }
 
@@ -1377,6 +1467,8 @@ namespace DualRemote
             if (string.IsNullOrEmpty(target)) return;
             int oldPid = activeStreamPid;
             activeStreamPid = 0;
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                activeStreamToolbar.PauseWatchingForRestart();
             if (oldPid > 0) Engines.StopStreamProcess(oldPid);
             StartStream(target);
         }
@@ -1389,8 +1481,7 @@ namespace DualRemote
             SetStatus("已断开远程串流会话。", Theme.PillTone.Info);
             try
             {
-                if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
-                Activate();
+                RestoreFromTray();
             }
             catch { }
         }
@@ -1594,17 +1685,11 @@ namespace DualRemote
                 if (IsDisposed) return;
                 if (e.Reason == SessionSwitchReason.SessionLock)
                 {
-                    privacyGuard.OnSessionLock();
+                    HandleSessionLocked();
                 }
                 else if (e.Reason == SessionSwitchReason.SessionUnlock)
                 {
-                    privacyGuard.OnSessionUnlock(DateTime.UtcNow);
-                    // 若在解锁瞬间发现有残留防窥层且用户已主动解除，强制确保其关闭
-                    if (privacyGuard.ManualDismissSuppressed && privacyCurtain.IsActive && !privacyCurtain.IsPreview)
-                    {
-                        privacyCurtain.Deactivate(false);
-                    }
-                    UpdatePrivacyIndicators();
+                    HandleSessionUnlocked();
                 }
             };
             if (InvokeRequired)
@@ -1615,6 +1700,93 @@ namespace DualRemote
             {
                 apply();
             }
+        }
+
+        private void HandleSessionLocked()
+        {
+            if (IsDisposed) return;
+            bool curtainWasActive = privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+            if (!privacyGuard.SessionLocked || curtainWasActive)
+            {
+                privacyGuard.OnSessionLock(curtainWasActive);
+            }
+            ClearPrivacyButtonFocus();
+            // 任何锁屏动作（快捷键自动锁屏、Win+L 或系统锁屏）均立刻撤销物理屏防窥幕布，确保解锁回到桌面时不残留遮挡
+            if (privacyCurtain.IsActive)
+            {
+                privacyCurtain.Deactivate(false);
+            }
+            UpdatePrivacyIndicators();
+        }
+
+        private void HandleSessionUnlocked()
+        {
+            if (IsDisposed) return;
+            DateTime nowUtc = DateTime.UtcNow;
+            bool hadCurtain = privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+            bool duplicateUnlock = !privacyGuard.SessionLocked
+                && lastSessionUnlockUtc != DateTime.MinValue
+                && (nowUtc - lastSessionUnlockUtc).TotalMilliseconds < 1000.0;
+            if (duplicateUnlock && !privacyCurtain.IsActive)
+            {
+                return;
+            }
+
+            lastSessionUnlockUtc = nowUtc;
+            privacyGuard.OnSessionUnlock(nowUtc);
+            ClearPrivacyButtonFocus();
+            // 解锁进入桌面后无条件保证防窥屏关闭，防止防窥层残留或被锁屏前后竞态重新拉起
+            if (privacyCurtain.IsActive)
+            {
+                privacyCurtain.Deactivate(false);
+            }
+            UpdatePrivacyIndicators();
+            if (hadCurtain)
+            {
+                ShowDisplayBanner("已解锁返回桌面，防窥屏壁纸已自动关闭。", Theme.PillTone.Info);
+            }
+        }
+
+        private void BindPrivacyToggleButton(Button button)
+        {
+            if (button == null) return;
+            button.MouseDown += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    lastPrivacyPointerControl = button;
+                    lastPrivacyPointerDownUtc = DateTime.UtcNow;
+                }
+            };
+            button.Click += delegate
+            {
+                bool pointerTriggered = false;
+                if (lastPrivacyPointerControl == button
+                    && lastPrivacyPointerDownUtc != DateTime.MinValue
+                    && (DateTime.UtcNow - lastPrivacyPointerDownUtc).TotalMilliseconds <= 2000.0)
+                {
+                    try
+                    {
+                        pointerTriggered = button.ClientRectangle.Contains(button.PointToClient(Cursor.Position));
+                    }
+                    catch { pointerTriggered = true; }
+                }
+                lastPrivacyPointerControl = null;
+                TogglePrivacyCurtain(false, pointerTriggered);
+            };
+        }
+
+        private void ClearPrivacyButtonFocus()
+        {
+            try
+            {
+                Control active = ActiveControl;
+                if (active != null && (active == toggleCurtainBtn || active == heroPrivacyToggle || active == topPrivacyBtn))
+                {
+                    ActiveControl = null;
+                }
+            }
+            catch { }
         }
 
         private void SyncRemoteGuardTimer()
@@ -1652,6 +1824,7 @@ namespace DualRemote
 
                 if (action == PrivacyGuardAction.ActivateAuto)
                 {
+                    ClearPrivacyButtonFocus();
                     string msg;
                     if (privacyCurtain.Activate(privacyConfig, false, out msg))
                     {
@@ -1664,6 +1837,7 @@ namespace DualRemote
                 }
                 else if (action == PrivacyGuardAction.DeactivateAuto)
                 {
+                    ClearPrivacyButtonFocus();
                     privacyCurtain.Deactivate(privacyConfig.LockOnLocalExit);
                     ShowDisplayBanner("远控会话已结束，已自动收起防窥壁纸。", Theme.PillTone.Info);
                 }
@@ -1674,14 +1848,20 @@ namespace DualRemote
 
         internal void TogglePrivacyCurtain(bool fromLocalHotkey)
         {
+            TogglePrivacyCurtain(fromLocalHotkey, !fromLocalHotkey);
+        }
+
+        internal void TogglePrivacyCurtain(bool fromLocalHotkey, bool pointerTriggered)
+        {
             DateTime nowUtc = DateTime.UtcNow;
             if (privacyCurtain.IsActive)
             {
                 bool triggerLock = fromLocalHotkey && !privacyCurtain.IsPreview;
                 privacyGuard.OnManualExit(nowUtc);
+                ClearPrivacyButtonFocus();
                 privacyCurtain.Deactivate(triggerLock);
                 ShowDisplayBanner(triggerLock && privacyConfig.LockOnLocalExit
-                    ? "已退出防窥屏并触发锁屏，解锁返回桌面后不会自动再次遮挡。"
+                    ? "已退出防窥屏并触发锁屏，解锁返回桌面后防窥将保持关闭。"
                     : "已退出防窥屏壁纸。", Theme.PillTone.Info);
                 return;
             }
@@ -1689,7 +1869,12 @@ namespace DualRemote
             {
                 return;
             }
+            if (!fromLocalHotkey && !privacyGuard.CanActivateFromUi(nowUtc, pointerTriggered))
+            {
+                return;
+            }
             privacyGuard.OnManualActivate();
+            ClearPrivacyButtonFocus();
             string msg;
             bool ok = privacyCurtain.Activate(privacyConfig, false, out msg);
             if (!ok) privacyGuard.OnManualExit(nowUtc);
@@ -1954,6 +2139,12 @@ namespace DualRemote
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSRegisterSessionNotification(IntPtr hWnd, uint dwFlags);
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();

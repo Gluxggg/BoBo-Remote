@@ -601,6 +601,8 @@ namespace DualRemote
                 info.CreateNoWindow = true;
                 info.RedirectStandardOutput = true;
                 info.RedirectStandardError = true;
+                info.StandardOutputEncoding = Encoding.UTF8;
+                info.StandardErrorEncoding = Encoding.UTF8;
                 using (Process process = new Process())
                 {
                     process.StartInfo = info;
@@ -622,7 +624,7 @@ namespace DualRemote
                         timedOut = true;
                         try { process.Kill(); } catch { }
                     }
-                    try { process.WaitForExit(); } catch { }
+                    try { process.WaitForExit(1500); } catch { }
                     if (!timedOut)
                     {
                         try { exitCode = process.ExitCode; } catch { exitCode = -1; }

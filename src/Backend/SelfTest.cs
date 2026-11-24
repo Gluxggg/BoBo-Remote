@@ -665,23 +665,45 @@ namespace DualRemote
             guard.OnManualActivate();
             long staleGen = guard.Generation;
             guard.OnManualExit(t0);
-            Check("防窥锁屏状态机：手动退出后 1.5s 内拦截快捷键连击/回弹",
-                !guard.CanActivateFromHotkey(t0.AddMilliseconds(400)),
+            Check("防窥锁屏状态机：手动退出后 2s 内拦截快捷键连击/回弹及键盘误触",
+                !guard.CanActivateFromHotkey(t0.AddMilliseconds(400))
+                && !guard.CanActivateFromUi(t0.AddMilliseconds(400), false)
+                && guard.CanActivateFromUi(t0.AddMilliseconds(400), true),
                 "debounce");
-            guard.OnSessionLock();
+            guard.OnSessionLock(false);
             Check("防窥锁屏状态机：锁屏期间丢弃在途轮询与自动拉起",
                 guard.EvaluateAutoGuardPoll(staleGen, true, false, false, true, t0.AddSeconds(1)) == PrivacyGuardAction.NoOp
                 && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(5)) == PrivacyGuardAction.NoOp,
                 "locked");
             guard.OnSessionUnlock(t0.AddSeconds(8));
-            Check("防窥锁屏状态机：输入密码解锁回到桌面后保持关闭，不重新拉起防窥屏",
+            Check("防窥锁屏状态机：输入密码解锁回到桌面后保持关闭，拦截回弹回车且不重新拉起",
                 !guard.CanActivateFromHotkey(t0.AddSeconds(8.5))
+                && !guard.CanActivateFromUi(t0.AddSeconds(9.0), false)
+                && guard.CanActivateFromUi(t0.AddSeconds(9.0), true)
                 && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(12)) == PrivacyGuardAction.NoOp,
                 "post-unlock");
-            Check("防窥锁屏状态机：当前远控断开后重新武装，下次新远控正常自动防窥",
-                guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(15)) == PrivacyGuardAction.NoOp
-                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(18)) == PrivacyGuardAction.ActivateAuto,
+            Check("防窥锁屏状态机：解锁冷静期内及单次状态抖动不解除屏蔽，防止桌面切换瞬间误重拉",
+                guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(10)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(14)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(16)) == PrivacyGuardAction.NoOp,
+                "anti-flap");
+            Check("防窥锁屏状态机：解锁冷静期后连续 3 次观测到远控断开才重新武装，下次新远控正常自动防窥",
+                guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(18)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(20.5)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(23)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(26)) == PrivacyGuardAction.ActivateAuto,
                 "re-arm");
+
+            // 场景 2：防窥开启中直接触发系统锁屏（例如 Win+L），解锁返回桌面后同样保持关闭且屏蔽本轮自动重拉
+            var directLockGuard = new PrivacyGuardState();
+            directLockGuard.OnManualActivate();
+            directLockGuard.OnSessionLock(true);
+            directLockGuard.OnSessionUnlock(t0.AddSeconds(30));
+            Check("防窥锁屏状态机：防窥开启后直接锁屏再解锁进入桌面，保持防窥关闭并屏蔽当前远控重拉",
+                directLockGuard.ManualDismissSuppressed
+                && !directLockGuard.SessionLocked
+                && directLockGuard.EvaluateAutoGuardPoll(directLockGuard.Generation, true, false, false, true, t0.AddSeconds(38)) == PrivacyGuardAction.NoOp,
+                "direct-lock-unlock");
 
             // 新手引导持久化 + 灰白框选避让几何 + 32bpp Alpha 渲染验收
             Check("新手引导状态解析：首次默认未完成，写入标记后识别已完成",
@@ -753,6 +775,29 @@ namespace DualRemote
                 barExpanded.Width > 500 && barExpanded.Top == 8 && Math.Abs((barExpanded.Left + barExpanded.Width / 2) - 960) <= 1
                 && barCollapsed.Width < 140 && barCollapsed.Top == 0 && Math.Abs((barCollapsed.Left + barCollapsed.Width / 2) - 960) <= 1,
                 "exp=" + barExpanded + " col=" + barCollapsed);
+
+            Check("本机地址隐私脱敏：默认隐藏 IPv4 后两段与完整 IPv6 前缀",
+                MainForm.MaskAddressForDisplay("192.0.2.88") == "192.0.•••.•••"
+                && MainForm.MaskAddressForDisplay("100.64.12.34") == "100.64.•••.•••"
+                && MainForm.MaskAddressForDisplay("2001:db8:85a3::8a2e:370:7334") == "IPv6 ••••:••••"
+                && MainForm.MaskAddressForDisplay("") == "未获取到网络地址",
+                MainForm.MaskAddressForDisplay("192.0.2.88"));
+
+            bool bundledAvailable = BundledHost.BundledAvailable;
+            if (!string.IsNullOrEmpty(BundledHost.BundledSourceRoot))
+            {
+                string verifyErr;
+                bool verifyOk = BundledHost.TryVerifyBundledExecutable(out verifyErr);
+                Check("内置 Foundation Sunshine 完整性校验：版本、字节数与 SHA-256 一致",
+                    bundledAvailable && verifyOk,
+                    verifyOk ? BundledHost.BundleVersion : (verifyErr ?? "version-mismatch"));
+            }
+            else
+            {
+                Check("内置 Foundation Sunshine 缺失安全处理：无目录时返回不可用且不抛异常",
+                    !bundledAvailable && BundledHost.BundledSourceExecutable == null,
+                    "absent-safe");
+            }
 
             var badSnap = new HostSnapshot { SunshineInstalled = true };
             var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

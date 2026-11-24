@@ -10,7 +10,8 @@ namespace DualRemote
     internal static class WindowsSession
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string RunValueName = "DualRemote.Windows";
+        private const string RunValueName = "BoBoRemote";
+        private const string LegacyRunValueName = "DualRemote.Windows";
         private const uint ES_CONTINUOUS = 0x80000000u;
         private const uint ES_SYSTEM_REQUIRED = 0x00000001u;
 
@@ -25,7 +26,8 @@ namespace DualRemote
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
                 {
                     if (key == null) return false;
-                    return IsOurLaunchCommand(key.GetValue(RunValueName) as string);
+                    return IsOurLaunchCommand(key.GetValue(RunValueName) as string)
+                        || IsOurLaunchCommand(key.GetValue(LegacyRunValueName) as string);
                 }
             }
             catch
@@ -34,7 +36,7 @@ namespace DualRemote
             }
         }
 
-        // 明确点击才增删；值只含固定的当前 EXE 绝对路径（带引号），仅写当前用户。
+        // 明确点击才增删；值只含固定的当前 EXE 绝对路径（带引号），仅写当前用户，并自动清理旧版重复启动键。
         internal static bool TrySetStartAtSignIn(bool enabled, out string error)
         {
             error = null;
@@ -53,6 +55,8 @@ namespace DualRemote
                         error = "无法打开当前用户的启动项注册表键，请检查权限。";
                         return false;
                     }
+                    if (key.GetValue(LegacyRunValueName) != null)
+                        key.DeleteValue(LegacyRunValueName, false);
                     if (enabled) key.SetValue(RunValueName, Quote(exe), RegistryValueKind.String);
                     else if (key.GetValue(RunValueName) != null) key.DeleteValue(RunValueName, false);
                 }

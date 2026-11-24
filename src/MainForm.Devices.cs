@@ -183,7 +183,7 @@ namespace DualRemote
             };
 
             heroPrivacyToggle = Theme.Action("开启防窥壁纸", Theme.ButtonStyle.Secondary);
-            heroPrivacyToggle.Click += delegate { TogglePrivacyCurtain(false); };
+            BindPrivacyToggleButton(heroPrivacyToggle);
 
             var addrBtn = Theme.Action("查看本机地址", Theme.ButtonStyle.Link);
             addrBtn.Click += delegate { ToggleHostDetails(addrBtn); };
@@ -299,13 +299,13 @@ namespace DualRemote
             try
             {
                 Clipboard.SetText(value);
-                string ok = "已复制本机" + label + "：" + value;
+                string ok = "已复制本机" + label + "到剪贴板（为保护隐私，状态栏不回显明文）。";
                 deviceBanner.Set(ok, Theme.PillTone.Success);
                 SetStatus(ok, Theme.PillTone.Success);
             }
             catch
             {
-                deviceBanner.Set("无法写入剪贴板，请手动记录：" + value, Theme.PillTone.Warning);
+                deviceBanner.Set("无法写入剪贴板，请展开本机地址后手动复制。", Theme.PillTone.Warning);
             }
         }
 

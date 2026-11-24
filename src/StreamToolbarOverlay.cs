@@ -43,6 +43,7 @@ namespace DualRemote
         private readonly Timer collapseTimer = new Timer();
         private readonly Timer processWatchTimer = new Timer();
         private readonly ContextMenuStrip qualityMenu = new ContextMenuStrip();
+        private readonly Font qualityMenuFont = new Font("Microsoft YaHei UI", 9f);
 
         private struct BarButton
         {
@@ -95,6 +96,15 @@ namespace DualRemote
             Opacity = 0.94;
             Cursor = Cursors.Hand;
 
+            qualityMenu.ShowImageMargin = false;
+            qualityMenu.Renderer = new ToolStripProfessionalRenderer();
+            qualityMenu.Font = qualityMenuFont;
+            qualityMenu.Opening += delegate { menuOpen = true; collapseTimer.Stop(); };
+            qualityMenu.Closed += delegate
+            {
+                menuOpen = false;
+                if (!pinned && !IsDisposed) collapseTimer.Start();
+            };
             BuildQualityMenu();
 
             collapseTimer.Interval = 3400;
@@ -114,10 +124,6 @@ namespace DualRemote
                 if (trackedPid > 0 && !Engines.IsProcessAlive(trackedPid))
                 {
                     CloseSafely();
-                }
-                else
-                {
-                    Invalidate();
                 }
             };
 
@@ -152,6 +158,11 @@ namespace DualRemote
             Show();
             collapseTimer.Start();
             processWatchTimer.Start();
+        }
+
+        internal void PauseWatchingForRestart()
+        {
+            trackedPid = 0;
         }
 
         internal void UpdateSession(int newPid, string modeTag, int qualityIndex)
@@ -189,6 +200,13 @@ namespace DualRemote
             collapseTimer.Dispose();
             processWatchTimer.Dispose();
             qualityMenu.Dispose();
+            qualityMenuFont.Dispose();
+            if (Region != null)
+            {
+                Region r = Region;
+                Region = null;
+                r.Dispose();
+            }
             base.OnFormClosed(e);
             if (onClosed != null)
             {
@@ -302,16 +320,12 @@ namespace DualRemote
 
         private void BuildQualityMenu()
         {
-            qualityMenu.Items.Clear();
-            qualityMenu.ShowImageMargin = false;
-            qualityMenu.Renderer = new ToolStripProfessionalRenderer();
-            qualityMenu.Font = new Font("Microsoft YaHei UI", 9f);
-            qualityMenu.Opening += delegate { menuOpen = true; collapseTimer.Stop(); };
-            qualityMenu.Closed += delegate
+            while (qualityMenu.Items.Count > 0)
             {
-                menuOpen = false;
-                if (!pinned) collapseTimer.Start();
-            };
+                ToolStripItem oldItem = qualityMenu.Items[0];
+                qualityMenu.Items.RemoveAt(0);
+                try { oldItem.Dispose(); } catch { }
+            }
 
             for (int i = 0; i < qualityLabels.Length; i++)
             {

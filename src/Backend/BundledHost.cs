@@ -27,14 +27,14 @@ namespace DualRemote
         internal const string AppsFileName = "apps.json";
         internal const string StateFileName = "sunshine_state.json";
 
-        internal const string BundleVersion = "v2026.1123.35314";
-        internal const string BundleReleaseTag = "v2026.1123.35314.杂鱼";
-        internal const string BundleSourceFileName = "Sunshine.v2026.1123.Portable-x64.zip";
-        internal const long BundleExecutableSize = 53040640L;
+        internal const string BundleVersion = "v2026.1123.185102";
+        internal const string BundleReleaseTag = "v2026.1123.185102.杂鱼";
+        internal const string BundleSourceFileName = "Sunshine.v2026.1123.185102.Portable-x64.zip";
+        internal const long BundleExecutableSize = 53252608L;
         internal const string BundleExecutableSha256 =
-            "005623E247BDFA52AE30A26681E89198BD4D43E222B2D7E1094510DBD5057474";
+            "87B4D685E23D843AD8D6CD19678EB468159CB3C45479E2F997B358220FE359C7";
         internal const string BundleZipSha256 =
-            "B9B3FCDBBB9D7F85FC5B96D5BAB464EA341FFEA2801EA476E10373DB0E5C14B0";
+            "610788D951FE9BA0BA74F370C4BB83D535A61531F17937CD0A4644F00EABBA49";
 
         private const string RuntimeStampFileName = ".bundle-version";
         private const int StartProbeMilliseconds = 2500;
@@ -97,7 +97,11 @@ namespace DualRemote
 
         internal static string BundledSourceExecutable
         {
-            get { return Path.Combine(BundledSourceRoot, ExecutableName); }
+            get
+            {
+                string root = BundledSourceRoot;
+                return string.IsNullOrEmpty(root) ? null : Path.Combine(root, ExecutableName);
+            }
         }
 
         internal static bool BundledAvailable
@@ -105,6 +109,7 @@ namespace DualRemote
             get
             {
                 string root = BundledSourceRoot;
+                if (string.IsNullOrEmpty(root)) return false;
                 if (!File.Exists(Path.Combine(root, ExecutableName))) return false;
                 if (!File.Exists(Path.Combine(root, "assets", AppsFileName))) return false;
                 try
@@ -290,7 +295,7 @@ namespace DualRemote
                 string local = Path.Combine(LocalRoot, ExecutableName);
                 if (File.Exists(local)) return local;
                 string bundled = BundledSourceExecutable;
-                if (File.Exists(bundled)) return bundled;
+                if (!string.IsNullOrEmpty(bundled) && File.Exists(bundled)) return bundled;
                 return Path.Combine(DefaultInstalledRoot, ExecutableName);
             }
         }
@@ -647,13 +652,13 @@ namespace DualRemote
             }
         }
 
-        private static bool TryVerifyBundledExecutable(out string error)
+        internal static bool TryVerifyBundledExecutable(out string error)
         {
             error = null;
             try
             {
                 string exe = BundledSourceExecutable;
-                if (!File.Exists(exe))
+                if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
                 {
                     error = "engines\\Sunshine\\sunshine.exe 不存在。";
                     return false;
@@ -913,25 +918,33 @@ namespace DualRemote
         private static bool TryGetExplicitConfigPath(string executable, out string configPath)
         {
             configPath = null;
+            Process[] list = null;
             try
             {
-                foreach (Process process in GetSunshineProcesses())
+                list = GetSunshineProcesses();
+                foreach (Process process in list)
                 {
-                    try
-                    {
-                        string path = TryGetProcessExecutablePath(process);
-                        if (string.IsNullOrEmpty(path) || !SamePath(path, executable)) continue;
-                        string commandLine = TryGetWmiCommandLine(process.Id);
-                        if (string.IsNullOrEmpty(commandLine)) return false;
-                        string candidate = ExtractConfigArgument(commandLine);
-                        if (string.IsNullOrEmpty(candidate) || !Path.IsPathRooted(candidate) || !File.Exists(candidate)) return false;
-                        configPath = Path.GetFullPath(candidate);
-                        return true;
-                    }
-                    finally { try { process.Dispose(); } catch { } }
+                    string path = TryGetProcessExecutablePath(process);
+                    if (string.IsNullOrEmpty(path) || !SamePath(path, executable)) continue;
+                    string commandLine = TryGetWmiCommandLine(process.Id);
+                    if (string.IsNullOrEmpty(commandLine)) return false;
+                    string candidate = ExtractConfigArgument(commandLine);
+                    if (string.IsNullOrEmpty(candidate) || !Path.IsPathRooted(candidate) || !File.Exists(candidate)) return false;
+                    configPath = Path.GetFullPath(candidate);
+                    return true;
                 }
             }
             catch { }
+            finally
+            {
+                if (list != null)
+                {
+                    foreach (Process process in list)
+                    {
+                        try { process.Dispose(); } catch { }
+                    }
+                }
+            }
             return false;
         }
 

@@ -96,29 +96,38 @@ try {
     Write-Host "WinSDK: $sdkVer"
 
     $exeOut = Join-Path $outDir 'BoBoStreamPlayer.exe'
-    $objDir = Join-Path $outDir 'obj\'
+    $objDir = Join-Path $outDir 'obj'
     New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 
-    $srcFiles = @(
+    # Avoid Windows CommandLineToArgvW trailing-backslash quote escaping when paths contain spaces:
+    # pass /Fo using double trailing backslash if $objDir contains whitespace, or use relative paths from $root.
+    $srcRel = @(
         'src\main.cpp',
         'src\ipc_protocol.cpp',
         'src\d3d11_renderer.cpp',
         'src\mf_decoder.cpp',
         'src\moonlight_bridge.cpp'
-    ) | ForEach-Object { Join-Path $root $_ }
+    )
+    $foArg = if ($objDir -match '\s') { "/Fo$objDir\\" } else { "/Fo$objDir\" }
+    $feArg = "/Fe:$exeOut"
 
     $clArgs = @(
         '/nologo', '/std:c++17', '/EHsc', '/O2', '/W4', '/WX', '/utf-8',
-        "/Fo$objDir",
-        "/Fe:$exeOut"
-    ) + $srcFiles + @(
+        $foArg,
+        $feArg
+    ) + $srcRel + @(
         '/link',
         'd3d11.lib', 'dxgi.lib', 'mfplat.lib', 'mfuuid.lib', 'mf.lib',
         'strmiids.lib', 'ole32.lib', 'user32.lib', 'ws2_32.lib', 'winmm.lib'
     )
 
-    & $clExe @clArgs
-    if ($LASTEXITCODE -ne 0) { throw "MSVC compile failed with exit code $LASTEXITCODE" }
+    Push-Location -LiteralPath $root
+    try {
+        & $clExe @clArgs
+        if ($LASTEXITCODE -ne 0) { throw "MSVC compile failed with exit code $LASTEXITCODE" }
+    } finally {
+        Pop-Location
+    }
 } finally {
     $env:INCLUDE = $prevInclude
     $env:LIB = $prevLib

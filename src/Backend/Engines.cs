@@ -431,11 +431,11 @@ namespace DualRemote
             {
                 if (RustDeskWindowReady())
                 {
-                    StartEngine(RustDeskExe, action + " " + id);
+                    using (StartEngine(RustDeskExe, action + " " + id)) { }
                     message = "已向 RustDesk 发送" + actionName + "请求：" + id + "。请在被控端原生界面确认授权。";
                     return true;
                 }
-                StartEngine(RustDeskExe, "");
+                using (StartEngine(RustDeskExe, "")) { }
                 string targetId = id;
                 string targetAction = action;
                 string targetActionName = actionName;
@@ -446,7 +446,7 @@ namespace DualRemote
                     {
                         if (WaitRustDeskWindow(RustDeskWindowTimeoutMs))
                         {
-                            StartEngine(RustDeskExe, targetAction + " " + targetId);
+                            using (StartEngine(RustDeskExe, targetAction + " " + targetId)) { }
                             text = "RustDesk 窗口已就绪，已发起" + targetActionName + "：" + targetId + "。请在被控端确认授权。";
                         }
                         else
@@ -488,7 +488,7 @@ namespace DualRemote
             }
             try
             {
-                StartEngine(MoonlightExe, "");
+                using (StartEngine(MoonlightExe, "")) { }
                 message = "已打开 Moonlight 原生界面：首次配对请在其中完成 PIN 确认。";
                 return true;
             }
@@ -515,7 +515,7 @@ namespace DualRemote
             }
             try
             {
-                StartEngine(MoonlightExe, BuildMoonlightPairArgs(host));
+                using (StartEngine(MoonlightExe, BuildMoonlightPairArgs(host))) { }
                 message = "已在 Moonlight 窗口发起配对：把窗口中显示的 4 位 PIN 输入 Foundation 的 47990 页面完成确认。"
                         + "若提示已配对，可直接连接 Desktop。";
                 return true;
@@ -662,7 +662,7 @@ namespace DualRemote
             message = null;
             try
             {
-                StartEngine(MoonlightExe, arguments);
+                using (StartEngine(MoonlightExe, arguments)) { }
                 message = successMessage;
                 return true;
             }
@@ -749,7 +749,7 @@ namespace DualRemote
             {
                 ProcessStartInfo info = new ProcessStartInfo(url);
                 info.UseShellExecute = true;
-                Process.Start(info);
+                using (Process.Start(info)) { }
                 return true;
             }
             catch (Exception ex)

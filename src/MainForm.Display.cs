@@ -215,7 +215,7 @@ namespace DualRemote
             Theme.FillColumn(actRow);
 
             toggleCurtainBtn = Theme.Action("开启防窥", Theme.ButtonStyle.Primary, Theme.Glyph.Shield);
-            toggleCurtainBtn.Click += delegate { TogglePrivacyCurtain(false); };
+            BindPrivacyToggleButton(toggleCurtainBtn);
 
             var previewBtn = Theme.Action("全屏预览", Theme.ButtonStyle.Secondary, Theme.Glyph.Eye);
             previewBtn.Click += delegate

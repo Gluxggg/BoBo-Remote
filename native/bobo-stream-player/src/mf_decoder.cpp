@@ -54,12 +54,15 @@ MfHardwareDecoder::~MfHardwareDecoder() {
 }
 
 bool MfHardwareDecoder::Initialize(ID3D11Device* d3dDevice, std::string& outError) {
-    HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    if (FAILED(hr)) {
-        outError = FormatMfHr("MFStartup failed", hr);
-        return false;
+    HRESULT hr = S_OK;
+    if (!mfStarted_) {
+        hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        if (FAILED(hr)) {
+            outError = FormatMfHr("MFStartup failed", hr);
+            return false;
+        }
+        mfStarted_ = true;
     }
-    mfStarted_ = true;
 
     hr = MFCreateDXGIDeviceManager(&resetToken_, dxgiManager_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) {
@@ -226,6 +229,8 @@ bool MfHardwareDecoder::PullDecodedTexture(Microsoft::WRL::ComPtr<ID3D11Texture2
     DWORD status = 0;
     HRESULT hr = decoder_->ProcessOutput(0, 1, &outBuf, &status);
     if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+        if (outBuf.pSample) outBuf.pSample->Release();
+        if (outBuf.pEvents) outBuf.pEvents->Release();
         for (DWORD idx = 0; ; ++idx) {
             Microsoft::WRL::ComPtr<IMFMediaType> outMt;
             if (FAILED(decoder_->GetOutputAvailableType(0, idx, outMt.GetAddressOf()))) break;
@@ -238,6 +243,7 @@ bool MfHardwareDecoder::PullDecodedTexture(Microsoft::WRL::ComPtr<ID3D11Texture2
         return false;
     }
     if (FAILED(hr) || !outBuf.pSample) {
+        if (outBuf.pSample) outBuf.pSample->Release();
         if (outBuf.pEvents) outBuf.pEvents->Release();
         return false;
     }

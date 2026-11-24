@@ -46,12 +46,12 @@ std::string FormatReadyJson(const std::string& gpuName, bool d3d11Video, bool h2
 }
 
 std::string FormatStatsJson(const StreamStats& stats) {
-    char buf[512];
+    char numBuf[256];
     std::snprintf(
-        buf,
-        sizeof(buf),
+        numBuf,
+        sizeof(numBuf),
         "{\"event\":\"stats\",\"fps\":%.1f,\"decodeMs\":%.2f,\"renderMs\":%.2f,\"rttMs\":%.1f,"
-        "\"packetLossPct\":%.2f,\"bitrateKbps\":%u,\"width\":%u,\"height\":%u,\"codec\":\"%s\",\"decoder\":\"%s\"}",
+        "\"packetLossPct\":%.2f,\"bitrateKbps\":%u,\"width\":%u,\"height\":%u",
         stats.fps,
         stats.decodeMs,
         stats.renderMs,
@@ -59,10 +59,12 @@ std::string FormatStatsJson(const StreamStats& stats) {
         stats.packetLossPct,
         stats.bitrateKbps,
         stats.width,
-        stats.height,
-        EscapeJson(stats.codec).c_str(),
-        EscapeJson(stats.decoderName).c_str());
-    return std::string(buf);
+        stats.height);
+    std::ostringstream os;
+    os << numBuf
+       << ",\"codec\":\"" << EscapeJson(stats.codec) << "\""
+       << ",\"decoder\":\"" << EscapeJson(stats.decoderName) << "\"}";
+    return os.str();
 }
 
 static bool ExtractUintField(const std::string& line, const char* key, uint32_t& outVal) {

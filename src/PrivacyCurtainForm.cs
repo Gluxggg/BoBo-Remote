@@ -22,6 +22,7 @@ namespace DualRemote
         private bool active;
         private bool previewMode;
         private bool displayEventsHooked;
+        private int activationEpoch;
         private bool disposed;
 
         internal event Action StateChanged;
@@ -44,6 +45,7 @@ namespace DualRemote
         {
             statusMessage = null;
             Deactivate(false);
+            activationEpoch++;
             currentConfig = config ?? new PrivacyWallpaperConfig();
             previewMode = preview;
             ReloadImage();
@@ -63,9 +65,9 @@ namespace DualRemote
                 {
                     win.ExitRequested += delegate { Deactivate(false); };
                 }
+                windows.Add(win);
                 win.Show();
                 if (!preview && !win.CaptureExcluded) allExcluded = false;
-                windows.Add(win);
             }
 
             active = windows.Count > 0;
@@ -93,7 +95,8 @@ namespace DualRemote
             bool wasActiveNonPreview = active && !previewMode;
             bool shouldLock = triggerLockIfConfigured && wasActiveNonPreview && currentConfig != null && currentConfig.LockOnLocalExit;
 
-            // 先切换状态、停定时器并解绑显示事件，杜绝锁屏/解锁切换桌面时残留回调重新拉起防窥屏
+            // 先递增代次、切换状态、停定时器并解绑显示事件，杜绝锁屏/解锁切换桌面时残留回调重新拉起防窥屏
+            activationEpoch++;
             active = false;
             previewMode = false;
             refreshTimer.Stop();
@@ -103,13 +106,14 @@ namespace DualRemote
                 displayEventsHooked = false;
             }
 
-            foreach (var win in windows)
+            List<PrivacyCurtainWindow> snapshot = new List<PrivacyCurtainWindow>(windows);
+            windows.Clear();
+            foreach (var win in snapshot)
             {
                 try { win.Hide(); } catch { }
                 try { win.Close(); } catch { }
                 try { win.Dispose(); } catch { }
             }
-            windows.Clear();
             DisposeImage();
             RaiseStateChanged();
 
@@ -151,6 +155,7 @@ namespace DualRemote
         private void OnDisplaySettingsChanged(object sender, EventArgs e)
         {
             if (!active || disposed || windows.Count == 0) return;
+            int capturedEpoch = activationEpoch;
             try
             {
                 Control anchor = windows[0];
@@ -158,7 +163,7 @@ namespace DualRemote
                 {
                     anchor.BeginInvoke(new Action(delegate
                     {
-                        if (!active || disposed) return;
+                        if (!active || disposed || capturedEpoch != activationEpoch || windows.Count == 0) return;
                         string ignored;
                         ActivateInternal(currentConfig, previewMode, false, out ignored);
                     }));

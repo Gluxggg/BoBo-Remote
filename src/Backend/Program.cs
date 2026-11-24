@@ -1,14 +1,25 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace DualRemote
 {
     internal static class Program
     {
+        private const string SingleInstanceMutexName = @"Local\BoBoRemote.Launcher.SingleInstance";
+        private static readonly IntPtr HwndBroadcast = new IntPtr(0xFFFF);
+        internal static readonly int WmShowExistingInstance = RegisterWindowMessage("BoBoRemote.Launcher.ShowExistingInstance");
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AttachConsole(uint dwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int RegisterWindowMessage(string lpString);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         private const uint AttachParentProcess = 0xFFFFFFFFu;
 
@@ -59,6 +70,30 @@ namespace DualRemote
                     return 2;
                 }
             }
+
+            bool createdNew = true;
+            Mutex instanceMutex = null;
+            try
+            {
+                instanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
+            }
+            catch
+            {
+                createdNew = true;
+            }
+            if (!createdNew)
+            {
+                if (WmShowExistingInstance != 0)
+                {
+                    try { PostMessage(HwndBroadcast, WmShowExistingInstance, IntPtr.Zero, IntPtr.Zero); } catch { }
+                }
+                if (instanceMutex != null)
+                {
+                    try { instanceMutex.Dispose(); } catch { }
+                }
+                return 0;
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             try
@@ -70,6 +105,14 @@ namespace DualRemote
             {
                 MessageBox.Show("程序异常：" + ex.Message, "BoBo远程", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
+            }
+            finally
+            {
+                if (instanceMutex != null)
+                {
+                    try { instanceMutex.ReleaseMutex(); } catch { }
+                    try { instanceMutex.Dispose(); } catch { }
+                }
             }
         }
     }

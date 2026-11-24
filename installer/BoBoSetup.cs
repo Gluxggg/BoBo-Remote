@@ -336,6 +336,7 @@ namespace BoBoSetup
         internal const string UninstallRegSubKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BoBoRemote";
         internal const string RunRegSubKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         internal const string RunValueName = "BoBoRemote";
+        internal const string LegacyRunValueName = "DualRemote.Windows";
         internal const string ShortcutFileName = "BoBo Remote.lnk";
 
         internal static string DefaultInstallDir
@@ -740,6 +741,7 @@ namespace BoBoSetup
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegSubKey, true))
                 {
                     if (key == null) return;
+                    key.DeleteValue(LegacyRunValueName, false);
                     if (enabled && !string.IsNullOrEmpty(mainExe))
                         key.SetValue(RunValueName, "\"" + mainExe + "\"", RegistryValueKind.String);
                     else

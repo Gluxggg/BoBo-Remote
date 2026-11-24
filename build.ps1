@@ -1257,7 +1257,7 @@ function Show-Summary {
     }
     Write-Info ''
     Write-Info '本脚本不修改系统服务、防火墙、注册表或网络配置；RustDesk 用 msiexec /a 仅解包，未安装任何产品。'
-    Write-Info '已集成 Foundation Sunshine ' + $SunshineAsset.Version + ' 内置宿主、Moonlight V+ 6.5.6 与主机只读诊断。'
+    Write-Info ('已集成 Foundation Sunshine ' + $SunshineAsset.Version + ' 内置宿主、Moonlight V+ 6.5.6 与主机只读诊断。')
     Write-Info '内置宿主首次准备才在 %LOCALAPPDATA%\双端远程\host 生成配置与凭据，不复制 Program Files 私人配置。'
 }
 

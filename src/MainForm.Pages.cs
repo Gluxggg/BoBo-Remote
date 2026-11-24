@@ -145,7 +145,7 @@ namespace DualRemote
             topPrivacyBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Shield);
             topPrivacyBtn.AccessibleName = "防窥壁纸快捷开关";
             topPrivacyBtn.Margin = new Padding(0, 7, 0, 7);
-            topPrivacyBtn.Click += delegate { TogglePrivacyCurtain(false); };
+            BindPrivacyToggleButton(topPrivacyBtn);
 
             topStatusBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Bell);
             topStatusBtn.AccessibleName = "本机状态与网络地址";
@@ -847,16 +847,34 @@ namespace DualRemote
             menu.Show(pt);
         }
 
-        private static ContextMenuStrip CreateCleanPopupMenu()
+        private static readonly Font PopupMenuFont = new Font("Microsoft YaHei UI", 9.25f);
+
+        private ContextMenuStrip CreateCleanPopupMenu()
         {
             var menu = new ContextMenuStrip
             {
                 ShowImageMargin = false,
                 BackColor = Theme.Paper,
                 ForeColor = Theme.Ink,
-                Font = new Font("Microsoft YaHei UI", 9.25f),
+                Font = PopupMenuFont,
                 Padding = new Padding(4, 6, 4, 6),
                 Renderer = new CleanMenuRenderer()
+            };
+            menu.Closed += delegate
+            {
+                if (IsDisposed || !IsHandleCreated)
+                {
+                    try { menu.Dispose(); } catch { }
+                    return;
+                }
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        try { menu.Dispose(); } catch { }
+                    }));
+                }
+                catch { }
             };
             return menu;
         }
