@@ -32,12 +32,12 @@ namespace DualRemote
 
         private static string DisplayTool
         {
-            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools", "Set-SunshineDisplay.ps1"); }
+            get { return EmbeddedTools.ResolveDisplayTool(); }
         }
 
         private static string OptimizeTool
         {
-            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools", "Optimize-SunshineStream.ps1"); }
+            get { return EmbeddedTools.ResolveOptimizeTool(); }
         }
 
         private Control BuildPrivacyAndDisplayPage()

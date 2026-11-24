@@ -2,10 +2,10 @@
   <img src="assets/bobo-logo.png" alt="BoBo Remote logo" width="152" />
 </p>
 
-<h1 align="center">BoBo Remote (BoBo远程)</h1>
+<h1 align="center">BoBo Remote</h1>
 
 <p align="center">
-  <strong>Portable, Low-Latency Remote Desktop & Streaming Launcher for Your Own Windows PCs</strong>
+  <strong>One-Click Windows x64 Installer & Low-Latency Remote Desktop Launcher for Your Own PCs</strong>
 </p>
 
 <p align="center">
@@ -14,9 +14,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Gluxggg/dual-remote/actions/workflows/ci.yml"><img src="https://github.com/Gluxggg/dual-remote/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Gluxggg/BoBo-Remote/actions/workflows/ci.yml"><img src="https://github.com/Gluxggg/BoBo-Remote/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Gluxggg/BoBo-Remote/releases"><img src="https://img.shields.io/github/v/release/Gluxggg/BoBo-Remote?label=release&color=337aff" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <img src="https://img.shields.io/badge/status-V4_complete-brightgreen" alt="Status">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078d6" alt="Platform">
   <img src="https://img.shields.io/badge/.NET%20Framework-4.8-512bd4" alt=".NET Framework 4.8">
   <img src="https://img.shields.io/badge/engines-RustDesk%20%7C%20Moonlight%20V%2B%20%7C%20Sunshine-2e4ecb" alt="Engines">
@@ -24,7 +24,7 @@
 
 ---
 
-**One portable ZIP, ready on both ends.** Packs general remote control, high-FPS low-latency streaming, and a bundled Foundation Sunshine host into a single no-install Windows x64 archive — zero accounts, zero SDKs, unzip and connect across your desktop and laptop.
+**One standard installer, ready on both ends.** Ships a sleek **single-file Windows x64 GUI installer (`BoBoRemote-Setup-x64.exe`)** — one-click install with automatic Desktop & Start Menu shortcuts, Windows Apps & Features uninstaller registration, and compiled-in tuning scripts — zero accounts, zero SDKs.
 
 Built for **everyday dual-PC work**, **2K 90 fps streaming over LAN/Tailscale/IPv6**, and **physical screen privacy** — featuring a clean glacier ice-blue UI, a 7-step ClearType spotlight onboarding tour, custom privacy wallpaper with lock-screen guarding, and reversible anti-loss tuning.
 
@@ -38,19 +38,19 @@ Built for **everyday dual-PC work**, **2K 90 fps streaming over LAN/Tailscale/IP
 
 ## Why BoBo Remote?
 
-| Commercial Remote Desktop Tools | BoBo Remote (`dual-remote`) |
+| Commercial Remote Desktop Tools | BoBo Remote |
 | --- | --- |
 | Mandatory cloud account; device metadata routed through vendor servers | **No account, no custom relay** — runs over your LAN, Tailscale tailnet, or public IPv6 |
-| Opaque quality presets; bitrate and frame-rate tiers often paywalled | **Open-source engines + transparent tuning** — Moonlight V+ / Foundation Sunshine + reversible scripts |
-| Installs background system services, drivers, and firewall exceptions | **Portable & explicit authorization** — isolated child processes; never silently alters services or firewall |
-| Juggling RustDesk + Moonlight + Sunshine separately is tedious | **One unified native launcher** — single ZIP for both PCs, in-flow 4-digit pairing, and a 7-step spotlight tour |
+| Opaque quality presets; bitrate and frame-rate tiers often paywalled | **Open-source engines + transparent tuning** — Moonlight V+ / Foundation Sunshine + built-in reversible tuning |
+| Installs background system services, drivers, and firewall exceptions | **Standard GUI installer + explicit consent** — creates Desktop/Start Menu shortcuts without silent services or firewall edits |
+| Juggling RustDesk + Moonlight + Sunshine separately is tedious | **One unified installer & launcher** — single `BoBoRemote-Setup-x64.exe` for both PCs with a 7-step onboarding tour |
 | Limited host screen privacy or fragile lock-screen recovery | **Custom privacy wallpaper + virtual display** — auto-enable on attach, lock-on-exit guard state machine |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph L["BoBo远程.exe (Native WinForms · C# 5)"]
+  subgraph L["BoBo远程.exe (Native WinForms · C# 5 · Embedded Tuning Scripts)"]
     direction TB
     G["7-Step Spotlight Onboarding"] -.-> A["Devices · Host Dashboard"]
     A --> B["Remote Assist · 4-Digit / 9-Digit"]
@@ -73,12 +73,13 @@ flowchart LR
   S --- H
 ```
 
-Every client engine and the bundled host runs as a **separate process** from fixed relative paths under `engines\`. The launcher links no GPL code, modifies no upstream source, and never launches arbitrary executables from user config. First-time access always requires explicit local approval on the controlled PC (RustDesk's native prompt or Sunshine's 4-digit local pairing code).
+The UI, 7-step onboarding engine, privacy curtain state machine, and core display/anti-loss scripts are compiled directly into `BoBo远程.exe`. The four native C++/Rust engines — RustDesk (AGPL-3.0), Moonlight / Moonlight V+, and Foundation Sunshine (GPL-3.0) — run as isolated child processes from fixed relative paths under `engines\` so the launcher stays cleanly MIT-licensed while packaged inside a single installer executable.
 
 ## Connection & Feature Matrix
 
 | Capability | Status | Notes |
 | --- | --- | --- |
+| **One-click GUI installer** | ✅ Native | `BoBoRemote-Setup-x64.exe`: SHA-256 self-check, Desktop & Start Menu shortcuts, upgrade-safe pairing preservation, Windows Apps uninstall |
 | **Low-latency 2K/90 fps streaming** | ✅ Native | Moonlight V+ 6.5.6 + Foundation Sunshine with HEVC, Foundation ABR, and dynamic Auto-FEC |
 | **In-flow 4-digit local pairing** | ✅ Native | Controlled PC generates a 120 s 4-digit pairing code; once paired, subsequent sessions launch directly |
 | **Temporary assist & file transfer** | ✅ Native | RustDesk 1.5.3 extracted from official MSI (`msiexec /a`, no install/service) for 9-digit remote assist |
@@ -89,8 +90,6 @@ Every client engine and the bundled host runs as a **separate process** from fix
 ## Interface Preview
 
 ### 7-Step ClearType Spotlight Onboarding & Remote Assist
-
-On first launch, BoBo Remote walks you through navigation, IP copying, 4-digit pairing, privacy protection, and tuning using a translucent gray scrim paired with a native opaque ClearType card so CJK and Latin typography stays crisp at every Windows DPI scale.
 
 <p align="center">
   <img src="assets/screenshot-onboarding.png" alt="7-step ClearType spotlight onboarding overlay" width="450" />
@@ -113,18 +112,26 @@ On first launch, BoBo Remote walks you through navigation, IP copying, 4-digit p
 
 ## Quick Start
 
-> The repository ships source code and docs only. Running `build.ps1` downloads all four pinned upstream components, verifies every byte size and SHA-256 digest, and compiles with Windows' in-box `.NET Framework 4.8` `csc.exe` — **no SDK, no NuGet**.
+### Option 1: Download the Standard Windows Installer (Recommended)
+
+1. Download **`BoBoRemote-Setup-x64.exe`** (or the portable ZIP) from [**GitHub Releases**](https://github.com/Gluxggg/BoBo-Remote/releases/latest).
+2. Double-click **`BoBoRemote-Setup-x64.exe`** on both Windows 10/11 x64 machines and click **Install**:
+   - Installs cleanly into `%LOCALAPPDATA%\BoBoRemote` (no UAC admin prompt required; custom path supported);
+   - Automatically creates the **BoBo Remote** Desktop shortcut, Start Menu folder, and standard Windows Apps & Features uninstaller;
+   - Preserves existing Moonlight pairing configs when upgrading in place.
+
+### Option 2: Build Installer & Portable Package from Source (Zero SDK)
 
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/Gluxggg/dual-remote.git
-cd dual-remote
+git clone https://github.com/Gluxggg/BoBo-Remote.git
+cd BoBo-Remote
 
-# 2. Build the portable package (fetches and SHA-256 verifies all upstream engines)
+# 2. Build both BoBoRemote-Setup-x64.exe and the portable ZIP (verifies every upstream SHA-256)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
-# 3. Run BoBo Remote (send dist\BoBo远程-Windows-x64.zip directly to your second PC)
-.\dist\BoBo远程-Windows-x64\BoBo远程.exe
+# 3. Run the graphical installer
+.\dist\BoBoRemote-Setup-x64.exe
 ```
 
 Useful build and CLI flags:
@@ -132,7 +139,8 @@ Useful build and CLI flags:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch            # offline build from verified .cache
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -FetchOnly            # prepare & verify engine cache only
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch -NoPublish # clean stage only; no dist/ZIP write
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch -NoPublish # clean stage only; no dist write
+.\BoBoRemote-Setup-x64.exe --silent --dir="D:\BoBoRemote"                             # silent unattended install
 .\BoBo远程.exe --self-test                                                            # headless self-test suite
 .\BoBo远程.exe --tour                                                                 # replay the 7-step onboarding guide
 ```
@@ -152,24 +160,25 @@ Every download URL, file size, and SHA-256 hash is pinned in [`build.ps1`](build
 
 | Module / Path | Responsibility |
 | --- | --- |
+| `installer/BoBoSetup.cs` | Zero-dependency native GUI installer/uninstaller: SHA-256 check, streaming extract, shortcuts, Windows Apps registry |
 | `src/MainForm*.cs` | Glacier ice-blue native shell & four pages: Devices, Remote Assist, Privacy & Display, Settings |
 | `src/RemoteTheme.cs` | Hand-drawn WinForms theme: ice-blue/porcelain palette, elevated cards, two-tone icons, slim scrollbar |
 | `src/OnboardingTour.cs` | 7-step spotlight onboarding with 2-layer ClearType rendering, overlap avoidance, and state persistence |
 | `src/PrivacyCurtainForm.cs` | Host privacy curtain window, `Ctrl+Alt+Shift+P` global hotkey, and lock-screen guard state machine |
-| `src/Backend/*.cs` | Engine launcher, bundled host manager, Foundation local pairing, network discovery, wallpaper geometry, self-test |
-| `tools/*.ps1` | Read-only host diagnostics, reversible anti-loss tuning, virtual display control, LAN/Tailscale path probes |
-| `build.ps1` / `ci/build.ps1` | Zero-SDK portable bundler and GitHub Actions CI compile + `--self-test` verification |
+| `src/Backend/*.cs` | Engine launcher, bundled host manager, compiled-in scripts, Foundation local pairing, network discovery, self-test |
+| `tools/*.ps1` | Read-only host diagnostics, reversible anti-loss tuning, virtual display control (also compiled into `BoBo远程.exe`) |
+| `build.ps1` / `ci/build.ps1` | Zero-SDK installer & portable bundler + GitHub Actions CI compile & dual `--self-test` verification |
 
 ## Highlights
 
+- ✅ **Standard Single-File Windows Installer (`BoBoRemote-Setup-x64.exe`)** — SHA-256 verification, Desktop & Start Menu shortcuts, Windows Apps uninstaller, upgrade-safe pairing retention
 - ✅ **Glacier Ice-Blue UI & Tuxedo Cat Brand Identity** — Calibrated light cool palette, borderless custom resize grip, and clean rounded-square `bobo-logo.png` / Win32 multi-size `bobo-remote.ico`
 - ✅ **7-Step Spotlight Onboarding Tour** — Layered translucent gray scrim + native opaque ClearType card; keyboard navigation (`← / → / Enter / Esc`) and one-click replay from `?`
-- ✅ **Single Portable ZIP for Both PCs** — Control another PC or prepare the bundled Foundation Sunshine host from the exact same package
+- ✅ **Compiled-in Core Tuning & Display Scripts** — `Set-SunshineDisplay.ps1` and `Optimize-SunshineStream.ps1` embedded directly inside `BoBo远程.exe`
 - ✅ **Dual-Channel Streaming & Remote Assist** — Moonlight V+ / Moonlight for high-FPS streaming plus RustDesk 1.5.3 for ad-hoc 9-digit support and file transfer
 - ✅ **Privacy Wallpaper + Lock-Screen Guard** — Custom local images or 3 themes, auto-enable on remote attach, lock on local exit, and state-machine protection against false re-triggers after unlock
 - ✅ **Virtual Display & Display-Off Privacy** — Zako virtual display aspect matching and physical monitor blackout during remote sessions
-- ✅ **Transparent, Reversible Anti-Loss Tuning** — Read-only encoder/network diagnostics plus backed-up CBR + HRD + LTR + Auto-FEC tuning for standard Sunshine installs
-- ✅ **Headless Self-Test (`--self-test`)** — Automated checks covering CLI argument assembly, wallpaper geometry, privacy lock-screen transitions, onboarding layout, and diagnostics
+- ✅ **Dual Headless Self-Tests (`--self-test`)** — Automated checks covering launcher logic, onboarding, privacy state machine, installer trailer integrity, and Zip-Slip defense
 
 ## Tech Stack
 
@@ -182,10 +191,10 @@ Every download URL, file size, and SHA-256 hash is pinned in [`build.ps1`](build
 
 Every performance claim in this project is strictly graded as **configuration written**, **phenomenon observed in logs**, or **same-condition A/B measurement** (see [`低延迟调优与防窥指南.md`](低延迟调优与防窥指南.md)).
 
-- **No accounts, relays, or telemetry**: Preferences stay in `%LOCALAPPDATA%\双端远程\` (no passwords, PINs, or tokens). Bundled host credentials (`local-auth.token`, certs, pairing state) are generated locally under `%LOCALAPPDATA%\双端远程\host\config` on first preparation and never ship in the ZIP.
+- **No accounts, relays, or telemetry**: Preferences stay in `%LOCALAPPDATA%\双端远程\` (no passwords, PINs, or tokens). Bundled host credentials (`local-auth.token`, certs, pairing state) are generated locally under `%LOCALAPPDATA%\双端远程\host\config` on first preparation and never ship in the installer.
 - **Explicit local authorization**: RustDesk asks in its native window; Sunshine pairs via a local 4-digit code. Windows Firewall prompts must be approved manually by the user.
 - **Unsigned pre-release binaries**: Moonlight V+ and Foundation Sunshine portable zips are upstream `NotSigned` builds; Windows SmartScreen may warn — verify pinned SHA-256 hashes in [THIRD-PARTY.md](THIRD-PARTY.md).
-- **Real-world boundaries**: Privacy wallpaper relies on `WDA_EXCLUDEFROMCAPTURE` and must be verified per capture backend; 90 fps presets require matching host display mode, refresh rate, and client decode support. This project makes no claim of matching or exceeding commercial tools — measure on your own hardware.
+- **Real-world boundaries**: Privacy wallpaper relies on `WDA_EXCLUDEFROMCAPTURE` and must be verified per capture backend; 90 fps presets require matching host display mode, refresh rate, and client decode support.
 
 ## Roadmap
 
@@ -194,37 +203,37 @@ Every performance claim in this project is strictly graded as **configuration wr
 | **V1** | Zero-SDK native WinForms launcher & RustDesk / Moonlight / Moonlight V+ orchestration | ✅ Done |
 | **V2** | Bundled Foundation Sunshine host, 4-digit local pairing flow & existing-host reuse | ✅ Done |
 | **V3** | Host privacy wallpaper, lock-screen guard state machine, virtual display & reversible anti-loss tuning | ✅ Done |
-| **V4** | Glacier ice-blue UI redesign, rounded-square tuxedo cat icon & 7-step ClearType spotlight onboarding | ✅ Done |
-| **V5** | Automated dual-PC frame-time/latency A/B benchmark scripts & in-session bitrate switching | 📋 Planned |
+| **V4** | Glacier ice-blue UI, tuxedo cat icon, 7-step ClearType onboarding, GUI installer & compiled-in scripts | ✅ Done |
+| **V5** | Native C++ `moonlight-common-c` + D3D11VA embedded stream viewport with floating toolbar & live bitrate toggle | 📋 Planned |
 
 ## Star History
 
 <p align="center">
-  <a href="https://www.star-history.com/#Gluxggg/dual-remote&Date">
+  <a href="https://www.star-history.com/#Gluxggg/BoBo-Remote&Date">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gluxggg/dual-remote&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gluxggg/dual-remote&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Gluxggg/dual-remote&type=Date" width="700" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date" width="700" />
     </picture>
   </a>
 </p>
 
 ## Contributing
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR. Hardware-specific engine behavior reports with `--self-test` output and encoder logs are especially valuable.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 ## Development Checks
 
 Run both checks on Windows 10/11 x64 before submitting a pull request:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # compile + headless --self-test (matches CI)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch # full portable package build from verified cache
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # compile + launcher & setup self-tests (matches CI)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch # full installer + portable build from verified cache
 ```
 
 ## License
 
-Launcher code (`src\`), scripts (`tools\`, `ci\`, `build.ps1`), and docs are released under [MIT](LICENSE). The four bundled upstream components retain their original licences:
+Launcher code (`src\`), installer (`installer\`), scripts (`tools\`, `ci\`, `build.ps1`), and docs are released under [MIT](LICENSE). The four bundled upstream components retain their original licences:
 
 - **RustDesk 1.5.3**: AGPL-3.0 (`LICENSES\AGPL-3.0.txt`)
 - **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.35314**: GPL-3.0 (`LICENSES\GPL-3.0.txt`, `engines\Sunshine\LICENSE`)

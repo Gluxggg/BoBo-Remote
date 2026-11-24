@@ -98,6 +98,7 @@ if ($DistDir.TrimEnd('\').Equals([System.IO.Path]::GetFullPath($Root).TrimEnd('\
 }
 $ZipPath      = Join-Path $DistDir 'BoBo远程-Windows-x64.zip'
 $LightZipPath = Join-Path $DistDir 'BoBo远程-轻量更新包.zip'
+$SetupExePath = Join-Path $DistDir 'BoBoRemote-Setup-x64.exe'
 $SunshineExtractDir = Join-Path $BuildDir 'sunshine-extract'
 
 # 固定上游资产：版本、官方地址、字节数、SHA256 全部锁死。
@@ -731,6 +732,8 @@ function Invoke-CompileStage {
 
     $appIcon = Join-Path $Root 'assets\bobo-remote.ico'
     $brandLogo = Join-Path $Root 'assets\bobo-logo.png'
+    $displayTool = Join-Path $Root 'tools\Set-SunshineDisplay.ps1'
+    $optimizeTool = Join-Path $Root 'tools\Optimize-SunshineStream.ps1'
     $cscArgs = @(
         '/nologo'
         '/target:winexe'
@@ -746,6 +749,8 @@ function Invoke-CompileStage {
     )
     if (Test-Path -LiteralPath $appIcon) { $cscArgs += "/win32icon:$appIcon" }
     if (Test-Path -LiteralPath $brandLogo) { $cscArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
+    if (Test-Path -LiteralPath $displayTool) { $cscArgs += "/resource:$displayTool,DualRemote.tools.Set-SunshineDisplay.ps1" }
+    if (Test-Path -LiteralPath $optimizeTool) { $cscArgs += "/resource:$optimizeTool,DualRemote.tools.Optimize-SunshineStream.ps1" }
     $cscArgs += $csFiles | ForEach-Object { $_.FullName }
 
     Write-Info "编译器：$csc（$((Get-Item -LiteralPath $csc).VersionInfo.FileVersion)）"
@@ -1112,9 +1117,118 @@ function Invoke-Publish {
         '低延迟调优与防窥指南.md'
     )
     New-RelativeFileSetZip -SourceRoot $PackageDir -RelativePaths $lightPaths -StagePath $lightStage `
-        -OutputPath $LightZipPath -Context '轻量更新包' -MaxBytes 512000
+        -OutputPath $LightZipPath -Context '轻量更新包' -MaxBytes 1048576
+
+    # 标准图形化单文件安装程序：BoBoRemote-Setup-x64.exe（双击向导安装 + 桌面/开始菜单快捷方式 + 系统卸载项）
+    New-SetupInstaller -ZipSource $ZipPath -OutputExe $SetupExePath -VersionLabel $BuildVersion
 
     return $releaseDir
+}
+
+function New-SetupInstaller {
+    param(
+        [string]$ZipSource,
+        [string]$OutputExe,
+        [string]$VersionLabel
+    )
+
+    $setupSource = Join-Path $Root 'installer\BoBoSetup.cs'
+    if (-not (Test-Path -LiteralPath $setupSource)) {
+        Write-Info '未找到 installer\BoBoSetup.cs，跳过生成图形化安装包。'
+        return
+    }
+
+    $frameworkDir = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
+    $csc = Join-Path $frameworkDir 'csc.exe'
+    $manifest = Join-Path $Root 'src\app.manifest'
+    $appIcon = Join-Path $Root 'assets\bobo-remote.ico'
+    $brandLogo = Join-Path $Root 'assets\bobo-logo.png'
+
+    $setupBuildDir = Join-Path $BuildDir 'setup'
+    New-Item -ItemType Directory -Force -Path $setupBuildDir | Out-Null
+    $stubExe = Join-Path $setupBuildDir 'BoBoSetupStub.exe'
+    $verFile = Join-Path $setupBuildDir 'setup-version.txt'
+    $displayVer = if ([string]::IsNullOrWhiteSpace($VersionLabel)) { '4.1.0' } else { $VersionLabel }
+    [System.IO.File]::WriteAllText($verFile, $displayVer, (New-Object System.Text.UTF8Encoding($false)))
+    if (Test-Path -LiteralPath $stubExe) { Remove-Item -LiteralPath $stubExe -Force }
+
+    $refs = @(
+        'System.dll',
+        'System.Core.dll',
+        'System.Drawing.dll',
+        'System.Windows.Forms.dll',
+        'System.IO.Compression.dll',
+        'System.IO.Compression.FileSystem.dll'
+    ) | ForEach-Object { Join-Path $frameworkDir $_ }
+
+    $cscArgs = @(
+        '/nologo'
+        '/target:winexe'
+        '/platform:x64'
+        '/optimize+'
+        '/warn:4'
+        '/warnaserror+'
+        '/codepage:65001'
+        '/utf8output'
+        "/out:$stubExe"
+        "/win32manifest:$manifest"
+        "/reference:$($refs -join ',')"
+    )
+    if (Test-Path -LiteralPath $appIcon) { $cscArgs += "/win32icon:$appIcon" }
+    if (Test-Path -LiteralPath $brandLogo) { $cscArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
+    $cscArgs += "/resource:$verFile,DualRemote.setup-version.txt"
+    $cscArgs += $setupSource
+
+    $outLines = & $csc $cscArgs 2>&1
+    $code = $LASTEXITCODE
+    foreach ($ln in @($outLines)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$ln)) { Write-Info "setup-csc: $ln" }
+    }
+    if ($code -ne 0) { throw "BoBoSetup.cs 编译失败（退出码 $code）。" }
+
+    # 流式拼接：Stub EXE + 完整便携 ZIP + 64 字节 BOBOSET1 SHA-256 尾标
+    $tmpSetup = Join-Path $setupBuildDir 'BoBoRemote-Setup-x64.exe.tmp'
+    if (Test-Path -LiteralPath $tmpSetup) { Remove-Item -LiteralPath $tmpSetup -Force }
+
+    $stubBytes = [System.IO.File]::ReadAllBytes($stubExe)
+    $payloadOffset = [long]$stubBytes.Length
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $outStream = [System.IO.File]::Create($tmpSetup)
+    try {
+        $outStream.Write($stubBytes, 0, $stubBytes.Length)
+        $zipStream = [System.IO.File]::OpenRead($ZipSource)
+        try {
+            $payloadLength = [long]$zipStream.Length
+            $buf = New-Object byte[] (1024 * 1024)
+            while ($true) {
+                $n = $zipStream.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                $outStream.Write($buf, 0, $n)
+                [void]$sha.TransformBlock($buf, 0, $n, $null, 0)
+            }
+            [void]$sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+            $hashBytes = $sha.Hash
+
+            $trailer = New-Object byte[] 64
+            $m1 = [System.Text.Encoding]::ASCII.GetBytes('BOBOSET1')
+            $m2 = [System.Text.Encoding]::ASCII.GetBytes('END1')
+            [Array]::Copy($m1, 0, $trailer, 0, 8)
+            [Array]::Copy([BitConverter]::GetBytes($payloadOffset), 0, $trailer, 8, 8)
+            [Array]::Copy([BitConverter]::GetBytes($payloadLength), 0, $trailer, 16, 8)
+            [Array]::Copy($hashBytes, 0, $trailer, 24, 32)
+            [Array]::Copy([BitConverter]::GetBytes([int]1), 0, $trailer, 56, 4)
+            [Array]::Copy($m2, 0, $trailer, 60, 4)
+            $outStream.Write($trailer, 0, 64)
+        } finally {
+            $zipStream.Dispose()
+        }
+    } finally {
+        $outStream.Dispose()
+        $sha.Dispose()
+    }
+
+    Move-Item -LiteralPath $tmpSetup -Destination $OutputExe -Force
+    Write-Ok "标准安装包：dist\$(Split-Path -Leaf $OutputExe)"
 }
 
 function Show-Summary {
@@ -1131,6 +1245,7 @@ function Show-Summary {
     Write-Info "  入口：$(Join-Path $ReleaseDir 'BoBo远程.exe')"
 
     foreach ($pair in @(
+        @{ Label = '标准安装包'; Path = $SetupExePath },
         @{ Label = '完整便携包'; Path = $ZipPath },
         @{ Label = '轻量更新包'; Path = $LightZipPath }
     )) {

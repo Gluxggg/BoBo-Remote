@@ -1,9 +1,8 @@
-# Contributing to BoBo远程 (dual-remote)
+# Contributing to BoBo Remote
 
-Thanks for taking a look. BoBo远程 (`dual-remote`) is a personal-scale remote desktop launcher for
+Thanks for taking a look. BoBo Remote (`Gluxggg/BoBo-Remote`) is a personal-scale remote desktop launcher and installer for
 Windows: it wraps four upstream engines (RustDesk, Moonlight V+, Moonlight, and bundled Foundation Sunshine) behind
-one small native launcher, and adds onboarding, privacy curtain protection, and tuning/diagnostics that those engines do not
-ship together.
+one small native launcher + graphical installer, and adds onboarding, privacy curtain protection, and built-in tuning/diagnostics.
 
 Issues and pull requests are welcome. Please read the two rules below first — they
 keep this project honest.

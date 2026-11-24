@@ -741,6 +741,12 @@ namespace DualRemote
             Check("BoBo远程 品牌 Logo 资源：内嵌圆角方框奶牛猫徽章可正常加载",
                 brandLogo != null && brandLogo.Width >= 32 && brandLogo.Height >= 32,
                 brandLogo == null ? "null" : (brandLogo.Width + "x" + brandLogo.Height));
+            Check("内置调优与显示脚本：已编译进主程序资源并可解析落地",
+                EmbeddedTools.HasEmbeddedResource(EmbeddedTools.DisplayResourceName)
+                && EmbeddedTools.HasEmbeddedResource(EmbeddedTools.OptimizeResourceName)
+                && File.Exists(EmbeddedTools.ResolveDisplayTool())
+                && File.Exists(EmbeddedTools.ResolveOptimizeTool()),
+                EmbeddedTools.ResolveOptimizeTool());
 
             var badSnap = new HostSnapshot { SunshineInstalled = true };
             var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
