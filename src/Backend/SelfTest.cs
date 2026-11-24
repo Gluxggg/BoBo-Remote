@@ -912,6 +912,33 @@ namespace DualRemote
                 && AppUpdater.NormalizeLightZipEntry("BoBo远程/tools/Set-SunshineDisplay.ps1") == @"tools\Set-SunshineDisplay.ps1",
                 AppUpdater.NormalizeLightZipEntry("BoBo远程/BoBo远程.exe"));
 
+            string parsedRedirectTag = null;
+            string parsedRelativeTag = null;
+            string badRedirectTag = null;
+            bool redirectExtractOk = AppUpdater.TryExtractTagFromReleaseUrl("https://github.com/Gluxggg/BoBo-Remote/releases/tag/v4.3.1", out parsedRedirectTag)
+                && parsedRedirectTag == "v4.3.1"
+                && AppUpdater.TryExtractTagFromReleaseUrl("/Gluxggg/BoBo-Remote/releases/tag/v4.3.1?foo=1", out parsedRelativeTag)
+                && parsedRelativeTag == "v4.3.1"
+                && !AppUpdater.TryExtractTagFromReleaseUrl("https://evil.example.com/Gluxggg/BoBo-Remote/releases/tag/v4.3.1", out badRedirectTag)
+                && !AppUpdater.TryExtractTagFromReleaseUrl("https://github.com/other/repo/releases/tag/v4.3.1", out badRedirectTag)
+                && !AppUpdater.TryExtractTagFromReleaseUrl("https://github.com/Gluxggg/BoBo-Remote/releases/tag/../../etc", out badRedirectTag);
+            Check("自动更新 302 重定向标签安全提取", redirectExtractOk, parsedRedirectTag ?? "null");
+
+            ReleaseManifestInfo redirectRelease = AppUpdater.BuildReleaseFromTag("v4.3.1");
+            var redirectPlan = new UpdateCheckResult();
+            if (redirectRelease != null && sumsOk)
+            {
+                AppUpdater.SelectBestPlan(redirectRelease, parsedEngines, parsedHashes, true, true, redirectPlan);
+            }
+            Check("自动更新由 tag 构造可信下载链接与更新计划",
+                redirectRelease != null
+                && AppUpdater.IsTrustedDownloadUrl(redirectRelease.Sha256SumsUrl)
+                && AppUpdater.IsTrustedDownloadUrl(redirectRelease.LightZipUrl)
+                && AppUpdater.IsTrustedDownloadUrl(redirectRelease.SetupExeUrl)
+                && redirectPlan.PackageKind == UpdatePackageKind.LightZip
+                && redirectPlan.DownloadUrl == "https://github.com/Gluxggg/BoBo-Remote/releases/download/v4.3.1/BoBoRemote-Update-x64.zip",
+                redirectRelease == null ? "null" : redirectRelease.LightZipUrl);
+
             // Win11 多档 DPI 新手引导卡片自适应度量与渲染自检
             bool tourDpiOk = true;
             string tourDpiDetail = "ok";

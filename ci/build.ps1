@@ -67,9 +67,28 @@ $compilerArgs += $sources
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 Write-Host "compiled $($sources.Count) source files"
 
-$process = Start-Process -FilePath $exePath -ArgumentList '--self-test' -Wait -PassThru
-Write-Host "self-test exit code: $($process.ExitCode)"
-if ($process.ExitCode -ne 0) { throw "self-test failed with exit code $($process.ExitCode)" }
+function Invoke-SelfTestBinary {
+    param([string]$BinaryPath)
+
+    if ($BinaryPath -match '[^\x00-\x7F]') {
+        $tmpDir = Join-Path $env:TEMP ('bobo-selftest-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+        try {
+            $tmpExe = Join-Path $tmpDir ([System.IO.Path]::GetFileName($BinaryPath))
+            Copy-Item -LiteralPath $BinaryPath -Destination $tmpExe -Force
+            $proc = Start-Process -FilePath $tmpExe -ArgumentList '--self-test' -Wait -PassThru
+            return $proc.ExitCode
+        } finally {
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $procDirect = Start-Process -FilePath $BinaryPath -ArgumentList '--self-test' -Wait -PassThru
+    return $procDirect.ExitCode
+}
+
+$selfTestCode = Invoke-SelfTestBinary -BinaryPath $exePath
+Write-Host "self-test exit code: $selfTestCode"
+if ($selfTestCode -ne 0) { throw "self-test failed with exit code $selfTestCode" }
 
 $setupSource = Join-Path $repoRoot 'installer\BoBoSetup.cs'
 if (Test-Path -LiteralPath $setupSource) {
@@ -86,9 +105,9 @@ if (Test-Path -LiteralPath $setupSource) {
     $setupArgs += $setupSource
     & $compiler @setupArgs
     if ($LASTEXITCODE -ne 0) { throw "setup csc failed with exit code $LASTEXITCODE" }
-    $setupProc = Start-Process -FilePath $setupExe -ArgumentList '--self-test' -Wait -PassThru
-    Write-Host "setup self-test exit code: $($setupProc.ExitCode)"
-    if ($setupProc.ExitCode -ne 0) { throw "setup self-test failed with exit code $($setupProc.ExitCode)" }
+    $setupCode = Invoke-SelfTestBinary -BinaryPath $setupExe
+    Write-Host "setup self-test exit code: $setupCode"
+    if ($setupCode -ne 0) { throw "setup self-test failed with exit code $setupCode" }
 }
 
 Write-Host 'OK: build and self-test passed'

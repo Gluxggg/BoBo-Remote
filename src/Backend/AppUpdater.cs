@@ -67,7 +67,7 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "4.3.0";
+        internal const string FallbackVersion = "4.3.1";
 
         /// <summary>当前随包封装的 4 个固定上游引擎指纹；与 ci/release-package.ps1 写入 SHA256SUMS.txt 的 # engines= 对齐。</summary>
         internal const string CurrentEnginesStamp = "rd1.5.3-ml6.2.0-vp6.5.6-fs2026.1123.185102";
@@ -306,6 +306,205 @@ namespace DualRemote
             }
         }
 
+        internal static bool IsSafeReleaseTag(string tag)
+        {
+            if (string.IsNullOrEmpty(tag) || tag.Length > 64) return false;
+            if (tag.IndexOf("..", StringComparison.Ordinal) >= 0) return false;
+            char first = tag[0];
+            bool validFirst = first == 'v' || first == 'V' || (first >= '0' && first <= '9');
+            if (!validFirst) return false;
+            for (int i = 0; i < tag.Length; i++)
+            {
+                char c = tag[i];
+                bool isAsciiAlnum = (c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9');
+                bool allowed = isAsciiAlnum || c == '.' || c == '-' || c == '_';
+                if (!allowed) return false;
+            }
+            return true;
+        }
+
+        internal static bool TryExtractTagFromReleaseUrl(string urlOrPath, out string tag)
+        {
+            tag = null;
+            if (string.IsNullOrWhiteSpace(urlOrPath)) return false;
+            string trimmed = urlOrPath.Trim();
+            string pathPart;
+            if (trimmed.StartsWith("/", StringComparison.Ordinal))
+            {
+                pathPart = trimmed;
+            }
+            else
+            {
+                Uri uri;
+                if (!Uri.TryCreate(trimmed, UriKind.Absolute, out uri)) return false;
+                if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+                if (!string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)) return false;
+                pathPart = uri.AbsolutePath ?? "";
+            }
+
+            int q = pathPart.IndexOfAny(new[] { '?', '#' });
+            if (q >= 0) pathPart = pathPart.Substring(0, q);
+            pathPart = pathPart.TrimEnd('/');
+
+            string prefix = "/" + Repository + "/releases/tag/";
+            if (!pathPart.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+
+            string rawSeg;
+            try
+            {
+                rawSeg = Uri.UnescapeDataString(pathPart.Substring(prefix.Length)).Trim('/');
+            }
+            catch
+            {
+                return false;
+            }
+            if (rawSeg.IndexOf('/') >= 0 || !IsSafeReleaseTag(rawSeg)) return false;
+            tag = rawSeg;
+            return true;
+        }
+
+        internal static ReleaseManifestInfo BuildReleaseFromTag(string tag)
+        {
+            if (!IsSafeReleaseTag(tag)) return null;
+            string escaped = Uri.EscapeDataString(tag);
+            string dlPrefix = "https://github.com/" + Repository + "/releases/download/" + escaped + "/";
+            return new ReleaseManifestInfo
+            {
+                TagName = tag,
+                HtmlUrl = "https://github.com/" + Repository + "/releases/tag/" + escaped,
+                Body = "",
+                Sha256SumsUrl = dlPrefix + Sha256SumsAssetName,
+                LightZipUrl = dlPrefix + LightUpdateAssetName,
+                SetupExeUrl = dlPrefix + FullSetupAssetName
+            };
+        }
+
+        private static bool TryResolveLatestReleaseByRedirect(out ReleaseManifestInfo info, out string error)
+        {
+            info = null;
+            error = null;
+            try
+            {
+                HttpWebRequest req = CreateGitHubRequest(ReleasesWebUrl, "text/html,application/xhtml+xml", ApiTimeoutMs);
+                req.AllowAutoRedirect = false;
+                string candidate = null;
+                string responseUri = null;
+                try
+                {
+                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        candidate = resp.Headers != null ? resp.Headers["Location"] : null;
+                        if (resp.ResponseUri != null) responseUri = resp.ResponseUri.AbsoluteUri;
+                    }
+                }
+                catch (WebException ex)
+                {
+                    var webResp = ex.Response as HttpWebResponse;
+                    if (webResp != null)
+                    {
+                        try
+                        {
+                            candidate = webResp.Headers != null ? webResp.Headers["Location"] : null;
+                            if (webResp.ResponseUri != null) responseUri = webResp.ResponseUri.AbsoluteUri;
+                        }
+                        finally
+                        {
+                            webResp.Close();
+                        }
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+
+                string tag;
+                if (TryExtractTagFromReleaseUrl(candidate, out tag) || TryExtractTagFromReleaseUrl(responseUri, out tag))
+                {
+                    info = BuildReleaseFromTag(tag);
+                    return info != null;
+                }
+
+                // Fallback within redirect resolver: HEAD with AllowAutoRedirect in case an upstream proxy intercepts 302
+                HttpWebRequest headReq = CreateGitHubRequest(ReleasesWebUrl, "text/html,application/xhtml+xml", ApiTimeoutMs);
+                headReq.Method = "HEAD";
+                headReq.AllowAutoRedirect = true;
+                using (var headResp = (HttpWebResponse)headReq.GetResponse())
+                {
+                    string finalUri = headResp.ResponseUri != null ? headResp.ResponseUri.AbsoluteUri : "";
+                    if (TryExtractTagFromReleaseUrl(finalUri, out tag))
+                    {
+                        info = BuildReleaseFromTag(tag);
+                        return info != null;
+                    }
+                }
+
+                error = "未从 GitHub Releases 页面解析到最新版本标签。";
+                return false;
+            }
+            catch (WebException ex)
+            {
+                if (ex.Response != null)
+                {
+                    try { ex.Response.Close(); } catch { }
+                }
+                error = "无法连接 GitHub Releases 检查更新（可开启系统代理或稍后重试）：" + SafeOneLine(ex.Message);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = "检查 GitHub Releases 最新版本失败：" + SafeOneLine(ex.Message);
+                return false;
+            }
+        }
+
+        private static void TryEnrichReleaseNotesBestEffort(ReleaseManifestInfo release)
+        {
+            if (release == null || string.IsNullOrEmpty(release.TagName)) return;
+            try
+            {
+                HttpWebRequest req = CreateGitHubRequest(LatestReleaseApiUrl, "application/vnd.github+json", 4000);
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (Stream stream = resp.GetResponseStream())
+                {
+                    if (stream == null) return;
+                    using (var ms = new MemoryStream())
+                    {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        int total = 0;
+                        while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            total += n;
+                            if (total > MaxJsonBytes) return;
+                            ms.Write(buf, 0, n);
+                        }
+                        string json = Encoding.UTF8.GetString(ms.ToArray());
+                        ReleaseManifestInfo apiInfo;
+                        string ignoredErr;
+                        if (TryParseLatestReleaseJson(json, out apiInfo, out ignoredErr)
+                            && apiInfo != null
+                            && string.Equals(apiInfo.TagName, release.TagName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(apiInfo.Body)) release.Body = apiInfo.Body;
+                            if (apiInfo.LightZipSize > 0) release.LightZipSize = apiInfo.LightZipSize;
+                            if (apiInfo.SetupExeSize > 0) release.SetupExeSize = apiInfo.SetupExeSize;
+                        }
+                    }
+                }
+            }
+            catch (WebException ex)
+            {
+                if (ex.Response != null)
+                {
+                    try { ex.Response.Close(); } catch { }
+                }
+            }
+            catch { }
+        }
+
         internal static Task<UpdateCheckResult> CheckForUpdateAsync()
         {
             return Task.Run(delegate { return CheckForUpdateSync(); });
@@ -321,30 +520,39 @@ namespace DualRemote
 
             try
             {
-                string json;
-                string fetchError;
-                if (!TryDownloadText(LatestReleaseApiUrl, "application/vnd.github+json", MaxJsonBytes, out json, out fetchError))
-                {
-                    result.Error = fetchError;
-                    return result;
-                }
-
                 ReleaseManifestInfo release;
-                string parseError;
-                if (!TryParseLatestReleaseJson(json, out release, out parseError))
+                string redirectError;
+                if (!TryResolveLatestReleaseByRedirect(out release, out redirectError))
                 {
-                    result.Error = parseError;
-                    return result;
+                    string json;
+                    string fetchError;
+                    if (!TryDownloadText(LatestReleaseApiUrl, "application/vnd.github+json", MaxJsonBytes, out json, out fetchError))
+                    {
+                        result.Error = !string.IsNullOrEmpty(redirectError) ? redirectError : fetchError;
+                        return result;
+                    }
+
+                    string parseError;
+                    if (!TryParseLatestReleaseJson(json, out release, out parseError))
+                    {
+                        result.Error = parseError;
+                        return result;
+                    }
                 }
 
                 result.Checked = true;
                 result.ReleaseTag = release.TagName;
                 result.LatestVersion = release.TagName.TrimStart('v', 'V');
                 result.ReleasePageUrl = release.HtmlUrl;
-                result.ReleaseNotesSummary = SummarizeReleaseNotes(release.Body);
                 result.HasUpdate = CompareVersions(result.CurrentVersion, result.LatestVersion) < 0;
 
                 if (!result.HasUpdate) return result;
+
+                if (string.IsNullOrEmpty(release.Body))
+                {
+                    TryEnrichReleaseNotesBestEffort(release);
+                }
+                result.ReleaseNotesSummary = SummarizeReleaseNotes(release.Body);
 
                 if (!string.IsNullOrEmpty(release.Sha256SumsUrl))
                 {
