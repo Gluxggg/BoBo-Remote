@@ -71,6 +71,13 @@ $notes = @"
 - **`BoBoRemote-Portable-x64.zip`（绿色免安装便携版）**：解压即可运行。
 - **`BoBoStreamPlayer-v5-core-x64.exe`（V5 原生 C++17 D3D11VA 播放核心预览，~300 KB）**：可运行 `--self-test` / `--probe-gpu` 检验本机 D3D11VA 硬件解码能力。
 
+### 开箱即用与可选进阶说明
+- **下载双击即用（零额外安装）**：局域网 2K 高帧串流（内置 Foundation Sunshine + Moonlight V+ 与 4 位配对码）、跨外网 RustDesk 9 位码临时协助与文件互传、软件级物理屏防窥壁纸与锁屏守护（`Ctrl+Alt+Shift+P`）、串流顶部悬浮工具条及 7 步新手引导均已全部内置。
+- **可选进阶能力（按需额外搭配）**：
+  - **跨外网 2K 高帧低延迟串流**：需两台电脑安装同一异地组网工具（如 Tailscale / EasyTier），或具备公网 IPv6 直连条件；
+  - **硬件级彻底熄屏防窥（关闭物理显示器信号）与虚拟屏**：需在被控端额外搭配 **Zako 虚拟屏驱动** 与 **系统安装版 Foundation Sunshine**。
+- **首次运行提示**：未购买商业 EV 代码签名，Windows SmartScreen 首次提示时点击「更多信息 → 仍要运行」即可（可先核对下方 SHA-256）；首次被控开启局域网串流若弹出 Windows 防火墙提示，请点击「允许访问」。
+
 ### SHA-256 校验值
 ${fence}text
 $hSetup  BoBoRemote-Setup-x64.exe

@@ -1063,8 +1063,8 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "欢迎使用 BoBo远程 · 功能导航栏",
-                    Description = "左侧导航栏将全部核心功能分为四大区：「我的设备」直连常用电脑，「远程协助」发码/输码跨网互助，「防窥与显示」保护本地隐私并管理虚拟屏，底部「设置」用于画质与低延迟调优。",
-                    Tip = "支持键盘方向键 ← / → 或 Enter 快速翻页，按 Esc 随时跳过。",
+                    Description = "局域网高清串流、RustDesk 跨网协助/传文件与防窥壁纸均已内置，下载双击即用，无需注册账号或额外装引擎。左侧导航分为「我的设备」「远程协助」「防窥与显示」与底部「设置」四大区。",
+                    Tip = "仅跨外网 2K 高帧串流与硬件级彻底熄屏属于可选进阶能力，后续步骤会说明。支持 ←/→ 翻页，Esc 跳过。",
                     PaddingPx = 4,
                     Prepare = delegate
                     {
@@ -1076,8 +1076,8 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "本机状态与一键直连入口",
-                    Description = "右上角标签实时展示本机被控与防窥状态。点击「手动连接设备」输入对方 IP 即可高清低延迟串流；点击「允许连接本机」生成 4 位配对码；点「查看本机地址」可一键复制局域网 IP、Tailscale IP 或公网 IPv6。",
-                    Tip = "两台电脑登录同一个 Tailscale 账号后，外网也能免配置直连。",
+                    Description = "右上角标签实时展示本机被控与防窥状态。同局域网下，被控端点「允许连接本机」生成 4 位配对码，控制端点「手动连接设备」输入对方 IP 即可零配置开启高清低延迟串流。",
+                    Tip = "可选进阶：若要跨外网跑 2K 高帧串流，需两台电脑安装同一组网工具（如 Tailscale）或具备公网 IPv6。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1089,8 +1089,8 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "自动发现同网电脑与收藏秒连",
-                    Description = "局域网或 Tailscale 同网设备会自动列在这里，显示在线状态与直连/中继链路。点击任意在线设备即可发起 60~144Hz 硬件编码串流；收藏常用设备后，它还会出现在左侧快捷栏，实现一键直达。",
-                    Tip = "如果暂时未发现设备，可点右上角「刷新状态」或直接手动输入地址。",
+                    Description = "局域网或 Tailscale 同网设备会自动列在这里，显示在线状态与直连/中继链路。点击任意在线设备即可发起 60~144Hz 硬件编码串流；收藏常用设备后，会固定在左侧快捷栏一键直达。",
+                    Tip = "首次被控若弹出 Windows 防火墙提示，请点「允许访问」；暂未发现设备可点右上角「刷新状态」。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1108,9 +1108,9 @@ namespace DualRemote
                 },
                 new OnboardingStep
                 {
-                    Title = "远程协助 · 配对码与 9 位设备码互助",
-                    Description = "需要临时帮朋友排查问题或跨网授权连接时切到这里：上方「本设备」可一键生成 120 秒临时 4 位串流配对码；下方「远控伙伴设备」支持高清串流与内置 RustDesk 9 位设备码双通道切换，还可直接传文件。",
-                    Tip = "无需提前注册账号，对方发来 9 位设备码或 IP 即可开连。",
+                    Title = "远程协助 · 4 位配对码与 9 位跨网设备码",
+                    Description = "上方「本设备」默认脱敏显示本机地址（点眼睛图标显隐），可一键生成 120 秒 4 位串流配对码；下方支持高清串流与内置 RustDesk 9 位码双通道切换——跨外网临时协助与文件互传开箱即用。",
+                    Tip = "无需提前注册账号或安装组网工具，对方发来 9 位设备码即可直接跨外网协助和传文件。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1125,9 +1125,9 @@ namespace DualRemote
                 },
                 new OnboardingStep
                 {
-                    Title = "物理屏隐私防窥壁纸与虚拟显示器",
-                    Description = "开启防窥后，本机物理显示器会立刻覆盖全屏安全壁纸，而远程画面依然清晰可见。支持勾选「有远控连入时自动防窥」与自定义本地图片；下方还可配置虚拟显示器，自动匹配手机/平板/笔记本分辨率。",
-                    Tip = "紧急解除快捷键：Ctrl+Alt+Shift+P（系统锁屏输入密码解锁后不会误重拉）。",
+                    Title = "软件防窥壁纸与可选硬件熄屏",
+                    Description = "软件防窥壁纸开箱即用：开启后物理屏立刻覆盖安全壁纸，而远程画面依然清晰可见，支持远控自动开启与退出自动锁屏。紧急解除按 Ctrl+Alt+Shift+P（系统锁屏解锁后不会误重拉）。",
+                    Tip = "可选进阶：若要硬件级彻底熄屏（关闭物理显示器信号），需额外搭配 Zako 虚拟屏与系统安装版 Sunshine。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1139,7 +1139,7 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "低延迟抗丢包一键调优",
-                    Description = "针对 Wi-Fi 波动、跨省弱网与高刷画面，点击「外网抗丢包调优」可自动检测显卡编码器并写入 CBR + HRD 硬码率约束 + LTR 参考帧 + Auto-FEC 动态纠错，显著减少花屏与操作延迟。",
+                    Description = "内置宿主已默认启用 Auto-FEC 动态纠错；若额外安装了系统版 Sunshine，点击「外网抗丢包调优」可自动检测显卡并写入 CBR + HRD 硬码率约束与 LTR 参考帧，显著减少跨网花屏和延迟。",
                     Tip = "所有参数修改前均会自动备份，点「还原原配置」随时一键恢复。",
                     PaddingPx = 6,
                     Prepare = delegate

@@ -84,7 +84,7 @@ The UI, 7-step onboarding engine, privacy curtain state machine, and core displa
 | **In-flow 4-digit local pairing** | ✅ Native | Controlled PC generates a 120 s 4-digit pairing code; once paired, subsequent sessions launch directly |
 | **Temporary assist & file transfer** | ✅ Native | RustDesk 1.5.3 extracted from official MSI (`msiexec /a`, no install/service) for 9-digit remote assist |
 | **Host privacy wallpaper curtain** | ✅ Native | Uses `WDA_EXCLUDEFROMCAPTURE` with custom images or 3 themes, auto-enable on attach, and lock-on-exit |
-| **Virtual display & display-off privacy** | ✅ Via Sunshine | Zako virtual display aspect matching and hardware display-off during sessions (auto-restores on exit) |
+| **Virtual display & display-off privacy** | 🔧 Optional Advanced | Requires installing the Zako virtual display driver and system-installed Foundation Sunshine to turn off the physical monitor signal (auto-restores on exit) |
 | **7-step spotlight onboarding tour** | ✅ Native | Auto-opens on first launch with 2-layer native ClearType rendering; replay anytime via top-right `?` |
 
 ## Interface Preview
@@ -112,13 +112,30 @@ The UI, 7-step onboarding engine, privacy curtain state machine, and core displa
 
 ## Quick Start
 
+### Out-of-the-Box vs. Optional Advanced Capabilities
+
+All core remote control, LAN streaming, and software privacy features are bundled — **just download, double-click, and run with zero extra installs or cloud accounts**. Only two optional advanced scenarios require extra components:
+
+| Tier | Capability | Requirement |
+| --- | --- | --- |
+| **✅ Out of the Box** | **LAN 2K High-FPS Streaming** | Zero extra installs: bundled Foundation Sunshine + Moonlight V+ (ABR/Auto-FEC) with 4-digit local pairing |
+| **✅ Out of the Box** | **Cross-Network Temporary Assist & File Transfer** | Zero extra installs: bundled RustDesk 1.5.3 with 9-digit device codes across WAN |
+| **✅ Out of the Box** | **Software Physical-Screen Privacy Wallpaper & Lock Guard** | Zero extra installs: custom image or 3 themes, auto-enable on attach, lock-on-exit, `Ctrl+Alt+Shift+P` emergency exit |
+| **✅ Out of the Box** | **Floating In-Stream Toolbar & 7-Step Onboarding Tour** | Zero extra installs: live quality switching, stats/privacy toggle, and guided first-launch tour |
+| **🔧 Optional Advanced** | **Cross-Network (WAN) 2K High-FPS Streaming** | Install the same mesh VPN tool on both PCs (e.g., [Tailscale](https://tailscale.com/) or [EasyTier](https://easytier.cn/)), or have direct public IPv6 connectivity |
+| **🔧 Optional Advanced** | **Hardware-Level Full Display-Off Privacy & Virtual Display** | Additionally install the **Zako virtual display driver** and **system-installed Foundation Sunshine** (`C:\Program Files\Sunshine`) on the host PC |
+
 ### Option 1: Download the Standard Windows Installer (Recommended)
 
-1. Download **`BoBoRemote-Setup-x64.exe`** (or the portable ZIP) from [**GitHub Releases**](https://github.com/Gluxggg/BoBo-Remote/releases/latest).
+1. Download **`BoBoRemote-Setup-x64.exe`** (or the portable ZIP `BoBoRemote-Portable-x64.zip`) from [**GitHub Releases**](https://github.com/Gluxggg/BoBo-Remote/releases/latest).
 2. Double-click **`BoBoRemote-Setup-x64.exe`** on both Windows 10/11 x64 machines and click **Install**:
    - Installs cleanly into `%LOCALAPPDATA%\BoBoRemote` (no UAC admin prompt required; custom path supported);
    - Automatically creates the **BoBo Remote** Desktop shortcut, Start Menu folder, and standard Windows Apps & Features uninstaller;
    - Preserves existing Moonlight pairing configs when upgrading in place.
+
+> [!TIP]
+> - **SmartScreen prompt**: This open-source release is not signed with a commercial EV certificate; on first launch click **More info → Run anyway** (you can verify integrity against `SHA256SUMS.txt` on the Release page).
+> - **Windows Firewall**: When hosting LAN streaming for the first time, click **Allow access** if Windows Firewall prompts.
 
 ### Option 2: Build Installer & Portable Package from Source (Zero SDK)
 

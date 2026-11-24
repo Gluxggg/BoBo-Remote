@@ -99,7 +99,7 @@ namespace DualRemote
             Theme.FillColumn(hostHeader);
             Theme.FixedColumn(hostHeader, 12);
             Theme.FixedColumn(hostHeader, 168);
-            Theme.Row(hostHeader, 26, Theme.Text("虚拟屏与硬件熄屏（Foundation Sunshine）", Theme.TextSize.Label, Theme.Muted), null, displayModeBadge);
+            Theme.Row(hostHeader, 26, Theme.Text("虚拟屏与硬件熄屏（可选进阶 · 需 Zako + 系统版 Sunshine）", Theme.TextSize.Label, Theme.Muted), null, displayModeBadge);
             Theme.Row(desk, 26, hostHeader);
             Theme.Row(desk, 10);
 
@@ -107,12 +107,12 @@ namespace DualRemote
             preserve.AccessibleName = "启用虚拟屏，保留实体屏";
             preserve.Click += delegate { OpenDisplayTool("Apply", "Virtual"); };
             AddStandaloneSettingCard(desk, Theme.Glyph.Desktop, "铺满 16:10 虚拟屏（保留实体屏）",
-                "Zako 虚拟屏自动匹配笔记本画面比例，物理屏保持亮起（推荐搭配上方防窥壁纸）", preserve, 124);
+                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，自动匹配 16:10 比例并保留物理屏", preserve, 124);
 
             var privacy = Theme.Action("启用熄屏防窥", Theme.ButtonStyle.Primary);
             privacy.Click += delegate { OpenDisplayTool("Apply", "Privacy"); };
             AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "硬件级熄屏防窥（关闭物理屏信号）",
-                "远程期间彻底关闭物理显示器输出，仅渲染虚拟屏，会话断开后自动恢复", privacy, 124);
+                "需搭配 Zako 虚拟屏与系统安装版 Sunshine，远程关闭物理显示器信号，断开自动恢复", privacy, 124);
 
             var restoreRow = Theme.Grid(3);
             Theme.FillColumn(restoreRow);
