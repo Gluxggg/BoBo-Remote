@@ -7,6 +7,108 @@ using System.Text;
 
 namespace DualRemote
 {
+    internal enum PrivacyGuardAction
+    {
+        NoOp = 0,
+        ActivateAuto = 1,
+        DeactivateAuto = 2
+    }
+
+    /// <summary>
+    /// 防窥屏状态机（纯逻辑，供 MainForm 与 SelfTest 共用）：
+    /// - 手动退出（尤其触发自动锁屏后）立即屏蔽当前远控会话的自动重拉起，确保输入锁屏密码回到桌面时不会再次被防窥屏覆盖；
+    /// - 锁屏期间与解锁后短时间防抖窗口内绝不触发快捷键回弹或自动拉起；
+    /// - 仅在观测到远控会话真正结束后重新武装自动防窥，或由用户手动再次开启。
+    /// </summary>
+    internal sealed class PrivacyGuardState
+    {
+        internal const int HotkeyExitDebounceMs = 1500;
+        internal const int PostUnlockSuppressMs = 2500;
+
+        internal bool SessionLocked { get; private set; }
+        internal bool ManualDismissSuppressed { get; private set; }
+        internal bool AutoActivated { get; private set; }
+        internal long Generation { get; private set; }
+        internal DateTime LastManualExitUtc { get; private set; }
+        internal DateTime LastUnlockUtc { get; private set; }
+
+        internal void OnManualActivate()
+        {
+            Generation++;
+            ManualDismissSuppressed = false;
+            AutoActivated = false;
+        }
+
+        internal void OnManualExit(DateTime nowUtc)
+        {
+            Generation++;
+            ManualDismissSuppressed = true;
+            AutoActivated = false;
+            LastManualExitUtc = nowUtc;
+        }
+
+        internal void OnAutoGuardDisabled()
+        {
+            Generation++;
+            AutoActivated = false;
+            ManualDismissSuppressed = false;
+        }
+
+        internal void OnSessionLock()
+        {
+            Generation++;
+            SessionLocked = true;
+        }
+
+        internal void OnSessionUnlock(DateTime nowUtc)
+        {
+            SessionLocked = false;
+            LastUnlockUtc = nowUtc;
+        }
+
+        internal bool CanActivateFromHotkey(DateTime nowUtc)
+        {
+            if (SessionLocked) return false;
+            if (LastManualExitUtc != DateTime.MinValue
+                && (nowUtc - LastManualExitUtc).TotalMilliseconds < HotkeyExitDebounceMs)
+                return false;
+            if (LastUnlockUtc != DateTime.MinValue
+                && (nowUtc - LastUnlockUtc).TotalMilliseconds < HotkeyExitDebounceMs)
+                return false;
+            return true;
+        }
+
+        internal PrivacyGuardAction EvaluateAutoGuardPoll(long pollGeneration, bool activeSession,
+            bool curtainActive, bool curtainIsPreview, bool autoOnRemote, DateTime nowUtc)
+        {
+            if (!autoOnRemote || pollGeneration != Generation) return PrivacyGuardAction.NoOp;
+            if (SessionLocked) return PrivacyGuardAction.NoOp;
+
+            if (!activeSession)
+            {
+                ManualDismissSuppressed = false;
+                if (AutoActivated && curtainActive && !curtainIsPreview)
+                {
+                    AutoActivated = false;
+                    return PrivacyGuardAction.DeactivateAuto;
+                }
+                AutoActivated = false;
+                return PrivacyGuardAction.NoOp;
+            }
+
+            if (ManualDismissSuppressed) return PrivacyGuardAction.NoOp;
+            if (LastUnlockUtc != DateTime.MinValue
+                && (nowUtc - LastUnlockUtc).TotalMilliseconds < PostUnlockSuppressMs)
+                return PrivacyGuardAction.NoOp;
+            if (!curtainActive)
+            {
+                AutoActivated = true;
+                return PrivacyGuardAction.ActivateAuto;
+            }
+            return PrivacyGuardAction.NoOp;
+        }
+    }
+
     /// <summary>被控端防窥屏壁纸设置（持久化于 %LOCALAPPDATA%\双端远程\privacy-wallpaper.txt）。</summary>
     internal sealed class PrivacyWallpaperConfig
     {
@@ -317,48 +419,158 @@ namespace DualRemote
             }
         }
 
+        internal static string FormatCurtainBadgeText(PrivacyWallpaperConfig cfg, DateTime now)
+        {
+            string timeText = now.ToString("HH:mm");
+            string caption = cfg == null || string.IsNullOrWhiteSpace(cfg.Caption)
+                ? ""
+                : cfg.Caption.Trim();
+            return caption.Length > 0 ? (timeText + "  ·  " + caption) : timeText;
+        }
+
+        /// <summary>
+        /// 进入防窥屏瞬间的顶部悬浮快捷键提醒（展示约 3.2s 后平滑淡出，随后壁纸保持纯净不暴露退出方式）。
+        /// </summary>
+        internal static void RenderEntryToast(Graphics g, Rectangle bounds, float opacity, bool lockOnLocalExit)
+        {
+            if (opacity <= 0.01f || bounds.Width < 260 || bounds.Height < 160) return;
+            float clamped = Math.Max(0f, Math.Min(1f, opacity));
+            var save = g.Save();
+            try
+            {
+                g.SetClip(bounds);
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                float unit = Math.Max(0.75f, Math.Min(1.25f, bounds.Height / 1080f));
+                string title = "已进入防窥模式  ·  按 Ctrl + Alt + Shift + P 退出";
+                string sub = lockOnLocalExit ? "退出防窥后将自动锁定 Windows 桌面" : "";
+                bool hasSub = sub.Length > 0;
+
+                using (var titleFont = new Font("Microsoft YaHei UI", 12f * unit, FontStyle.Bold))
+                using (var subFont = new Font("Microsoft YaHei UI", 9.5f * unit))
+                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                {
+                    SizeF titleSz = g.MeasureString(title, titleFont);
+                    SizeF subSz = hasSub ? g.MeasureString(sub, subFont) : SizeF.Empty;
+                    float padX = 26f * unit;
+                    float pillW = Math.Min(bounds.Width * 0.86f, Math.Max(titleSz.Width, subSz.Width) + padX * 2f);
+                    float pillH = (hasSub ? 64f : 44f) * unit;
+                    float px = bounds.X + (bounds.Width - pillW) * 0.5f;
+                    float py = bounds.Y + Math.Max(28f, 44f * unit);
+                    var pill = new RectangleF(px, py, pillW, pillH);
+
+                    int bgAlpha = (int)Math.Round(218 * clamped);
+                    int borderAlpha = (int)Math.Round(96 * clamped);
+                    int titleAlpha = (int)Math.Round(250 * clamped);
+                    int subAlpha = (int)Math.Round(198 * clamped);
+
+                    using (var path = CreateRoundedRect(pill, 12f * unit))
+                    using (var bg = new SolidBrush(Color.FromArgb(bgAlpha, 15, 23, 42)))
+                    using (var border = new Pen(Color.FromArgb(borderAlpha, 148, 197, 255), 1.2f))
+                    {
+                        g.FillPath(bg, path);
+                        g.DrawPath(border, path);
+                    }
+
+                    using (var titleBrush = new SolidBrush(Color.FromArgb(titleAlpha, 248, 250, 252)))
+                    using (var subBrush = new SolidBrush(Color.FromArgb(subAlpha, 191, 219, 254)))
+                    {
+                        if (hasSub)
+                        {
+                            g.DrawString(title, titleFont, titleBrush,
+                                new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.11f, pill.Width - 24f, pill.Height * 0.44f), fmt);
+                            g.DrawString(sub, subFont, subBrush,
+                                new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.54f, pill.Width - 24f, pill.Height * 0.36f), fmt);
+                        }
+                        else
+                        {
+                            g.DrawString(title, titleFont, titleBrush, pill, fmt);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                g.Restore(save);
+            }
+        }
+
         private static void RenderOverlayBadge(Graphics g, Rectangle bounds, PrivacyWallpaperConfig cfg, bool previewMode)
         {
-            float unit = Math.Max(0.28f, Math.Min(1.25f, bounds.Height / 900f));
-            string caption = string.IsNullOrWhiteSpace(cfg.Caption) ? "远程安全防窥保护中" : cfg.Caption.Trim();
-            string timeText = DateTime.Now.ToString("HH:mm");
-            string subText = previewMode
-                ? "壁纸预览 · 点击画面或按 Esc 立即退出"
-                : caption + " · 按 Ctrl+Alt+Shift+P 退出";
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            float unit = Math.Max(0.24f, Math.Min(1.25f, bounds.Height / 900f));
+            bool isMiniPreview = bounds.Width < 460;
+            string mainText = FormatCurtainBadgeText(cfg, DateTime.Now);
 
-            float pillW = Math.Min(bounds.Width * 0.86f, Math.Max(210f * unit, 440f * unit));
-            float pillH = Math.Max(26f, 66f * unit);
-            float px = bounds.X + (bounds.Width - pillW) * 0.5f;
-            float py = bounds.Bottom - pillH - Math.Max(12f, 44f * unit);
-            var pill = new RectangleF(px, py, pillW, pillH);
-
-            using (var path = CreateRoundedRect(pill, pillH * 0.5f))
-            using (var bg = new SolidBrush(Color.FromArgb(148, 12, 18, 34)))
-            using (var border = new Pen(Color.FromArgb(65, 226, 232, 240), 1f))
+            if (!previewMode)
             {
-                g.FillPath(bg, path);
-                g.DrawPath(border, path);
+                if (!cfg.ShowOverlayBadge) return;
+
+                float fontSize = isMiniPreview ? Math.Max(6.5f, Math.Min(8.5f, bounds.Height / 19f)) : Math.Max(11f, 14f * unit);
+                using (var mainFont = new Font("Microsoft YaHei UI", fontSize, FontStyle.Bold))
+                using (var mainBrush = new SolidBrush(Color.FromArgb(242, 246, 255)))
+                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                {
+                    SizeF measured = g.MeasureString(mainText, mainFont);
+                    float padX = isMiniPreview ? 12f : Math.Max(22f, 28f * unit);
+                    float pillW = Math.Min(bounds.Width * 0.90f, measured.Width + padX * 2f);
+                    float pillH = isMiniPreview ? Math.Max(20f, measured.Height + 8f) : Math.Max(38f, 46f * unit);
+                    float px = bounds.X + (bounds.Width - pillW) * 0.5f;
+                    float py = bounds.Bottom - pillH - (isMiniPreview ? Math.Max(8f, bounds.Height * 0.08f) : Math.Max(28f, 48f * unit));
+                    var pill = new RectangleF(px, py, pillW, pillH);
+
+                    using (var path = CreateRoundedRect(pill, pillH * 0.5f))
+                    using (var bg = new SolidBrush(Color.FromArgb(152, 12, 18, 34)))
+                    using (var border = new Pen(Color.FromArgb(68, 226, 232, 240), 1f))
+                    {
+                        g.FillPath(bg, path);
+                        g.DrawPath(border, path);
+                    }
+                    g.DrawString(mainText, mainFont, mainBrush,
+                        new RectangleF(pill.X + 8f, pill.Y, pill.Width - 16f, pill.Height), fmt);
+                }
+                return;
             }
 
-            float fontSizeMain = Math.Max(7.5f, 13.5f * unit);
-            float fontSizeSub = Math.Max(6.5f, 9.5f * unit);
+            // Full-screen interactive preview mode only
+            string previewHint = "壁纸预览模式 · 点击任意位置或按 Esc 退出";
+            float fontSizeMain = Math.Max(10.5f, 13.5f * unit);
+            float fontSizeSub = Math.Max(8.5f, 10f * unit);
             using (var mainFont = new Font("Microsoft YaHei UI", fontSizeMain, FontStyle.Bold))
             using (var subFont = new Font("Microsoft YaHei UI", fontSizeSub))
             using (var mainBrush = new SolidBrush(Color.FromArgb(242, 246, 255)))
             using (var subBrush = new SolidBrush(Color.FromArgb(186, 204, 232)))
             using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
             {
+                SizeF mainSz = cfg.ShowOverlayBadge ? g.MeasureString(mainText, mainFont) : SizeF.Empty;
+                SizeF subSz = g.MeasureString(previewHint, subFont);
+                float padX = Math.Max(24f, 28f * unit);
+                float pillW = Math.Min(bounds.Width * 0.88f, Math.Max(mainSz.Width, subSz.Width) + padX * 2f);
+                float pillH = cfg.ShowOverlayBadge ? Math.Max(54f, 66f * unit) : Math.Max(36f, 42f * unit);
+                float px = bounds.X + (bounds.Width - pillW) * 0.5f;
+                float py = bounds.Bottom - pillH - Math.Max(24f, 44f * unit);
+                var pill = new RectangleF(px, py, pillW, pillH);
+
+                using (var path = CreateRoundedRect(pill, pillH * 0.5f))
+                using (var bg = new SolidBrush(Color.FromArgb(156, 12, 18, 34)))
+                using (var border = new Pen(Color.FromArgb(68, 226, 232, 240), 1f))
+                {
+                    g.FillPath(bg, path);
+                    g.DrawPath(border, path);
+                }
+
                 if (cfg.ShowOverlayBadge)
                 {
-                    g.DrawString(timeText + "  ·  " + caption, mainFont, mainBrush,
-                        new RectangleF(pill.X + 12, pill.Y + pill.Height * 0.10f, pill.Width - 24, pill.Height * 0.46f), fmt);
-                    g.DrawString(previewMode ? "壁纸预览模式 · 点击任意位置或按 Esc 退出" : "物理屏已防窥隐藏 · 快捷键 Ctrl+Alt+Shift+P 退出",
-                        subFont, subBrush,
-                        new RectangleF(pill.X + 12, pill.Y + pill.Height * 0.54f, pill.Width - 24, pill.Height * 0.36f), fmt);
+                    g.DrawString(mainText, mainFont, mainBrush,
+                        new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.10f, pill.Width - 24f, pill.Height * 0.46f), fmt);
+                    g.DrawString(previewHint, subFont, subBrush,
+                        new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.54f, pill.Width - 24f, pill.Height * 0.36f), fmt);
                 }
                 else
                 {
-                    g.DrawString(subText, subFont, mainBrush, pill, fmt);
+                    g.DrawString(previewHint, subFont, mainBrush, pill, fmt);
                 }
             }
         }

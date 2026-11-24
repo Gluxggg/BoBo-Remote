@@ -19,6 +19,18 @@
 .PARAMETER SkipFetch
     离线构建：不联网下载，但 .cache 里的缓存必须已存在且通过 SHA256 校验，否则中止。
 
+.PARAMETER OutputDir
+    发布目录，默认项目下 dist。正式构建固定使用此目录；隔离验证应传入项目外的
+    临时绝对路径，避免覆盖已有便携包或把上一轮旧文件带进 ZIP。
+
+.PARAMETER NoPublish
+    只完成下载校验、编译和干净组装到 .cache\build\clean-stage，不写 dist，也不生成 ZIP。
+    用于在 UI/后端源码尚未稳定时检查组件集成，不产生可误发的旧程序包。
+
+.PARAMETER ReleaseVersion
+    写入 BUILD-INFO 的发包版本标签；默认取当前 UTC 时间并带 -dev 后缀。正式发布时
+    由主代理显式传入，便于区分旧包。
+
 .PARAMETER SourceDir
     启动器源码目录，默认 src（相对脚本所在目录）。仅供主模型在源码尚未合入时
     单独验证编译链使用，正常构建不要改。
@@ -38,7 +50,10 @@
 param(
     [switch]$FetchOnly,
     [switch]$SkipFetch,
-    [string]$SourceDir = 'src'
+    [switch]$NoPublish,
+    [string]$SourceDir = 'src',
+    [string]$OutputDir = '',
+    [string]$ReleaseVersion = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,22 +66,42 @@ try {
 
 $Root = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Root)) { $Root = (Get-Location).Path }
+if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::IsPathRooted($OutputDir)) {
+    throw "-OutputDir 必须是显式绝对路径；默认发布目录才是项目下 dist。"
+}
+$BuildTimestamp = Get-Date
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
+    'dev-' + $BuildTimestamp.ToUniversalTime().ToString("s").Replace("-", "").Replace(":", "")
+} else {
+    $ReleaseVersion.Trim()
+}
 
 $DownloadsDir = Join-Path $Root '.cache\downloads'
 $BuildDir     = Join-Path $Root '.cache\build'
 $MlExtractDir = Join-Path $BuildDir 'moonlight-extract'
 $RdMsiExtractDir = Join-Path $BuildDir 'rd-msi-extract'
 $RdMsiPayloadRelative = 'PFiles64\RustDesk'
-$StageRoot    = Join-Path $BuildDir 'stage'
-$PackageDir   = Join-Path $StageRoot '双端远程'
+$StageRoot    = Join-Path $BuildDir 'clean-stage'
+$PackageDir   = Join-Path $StageRoot 'BoBo远程'
 $VPlusExtractDir = Join-Path $BuildDir 'vplus-extract'
 $DeltaStageRoot  = Join-Path $BuildDir 'delta-stage'
-$DistDir      = Join-Path $Root 'dist'
-$ZipPath      = Join-Path $DistDir '双端远程-Windows-x64.zip'
-$LightZipPath = Join-Path $DistDir '双端远程-轻量更新包.zip'
+$DistDir      = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    Join-Path $Root 'dist'
+} else {
+    [System.IO.Path]::GetFullPath($OutputDir)
+}
+if ($DistDir.TrimEnd('\') -eq [System.IO.Path]::GetPathRoot($DistDir).TrimEnd('\')) {
+    throw "拒绝把磁盘根目录当作发布目录：$DistDir"
+}
+if ($DistDir.TrimEnd('\').Equals([System.IO.Path]::GetFullPath($Root).TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "拒绝把项目根目录当作发布目录：$DistDir"
+}
+$ZipPath      = Join-Path $DistDir 'BoBo远程-Windows-x64.zip'
+$LightZipPath = Join-Path $DistDir 'BoBo远程-轻量更新包.zip'
+$SunshineExtractDir = Join-Path $BuildDir 'sunshine-extract'
 
 # 固定上游资产：版本、官方地址、字节数、SHA256 全部锁死。
-# 两个 Release 资产均可用 GitHub Releases API 复核（见 THIRD-PARTY.md）。
+# 固定 Release 资产均可用 GitHub Releases API 复核（见 THIRD-PARTY.md）。
 # RustDesk 使用官方 MSI：本机实测单文件 portable exe 启动无窗口，MSI 展开的原版
 # RustDesk.exe + librustdesk.dll + data\ 布局则可以直接运行。
 $Assets = @(
@@ -115,7 +150,10 @@ $ToolFiles = @(
 # 随包分发的文档固定清单；不按通配符复制。
 $DocFiles = @(
     'README.md',
+    'README.en.md',
     'THIRD-PARTY.md',
+    'NOTICE.md',
+    'LICENSE',
     'UU远程功能核对.md',
     '低延迟调优与防窥指南.md'
 )
@@ -133,6 +171,36 @@ $VPlusAsset = [pscustomobject]@{
     Sha256       = 'E02447BE08ECA5DDD2555FD7669A114F6C896FDA3B70866401881026C27314E5'
     Version      = '6.5.6.0'
 }
+
+# Foundation Sunshine v2026.1123.35314（预发布）官方 Windows x64 便携包，作为内置被控宿主。
+# 只取官方 portable zip；不使用 standardLizardByte 或 Windows Installer，也不复制本机
+# Program Files\Sunshine\config 的私人证书、令牌、配对状态或日志。
+# GitHub Release 资产摘要与本地 zip 已交叉校验；资产签名未提供 Authenticode（NotSigned）。
+$SunshineAsset = [pscustomobject]@{
+    Label        = 'Foundation Sunshine v2026.1123.35314（官方 Windows x64 便携包，内置宿主）'
+    File         = 'Sunshine.v2026.1123.Portable-x64.zip'
+    Url          = 'https://github.com/AlkaidLab/foundation-sunshine/releases/download/v2026.1123.35314.%E6%9D%82%E9%B1%BC/Sunshine.v2026.1123.Portable-x64.zip'
+    ApiFallback  = 'https://api.github.com/repos/AlkaidLab/foundation-sunshine/releases/assets/781486852'
+    Size         = 51411142
+    Sha256       = 'B9B3FCDBBB9D7F85FC5B96D5BAB464EA341FFEA2801EA476E10373DB0E5C14B0'
+    Version      = 'v2026.1123.35314'
+    ReleaseTag   = 'v2026.1123.35314.杂鱼'
+    Prerelease   = $true
+    PublishedAt  = '2026-11-23T04:14:43Z'
+    Commit       = '138946ee8506882936bfbf7569525ebf08506e9f'
+    SourceTagUrl = 'https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.35314.杂鱼'
+    SourceArchiveUrl = 'https://github.com/AlkaidLab/foundation-sunshine/archive/refs/tags/v2026.1123.35314.%E6%9D%82%E9%B1%BC.zip'
+    ExeSize      = 53040640
+    ExeSha256    = '005623E247BDFA52AE30A26681E89198BD4D43E222B2D7E1094510DBD5057474'
+}
+
+$SunshineKeyFiles = @(
+    [pscustomobject]@{ Path = 'sunshine.exe'; Size = 53040640; Sha256 = '005623E247BDFA52AE30A26681E89198BD4D43E222B2D7E1094510DBD5057474' },
+    [pscustomobject]@{ Path = 'zlib1.dll'; Size = 187392; Sha256 = '6D6A2429C74E2A659917C7D87037EF7F377036BB8D115DE96A645D8E6B184916' },
+    [pscustomobject]@{ Path = 'assets\apps.json'; Size = 1764; Sha256 = '449F0816E37140F0ED40AACC21CB05B14E53DDDFB3AC6F4CB0BD6DB6C86F394B' },
+    [pscustomobject]@{ Path = 'LICENSE'; Size = 35149; Sha256 = '3972DC9744F6499F0F9B2DBF76696F2AE7AD8AF9B23DDE66D6AF86C9DFB36986' },
+    [pscustomobject]@{ Path = 'NOTICE'; Size = 3414; Sha256 = 'A3676180C504A10CA85563EB781C5F2574AD0E244054DCF3741184EE60463B0A' }
+)
 
 # V+ 展开后的关键文件（官方发布包原样），构建时逐个校验。
 $VPlusKeyFiles = @(
@@ -184,6 +252,54 @@ function Assert-BuildOwnedPath {
         }
     }
     return $full
+}
+
+function Assert-NoReparseTree {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $root = Get-Item -LiteralPath $Path -Force
+    if (($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "路径是重解析点，拒绝递归操作：$($root.FullName)"
+    }
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "路径树中含重解析点，拒绝递归操作：$($item.FullName)"
+        }
+    }
+}
+
+function Assert-DistOwnedPath {
+    param([string]$Path)
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $distFull = [System.IO.Path]::GetFullPath($DistDir).TrimEnd('\')
+    $expectedRelease = Join-Path $distFull 'BoBo远程-Windows-x64'
+    if (-not $full.Equals($expectedRelease, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝操作非精确 releaseDir 的路径：$full（只允许 $expectedRelease）"
+    }
+    if (Test-Path -LiteralPath $distFull) {
+        $distItem = Get-Item -LiteralPath $distFull -Force
+        if (($distItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "分发父目录是重解析点，拒绝递归操作：$distFull"
+        }
+    }
+    Assert-NoReparseTree $full
+    return $full
+}
+
+function Remove-DistPath {
+    param([string]$Path)
+    $full = Assert-DistOwnedPath $Path
+    if (-not (Test-Path -LiteralPath $full)) { return }
+    $root = Get-Item -LiteralPath $full -Force
+    if (($root.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+        $root.Attributes = $root.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+    }
+    foreach ($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+        }
+    }
+    Remove-Item -LiteralPath $full -Recurse -Force
 }
 
 function Remove-BuildPath {
@@ -307,6 +423,84 @@ function Assert-VPlusPayload {
         $names = @($forbidden | ForEach-Object { $_.FullName.Substring($PayloadDir.Length + 1) })
         throw "$Context 含禁止的私有配置/源码对象：$($names -join '、')"
     }
+}
+
+function Get-SunshineRoot {
+    if (-not (Test-Path -LiteralPath $SunshineExtractDir)) { return $null }
+    $found = @(Get-ChildItem -LiteralPath $SunshineExtractDir -Recurse -File -Filter 'sunshine.exe' -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } | Select-Object -First 1)
+    if ($found.Count -eq 0) { return $null }
+    return $found[0].DirectoryName
+}
+
+function Assert-SunshinePayload {
+    param([string]$PayloadDir, [string]$Context)
+    foreach ($key in $SunshineKeyFiles) {
+        $path = Join-Path $PayloadDir $key.Path
+        if (-not (Test-Path -LiteralPath $path)) { throw "$Context 缺少关键文件：$($key.Path)" }
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-FileSha256 $path
+        if ($item.Length -ne $key.Size -or $hash -ne $key.Sha256) {
+            throw "$Context 关键文件校验失败：$($key.Path)（应为 $($key.Size) 字节 / SHA256 $($key.Sha256)）"
+        }
+    }
+
+    $exePath = Join-Path $PayloadDir 'sunshine.exe'
+    $version = (Get-Item -LiteralPath $exePath).VersionInfo.FileVersion
+    if ($version -notlike "$($SunshineAsset.Version)*") {
+        throw "$Context 版本不符：FileVersion=$version（预期 $($SunshineAsset.Version)*）"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $exePath
+    if ($signature.Status -ne 'NotSigned') {
+        throw "$Context 预期 Windows Authenticode 为 NotSigned，实际为 $($signature.Status)；官方原包可能已变化，请人工复核。"
+    }
+
+    $forbidden = @(Get-ChildItem -LiteralPath $PayloadDir -Recurse -File -Force | Where-Object {
+        $_.FullName -match '(?i)\\config\\' -or
+        $_.Name -match '(?i)^(local-auth\.token|cacert\.pem|cakey\.pem|sunshine_state\.json|sunshine\.conf|startup_guard\.json|client-fingerprint-rules\.json)$' -or
+        $_.Name -match '(?i)\.(log|pdb|part|tmp)$' -or
+        $_.FullName -match '(?i)\\credentials\\'
+    })
+    if ($forbidden.Count -gt 0) {
+        $names = @($forbidden | ForEach-Object { $_.FullName.Substring($PayloadDir.Length + 1) })
+        throw "$Context 含禁止的私人配置/凭据/日志：$($names -join '、')"
+    }
+    foreach ($privateDir in @('config', 'credentials', 'logs', 'logs_archive', 'crashes', 'telemetry')) {
+        if (Test-Path -LiteralPath (Join-Path $PayloadDir $privateDir)) {
+            throw "$Context 含禁止的私人目录：$privateDir"
+        }
+    }
+
+    $appsPath = Join-Path $PayloadDir 'assets\apps.json'
+    $appsText = Get-Content -LiteralPath $appsPath -Encoding UTF8 -Raw
+    if ($appsText.IndexOf('"Desktop"', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "$Context 的默认应用表缺少 Desktop；连接后可能没有可启动的桌面应用。"
+    }
+}
+
+function Invoke-SunshinePrepare {
+    $asset = $SunshineAsset
+    $dest = Join-Path $DownloadsDir $asset.File
+    if (-not (Test-CachedAsset $asset)) {
+        if ($SkipFetch) {
+            throw "离线构建模式（-SkipFetch）缺少已校验的 Foundation Sunshine 缓存：$dest"
+        }
+        Invoke-Download -Asset $asset
+    }
+
+    Remove-BuildPath $SunshineExtractDir
+    New-Item -ItemType Directory -Force -Path $SunshineExtractDir | Out-Null
+    Write-Info '展开 Foundation Sunshine 官方便携包（只从已校验 zip）…'
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($dest, $SunshineExtractDir)
+    $root = Get-SunshineRoot
+    if (-not $root) { throw 'Foundation Sunshine 展开后未找到 sunshine.exe。' }
+    Assert-SunshinePayload -PayloadDir $root -Context 'Foundation Sunshine 展开目录'
+
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
+    $bytes = ($files | Measure-Object -Property Length -Sum).Sum
+    Write-Ok "Foundation Sunshine 展开完成：$($files.Count) 个文件，$([Math]::Round($bytes / 1MB, 1)) MiB（$($asset.Version)，NotSigned）"
+    Write-Info '  展开目录：.cache\build\sunshine-extract'
+    Write-Info '  内置宿主运行时不读取源目录 config；首次准备才在用户稳定目录生成配置和凭据。'
 }
 
 function Invoke-VPlusPrepare {
@@ -486,6 +680,7 @@ function Invoke-FetchStage {
     Write-Info '  说明：msiexec /a 只解包，不安装产品、不注册服务；Windows Installer 会留一条 SourceHash 记账文件。'
 
     Invoke-VPlusPrepare
+    Invoke-SunshinePrepare
 
     if ($FetchOnly) {
         Write-Host ''
@@ -531,9 +726,11 @@ function Invoke-CompileStage {
 
     $appDir = Join-Path $BuildDir 'app'
     if (-not (Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Force -Path $appDir | Out-Null }
-    $exePath = Join-Path $appDir '双端远程.exe'
+    $exePath = Join-Path $appDir 'BoBo远程.exe'
     if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
+    $appIcon = Join-Path $Root 'assets\bobo-remote.ico'
+    $brandLogo = Join-Path $Root 'assets\bobo-logo.png'
     $cscArgs = @(
         '/nologo'
         '/target:winexe'
@@ -547,6 +744,8 @@ function Invoke-CompileStage {
         "/win32manifest:$manifest"
         "/reference:$($refs -join ',')"
     )
+    if (Test-Path -LiteralPath $appIcon) { $cscArgs += "/win32icon:$appIcon" }
+    if (Test-Path -LiteralPath $brandLogo) { $cscArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
     $cscArgs += $csFiles | ForEach-Object { $_.FullName }
 
     Write-Info "编译器：$csc（$((Get-Item -LiteralPath $csc).VersionInfo.FileVersion)）"
@@ -558,11 +757,11 @@ function Invoke-CompileStage {
         if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Write-Info "csc: $line" }
     }
     if ($exitCode -ne 0) { throw "csc 编译失败（退出码 $exitCode），请查看上方编译器输出。" }
-    if (-not (Test-Path -LiteralPath $exePath)) { throw 'csc 报告成功，但没有生成 双端远程.exe。' }
+    if (-not (Test-Path -LiteralPath $exePath)) { throw 'csc 报告成功，但没有生成 BoBo远程.exe。' }
 
     $exeSize = (Get-Item -LiteralPath $exePath).Length
     if ($exeSize -lt 1024) { throw "生成的 exe 只有 $exeSize 字节，疑似编译异常。" }
-    Write-Ok "编译完成：双端远程.exe（$exeSize 字节）"
+    Write-Ok "编译完成：BoBo远程.exe（$exeSize 字节）"
 }
 
 function Assert-ProjectFiles {
@@ -598,7 +797,7 @@ function Invoke-Stage {
     New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 
     # 启动器
-    Copy-Item -LiteralPath (Join-Path (Join-Path $BuildDir 'app') '双端远程.exe') -Destination $PackageDir
+    Copy-Item -LiteralPath (Join-Path (Join-Path $BuildDir 'app') 'BoBo远程.exe') -Destination $PackageDir
 
     # RustDesk：官方 MSI 管理安装展开后的原版文件布局，整体放进 engines\RustDesk
     $rdPayload = Get-RustDeskPayloadDir
@@ -639,6 +838,17 @@ function Invoke-Stage {
     }
     Assert-VPlusPayload -PayloadDir $vplusDir -Context '发布目录 engines\MoonlightVPlus'
 
+    # Foundation Sunshine：官方 portable 文件的固定版本，作为内置被控宿主。
+    $sunshineRoot = Get-SunshineRoot
+    if (-not $sunshineRoot) { throw '未找到本次展开的 Foundation Sunshine 目录，请先执行 -FetchOnly 或完整构建。' }
+    Assert-SunshinePayload -PayloadDir $sunshineRoot -Context 'Foundation Sunshine 发布源'
+    $sunshineDir = Join-Path $PackageDir 'engines\Sunshine'
+    New-Item -ItemType Directory -Force -Path $sunshineDir | Out-Null
+    Get-ChildItem -LiteralPath $sunshineRoot -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $sunshineDir -Recurse -Force
+    }
+    Assert-SunshinePayload -PayloadDir $sunshineDir -Context '发布目录 engines\Sunshine'
+
     # 文档、工具、许可证：固定清单逐个复制，不按通配符
     foreach ($doc in $DocFiles) {
         Copy-Item -LiteralPath (Join-Path $Root $doc) -Destination $PackageDir
@@ -653,12 +863,17 @@ function Invoke-Stage {
     foreach ($lic in $LicenseAssets) {
         Copy-Item -LiteralPath (Join-Path (Join-Path $Root 'LICENSES') $lic.File) -Destination $licDir
     }
+    Copy-Item -LiteralPath (Join-Path $sunshineRoot 'LICENSE') -Destination (Join-Path $licDir 'Sunshine-LICENSE.txt') -Force
+    Copy-Item -LiteralPath (Join-Path $sunshineRoot 'NOTICE') -Destination (Join-Path $licDir 'Sunshine-NOTICE.txt') -Force
 
     # 构建信息：只写版本、校验值和构建环境，不写任何账号/设备/网络信息
-    $now = Get-Date
+    $now = $BuildTimestamp
     $info = New-Object System.Collections.Generic.List[string]
-    $info.Add('双端远程（Windows x64 便携包）')
+    $info.Add('BoBo远程（Windows x64 便携包）')
     $info.Add('')
+    $info.Add("包版本：$BuildVersion")
+    $utcStamp = $now.ToUniversalTime().ToString("s") + "Z"
+    $info.Add("构建标识：$BuildVersion@$utcStamp")
     $info.Add("构建时间：$($now.ToString('yyyy-MM-dd HH:mm:ss zzz'))")
     $info.Add("构建环境：$([Environment]::OSVersion.VersionString)，Windows PowerShell $($PSVersionTable.PSVersion)")
     $info.Add('编译器：系统 .NET Framework csc（C# 5，/codepage:65001）')
@@ -679,23 +894,42 @@ function Invoke-Stage {
     $info.Add("  来源：$($VPlusAsset.Url)")
     $info.Add("  源码 tag：$($VPlusAsset.SourceTagUrl)")
     $info.Add('')
+    $info.Add('Foundation Sunshine ' + $SunshineAsset.Version + '（engines\Sunshine）：GPL-3.0，官方 Windows x64 便携包，预发布。')
+    $info.Add("  原包：$($SunshineAsset.File)（$($SunshineAsset.Size) 字节，SHA256 $($SunshineAsset.Sha256)）")
+    $info.Add("  sunshine.exe：$($SunshineAsset.ExeSize) 字节，SHA256 $($SunshineAsset.ExeSha256)，Authenticode NotSigned")
+    $info.Add("  来源：$($SunshineAsset.Url)")
+    $info.Add("  源码 tag：$($SunshineAsset.SourceTagUrl)")
+    $info.Add("  源码 commit：$($SunshineAsset.Commit)")
+    $info.Add("  prerelease：$($SunshineAsset.Prerelease)；published_at：$($SunshineAsset.PublishedAt)；不是 latest/stable")
+    $info.Add("  源码归档：$($SunshineAsset.SourceArchiveUrl)（GitHub 自动归档不含 submodule；完整源码请 git clone 后 checkout 该 commit，并执行 git submodule update --init --recursive）")
+    $info.Add('  内置宿主不含 config、local-auth.token、证书、私钥、配对状态或日志；首次准备时在 %LOCALAPPDATA%\双端远程\host 生成。')
+    $info.Add('')
     $info.Add('许可证：')
     foreach ($lic in $LicenseAssets) {
         $info.Add("  LICENSES\$($lic.File)（$($lic.Component)，SHA256 $($lic.Sha256)）")
     }
+    $info.Add("  engines\Sunshine\LICENSE（Foundation Sunshine $($SunshineAsset.Version)，SHA256 3972DC9744F6499F0F9B2DBF76696F2AE7AD8AF9B23DDE66D6AF86C9DFB36986）")
+    $info.Add("  LICENSES\Sunshine-LICENSE.txt（Foundation Sunshine $($SunshineAsset.Version)，SHA256 3972DC9744F6499F0F9B2DBF76696F2AE7AD8AF9B23DDE66D6AF86C9DFB36986）")
+    $info.Add("  LICENSES\Sunshine-NOTICE.txt（Foundation Sunshine $($SunshineAsset.Version)，SHA256 A3676180C504A10CA85563EB781C5F2574AD0E244054DCF3741184EE60463B0A）")
     $info.Add('')
     $info.Add('本包不含任何账号、设备 ID、节点地址、许可证密钥、缓存或本机配置。')
     $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
     [System.IO.File]::WriteAllText((Join-Path $PackageDir 'BUILD-INFO.txt'), ($info -join "`r`n"), $utf8Bom)
 
     $requiredInPackage = @(
-        '双端远程.exe',
+        'BoBo远程.exe',
         'engines\RustDesk\RustDesk.exe',
         'engines\RustDesk\librustdesk.dll',
         'engines\RustDesk\flutter_windows.dll',
         'engines\RustDesk\data\app.so',
         'engines\Moonlight\Moonlight.exe',
         'engines\MoonlightVPlus\Moonlight.exe',
+        'engines\Sunshine\sunshine.exe',
+        'engines\Sunshine\assets\apps.json',
+        'engines\Sunshine\LICENSE',
+        'engines\Sunshine\NOTICE',
+        'LICENSES\Sunshine-LICENSE.txt',
+        'LICENSES\Sunshine-NOTICE.txt',
         'BUILD-INFO.txt'
     )
     foreach ($doc in $DocFiles) { $requiredInPackage += $doc }
@@ -719,10 +953,26 @@ function Assert-CleanPackage {
     $badDirs = @(Get-ChildItem -LiteralPath $Path -Recurse -Directory -Force | Where-Object {
         $_.Name -match '(?i)^(Moonlight Game Streaming Project|source)$'
     })
-    if ($badFiles.Count -gt 0 -or $badDirs.Count -gt 0) {
+    $sunshineRoot = Join-Path $Path 'engines\Sunshine'
+    $sunshinePrivate = @()
+    if (Test-Path -LiteralPath $sunshineRoot) {
+        foreach ($privateRel in @('config', 'credentials', 'logs', 'logs_archive', 'crashes', 'telemetry')) {
+            $privatePath = Join-Path $sunshineRoot $privateRel
+            if (Test-Path -LiteralPath $privatePath) { $sunshinePrivate += $privatePath }
+        }
+        $sunshinePrivate += @(Get-ChildItem -LiteralPath $sunshineRoot -Recurse -File -Force | Where-Object {
+            $_.Name -match '(?i)^(local-auth\.token|cacert\.pem|cakey\.pem|sunshine_state\.json|sunshine\.log|startup_guard\.json|client-fingerprint-rules\.json)$'
+        } | ForEach-Object { $_.FullName })
+        $allowedApps = [System.IO.Path]::GetFullPath((Join-Path $sunshineRoot 'assets\apps.json'))
+        $sunshinePrivate += @(Get-ChildItem -LiteralPath $sunshineRoot -Recurse -File -Force -Filter 'apps.json' | Where-Object {
+            -not [string]::Equals([System.IO.Path]::GetFullPath($_.FullName), $allowedApps, [System.StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object { $_.FullName })
+    }
+    if ($badFiles.Count -gt 0 -or $badDirs.Count -gt 0 -or $sunshinePrivate.Count -gt 0) {
         $names = @()
         $names += @($badFiles | ForEach-Object { $_.FullName.Substring($Path.Length + 1) })
         $names += @($badDirs | ForEach-Object { $_.FullName.Substring($Path.Length + 1) + '\' })
+        $names += @($sunshinePrivate | ForEach-Object { $_.Substring($Path.Length + 1) })
         throw "$Context 含禁止的私有配置/源码对象：$($names -join '、')"
     }
 }
@@ -801,10 +1051,10 @@ function Invoke-Publish {
 
     if (-not (Test-Path -LiteralPath $DistDir)) { New-Item -ItemType Directory -Force -Path $DistDir | Out-Null }
 
-    $releaseDir = Join-Path $DistDir '双端远程-Windows-x64'
+    $releaseDir = Assert-DistOwnedPath (Join-Path $DistDir 'BoBo远程-Windows-x64')
     # 若旧解压目录内有用户本地配对设置，先暂存，替换程序文件后再还原，避免丢配对。
     $savedPairingDirs = @()
-    foreach ($relCfg in @('engines\Moonlight\Moonlight Game Streaming Project', 'engines\MoonlightVPlus\Moonlight Game Streaming Project')) {
+    foreach ($relCfg in @('engines\Moonlight\Moonlight Game Streaming Project', 'engines\MoonlightVPlus\Moonlight Game Streaming Project', 'engines\Sunshine\config')) {
         $existingCfg = Join-Path $releaseDir $relCfg
         if (Test-Path -LiteralPath $existingCfg) {
             $tmpSave = Join-Path $BuildDir ('preserve-' + [Guid]::NewGuid().ToString('N'))
@@ -813,7 +1063,7 @@ function Invoke-Publish {
         }
     }
     if (Test-Path -LiteralPath $releaseDir) {
-        Remove-Item -LiteralPath $releaseDir -Recurse -Force
+        Remove-DistPath $releaseDir
     }
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     Get-ChildItem -LiteralPath $PackageDir -Force | ForEach-Object {
@@ -822,13 +1072,13 @@ function Invoke-Publish {
     foreach ($saved in $savedPairingDirs) {
         $destCfg = Join-Path $releaseDir $saved.Rel
         Copy-Item -LiteralPath $saved.Backup -Destination $destCfg -Recurse -Force
-        Remove-Item -LiteralPath $saved.Backup -Recurse -Force
+        Remove-BuildPath $saved.Backup
         Write-Info "已保留原有本机配对目录：$($saved.Rel)"
     }
     Write-Ok "最新解压目录：$releaseDir"
 
-    # 完整便携包：唯一根目录 双端远程，含 RustDesk 1.5.3 + Moonlight 6.2.0 + Moonlight V+ 6.5.6。
-    $fullTmp = Join-Path $BuildDir '双端远程-Windows-x64.zip.tmp'
+    # 完整便携包：唯一根目录 BoBo远程，含 RustDesk 1.5.3 + Moonlight 6.2.0 + Moonlight V+ 6.5.6 + Foundation Sunshine。
+    $fullTmp = Join-Path $BuildDir 'BoBo远程-Windows-x64.zip.tmp'
     if (Test-Path -LiteralPath $fullTmp) { Remove-Item -LiteralPath $fullTmp -Force }
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
         $StageRoot,
@@ -842,19 +1092,23 @@ function Invoke-Publish {
     } finally {
         $archive.Dispose()
     }
-    if ($rootNames.Count -ne 1 -or $rootNames[0] -ne '双端远程') {
-        throw "完整 zip 结构异常：根目录应为唯一的 双端远程，实际为 $($rootNames -join '、')"
+    if ($rootNames.Count -ne 1 -or $rootNames[0] -ne 'BoBo远程') {
+        throw "完整 zip 结构异常：根目录应为唯一的 BoBo远程，实际为 $($rootNames -join '、')"
     }
     Move-Item -LiteralPath $fullTmp -Destination $ZipPath -Force
-    Write-Ok "完整便携包：dist\双端远程-Windows-x64.zip"
+    Write-Ok "完整便携包：dist\BoBo远程-Windows-x64.zip"
 
     # 轻量更新包：只含新启动器、显示/抗丢包调优工具与最新文档，便于已装完整包的笔记本秒级覆盖更新。
     $lightStage = Join-Path $BuildDir 'base-delta-stage'
     $lightPaths = @(
-        '双端远程.exe',
+        'BoBo远程.exe',
         'tools\Set-SunshineDisplay.ps1',
         'tools\Optimize-SunshineStream.ps1',
         'README.md',
+        'README.en.md',
+        'THIRD-PARTY.md',
+        'NOTICE.md',
+        'LICENSE',
         '低延迟调优与防窥指南.md'
     )
     New-RelativeFileSetZip -SourceRoot $PackageDir -RelativePaths $lightPaths -StagePath $lightStage `
@@ -872,8 +1126,9 @@ function Show-Summary {
     $bytes = ($files | Measure-Object -Property Length -Sum).Sum
 
     Write-Info "最新解压目录：$ReleaseDir"
+    Write-Info "包版本：$BuildVersion"
     Write-Info "  文件数 $($files.Count)，合计 $([Math]::Round($bytes / 1MB, 1)) MiB"
-    Write-Info "  入口：$(Join-Path $ReleaseDir '双端远程.exe')"
+    Write-Info "  入口：$(Join-Path $ReleaseDir 'BoBo远程.exe')"
 
     foreach ($pair in @(
         @{ Label = '完整便携包'; Path = $ZipPath },
@@ -887,11 +1142,12 @@ function Show-Summary {
     }
     Write-Info ''
     Write-Info '本脚本不修改系统服务、防火墙、注册表或网络配置；RustDesk 用 msiexec /a 仅解包，未安装任何产品。'
-    Write-Info '已集成 Moonlight V+ 6.5.6（默认开启 ABR + HEVC + 低延迟）、主机抗丢包调优与自定义防窥屏壁纸。'
+    Write-Info '已集成 Foundation Sunshine ' + $SunshineAsset.Version + ' 内置宿主、Moonlight V+ 6.5.6 与主机只读诊断。'
+    Write-Info '内置宿主首次准备才在 %LOCALAPPDATA%\双端远程\host 生成配置与凭据，不复制 Program Files 私人配置。'
 }
 
 try {
-    Write-Host '双端远程 · Windows x64 便携包构建' -ForegroundColor Cyan
+    Write-Host 'BoBo远程 · Windows x64 便携包构建' -ForegroundColor Cyan
     Write-Info "项目目录：$Root"
 
     if (-not [Environment]::Is64BitOperatingSystem) { throw '本脚本只支持 64 位 Windows。' }
@@ -900,6 +1156,13 @@ try {
     Invoke-FetchStage
     Invoke-CompileStage
     Invoke-Stage
+    if ($NoPublish) {
+        Write-Step '检查完成（未发布）'
+        Write-Ok "干净发布目录：$PackageDir"
+        Write-Info "包版本：$BuildVersion"
+        Write-Info '本次未写 dist、未生成 ZIP；现有发布包保持不变。'
+        exit 0
+    }
     $releaseDir = Invoke-Publish
     Show-Summary -ReleaseDir $releaseDir
 } catch {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 
@@ -106,11 +107,21 @@ namespace DualRemote
             Check("精确串流：拒绝奇数高",
                 !Engines.StreamMoonlight("100.64.0.12", 1920, 1201, 60, 8000, false, false, true, false, out streamMessage)
                 && streamMessage.IndexOf("偶数", StringComparison.Ordinal) >= 0, streamMessage);
+            Check("精确串流：允许 4K60 (3840x2160@60) 通过几何校验",
+                Engines.TryValidateStreamGeometry(3840, 2160, 60, 35000, out streamMessage)
+                && Engines.BuildMoonlightStreamArgs("100.64.0.12", 3840, 2160, 60, 35000, false, false, false, true, true, false)
+                    == "stream \"100.64.0.12\" \"Desktop\" --resolution 3840x2160 --fps 60 --bitrate 35000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
+                streamMessage ?? "4K60 参数拼装");
+            Check("精确串流：允许 2K144 (2560x1440@144) 通过几何校验",
+                Engines.TryValidateStreamGeometry(2560, 1440, 144, 36000, out streamMessage)
+                && Engines.BuildMoonlightStreamArgs("100.64.0.12", 2560, 1440, 144, 36000, false, false, false, true, true, false)
+                    == "stream \"100.64.0.12\" \"Desktop\" --resolution 2560x1440 --fps 144 --bitrate 36000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
+                streamMessage ?? "2K144 参数拼装");
             Check("精确串流：拒绝边界宽度",
-                !Engines.StreamMoonlight("100.64.0.12", 3840, 2160, 60, 25000, false, false, true, false, out streamMessage)
+                !Engines.StreamMoonlight("100.64.0.12", 4096, 2160, 60, 25000, false, false, true, false, out streamMessage)
                 && streamMessage.IndexOf("宽度需大于", StringComparison.Ordinal) >= 0, streamMessage);
             Check("精确串流：拒绝边界高度",
-                !Engines.StreamMoonlight("100.64.0.12", 1920, 2160, 60, 25000, false, false, true, false, out streamMessage)
+                !Engines.StreamMoonlight("100.64.0.12", 1920, 2560, 60, 25000, false, false, true, false, out streamMessage)
                 && streamMessage.IndexOf("高度需大于", StringComparison.Ordinal) >= 0, streamMessage);
             Check("精确串流：拒绝边界帧率",
                 !Engines.StreamMoonlight("100.64.0.12", 1920, 1080, 240, 15000, false, false, true, false, out streamMessage)
@@ -124,6 +135,219 @@ namespace DualRemote
                 streamMessage);
             Check("Moonlight 配对参数：pair + 主机", Engines.BuildMoonlightPairArgs("100.64.0.12") == "pair \"100.64.0.12\"",
                 Engines.BuildMoonlightPairArgs("100.64.0.12"));
+            Check("Moonlight 配对参数：4 位 PIN",
+                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123") == "pair \"100.64.0.12\" --pin 0123",
+                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123"));
+            Check("Moonlight 配对参数：拒绝非 4 位/非数字 PIN",
+                Engines.BuildMoonlightPairArgs("100.64.0.12", "123") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12", "12345") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12", "12a4") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12", "１２３４") == null,
+                "pin validation");
+            Check("Moonlight 配对参数：拒绝主机命令注入",
+                Engines.BuildMoonlightPairArgs("100.64.0.12\" --pin 0000") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12\" --pin 0000", "0123") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12\n--pin 0000", "0123") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12 & calc", "0123") == null,
+                "host validation");
+            Check("Moonlight 配对参数：拒绝 PIN 命令注入",
+                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123;calc") == null
+                && Engines.BuildMoonlightPairArgs("100.64.0.12", "01 23") == null,
+                "pin injection");
+            Process badPairProcess = null;
+            string badPairMessage = null;
+            Check("Moonlight PIN：非法 host/PIN 不启动进程",
+                !FoundationClient.StartPairWithPin("100.64.0.12\" --bad", "0123",
+                    out badPairProcess, out badPairMessage)
+                && badPairProcess == null
+                && !FoundationClient.StartPairWithPin("100.64.0.12", "01 23",
+                    out badPairProcess, out badPairMessage)
+                && badPairProcess == null,
+                badPairMessage);
+            Check("Moonlight 配对参数：保留旧单参版本",
+                Engines.BuildMoonlightPairArgs("desk.ts.net") == "pair \"desk.ts.net\"",
+                Engines.BuildMoonlightPairArgs("desk.ts.net"));
+
+            string certificate = "@ByteArray(-----BEGIN CERTIFICATE-----\\n"
+                + new string('A', 160)
+                + "\\n-----END CERTIFICATE-----)";
+            string iniHosts =
+                "[General]\nkey=value\n\n[hosts]\n"
+                + "3\\hostname=Desk-Unordered\n3\\manualaddress=192.168.1.30\n"
+                + "3\\srvcert=" + certificate + "\n"
+                + "7\\hostname=Desk-A\n7\\manualaddress=192.168.1.20\n7\\remoteaddress=\n"
+                + "7\\ipv6address=fd7a:115c:a1e0::20\n7\\srvcert=" + certificate + "\n"
+                + "2\\hostname=Desk-B\n2\\manualaddress=localhost\n2\\remoteaddress=desk-b.ts.net\n"
+                + "2\\srvcert=" + certificate + "\n";
+            Check("Moonlight.ini：显示名称本身不认定为已配对",
+                !FoundationClient.ContainsPairedHost(iniHosts, "Desk-A"), "hostname");
+            Check("Moonlight.ini：同编号有效 srvcert + 手动地址才已配对",
+                FoundationClient.ContainsPairedHost(iniHosts, "192.168.1.20"), "manualaddress");
+            Check("Moonlight.ini：按远程地址判断已配对",
+                FoundationClient.ContainsPairedHost(iniHosts, "desk-b.ts.net"), "remoteaddress");
+            Check("Moonlight.ini：IPv6 方括号与展开形式等价",
+                FoundationClient.ContainsPairedHost(iniHosts, "[fd7a:115c:a1e0::20]")
+                && FoundationClient.ContainsPairedHost(iniHosts, "fd7a:115c:a1e0:0:0:0:0:20"),
+                "ipv6address");
+            Check("Moonlight.ini：乱序编号仍可读取",
+                FoundationClient.ContainsPairedHost(iniHosts, "192.168.1.30"), "unordered index");
+            Check("Moonlight.ini：只有 hostname/地址、没有 srvcert 不算配对",
+                !FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\hostname=Desk-A\n1\\manualaddress=192.168.1.20\n",
+                    "192.168.1.20"), "missing srvcert");
+            Check("Moonlight.ini：空 srvcert 不算配对",
+                !FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n",
+                    "192.168.1.20"), "empty srvcert");
+            Check("Moonlight.ini：残缺/过短 srvcert 不算有效证书候选",
+                !FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray(-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----)\n",
+                    "192.168.1.20")
+                && !FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=not-a-certificate\n",
+                    "192.168.1.20"), "truncated srvcert");
+            Check("Moonlight.ini：证书必须与地址同编号",
+                !FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n"
+                    + "2\\manualaddress=192.168.1.21\n2\\srvcert=" + certificate + "\n",
+                    "192.168.1.20")
+                && FoundationClient.ContainsPairedHost(
+                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n"
+                    + "2\\manualaddress=192.168.1.21\n2\\srvcert=" + certificate + "\n",
+                    "192.168.1.21"), "same numbered srvcert");
+            Check("Moonlight.ini：不跨节误判",
+                !FoundationClient.ContainsPairedHost("[apps]\n1\\hostname=Desk-A\n1\\manualaddress=192.168.1.20\n",
+                    "Desk-A"), "section boundary");
+            Check("Moonlight.ini：未配对返回 false",
+                !FoundationClient.ContainsPairedHost(iniHosts, "10.0.0.9"), "unknown host");
+            Check("Moonlight.ini：显示名参数不能给未知地址背书",
+                !FoundationClient.ContainsPairedHost(iniHosts, "10.0.0.9", "Desk-A"), "display name");
+            bool pairedState;
+            string pairedMessage;
+            Check("Moonlight.ini：无 INI 是可读的未配对状态",
+                FoundationClient.TryEvaluatePairedSettings(false, null, "100.64.0.12", "",
+                    out pairedState, out pairedMessage) && !pairedState,
+                pairedMessage);
+
+            int parsedPort;
+            string portError;
+            Check("Sunshine 配置：默认 WebUI 端口",
+                SunshinePairing.TryParseWebUiPort("address_family = both\n", out parsedPort, out portError)
+                && parsedPort == 47990, portError);
+            Check("Sunshine 配置：base port + 1",
+                SunshinePairing.TryParseWebUiPort("port = 47989\n", out parsedPort, out portError)
+                && parsedPort == 47990, portError);
+            Check("Sunshine 配置：显式 web_ui_port 优先",
+                SunshinePairing.TryParseWebUiPort("port = 50000\nweb_ui_port = 51234\n", out parsedPort, out portError)
+                && parsedPort == 51234, portError);
+            Check("Sunshine 配置：拒绝无效端口",
+                !SunshinePairing.TryParseWebUiPort("port = abc\n", out parsedPort, out portError),
+                portError);
+
+            string pendingJson =
+                "{\"generation\":7,\"pending\":true,\"requests\":[{\"id\":\"ABC-123\","
+                + "\"device_name\":\"客厅电脑\",\"started_at\":\"2026-11-23T10:00:00Z\","
+                + "\"expires_at\":\"2026-11-23T10:02:00Z\"},{\"device_name\":\"缺编号\"}]}";
+            List<PendingPairRequest> pendingRequests;
+            string pendingError;
+            Check("Sunshine pending：解析请求且跳过缺编号项",
+                SunshinePairing.TryParsePending(pendingJson, out pendingRequests, out pendingError)
+                && pendingRequests.Count == 1
+                && pendingRequests[0].Id == "ABC-123"
+                && pendingRequests[0].DeviceName == "客厅电脑",
+                pendingError);
+            Check("Sunshine pending：空列表也是有效响应",
+                SunshinePairing.TryParsePending("{\"pending\":false,\"requests\":[]}", out pendingRequests, out pendingError)
+                && pendingRequests.Count == 0, pendingError);
+            Check("Sunshine pending：畸形 JSON 拒绝",
+                !SunshinePairing.TryParsePending("{\"requests\":[", out pendingRequests, out pendingError)
+                && pendingRequests.Count == 0, pendingError);
+            Check("Sunshine pending：缺 requests 数组不算有效响应",
+                !SunshinePairing.TryParsePending("{\"pending\":false}", out pendingRequests, out pendingError),
+                pendingError);
+            Check("Sunshine pending：请求编号只允许 1–64 位 [A-Za-z0-9_-]",
+                SunshinePairing.IsSafeRequestId("A")
+                && SunshinePairing.IsSafeRequestId(new string('a', 64))
+                && SunshinePairing.IsSafeRequestId("ABC-123_x")
+                && !SunshinePairing.IsSafeRequestId("")
+                && !SunshinePairing.IsSafeRequestId("ABC/123")
+                && !SunshinePairing.IsSafeRequestId("ABC 123")
+                && !SunshinePairing.IsSafeRequestId(new string('a', 65)),
+                "request id");
+
+            bool confirmed;
+            string statusError;
+            Check("Sunshine pin：status=true 才算成功",
+                SunshinePairing.TryParseStatus("{\"status\":true}", out confirmed, out statusError) && confirmed,
+                statusError);
+            Check("Sunshine pin：status=false 明确失败",
+                SunshinePairing.TryParseStatus("{\"status\":false,\"error\":\"invalid pin\"}", out confirmed, out statusError)
+                && !confirmed, statusError);
+            Check("Sunshine pin：缺少 status 不冒充成功",
+                !SunshinePairing.TryParseStatus("{\"error\":\"bad\"}", out confirmed, out statusError),
+                statusError);
+            Check("Sunshine pin：空响应与畸形 JSON 不冒充成功",
+                !SunshinePairing.TryParseStatus("", out confirmed, out statusError)
+                && !SunshinePairing.TryParseStatus("{\"status\":true", out confirmed, out statusError)
+                && !SunshinePairing.TryParseStatus("{\"status\":1}", out confirmed, out statusError)
+                && !SunshinePairing.TryParseStatus("{\"status\":\"true\"}", out confirmed, out statusError)
+                && !confirmed, statusError);
+            Check("Sunshine pin：status=true 只表示 PIN 已提交，不当作配对完成",
+                SunshinePairing.TryParseStatus("{\"status\":true}", out confirmed, out statusError)
+                && confirmed, "UI 仍需以新 paired UUID 为完成证据");
+
+            string confirmBody = SunshinePairing.BuildConfirmBody("0123", "我的、电脑", "ABC-123");
+            Check("Sunshine confirm：JSON 字段与转义",
+                confirmBody == "{\"pin\":\"0123\",\"name\":\"我的、电脑\",\"id\":\"ABC-123\"}",
+                confirmBody);
+            string confirmError;
+            string unusedConfigDirectory = Path.Combine(Path.GetTempPath(), "DualRemote-selftest-unused-config");
+            Check("Sunshine confirm：拒绝非 4 位 PIN",
+                !SunshinePairing.TryConfirm(unusedConfigDirectory, "123", "ABC-123", "pc", out confirmError)
+                && confirmError.IndexOf("4 位", StringComparison.Ordinal) >= 0,
+                confirmError);
+            Check("Sunshine confirm：非法请求编号不发 POST",
+                !SunshinePairing.TryConfirm(unusedConfigDirectory, "0123", "ABC/123", "pc", out confirmError)
+                && confirmError.IndexOf("编号", StringComparison.Ordinal) >= 0,
+                confirmError);
+            Check("Sunshine reject：非法请求编号不发 DELETE",
+                !SunshinePairing.TryReject(unusedConfigDirectory, "A B/1", out confirmError),
+                confirmError);
+            Check("Sunshine reject：空响应与畸形 JSON 不算拒绝成功（源码纯函数）",
+                !SunshinePairing.TryParseStatus("", out confirmed, out statusError)
+                && !SunshinePairing.TryParseStatus("null", out confirmed, out statusError)
+                && !confirmed, statusError);
+            Check("Sunshine reject：请求编号需转义",
+                SunshinePairing.BuildPendingPath("A B/1") == "/api/pairing/pending/A%20B%2F1",
+                SunshinePairing.BuildPendingPath("A B/1"));
+            List<PairedClientInfo> parsedClients;
+            string clientError;
+            string namedCerts =
+                "{\"named_certs\":[{\"uuid\":\"7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9\","
+                + "\"name\":\"DualRemote-Test\",\"enabled\":true,\"streaming\":false},"
+                + "{\"uuid\":\"bad\",\"name\":\"ignored\"}]}";
+            Check("Sunshine clients：解析 paired UUID 并忽略畸形条目",
+                SunshinePairing.TryParsePairedClients(namedCerts, out parsedClients, out clientError)
+                && parsedClients.Count == 1
+                && parsedClients[0].Id == "7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9"
+                && parsedClients[0].Name == "DualRemote-Test", clientError);
+            string sameNameCerts =
+                "{\"named_certs\":[{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"同名\"},"
+                + "{\"uuid\":\"22222222-2222-2222-2222-222222222222\",\"name\":\"同名\"}]}";
+            Check("Sunshine clients：同名设备仍按两个 UUID 保留，不靠显示名合并",
+                SunshinePairing.TryParsePairedClients(sameNameCerts, out parsedClients, out clientError)
+                && parsedClients.Count == 2
+                && parsedClients[0].Id != parsedClients[1].Id
+                && parsedClients[0].Name == parsedClients[1].Name, clientError);
+            Check("Sunshine clients：畸形 JSON / 缺 named_certs 拒绝",
+                !SunshinePairing.TryParsePairedClients("{\"named_certs\":[", out parsedClients, out clientError)
+                && !SunshinePairing.TryParsePairedClients("{\"clients\":[]}", out parsedClients, out clientError),
+                clientError);
+            Check("Sunshine clients：UUID 只接受标准 36 位格式",
+                SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9")
+                && !SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A")
+                && !SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0AG"),
+                "uuid");
 
             // 内部范围校验不启动进程：借 StreamMoonlight 的参数校验路径不现实（需要组件），
             // 这里只验证公开常量的边界与映射一致性。
@@ -379,11 +603,18 @@ namespace DualRemote
                 && FoundationClient.SelectEngine(true)
                     == FoundationClient.SelectEngine(Engines.MoonlightPresent, FoundationClient.IsAvailable, true),
                 FoundationClient.SelectEngine(false).ToString());
-            bool vplusExe = File.Exists(FoundationClient.EngineExe);
-            bool vplusMarker = File.Exists(Path.Combine(FoundationClient.EngineDir, "portable.dat"));
-            Check("V+ 可用性 = exe 且同目录 portable.dat",
-                FoundationClient.IsAvailable == (vplusExe && vplusMarker),
-                FoundationClient.IsAvailable ? "available" : "unavailable");
+            bool localRuntime = File.Exists(FoundationClient.EngineExe)
+                && File.Exists(Path.Combine(FoundationClient.EngineDir, "portable.dat"));
+            bool bundledRuntime = File.Exists(FoundationClient.BundledEngineExe)
+                && File.Exists(Path.Combine(FoundationClient.BundledEngineDir, "portable.dat"));
+            Check("V+ 可用性 = 稳定 runtime 或随包完整目录（干净解压也可用）",
+                FoundationClient.IsAvailable == (localRuntime || bundledRuntime),
+                "local=" + localRuntime + ", bundled=" + bundledRuntime);
+            Check("V+ 版本指纹变化触发更新，相同指纹不重复复制",
+                FoundationClient.ShouldRefreshRuntime("bundle-v2", "bundle-v1")
+                && !FoundationClient.ShouldRefreshRuntime("bundle-v1", "bundle-v1")
+                && !FoundationClient.ShouldRefreshRuntime(null, "bundle-v1"),
+                "version fingerprint");
 
             // 低延迟 CLI 参数（VSync / Frame Pacing）
             string llArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 1920, 1080, 60, 10000,
@@ -418,6 +649,98 @@ namespace DualRemote
             Check("防窥壁纸 Contain 等比完整居中",
                 Math.Abs(containRect.Width - 900f) < 0.5f && Math.Abs(containRect.Height - 900f) < 0.5f && Math.Abs(containRect.X - 350f) < 0.5f,
                 containRect.ToString());
+
+            // 防窥壁纸文字不暴露退出快捷键 + 手动解除自动锁屏解锁后绝不重新拉起防窥屏
+            var badgeCfg = new PrivacyWallpaperConfig { Caption = "远程安全防窥保护中", ShowOverlayBadge = true };
+            string badgeText = PrivacyWallpaper.FormatCurtainBadgeText(badgeCfg, new DateTime(2026, 11, 24, 9, 20, 0));
+            Check("防窥壁纸文案：仅含时间与保护文案，不暴露退出快捷键",
+                badgeText == "09:20  ·  远程安全防窥保护中"
+                && badgeText.IndexOf("Ctrl", StringComparison.OrdinalIgnoreCase) < 0
+                && badgeText.IndexOf("退出", StringComparison.Ordinal) < 0
+                && badgeText.IndexOf("快捷键", StringComparison.Ordinal) < 0,
+                badgeText);
+
+            var guard = new PrivacyGuardState();
+            DateTime t0 = new DateTime(2026, 11, 24, 10, 0, 0, DateTimeKind.Utc);
+            guard.OnManualActivate();
+            long staleGen = guard.Generation;
+            guard.OnManualExit(t0);
+            Check("防窥锁屏状态机：手动退出后 1.5s 内拦截快捷键连击/回弹",
+                !guard.CanActivateFromHotkey(t0.AddMilliseconds(400)),
+                "debounce");
+            guard.OnSessionLock();
+            Check("防窥锁屏状态机：锁屏期间丢弃在途轮询与自动拉起",
+                guard.EvaluateAutoGuardPoll(staleGen, true, false, false, true, t0.AddSeconds(1)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(5)) == PrivacyGuardAction.NoOp,
+                "locked");
+            guard.OnSessionUnlock(t0.AddSeconds(8));
+            Check("防窥锁屏状态机：输入密码解锁回到桌面后保持关闭，不重新拉起防窥屏",
+                !guard.CanActivateFromHotkey(t0.AddSeconds(8.5))
+                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(12)) == PrivacyGuardAction.NoOp,
+                "post-unlock");
+            Check("防窥锁屏状态机：当前远控断开后重新武装，下次新远控正常自动防窥",
+                guard.EvaluateAutoGuardPoll(guard.Generation, false, false, false, true, t0.AddSeconds(15)) == PrivacyGuardAction.NoOp
+                && guard.EvaluateAutoGuardPoll(guard.Generation, true, false, false, true, t0.AddSeconds(18)) == PrivacyGuardAction.ActivateAuto,
+                "re-arm");
+
+            // 新手引导持久化 + 灰白框选避让几何 + 32bpp Alpha 渲染验收
+            Check("新手引导状态解析：首次默认未完成，写入标记后识别已完成",
+                !OnboardingStore.ParseCompleted("")
+                && !OnboardingStore.ParseCompleted("completed=v0")
+                && OnboardingStore.ParseCompleted(OnboardingStore.FormatCompleted()),
+                OnboardingStore.FormatCompleted().Trim());
+
+            CardLayoutResult rightPlace = OnboardingOverlayForm.ComputeCardPlacement(
+                new System.Drawing.Size(1060, 700), new System.Drawing.Rectangle(6, 54, 224, 638), new System.Drawing.SizeF(368, 220), 1f);
+            Check("新手引导避让：左侧栏框选自动放置于右侧且零重叠不越界",
+                rightPlace.Side == CardPlacementSide.Right
+                && rightPlace.CardRect.Left > 230f
+                && rightPlace.CardRect.Right <= 1060f
+                && rightPlace.CardRect.Bottom <= 700f,
+                rightPlace.Side + " " + rightPlace.CardRect);
+
+            CardLayoutResult topRightPlace = OnboardingOverlayForm.ComputeCardPlacement(
+                new System.Drawing.Size(860, 560), new System.Drawing.Rectangle(540, 4, 164, 40), new System.Drawing.SizeF(368, 220), 1f);
+            Check("新手引导避让：窄屏右上工具栏框选自动放置于下方且完整落入窗口内",
+                topRightPlace.Side == CardPlacementSide.Bottom
+                && topRightPlace.CardRect.Top >= 44f
+                && topRightPlace.CardRect.Left >= 10f
+                && topRightPlace.CardRect.Right <= 850f,
+                topRightPlace.Side + " " + topRightPlace.CardRect);
+
+            var testStep = new OnboardingStep
+            {
+                Title = "测试引导步骤",
+                Description = "验证半透明灰遮罩、镂空框选透明区与纯白解说卡片的 32bpp Alpha 合成。",
+                Tip = "支持键盘 ← / → 翻页"
+            };
+            using (var frame = OnboardingOverlayForm.RenderPreviewBitmap(
+                new System.Drawing.Size(1060, 700), 1f, new System.Drawing.Rectangle(12, 60, 210, 580), testStep, 0, 7))
+            {
+                System.Drawing.Color holePx = frame.GetPixel(115, 350);
+                System.Drawing.Color scrimPx = frame.GetPixel(950, 620);
+                int opaqueWhiteCount = 0;
+                int opaqueInkCount = 0;
+                for (int y = 240; y < 440; y += 2)
+                {
+                    for (int x = 250; x < 590; x += 2)
+                    {
+                        System.Drawing.Color p = frame.GetPixel(x, y);
+                        if (p.A == 255 && p.R >= 250 && p.G >= 250 && p.B >= 250) opaqueWhiteCount++;
+                        else if (p.A == 255 && p.R < 90 && p.G < 100 && p.B < 120) opaqueInkCount++;
+                    }
+                }
+                Check("新手引导灰白框选像素：镂空区近全透、遮罩半透深灰、卡片纯白且含不透明清晰文字",
+                    holePx.A <= 2
+                    && scrimPx.A >= 120 && scrimPx.A <= 170
+                    && opaqueWhiteCount > 2000
+                    && opaqueInkCount > 30,
+                    string.Format("holeA={0} scrimA={1} white={2} ink={3}", holePx.A, scrimPx.A, opaqueWhiteCount, opaqueInkCount));
+            }
+            System.Drawing.Bitmap brandLogo = RemoteTheme.GetBrandLogoBitmap();
+            Check("BoBo远程 品牌 Logo 资源：内嵌圆角方框奶牛猫徽章可正常加载",
+                brandLogo != null && brandLogo.Width >= 32 && brandLogo.Height >= 32,
+                brandLogo == null ? "null" : (brandLogo.Width + "x" + brandLogo.Height));
 
             var badSnap = new HostSnapshot { SunshineInstalled = true };
             var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -16,11 +16,19 @@ namespace DualRemote
         internal static int Main(string[] args)
         {
             bool selfTest = false;
+            bool forceTour = false;
             foreach (string arg in args)
             {
                 if (string.Equals(arg, "--self-test", StringComparison.OrdinalIgnoreCase))
                 {
                     selfTest = true;
+                }
+                else if (string.Equals(arg, "--tour", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(arg, "--reset-tour", StringComparison.OrdinalIgnoreCase))
+                {
+                    forceTour = true;
+                    if (string.Equals(arg, "--reset-tour", StringComparison.OrdinalIgnoreCase))
+                        OnboardingStore.Reset();
                 }
             }
             if (selfTest)
@@ -55,12 +63,12 @@ namespace DualRemote
             Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                Application.Run(new MainForm());
+                Application.Run(new MainForm(forceTour));
                 return 0;
             }
             catch (Exception ex)
             {
-                MessageBox.Show("程序异常：" + ex.Message, "双端远程", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("程序异常：" + ex.Message, "BoBo远程", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
         }

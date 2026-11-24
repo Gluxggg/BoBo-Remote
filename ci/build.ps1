@@ -32,13 +32,15 @@ if ($sources.Count -eq 0) { throw "no .cs files under $sourceDir" }
 
 $manifest = Join-Path $sourceDir 'app.manifest'
 if (-not (Test-Path -LiteralPath $manifest)) { throw "missing manifest: $manifest" }
+$appIcon = Join-Path $repoRoot 'assets\bobo-remote.ico'
+$brandLogo = Join-Path $repoRoot 'assets\bobo-logo.png'
 
 $referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll')
 $references = @($referenceNames | ForEach-Object { Join-Path $framework $_ })
 
 $outputRoot = Join-Path $repoRoot $OutputDirectory
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
-$exePath = Join-Path $outputRoot 'DualRemote.exe'
+$exePath = Join-Path $outputRoot 'BoBoRemote.exe'
 if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
 Write-Host "compiler: $compiler"
@@ -53,7 +55,10 @@ $compilerArgs = @(
     "/out:$exePath"
     "/win32manifest:$manifest"
     "/reference:$($references -join ',')"
-) + $sources
+)
+if (Test-Path -LiteralPath $appIcon) { $compilerArgs += "/win32icon:$appIcon" }
+if (Test-Path -LiteralPath $brandLogo) { $compilerArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
+$compilerArgs += $sources
 & $compiler @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 Write-Host "compiled $($sources.Count) source files"

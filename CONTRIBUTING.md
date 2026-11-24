@@ -1,9 +1,9 @@
-# Contributing to 双端远程
+# Contributing to BoBo远程 (dual-remote)
 
-Thanks for taking a look. 双端远程 is a personal-scale remote desktop launcher for
-Windows: it wraps three upstream engines (RustDesk, Moonlight V+, Moonlight) behind
-one small native launcher, and adds the tuning/diagnostics that those engines do not
-ship themselves.
+Thanks for taking a look. BoBo远程 (`dual-remote`) is a personal-scale remote desktop launcher for
+Windows: it wraps four upstream engines (RustDesk, Moonlight V+, Moonlight, and bundled Foundation Sunshine) behind
+one small native launcher, and adds onboarding, privacy curtain protection, and tuning/diagnostics that those engines do not
+ship together.
 
 Issues and pull requests are welcome. Please read the two rules below first — they
 keep this project honest.
@@ -56,11 +56,14 @@ an installer. Please do not introduce NuGet packages, C# 6+ syntax, or a build s
 本地必须先过这两步，否则 PR 不会合并：
 
 ```powershell
-# 1. 用与 CI 相同的参数编译
+# 1. 快速编译 + 无 UI 自检（与 GitHub Actions CI 完全一致）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1
+
+# 2. 完整便携包构建（离线复用已校验缓存）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch
 
-# 2. 无 UI 自检（参数校验、CLI 拼装、壁纸几何、抗丢包诊断）
-.\dist\双端远程-Windows-x64\双端远程.exe --self-test
+# 3. 单独运行无 UI 自检（参数校验、CLI 拼装、壁纸几何、防窥锁屏状态机、新手引导布局、抗丢包诊断）
+.\dist\BoBo远程-Windows-x64\BoBo远程.exe --self-test
 ```
 
 `--self-test` 在禁止 ICMP 的环境（沙箱、部分安全软件）会把两项回环回包校验标记为

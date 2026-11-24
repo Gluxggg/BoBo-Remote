@@ -23,9 +23,9 @@ namespace DualRemote
         internal const int MinimalStreamBitrateKbps = 500;
         internal const int MaximalStreamBitrateKbps = 500000;
         internal const int MinimalStreamWidth = 640;
-        internal const int MaximalStreamWidth = 3840;
+        internal const int MaximalStreamWidth = 4096;
         internal const int MinimalStreamHeight = 480;
-        internal const int MaximalStreamHeight = 2160;
+        internal const int MaximalStreamHeight = 2560;
         internal const int MinimalStreamFps = 24;
         internal const int MaximalStreamFps = 240;
         internal const int RustDeskLaunchTimeoutMs = 6000;
@@ -292,7 +292,56 @@ namespace DualRemote
 
         internal static string BuildMoonlightPairArgs(string host)
         {
-            return "pair " + Quote(host);
+            string error;
+            return BuildMoonlightPairArgs(host, out error);
+        }
+
+        internal static string BuildMoonlightPairArgs(string host, out string error)
+        {
+            error = null;
+            string cleanHost = NormalizeHost(host, out error);
+            if (cleanHost == null) return null;
+            return "pair " + Quote(cleanHost);
+        }
+
+        /// <summary>配对码严格为 4 个 ASCII 数字；不接受空格、全角数字或其他字符。</summary>
+        internal static bool TryValidatePairPin(string pin, out string error)
+        {
+            error = null;
+            if (pin == null || pin.Length != 4)
+            {
+                error = "配对码必须是 4 位数字。";
+                return false;
+            }
+            foreach (char c in pin)
+            {
+                if (c < '0' || c > '9')
+                {
+                    error = "配对码只能包含 0–9 的数字。";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>Moonlight V+ 的带 PIN 配对参数；无效 PIN 返回 null。</summary>
+        internal static string BuildMoonlightPairArgs(string host, string pin)
+        {
+            string error;
+            return BuildMoonlightPairArgs(host, pin, out error);
+        }
+
+        internal static string BuildMoonlightPairArgs(string host, string pin, out string error)
+        {
+            string hostError;
+            string cleanHost = NormalizeHost(host, out hostError);
+            if (cleanHost == null)
+            {
+                error = hostError;
+                return null;
+            }
+            if (!TryValidatePairPin(pin, out error)) return null;
+            return "pair " + Quote(cleanHost) + " --pin " + pin;
         }
 
         internal static string Quote(string value)
@@ -543,11 +592,12 @@ namespace DualRemote
                 + (showStats ? " · 统计开" : "");
             return StartMoonlightStream(
                 BuildMoonlightStreamArgs(host, width, height, fps, bitrateKbps, showStats, playOnHost, windowed, useHevc, disableVsync, framePacing),
-                "已启动 Moonlight 串流（" + width + "×" + height + " · " + fps + "fps · " + detail + "）。",
+                "已提交 Moonlight 串流请求（" + width + "×" + height + " · " + fps + "fps · " + detail
+                + "）。等待客户端首帧，启动进程不代表串流已经稳定。",
                 out message);
         }
 
-        private static bool TryValidateStreamGeometry(int width, int height, int fps, int bitrateKbps,
+        internal static bool TryValidateStreamGeometry(int width, int height, int fps, int bitrateKbps,
             out string message)
         {
             message = null;
@@ -559,18 +609,18 @@ namespace DualRemote
             if (width <= MinimalStreamWidth || width >= MaximalStreamWidth)
             {
                 message = "宽度需大于 " + MinimalStreamWidth + " 且小于 " + MaximalStreamWidth
-                        + "（常用 1280 / 1920 / 2560）。";
+                        + "（常用 1280 / 1920 / 2560 / 3840）。";
                 return false;
             }
             if (height <= MinimalStreamHeight || height >= MaximalStreamHeight)
             {
                 message = "高度需大于 " + MinimalStreamHeight + " 且小于 " + MaximalStreamHeight
-                        + "（常用 720 / 1080 / 1200 / 1440 / 1600）。";
+                        + "（常用 720 / 1080 / 1200 / 1440 / 1600 / 2160）。";
                 return false;
             }
             if (fps <= MinimalStreamFps || fps >= MaximalStreamFps)
             {
-                message = "帧率需大于 " + MinimalStreamFps + " 且小于 " + MaximalStreamFps + "（常用 60 / 90）。";
+                message = "帧率需大于 " + MinimalStreamFps + " 且小于 " + MaximalStreamFps + "（常用 60 / 90 / 120 / 144）。";
                 return false;
             }
             if (bitrateKbps <= MinimalStreamBitrateKbps || bitrateKbps >= MaximalStreamBitrateKbps)
@@ -714,7 +764,7 @@ namespace DualRemote
         internal static string MissingComponentMessage(string name, string path)
         {
             return "未找到 " + name + " 组件：\r\n" + path + "\r\n\r\n"
-                 + "请确认发行包已完整解压，且 engines 目录与“双端远程.exe”位于同一层，然后重试。";
+                 + "请确认发行包已完整解压，且 engines 目录与“BoBo远程.exe”位于同一层，然后重试。";
         }
     }
 }

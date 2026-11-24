@@ -21,6 +21,7 @@ namespace DualRemote
         private Bitmap cachedImage;
         private bool active;
         private bool previewMode;
+        private bool displayEventsHooked;
         private bool disposed;
 
         internal event Action StateChanged;
@@ -32,10 +33,14 @@ namespace DualRemote
         {
             refreshTimer.Interval = 1500;
             refreshTimer.Tick += delegate { KeepOnTopAndRefreshClock(); };
-            SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         }
 
         internal bool Activate(PrivacyWallpaperConfig config, bool preview, out string statusMessage)
+        {
+            return ActivateInternal(config, preview, true, out statusMessage);
+        }
+
+        private bool ActivateInternal(PrivacyWallpaperConfig config, bool preview, bool showEntryReminder, out string statusMessage)
         {
             statusMessage = null;
             Deactivate(false);
@@ -53,7 +58,7 @@ namespace DualRemote
             bool allExcluded = true;
             foreach (Screen screen in screens)
             {
-                var win = new PrivacyCurtainWindow(screen.Bounds, currentConfig, cachedImage, preview);
+                var win = new PrivacyCurtainWindow(screen.Bounds, currentConfig, cachedImage, preview, showEntryReminder);
                 if (preview)
                 {
                     win.ExitRequested += delegate { Deactivate(false); };
@@ -66,11 +71,16 @@ namespace DualRemote
             active = windows.Count > 0;
             if (active)
             {
+                if (!displayEventsHooked)
+                {
+                    SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+                    displayEventsHooked = true;
+                }
                 refreshTimer.Start();
                 if (preview)
                     statusMessage = "正在全屏预览自定义防窥壁纸（点击任意处或按 Esc 退出）。";
                 else if (allExcluded)
-                    statusMessage = "防窥屏壁纸已覆盖 " + windows.Count + " 块屏幕（物理屏遮挡，远控端透明穿透；按 Ctrl+Alt+Shift+P 退出）。";
+                    statusMessage = "防窥屏壁纸已覆盖 " + windows.Count + " 块屏幕（物理屏遮挡，远控端透明穿透；随时按 Ctrl+Alt+Shift+P 退出）。";
                 else
                     statusMessage = "防窥壁纸已开启（当前系统未接受捕获排除标记，建议搭配 Zako 虚拟屏使用）。";
             }
@@ -80,17 +90,26 @@ namespace DualRemote
 
         internal void Deactivate(bool triggerLockIfConfigured)
         {
-            refreshTimer.Stop();
             bool wasActiveNonPreview = active && !previewMode;
             bool shouldLock = triggerLockIfConfigured && wasActiveNonPreview && currentConfig != null && currentConfig.LockOnLocalExit;
 
-            foreach (var win in windows)
-            {
-                try { win.Close(); win.Dispose(); } catch { }
-            }
-            windows.Clear();
+            // 先切换状态、停定时器并解绑显示事件，杜绝锁屏/解锁切换桌面时残留回调重新拉起防窥屏
             active = false;
             previewMode = false;
+            refreshTimer.Stop();
+            if (displayEventsHooked)
+            {
+                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                displayEventsHooked = false;
+            }
+
+            foreach (var win in windows)
+            {
+                try { win.Hide(); } catch { }
+                try { win.Close(); } catch { }
+                try { win.Dispose(); } catch { }
+            }
+            windows.Clear();
             DisposeImage();
             RaiseStateChanged();
 
@@ -141,7 +160,7 @@ namespace DualRemote
                     {
                         if (!active || disposed) return;
                         string ignored;
-                        Activate(currentConfig, previewMode, out ignored);
+                        ActivateInternal(currentConfig, previewMode, false, out ignored);
                     }));
                 }
             }
@@ -166,7 +185,6 @@ namespace DualRemote
         {
             if (disposed) return;
             disposed = true;
-            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             Deactivate(false);
             refreshTimer.Dispose();
         }
@@ -184,19 +202,28 @@ namespace DualRemote
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOACTIVATE = 0x0010;
+        private const double EntryToastHoldMs = 3200.0;
+        private const double EntryToastTotalMs = 4000.0;
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
 
         private readonly PrivacyWallpaperConfig config;
         private readonly Image customImage;
         private readonly bool previewMode;
+        private readonly bool showEntryReminder;
+        private readonly DateTime shownAtUtc;
+        private Timer entryToastTimer;
+        private float entryToastOpacity;
         internal bool CaptureExcluded { get; private set; }
         internal event Action ExitRequested;
 
-        internal PrivacyCurtainWindow(Rectangle monitorBounds, PrivacyWallpaperConfig config, Image customImage, bool previewMode)
+        internal PrivacyCurtainWindow(Rectangle monitorBounds, PrivacyWallpaperConfig config, Image customImage, bool previewMode, bool showEntryReminder)
         {
             this.config = config;
             this.customImage = customImage;
             this.previewMode = previewMode;
+            this.showEntryReminder = showEntryReminder && !previewMode;
+            shownAtUtc = DateTime.UtcNow;
+            entryToastOpacity = this.showEntryReminder ? 1f : 0f;
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -217,6 +244,51 @@ namespace DualRemote
                         RequestExit();
                 };
             }
+            else if (this.showEntryReminder)
+            {
+                entryToastTimer = new Timer { Interval = 33 };
+                entryToastTimer.Tick += delegate { UpdateEntryToastFade(); };
+                entryToastTimer.Start();
+            }
+        }
+
+        private void UpdateEntryToastFade()
+        {
+            if (IsDisposed)
+            {
+                StopEntryToastTimer();
+                return;
+            }
+            double elapsed = (DateTime.UtcNow - shownAtUtc).TotalMilliseconds;
+            if (elapsed <= EntryToastHoldMs)
+            {
+                entryToastOpacity = 1f;
+                return;
+            }
+            if (elapsed >= EntryToastTotalMs)
+            {
+                entryToastOpacity = 0f;
+                StopEntryToastTimer();
+                Invalidate();
+                return;
+            }
+            entryToastOpacity = (float)Math.Max(0.0, 1.0 - (elapsed - EntryToastHoldMs) / (EntryToastTotalMs - EntryToastHoldMs));
+            Invalidate();
+        }
+
+        private void StopEntryToastTimer()
+        {
+            if (entryToastTimer != null)
+            {
+                try { entryToastTimer.Stop(); entryToastTimer.Dispose(); } catch { }
+                entryToastTimer = null;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) StopEntryToastTimer();
+            base.Dispose(disposing);
         }
 
         protected override bool ShowWithoutActivation
@@ -276,6 +348,11 @@ namespace DualRemote
         protected override void OnPaint(PaintEventArgs e)
         {
             PrivacyWallpaper.Render(e.Graphics, ClientRectangle, config, customImage, previewMode);
+            if (!previewMode && entryToastOpacity > 0.01f)
+            {
+                PrivacyWallpaper.RenderEntryToast(e.Graphics, ClientRectangle, entryToastOpacity,
+                    config != null && config.LockOnLocalExit);
+            }
         }
 
         private void RequestExit()

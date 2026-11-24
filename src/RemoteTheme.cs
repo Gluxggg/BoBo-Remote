@@ -1,6 +1,9 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
+using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -8,41 +11,114 @@ namespace DualRemote
 {
     internal static class RemoteTheme
     {
-        // Modern Neo-Slate Light Palette
-        internal static readonly Color Workspace = Color.FromArgb(244, 246, 250);
-        internal static readonly Color Paper = Color.White;
-        internal static readonly Color Rail = Color.FromArgb(249, 250, 253);
-        internal static readonly Color SurfaceSubtle = Color.FromArgb(241, 245, 250);
-        internal static readonly Color Ink = Color.FromArgb(15, 23, 42);
-        internal static readonly Color Muted = Color.FromArgb(100, 116, 139);
-        internal static readonly Color Stroke = Color.FromArgb(226, 232, 240);
-        internal static readonly Color StrokeStrong = Color.FromArgb(203, 213, 225);
-        internal static readonly Color CardShadow = Color.FromArgb(232, 237, 246);
+        // UU-calibrated glacier ice-blue / porcelain white light system:
+        // L-frame (#F0F5F8) -> luminous ice-white workspace (#F7FBFE) -> pure elevated cards (#FFFFFF).
+        internal static readonly Color ChromeBg = Color.FromArgb(240, 245, 248);
+        internal static readonly Color Rail = Color.FromArgb(240, 245, 248);
+        internal static readonly Color Workspace = Color.FromArgb(247, 251, 254);
+        internal static readonly Color Paper = Color.FromArgb(255, 255, 255);
+        internal static readonly Color SurfaceSubtle = Color.FromArgb(241, 246, 250);
+        internal static readonly Color NavHover = Color.FromArgb(228, 235, 242);
+        internal static readonly Color NavActive = Color.FromArgb(221, 231, 241);
 
-        internal static readonly Color Accent = Color.FromArgb(59, 91, 255);
-        internal static readonly Color AccentHover = Color.FromArgb(43, 73, 234);
-        internal static readonly Color AccentLight = Color.FromArgb(238, 242, 255);
-        internal static readonly Color AccentBorder = Color.FromArgb(199, 210, 254);
+        internal static readonly Color Ink = Color.FromArgb(26, 32, 44);
+        internal static readonly Color BodyInk = Color.FromArgb(74, 86, 104);
+        internal static readonly Color Muted = Color.FromArgb(125, 138, 154);
+        internal static readonly Color Placeholder = Color.FromArgb(164, 174, 186);
 
-        internal static readonly Color Success = Color.FromArgb(5, 150, 105);
-        internal static readonly Color SuccessLight = Color.FromArgb(236, 253, 245);
-        internal static readonly Color Warning = Color.FromArgb(180, 83, 9);
-        internal static readonly Color WarningLight = Color.FromArgb(254, 243, 199);
-        internal static readonly Color Alert = Color.FromArgb(220, 38, 38);
-        internal static readonly Color AlertLight = Color.FromArgb(254, 242, 242);
-        internal static readonly Color HeroText = Color.FromArgb(203, 218, 255);
+        internal static readonly Color Stroke = Color.FromArgb(228, 236, 243);
+        internal static readonly Color StrokeStrong = Color.FromArgb(210, 221, 232);
+        internal static readonly Color Divider = Color.FromArgb(232, 238, 244);
+        internal static readonly Color WindowBorder = Color.FromArgb(212, 222, 233);
 
-        private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.25f);
+        internal static readonly Color Accent = Color.FromArgb(51, 122, 255);
+        internal static readonly Color AccentHover = Color.FromArgb(34, 102, 236);
+        internal static readonly Color AccentPressed = Color.FromArgb(24, 84, 206);
+        internal static readonly Color AccentLight = Color.FromArgb(235, 243, 255);
+        internal static readonly Color AccentBorder = Color.FromArgb(192, 217, 255);
+        internal static readonly Color AccentSky = Color.FromArgb(108, 182, 255);
+
+        internal static readonly Color DisabledBg = Color.FromArgb(201, 208, 218);
+        internal static readonly Color DisabledText = Color.FromArgb(255, 255, 255);
+
+        internal static readonly Color Success = Color.FromArgb(18, 158, 78);
+        internal static readonly Color SuccessLight = Color.FromArgb(236, 251, 243);
+        internal static readonly Color Warning = Color.FromArgb(198, 122, 16);
+        internal static readonly Color WarningLight = Color.FromArgb(253, 249, 240);
+        internal static readonly Color Alert = Color.FromArgb(220, 48, 56);
+        internal static readonly Color AlertLight = Color.FromArgb(254, 242, 243);
+
+        private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.5f);
         private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 8.5f);
-        private static readonly Font LabelFont = new Font("Microsoft YaHei UI", 9.25f, FontStyle.Bold);
-        private static readonly Font SectionFont = new Font("Microsoft YaHei UI", 12.25f, FontStyle.Bold);
-        private static readonly Font TitleFont = new Font("Microsoft YaHei UI", 20.5f, FontStyle.Bold);
+        private static readonly Font LabelFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Regular);
+        private static readonly Font LabelBoldFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Bold);
+        private static readonly Font SectionFont = new Font("Microsoft YaHei UI", 11.25f, FontStyle.Bold);
+        private static readonly Font TitleFont = new Font("Microsoft YaHei UI", 19f, FontStyle.Bold);
         private static readonly Font CodeFont = new Font("Consolas", 9.5f);
+        private static readonly Font BigCodeFont = new Font("Consolas", 17.5f, FontStyle.Bold);
 
-        internal enum TextSize { Small, Body, Label, Section, Title, Code }
-        internal enum ButtonStyle { Primary, Secondary, Navigation, Quiet, OnHero, OnHeroQuiet, Caption, Close, AccentSoft, Segmented, Chip }
-        internal enum Glyph { None, Devices, Desktop, Link, Gear, Help, Refresh, Folder, Arrow, Plus, Pin, Minus, Maximize, Restore, Close, Shield, Bolt, Copy, Image, Eye, Check }
-        internal enum PillTone { Neutral, Success, Warning, Alert, Info, OnHero }
+        internal enum TextSize { Small, Body, Label, LabelBold, Section, Title, Code, BigCode }
+
+        internal enum ButtonStyle
+        {
+            Primary,
+            Secondary,
+            Navigation,
+            NavSection,
+            Quiet,
+            Link,
+            Caption,
+            Close,
+            AccentSoft,
+            UnderlineTab,
+            Chip,
+            ToolbarAction,
+            IconGhost
+        }
+
+        internal enum Glyph
+        {
+            None,
+            Devices,
+            AllDevices,
+            Desktop,
+            WindowsTile,
+            Link,
+            Assist,
+            Star,
+            Gear,
+            Help,
+            Refresh,
+            Folder,
+            Arrow,
+            ChevronRight,
+            ChevronDown,
+            ChevronUp,
+            Plus,
+            Pin,
+            Minus,
+            Maximize,
+            Restore,
+            Close,
+            Shield,
+            Bolt,
+            Copy,
+            Image,
+            Eye,
+            EyeOff,
+            Check,
+            Info,
+            InfoMark,
+            Bell,
+            Menu,
+            Terminal,
+            Network,
+            MoreDots,
+            Trash,
+            Lock
+        }
+
+        internal enum PillTone { Neutral, Success, Warning, Alert, Info }
 
         internal static Label Text(string content, TextSize size, Color color)
         {
@@ -51,9 +127,11 @@ namespace DualRemote
             {
                 case TextSize.Small: font = SmallFont; break;
                 case TextSize.Label: font = LabelFont; break;
+                case TextSize.LabelBold: font = LabelBoldFont; break;
                 case TextSize.Section: font = SectionFont; break;
                 case TextSize.Title: font = TitleFont; break;
                 case TextSize.Code: font = CodeFont; break;
+                case TextSize.BigCode: font = BigCodeFont; break;
             }
             return new Label
             {
@@ -64,57 +142,87 @@ namespace DualRemote
                 Text = content,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Margin = Padding.Empty,
-                BackColor = Color.Transparent
+                BackColor = Color.Transparent,
+                UseMnemonic = false
             };
         }
 
         internal static Button Action(string caption, ButtonStyle style, Glyph glyph = Glyph.None)
         {
-            Font f = (style == ButtonStyle.Chip || style == ButtonStyle.Segmented) ? SmallFont : LabelFont;
-            if (style == ButtonStyle.Segmented) f = LabelFont;
+            Font f = LabelFont;
+            if (style == ButtonStyle.Primary || style == ButtonStyle.UnderlineTab) f = LabelFont;
+            else if (style == ButtonStyle.Chip || style == ButtonStyle.Link) f = SmallFont;
+            else if (style == ButtonStyle.NavSection) f = BodyFont;
+            else if (style == ButtonStyle.ToolbarAction) f = BodyFont;
+
             return new ActionButton(style, glyph)
             {
                 Text = caption,
-                AccessibleName = caption,
+                AccessibleName = string.IsNullOrEmpty(caption) ? glyph.ToString() : caption,
+                Font = f,
                 Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Font = f
+                Margin = Padding.Empty
             };
         }
 
         internal static void Highlight(Button button, bool active)
         {
-            var painted = button as ActionButton;
-            if (painted == null) return;
-            painted.Active = active;
-            painted.Invalidate();
+            var action = button as ActionButton;
+            if (action == null) return;
+            if (action.Active == active) return;
+            action.Active = active;
+            action.Invalidate();
+        }
+
+        internal static void SetGlyphTint(Button button, Color tint)
+        {
+            var action = button as ActionButton;
+            if (action == null) return;
+            action.CustomGlyphColor = tint;
+            action.Invalidate();
+        }
+
+        internal static void SetNavIndent(Button button, int indentPx)
+        {
+            var action = button as ActionButton;
+            if (action == null) return;
+            action.NavIndent = indentPx;
+            action.Invalidate();
+        }
+
+        internal static void SetIndicatorDot(Button button, bool show, Color color)
+        {
+            var action = button as ActionButton;
+            if (action == null) return;
+            action.ShowIndicatorDot = show;
+            action.IndicatorDotColor = color;
+            action.Invalidate();
         }
 
         internal static void ChangeGlyph(Button button, Glyph glyph)
         {
-            var painted = button as ActionButton;
-            if (painted == null) return;
-            painted.Icon = glyph;
-            painted.Invalidate();
+            var action = button as ActionButton;
+            if (action == null) return;
+            action.Icon = glyph;
+            action.Invalidate();
         }
 
         internal static TableLayoutPanel Grid(int columns)
         {
-            return new LayoutGrid
+            return new GridPanel
             {
-                AutoSize = false,
-                Dock = DockStyle.Fill,
                 ColumnCount = columns,
                 RowCount = 0,
+                Dock = DockStyle.Fill,
                 Margin = Padding.Empty,
-                BackColor = Color.Transparent,
-                GrowStyle = TableLayoutPanelGrowStyle.AddRows
+                Padding = Padding.Empty,
+                BackColor = Color.Transparent
             };
         }
 
-        private sealed class LayoutGrid : TableLayoutPanel
+        private sealed class GridPanel : TableLayoutPanel
         {
-            internal LayoutGrid()
+            internal GridPanel()
             {
                 DoubleBuffered = true;
             }
@@ -162,6 +270,11 @@ namespace DualRemote
 
         internal static Panel Rule()
         {
+            return new Panel { Dock = DockStyle.Fill, BackColor = Divider, Margin = Padding.Empty, TabStop = false };
+        }
+
+        internal static Panel StrongRule()
+        {
             return new Panel { Dock = DockStyle.Fill, BackColor = Stroke, Margin = Padding.Empty, TabStop = false };
         }
 
@@ -170,10 +283,10 @@ namespace DualRemote
             return new ComboBox
             {
                 AccessibleName = name,
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.None,
                 DropDownStyle = editable ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = SurfaceSubtle,
+                BackColor = Paper,
                 ForeColor = Ink,
                 Font = BodyFont,
                 Margin = Padding.Empty
@@ -185,9 +298,9 @@ namespace DualRemote
             return new TextBox
             {
                 AccessibleName = name,
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.None,
                 BorderStyle = BorderStyle.None,
-                BackColor = SurfaceSubtle,
+                BackColor = Paper,
                 ForeColor = Ink,
                 Font = BodyFont,
                 Text = text ?? "",
@@ -195,7 +308,6 @@ namespace DualRemote
             };
         }
 
-        /// <summary>圆角输入容器，消除原生 WinForms ComboBox/TextBox 硬边框，聚焦时呈现靛蓝描边。</summary>
         internal static Panel WrapInput(Control inner)
         {
             return new InputShell(inner);
@@ -203,31 +315,93 @@ namespace DualRemote
 
         private sealed class InputShell : Panel
         {
+            private readonly Control inner;
+            private readonly Panel comboClip;
             private bool focused;
+            private bool hovered;
 
             internal InputShell(Control inner)
             {
+                this.inner = inner;
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 BackColor = Paper;
-                Padding = new Padding(9, 5, 8, 4);
                 DoubleBuffered = true;
                 ResizeRedraw = true;
-                inner.BackColor = SurfaceSubtle;
+                inner.BackColor = Paper;
                 inner.GotFocus += delegate { focused = true; Invalidate(); };
                 inner.LostFocus += delegate { focused = false; Invalidate(); };
-                Controls.Add(inner);
+                inner.MouseEnter += delegate { hovered = true; Invalidate(); };
+                inner.MouseLeave += delegate { hovered = false; Invalidate(); };
+                if (inner is ComboBox)
+                {
+                    // Clip off the native 1px flat square border of WinForms ComboBox so only our crisp rounded shell shows
+                    comboClip = new Panel { BackColor = Paper, Margin = Padding.Empty, Padding = Padding.Empty };
+                    comboClip.Controls.Add(inner);
+                    Controls.Add(comboClip);
+                }
+                else
+                {
+                    Controls.Add(inner);
+                }
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hovered = true;
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hovered = false;
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnClick(EventArgs e)
+            {
+                base.OnClick(e);
+                if (inner != null && inner.CanFocus) inner.Focus();
+            }
+
+            protected override void OnLayout(LayoutEventArgs levent)
+            {
+                base.OnLayout(levent);
+                if (inner == null) return;
+                float scale = DeviceDpi / 96f;
+                int padX = Math.Max(8, (int)Math.Round(10 * scale));
+                int w = Math.Max(16, ClientSize.Width - padX * 2);
+                var tb = inner as TextBoxBase;
+                int h = tb != null ? tb.PreferredHeight : inner.Height;
+                if (h <= 0) h = inner.PreferredSize.Height;
+                if (h <= 0) h = Math.Max(18, (int)Math.Round(20 * scale));
+                if (comboClip != null)
+                {
+                    int clipPadX = Math.Max(6, (int)Math.Round(6 * scale));
+                    int clipW = Math.Max(16, ClientSize.Width - clipPadX * 2);
+                    int clipH = Math.Max(18, Math.Min(ClientSize.Height - 4, h - 2));
+                    int clipY = Math.Max(2, (ClientSize.Height - clipH) / 2);
+                    comboClip.Bounds = new Rectangle(clipPadX, clipY, clipW, clipH);
+                    inner.Bounds = new Rectangle(-1, -1, clipW + 2, clipH + 2);
+                }
+                else
+                {
+                    int y = Math.Max(2, (ClientSize.Height - h) / 2);
+                    inner.Bounds = new Rectangle(padX, y, w, h);
+                }
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
             {
-                Color parentBg = Parent == null ? Paper : Parent.BackColor;
-                if (parentBg.A == 0) parentBg = Paper;
-                using (var bg = new SolidBrush(parentBg)) e.Graphics.FillRectangle(bg, e.ClipRectangle);
+                Color parentBg = ResolveSurface(this, Paper);
+                FillBg(e.Graphics, e.ClipRectangle, parentBg);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = e.Graphics.DpiX / 96f;
-                Color border = focused ? Accent : StrokeStrong;
-                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 9 * scale, SurfaceSubtle, border, focused ? 1.5f : 1f);
+                Color border = focused ? Accent : hovered ? Color.FromArgb(182, 190, 204) : StrokeStrong;
+                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, Paper, border, focused ? 1.4f : 1f);
             }
         }
 
@@ -239,33 +413,101 @@ namespace DualRemote
             };
         }
 
+        internal static void Cue(TextBox field, string text)
+        {
+            field.HandleCreated += delegate
+            {
+                NativeSendMessage(field.Handle, 0x1501, IntPtr.Zero, text);
+            };
+        }
+
         [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
         private static extern IntPtr NativeSendMessage(IntPtr handle, uint message, IntPtr flag, string text);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
 
-        /// <summary>动态生成矢量风应用图标（供任务栏与系统托盘使用，无需外部 .ico 文件）。</summary>
+        private static Bitmap cachedBrandLogo;
+        private static bool brandLogoLoaded;
+
+        internal static Bitmap GetBrandLogoBitmap()
+        {
+            if (brandLogoLoaded) return cachedBrandLogo;
+            brandLogoLoaded = true;
+            try
+            {
+                using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("DualRemote.bobo-logo.png"))
+                {
+                    if (stream != null)
+                    {
+                        using (var img = Image.FromStream(stream))
+                            cachedBrandLogo = new Bitmap(img);
+                        return cachedBrandLogo;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                Icon associated = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (associated != null)
+                {
+                    using (associated)
+                        cachedBrandLogo = associated.ToBitmap();
+                }
+            }
+            catch { }
+            return cachedBrandLogo;
+        }
+
+        /// <summary>绘制 BoBo远程 专属圆形徽章 Logo（优先加载内嵌高分 BoBo-Remote 资源，高 DPI 抗锯齿缩放）。</summary>
+        internal static void DrawBrandMark(Graphics g, RectangleF area)
+        {
+            if (area.Width < 2f || area.Height < 2f) return;
+            var state = g.Save();
+            g.SmoothingMode = SmoothingMode.HighQuality;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.CompositingQuality = CompositingQuality.HighQuality;
+
+            Bitmap logo = GetBrandLogoBitmap();
+            if (logo != null)
+            {
+                g.DrawImage(logo, area);
+                g.Restore(state);
+                return;
+            }
+
+            // Fallback crisp circular monogram if compiled without embedded logo resource
+            Surface(g, area, area.Width * 0.5f, Paper, StrokeStrong, 1f);
+            using (var pen = new Pen(Ink, Math.Max(1.4f, area.Width * 0.08f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                float r = area.Width * 0.24f;
+                g.DrawEllipse(pen, area.X + area.Width * 0.5f - r, area.Y + area.Height * 0.5f - r, r * 2f, r * 2f);
+            }
+            g.Restore(state);
+        }
+
         internal static Icon CreateAppIcon()
         {
+            try
+            {
+                Icon associated = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (associated != null) return associated;
+            }
+            catch { }
+
             using (var bmp = new Bitmap(32, 32))
             using (var g = Graphics.FromImage(bmp))
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                var rect = new RectangleF(1, 1, 30, 30);
-                using (var path = Round(rect, 8))
-                using (var brush = new LinearGradientBrush(rect, Color.FromArgb(37, 65, 200), Color.FromArgb(74, 114, 255), 45f))
-                {
-                    g.FillPath(brush, path);
-                }
-                DrawGlyph(g, Glyph.Devices, new RectangleF(6, 6, 20, 20), Paper);
+                g.Clear(Color.Transparent);
+                DrawBrandMark(g, new RectangleF(1, 1, 30, 30));
                 IntPtr hIcon = bmp.GetHicon();
                 try
                 {
                     using (Icon temp = Icon.FromHandle(hIcon))
-                    {
                         return (Icon)temp.Clone();
-                    }
                 }
                 finally
                 {
@@ -278,7 +520,7 @@ namespace DualRemote
         {
             var path = new GraphicsPath();
             radius = Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2f);
-            if (radius < 1)
+            if (radius < 0.8f)
             {
                 path.AddRectangle(bounds);
                 return path;
@@ -288,6 +530,52 @@ namespace DualRemote
             path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
             path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
             path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        /// <summary>无抗锯齿实心填充背景（杜绝 GDI+ AntiAlias FillRectangle 在双缓冲上产生顶部/左侧黑边）。</summary>
+        internal static void FillBg(Graphics g, Rectangle rect, Color color)
+        {
+            g.SmoothingMode = SmoothingMode.None;
+            g.PixelOffsetMode = PixelOffsetMode.Default;
+            using (var brush = new SolidBrush(color)) g.FillRectangle(brush, rect);
+        }
+
+        internal static GraphicsPath RoundTop(RectangleF bounds, float radius)
+        {
+            var path = new GraphicsPath();
+            radius = Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2f);
+            if (radius < 0.8f)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+            float d = 2 * radius;
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+            path.AddLine(bounds.Right, bounds.Y + radius, bounds.Right, bounds.Bottom);
+            path.AddLine(bounds.Right, bounds.Bottom, bounds.X, bounds.Bottom);
+            path.AddLine(bounds.X, bounds.Bottom, bounds.X, bounds.Y + radius);
+            path.CloseFigure();
+            return path;
+        }
+
+        internal static GraphicsPath RoundTopLeft(RectangleF bounds, float radius)
+        {
+            var path = new GraphicsPath();
+            radius = Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2f);
+            if (radius < 0.8f)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+            float d = 2 * radius;
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddLine(bounds.X + radius, bounds.Y, bounds.Right, bounds.Y);
+            path.AddLine(bounds.Right, bounds.Y, bounds.Right, bounds.Bottom);
+            path.AddLine(bounds.Right, bounds.Bottom, bounds.X, bounds.Bottom);
+            path.AddLine(bounds.X, bounds.Bottom, bounds.X, bounds.Y + radius);
             path.CloseFigure();
             return path;
         }
@@ -304,13 +592,67 @@ namespace DualRemote
             }
         }
 
+        private static void FocusOutline(Graphics graphics, RectangleF bounds, float radius, Color color, float width)
+        {
+            using (var path = Round(bounds, radius))
+            using (var pen = new Pen(color, width))
+                graphics.DrawPath(pen, path);
+        }
+
+        private static Color ResolveSurface(Control control, Color fallback)
+        {
+            for (Control current = control.Parent; current != null; current = current.Parent)
+            {
+                if (current is Card) return Paper;
+                if (current is WorkspaceFrame) return Workspace;
+                if (current.BackColor.A == 255) return current.BackColor;
+            }
+            return fallback;
+        }
+
+        /// <summary>UU 风格纯白圆角工作区容器（左上角柔和切角接入 #F3F5F8 窗口骨架）。</summary>
+        internal sealed class WorkspaceFrame : Panel
+        {
+            internal WorkspaceFrame()
+            {
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                Padding = new Padding(1, 1, 0, 0);
+                BackColor = Workspace;
+                DoubleBuffered = true;
+                ResizeRedraw = true;
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                FillBg(g, e.ClipRectangle, ChromeBg);
+                if (Width < 4 || Height < 4) return;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                float scale = g.DpiX / 96f;
+                float radius = 10f * scale;
+                var rect = new RectangleF(0.5f, 0.5f, Width, Height);
+                using (var path = RoundTopLeft(rect, radius))
+                {
+                    using (var fill = new SolidBrush(Workspace)) g.FillPath(fill, path);
+                    using (var pen = new Pen(Stroke, 1f)) g.DrawPath(pen, path);
+                }
+            }
+        }
+
         private sealed class ActionButton : Button
         {
             private readonly ButtonStyle style;
             private bool hovered;
             private bool pressed;
+            private bool keyboardFocus;
             internal Glyph Icon;
             internal bool Active;
+            internal Color CustomGlyphColor = Color.Empty;
+            internal int NavIndent = 0;
+            internal bool ShowIndicatorDot;
+            internal Color IndicatorDotColor = Success;
 
             internal ActionButton(ButtonStyle style, Glyph icon)
             {
@@ -327,282 +669,675 @@ namespace DualRemote
 
             protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
             protected override void OnMouseLeave(EventArgs e) { hovered = pressed = false; Invalidate(); base.OnMouseLeave(e); }
-            protected override void OnMouseDown(MouseEventArgs e) { pressed = e.Button == MouseButtons.Left; Invalidate(); base.OnMouseDown(e); }
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                keyboardFocus = false;
+                pressed = e.Button == MouseButtons.Left;
+                Invalidate();
+                base.OnMouseDown(e);
+            }
             protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
-            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
-            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+            protected override void OnEnter(EventArgs e)
+            {
+                keyboardFocus = Control.MouseButtons == MouseButtons.None;
+                base.OnEnter(e);
+                Invalidate();
+            }
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                keyboardFocus = true;
+                base.OnKeyDown(e);
+                Invalidate();
+            }
+            protected override void OnLostFocus(EventArgs e)
+            {
+                keyboardFocus = false;
+                base.OnLostFocus(e);
+                Invalidate();
+            }
 
             protected override void OnPaint(PaintEventArgs e)
             {
                 if (Width < 3 || Height < 3) return;
                 Graphics g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                var background = Color.Transparent;
-                var stroke = Color.Transparent;
-                var text = Ink;
-                bool glow = Enabled && (hovered || pressed);
-                bool caption = style == ButtonStyle.Caption || style == ButtonStyle.Close;
+                GraphicsState state = g.Save();
+                try
+                {
+                    Color defaultParent = (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection
+                        || style == ButtonStyle.Caption || style == ButtonStyle.Close || style == ButtonStyle.IconGhost)
+                        ? ChromeBg : Paper;
+                    Color surface = ResolveSurface(this, defaultParent);
+                    g.Clear(surface);
 
-                if (style == ButtonStyle.Primary)
-                {
-                    background = !Enabled ? Color.FromArgb(209, 217, 236) : pressed ? Color.FromArgb(31, 58, 204) : glow ? AccentHover : Accent;
-                    text = Enabled ? Paper : Muted;
-                }
-                else if (style == ButtonStyle.Secondary)
-                {
-                    background = pressed ? AccentLight : glow ? Color.FromArgb(246, 249, 255) : Paper;
-                    stroke = glow ? AccentBorder : StrokeStrong;
-                    text = Ink;
-                }
-                else if (style == ButtonStyle.AccentSoft)
-                {
-                    background = pressed ? Color.FromArgb(215, 224, 255) : glow ? Color.FromArgb(224, 232, 255) : AccentLight;
-                    stroke = AccentBorder;
-                    text = Accent;
-                }
-                else if (style == ButtonStyle.OnHero)
-                {
-                    background = pressed ? Color.FromArgb(216, 228, 255) : glow ? Color.FromArgb(238, 244, 255) : Paper;
-                    text = Color.FromArgb(24, 48, 128);
-                }
-                else if (style == ButtonStyle.OnHeroQuiet)
-                {
-                    background = Active
-                        ? Color.FromArgb(16, 185, 129)
-                        : pressed ? Color.FromArgb(62, 92, 182) : glow ? Color.FromArgb(72, 106, 198) : Color.FromArgb(46, 70, 146);
-                    stroke = Active ? Color.FromArgb(110, 231, 183) : Color.FromArgb(95, 125, 212);
-                    text = Paper;
-                }
-                else if (style == ButtonStyle.Chip)
-                {
-                    background = Active
-                        ? Accent
-                        : glow ? Color.FromArgb(228, 235, 252) : SurfaceSubtle;
-                    stroke = Active ? Accent : StrokeStrong;
-                    text = Active ? Paper : Ink;
-                }
-                else if (style == ButtonStyle.Segmented)
-                {
-                    background = Active ? Paper : glow ? Color.FromArgb(232, 238, 248) : Color.Transparent;
-                    stroke = Active ? Stroke : Color.Transparent;
-                    text = Active ? Accent : Muted;
-                }
-                else if (style == ButtonStyle.Close && glow)
-                {
-                    background = Color.FromArgb(220, 38, 38);
-                    text = Paper;
-                }
-                else if (style == ButtonStyle.Navigation)
-                {
-                    background = Active ? AccentLight : glow ? Color.FromArgb(238, 242, 249) : Color.Transparent;
-                    text = Active ? Accent : glow ? Ink : Color.FromArgb(51, 65, 85);
-                }
-                else if (Active || glow)
-                {
-                    background = Active ? AccentLight : Color.FromArgb(238, 243, 252);
-                    text = Active ? Accent : Ink;
-                }
-                else if (style == ButtonStyle.Quiet)
-                {
-                    text = Accent;
-                }
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-                if (!Enabled) text = Muted;
-                if (SystemInformation.HighContrast)
-                {
-                    background = Active ? SystemColors.Highlight : SystemColors.ButtonFace;
-                    text = !Enabled ? SystemColors.GrayText : Active ? SystemColors.HighlightText : SystemColors.ControlText;
-                    stroke = SystemColors.WindowFrame;
-                }
+                    Color background = Color.Transparent;
+                    Color stroke = Color.Transparent;
+                    Color text = Ink;
+                    Color glyphColor = Color.Empty;
+                    bool glow = Enabled && (hovered || pressed);
+                    float scale = g.DpiX / 96f;
 
-                float scale = g.DpiX / 96f;
-                float radius = caption ? 0f : (style == ButtonStyle.Chip ? Height * 0.48f : (style == ButtonStyle.Segmented ? 8f * scale : 9f * scale));
-                Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), radius, background, stroke);
-                if (style == ButtonStyle.Navigation && Active)
-                    Surface(g, new RectangleF(2f * scale, Height * 0.22f, 3.5f * scale, Height * 0.56f), 2f * scale, Accent, Color.Transparent);
+                    if (style == ButtonStyle.Primary)
+                    {
+                        background = !Enabled ? DisabledBg : pressed ? AccentPressed : glow ? AccentHover : Accent;
+                        text = !Enabled ? DisabledText : Paper;
+                    }
+                    else if (style == ButtonStyle.Secondary)
+                    {
+                        background = !Enabled ? SurfaceSubtle : pressed ? Color.FromArgb(236, 240, 246) : glow ? SurfaceSubtle : Paper;
+                        stroke = glow ? Color.FromArgb(186, 194, 208) : StrokeStrong;
+                        text = Enabled ? Ink : Muted;
+                    }
+                    else if (style == ButtonStyle.AccentSoft)
+                    {
+                        background = pressed ? Color.FromArgb(215, 229, 255) : glow ? Color.FromArgb(225, 236, 255) : AccentLight;
+                        stroke = AccentBorder;
+                        text = Accent;
+                    }
+                    else if (style == ButtonStyle.Chip)
+                    {
+                        background = Active ? AccentLight : glow ? SurfaceSubtle : Paper;
+                        stroke = Active ? Accent : StrokeStrong;
+                        text = Active ? Accent : Ink;
+                    }
+                    else if (style == ButtonStyle.UnderlineTab)
+                    {
+                        background = surface;
+                        text = Active ? Ink : glow ? BodyInk : Muted;
+                    }
+                    else if (style == ButtonStyle.Navigation)
+                    {
+                        background = Active ? NavActive : glow ? NavHover : surface;
+                        text = Active ? Ink : glow ? Ink : BodyInk;
+                    }
+                    else if (style == ButtonStyle.NavSection)
+                    {
+                        background = glow ? NavHover : surface;
+                        text = Ink;
+                    }
+                    else if (style == ButtonStyle.ToolbarAction)
+                    {
+                        background = glow ? SurfaceSubtle : Paper;
+                        text = Enabled ? BodyInk : Muted;
+                    }
+                    else if (style == ButtonStyle.Link)
+                    {
+                        background = surface;
+                        text = Enabled ? (glow ? AccentHover : Accent) : Muted;
+                    }
+                    else if (style == ButtonStyle.Quiet)
+                    {
+                        background = glow ? SurfaceSubtle : surface;
+                        text = Enabled ? (Active ? Accent : BodyInk) : Muted;
+                    }
+                    else if (style == ButtonStyle.IconGhost)
+                    {
+                        background = Active ? NavActive : glow ? NavHover : surface;
+                        text = Ink;
+                    }
+                    else if (style == ButtonStyle.Close)
+                    {
+                        background = glow ? Color.FromArgb(232, 17, 35) : surface;
+                        text = glow ? Paper : BodyInk;
+                    }
+                    else if (style == ButtonStyle.Caption)
+                    {
+                        background = glow ? NavHover : surface;
+                        text = BodyInk;
+                    }
 
-                int iconSize = Math.Max(12, (int)((style == ButtonStyle.Chip ? 13 : 15) * scale));
-                int padx = (int)((style == ButtonStyle.Chip ? 8 : 12) * scale);
-                int width = Width - 2 * padx;
-                var flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis
-                    | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
+                    if (!Enabled && style != ButtonStyle.Primary) text = Muted;
+                    if (SystemInformation.HighContrast)
+                    {
+                        background = Active ? SystemColors.Highlight : SystemColors.ButtonFace;
+                        text = !Enabled ? SystemColors.GrayText : Active ? SystemColors.HighlightText : SystemColors.ControlText;
+                        stroke = SystemColors.WindowFrame;
+                    }
+                    if (background.A == 0) background = surface;
 
-                if (caption || Text.Length == 0)
-                {
-                    DrawGlyph(g, Icon, new RectangleF((Width - iconSize) / 2f, (Height - iconSize) / 2f, iconSize, iconSize), text);
-                }
-                else if (style == ButtonStyle.Navigation)
-                {
-                    DrawGlyph(g, Icon, new RectangleF(padx + 2 * scale, (Height - iconSize) / 2f, iconSize, iconSize), text);
-                    int x = padx + iconSize + (int)(11 * scale);
-                    TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, Math.Max(1, Width - x - padx), Height), text, flags);
-                }
-                else
-                {
-                    int x = padx;
+                    float radius = (style == ButtonStyle.Caption || style == ButtonStyle.Close || style == ButtonStyle.UnderlineTab
+                        || style == ButtonStyle.Link || style == ButtonStyle.ToolbarAction)
+                        ? 0f : (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection) ? 8f * scale : 6.5f * scale;
+
+                    if (style != ButtonStyle.UnderlineTab && style != ButtonStyle.Link)
+                    {
+                        Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), radius, background, stroke);
+                    }
+
+                    // UU signature left blue vertical pill on active navigation item
+                    if (style == ButtonStyle.Navigation && Active)
+                    {
+                        float barW = Math.Max(3.2f, 3.2f * scale);
+                        float barH = Math.Min(Height - 14f * scale, 18f * scale);
+                        Surface(g, new RectangleF(1.5f * scale, (Height - barH) / 2f, barW, barH), barW * 0.5f, Accent, Color.Transparent);
+                    }
+
+                    // UU signature centered short blue underline on active settings tab
+                    if (style == ButtonStyle.UnderlineTab && Active)
+                    {
+                        float lineW = Math.Min(Width - 8f * scale, 22f * scale);
+                        float lineH = Math.Max(2.5f, 2.5f * scale);
+                        Surface(g, new RectangleF((Width - lineW) / 2f, Height - lineH - 1f, lineW, lineH), lineH * 0.5f, Accent, Color.Transparent);
+                    }
+
+                    if (keyboardFocus && Focused && style != ButtonStyle.Caption && style != ButtonStyle.Close)
+                        FocusOutline(g, new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f), Math.Max(2f, radius - 1f), AccentBorder, 1.5f);
+
+                    glyphColor = CustomGlyphColor.IsEmpty ? text : CustomGlyphColor;
+                    if (!Enabled) glyphColor = Muted;
+                    if (style == ButtonStyle.Primary) glyphColor = text;
+
+                    Font drawFont = Font;
+                    if (style == ButtonStyle.UnderlineTab && Active)
+                        drawFont = LabelBoldFont;
+
+                    if (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection)
+                    {
+                        float iconSize = (float)Math.Round((style == ButtonStyle.NavSection ? 15f : 16f) * scale);
+                        float padLeft = (style == ButtonStyle.NavSection ? 10f : (14f + NavIndent)) * scale;
+                        float x = (float)Math.Round(padLeft);
+                        if (Icon != Glyph.None)
+                        {
+                            DrawGlyph(g, Icon, new RectangleF(x, (float)Math.Round((Height - iconSize) / 2f), iconSize, iconSize), glyphColor);
+                            x += iconSize + (float)Math.Round(10f * scale);
+                        }
+                        int rightReserve = style == ButtonStyle.NavSection ? (int)Math.Round(26 * scale) : (int)Math.Round(10 * scale);
+                        var labelRect = new Rectangle((int)Math.Round(x), 0, Math.Max(8, Width - (int)Math.Round(x) - rightReserve), Height);
+                        TextRenderer.DrawText(g, Text, drawFont, labelRect, text,
+                            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
+                            | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                        if (style == ButtonStyle.NavSection)
+                        {
+                            float chevSize = (float)Math.Round(11f * scale);
+                            DrawGlyph(g, Active ? Glyph.ChevronUp : Glyph.ChevronDown,
+                                new RectangleF((float)Math.Round(Width - 20f * scale), (float)Math.Round((Height - chevSize) / 2f), chevSize, chevSize), Muted);
+                        }
+                        return;
+                    }
+
+                    if (string.IsNullOrEmpty(Text))
+                    {
+                        float s = (float)Math.Round(((style == ButtonStyle.Caption || style == ButtonStyle.Close) ? 11f : 16f) * scale);
+                        DrawGlyph(g, Icon, new RectangleF((float)Math.Round((Width - s) / 2f), (float)Math.Round((Height - s) / 2f), s, s), glyphColor);
+                        if (ShowIndicatorDot)
+                        {
+                            float dot = 6.5f * scale;
+                            using (var db = new SolidBrush(IndicatorDotColor))
+                                g.FillEllipse(db, Width / 2f + 4f * scale, Height / 2f - 9f * scale, dot, dot);
+                        }
+                        return;
+                    }
+
+                    int textTopOffset = style == ButtonStyle.UnderlineTab ? -(int)Math.Round(3 * scale) : 0;
+
+                    // Text-only centered buttons: use native HorizontalCenter + VerticalCenter + SingleLine + NoPadding
+                    if (Icon == Glyph.None && style != ButtonStyle.Link && style != ButtonStyle.Quiet)
+                    {
+                        int padX = (int)Math.Round(6 * scale);
+                        var centerRect = new Rectangle(padX, textTopOffset, Math.Max(8, Width - padX * 2), Height - textTopOffset);
+                        TextRenderer.DrawText(g, Text, drawFont, centerRect, text,
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                            | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                        return;
+                    }
+
+                    TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+                    Size textSize = TextRenderer.MeasureText(g, Text, drawFont, new Size(int.MaxValue, Height), measureFlags);
+                    float iconDim = Icon == Glyph.None ? 0f : (float)Math.Round(14f * scale);
+                    float gap = Icon == Glyph.None ? 0f : (float)Math.Round(6f * scale);
+                    float contentW = iconDim + gap + textSize.Width;
+                    float padEdge = (float)Math.Round(6f * scale);
+                    float startX = Math.Max(padEdge, (float)Math.Round((Width - contentW) / 2f));
+                    if (style == ButtonStyle.Link) startX = 0f;
+                    else if (style == ButtonStyle.Quiet) startX = (float)Math.Round(4f * scale);
+
                     if (Icon != Glyph.None)
                     {
-                        int t = TextRenderer.MeasureText(g, Text, Font, new Size(Width, Height), flags).Width;
-                        int gap = (int)(6 * scale);
-                        x = Math.Max(5, (Width - t - iconSize - gap) / 2);
-                        DrawGlyph(g, Icon, new RectangleF(x, (Height - iconSize) / 2f, iconSize, iconSize), text);
-                        x += iconSize + gap;
-                        width = Math.Max(1, Width - x - 5);
+                        DrawGlyph(g, Icon, new RectangleF((float)Math.Round(startX), (float)Math.Round((Height - iconDim) / 2f), iconDim, iconDim), glyphColor);
+                        startX += iconDim + gap;
                     }
-                    else flags |= TextFormatFlags.HorizontalCenter;
-                    TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, Math.Max(1, width), Height), text, flags);
+                    int rightPad = (style == ButtonStyle.Link) ? 0 : (int)Math.Round(4 * scale);
+                    var rect = new Rectangle((int)Math.Round(startX), textTopOffset, Math.Max(8, Width - (int)Math.Round(startX) - rightPad), Height - textTopOffset);
+                    TextRenderer.DrawText(g, Text, drawFont, rect, text,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
+                        | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                 }
-                if (Focused && ShowFocusCues)
-                    ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -4, -4));
+                finally
+                {
+                    g.Restore(state);
+                }
             }
         }
 
+        /// <summary>UU 风格纯白浮层卡片（轻柔 8px 圆角 + 极细瓷感描边 + 微弱冷色底部浮影）。</summary>
         internal sealed class Card : Panel
         {
+            internal bool DashedBorder;
+
             internal Card()
             {
+                Padding = new Padding(22, 18, 22, 18);
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
                 BackColor = Paper;
-                Padding = new Padding(20, 16, 20, 16);
-                Dock = DockStyle.Fill;
-                Margin = Padding.Empty;
                 ResizeRedraw = true;
                 DoubleBuffered = true;
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
             {
-                Color bg = Parent == null ? Workspace : Parent.BackColor;
-                if (bg.A == 0) bg = Workspace;
-                using (var background = new SolidBrush(bg)) e.Graphics.FillRectangle(background, e.ClipRectangle);
+                Color bg = ResolveSurface(this, Workspace);
+                FillBg(e.Graphics, e.ClipRectangle, bg);
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = e.Graphics.DpiX / 96f;
-                float r = 14 * scale;
-                // Soft elevation hairline underneath card
-                Surface(e.Graphics, new RectangleF(1f, 2f, Width - 2f, Height - 2.5f), r, CardShadow, Color.Transparent);
-                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 2.5f), r, Paper, Stroke);
-            }
-        }
-
-        internal sealed class SegmentedTrack : Panel
-        {
-            internal SegmentedTrack()
-            {
-                BackColor = SurfaceSubtle;
-                Padding = new Padding(4);
-                Dock = DockStyle.Fill;
-                Margin = Padding.Empty;
-                ResizeRedraw = true;
-                DoubleBuffered = true;
-            }
-
-            protected override void OnPaintBackground(PaintEventArgs e)
-            {
-                Color bg = Parent == null ? Workspace : Parent.BackColor;
-                if (bg.A == 0) bg = Workspace;
-                using (var b = new SolidBrush(bg)) e.Graphics.FillRectangle(b, e.ClipRectangle);
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 11 * e.Graphics.DpiX / 96f, SurfaceSubtle, Stroke);
-            }
-        }
-
-        internal sealed class Hero : Panel
-        {
-            internal Hero()
-            {
-                Padding = new Padding(24, 18, 24, 18);
-                Dock = DockStyle.Fill;
-                Margin = Padding.Empty;
-                BackColor = Workspace;
-                ResizeRedraw = true;
-                DoubleBuffered = true;
-            }
-
-            protected override void OnPaintBackground(PaintEventArgs e)
-            {
-                Color bg = Parent == null ? Workspace : Parent.BackColor;
-                if (bg.A == 0) bg = Workspace;
-                using (var b = new SolidBrush(bg)) e.Graphics.FillRectangle(b, e.ClipRectangle);
-                if (Width < 4 || Height < 4) return;
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                float scale = g.DpiX / 96f;
-                var box = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 2.5f);
-                Surface(g, new RectangleF(2f, 3f, Width - 4f, Height - 3f), 16 * scale, Color.FromArgb(40, 30, 58, 138), Color.Transparent);
-                using (var path = Round(box, 16 * scale))
-                using (var fade = new LinearGradientBrush(box, Color.FromArgb(17, 27, 62), Color.FromArgb(49, 82, 206), 18f))
+                float radius = 8f * scale;
+                if (DashedBorder)
                 {
-                    g.FillPath(fade, path);
-                    var save = g.Save();
-                    g.SetClip(path);
-                    float cx = Width * 0.87f, cy = Height * 0.45f;
-                    float glowR = Math.Max(70 * scale, Height * 0.72f);
-                    using (var gp = new GraphicsPath())
+                    var dashBox = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+                    using (var path = Round(dashBox, radius))
                     {
-                        gp.AddEllipse(cx - glowR, cy - glowR, glowR * 2, glowR * 2);
-                        using (var pgb = new PathGradientBrush(gp))
-                        {
-                            pgb.CenterColor = Color.FromArgb(62, 129, 168, 255);
-                            pgb.SurroundColors = new[] { Color.FromArgb(0, 49, 82, 206) };
-                            g.FillPath(pgb, gp);
-                        }
+                        using (var fill = new SolidBrush(Paper)) e.Graphics.FillPath(fill, path);
+                        using (var pen = new Pen(StrokeStrong, 1f) { DashStyle = DashStyle.Dash })
+                            e.Graphics.DrawPath(pen, path);
                     }
-                    using (var pen = new Pen(Color.FromArgb(38, 219, 234, 254), 1f))
-                    {
-                        for (int i = 1; i <= 3; i++)
-                        {
-                            float r = 28 * scale + i * 24 * scale;
-                            g.DrawEllipse(pen, cx - r, cy - r, r * 2, r * 2);
-                        }
-                    }
-                    DrawGlyph(g, Glyph.Desktop, new RectangleF(cx - 34 * scale, cy - 26 * scale, 48 * scale, 48 * scale), Color.FromArgb(150, 219, 234, 254));
-                    DrawGlyph(g, Glyph.Bolt, new RectangleF(cx + 12 * scale, cy - 8 * scale, 26 * scale, 26 * scale), Color.FromArgb(200, 147, 197, 253));
-                    g.Restore(save);
+                    return;
                 }
+                // Whisper-soft cool ambient elevation underneath the pure-white card on #F7FBFE workspace
+                var shadowBox = new RectangleF(1f, 1.5f, Width - 2f, Height - 2f);
+                Surface(e.Graphics, shadowBox, radius, Color.FromArgb(14, 24, 56, 98), Color.Transparent);
+                var box = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 2f);
+                Surface(e.Graphics, box, radius, Paper, Stroke, 1f);
+            }
+        }
+
+        /// <summary>
+        /// UU 同款极简细条滚动视口 + 防拉伸变形响应宽度控制：
+        /// - 极细 3px 圆头悬浮滑块（Hover 舒展至 4.5px），无轨道、无箭头、不占布局宽度；
+        /// - 宽屏/全屏时限制最大内容宽度并水平居中，杜绝全屏缩在左上角或卡片变形。
+        /// </summary>
+        internal sealed class SlimScrollViewport : Panel
+        {
+            private const int ScrollbarReserve = 14;
+            private Control content;
+            private int offset;
+            private bool dragging;
+            private bool thumbHot;
+            private int dragStartY;
+            private int dragStartOffset;
+
+            internal int MaxContentWidth = 1160;
+            internal event Action<int> ContentWidthChanged;
+
+            internal SlimScrollViewport()
+            {
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                Padding = Padding.Empty;
+                BackColor = Workspace;
+                DoubleBuffered = true;
+                ResizeRedraw = true;
+            }
+
+            internal void ScrollByWheel(int delta)
+            {
+                ScrollBy(-delta / 3);
+            }
+
+            internal void ResetScroll()
+            {
+                SetOffset(0);
+            }
+
+            internal void RefreshLayout()
+            {
+                LayoutContent();
+            }
+
+            protected override void OnControlAdded(ControlEventArgs e)
+            {
+                base.OnControlAdded(e);
+                if (content == null && e.Control != null)
+                {
+                    content = e.Control;
+                    content.Dock = DockStyle.None;
+                    content.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+                    content.SizeChanged += delegate { ClampOffsetAndRedraw(); };
+                    HookMouseWheel(content);
+                    LayoutContent();
+                }
+            }
+
+            protected override void OnSizeChanged(EventArgs e)
+            {
+                base.OnSizeChanged(e);
+                LayoutContent();
+            }
+
+            protected override void OnVisibleChanged(EventArgs e)
+            {
+                base.OnVisibleChanged(e);
+                if (Visible) LayoutContent();
+            }
+
+            protected override void OnMouseWheel(MouseEventArgs e)
+            {
+                base.OnMouseWheel(e);
+                ScrollBy(-e.Delta / 3);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+                if (e.Button != MouseButtons.Left || !HasOverflow()) return;
+                RectangleF track;
+                RectangleF thumb;
+                GetScrollbarGeometry(out track, out thumb);
+                RectangleF hitThumb = RectangleF.Inflate(thumb, 6f, 4f);
+                RectangleF hitTrack = RectangleF.Inflate(track, 6f, 0f);
+                if (hitThumb.Contains(e.Location))
+                {
+                    dragging = true;
+                    dragStartY = e.Y;
+                    dragStartOffset = offset;
+                    Capture = true;
+                    Invalidate();
+                }
+                else if (hitTrack.Contains(e.Location))
+                {
+                    float travel = Math.Max(1f, track.Height - thumb.Height);
+                    float ratio = (e.Y - track.Top - thumb.Height * 0.5f) / travel;
+                    SetOffset((int)Math.Round(ratio * MaxOffset()));
+                }
+            }
+
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                base.OnMouseMove(e);
+                if (dragging)
+                {
+                    RectangleF track;
+                    RectangleF thumb;
+                    GetScrollbarGeometry(out track, out thumb);
+                    float travel = Math.Max(1f, track.Height - thumb.Height);
+                    float ratio = (e.Y - dragStartY) / travel;
+                    SetOffset(dragStartOffset + (int)Math.Round(ratio * MaxOffset()));
+                    return;
+                }
+
+                RectangleF unusedTrack;
+                RectangleF currentThumb;
+                GetScrollbarGeometry(out unusedTrack, out currentThumb);
+                bool hot = HasOverflow() && RectangleF.Inflate(currentThumb, 6f, 4f).Contains(e.Location);
+                if (hot != thumbHot)
+                {
+                    thumbHot = hot;
+                    Cursor = hot ? Cursors.Hand : Cursors.Default;
+                    Invalidate();
+                }
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                base.OnMouseUp(e);
+                if (e.Button != MouseButtons.Left) return;
+                dragging = false;
+                Capture = false;
+                Invalidate();
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                base.OnMouseLeave(e);
+                if (dragging) return;
+                if (thumbHot)
+                {
+                    thumbHot = false;
+                    Cursor = Cursors.Default;
+                    Invalidate();
+                }
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                Color background = BackColor.A == 0 ? Workspace : BackColor;
+                FillBg(e.Graphics, e.ClipRectangle, background);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                if (!HasOverflow()) return;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                RectangleF track;
+                RectangleF thumb;
+                GetScrollbarGeometry(out track, out thumb);
+                Color thumbColor = dragging
+                    ? Color.FromArgb(90, 98, 110)
+                    : thumbHot ? Color.FromArgb(116, 124, 138) : Color.FromArgb(164, 171, 182);
+                Surface(e.Graphics, thumb, thumb.Width * 0.5f, thumbColor, Color.Transparent);
+            }
+
+            private void HookMouseWheel(Control control)
+            {
+                control.MouseWheel += delegate(object sender, MouseEventArgs e)
+                {
+                    var combo = sender as ComboBox;
+                    if (combo != null && combo.DroppedDown) return;
+                    ScrollBy(-e.Delta / 3);
+                };
+                control.ControlAdded += delegate(object sender, ControlEventArgs e) { HookMouseWheel(e.Control); };
+                foreach (Control child in control.Controls)
+                    HookMouseWheel(child);
+            }
+
+            private void LayoutContent()
+            {
+                if (content == null) return;
+                float scale = DeviceDpi / 96f;
+                int reserve = Math.Max(8, (int)Math.Round(ScrollbarReserve * scale));
+                int avail = Math.Max(280, ClientSize.Width - reserve);
+                int targetWidth = MaxContentWidth > 0
+                    ? Math.Min(avail, (int)Math.Round(MaxContentWidth * scale))
+                    : avail;
+                int leftX = avail > targetWidth ? (avail - targetWidth) / 2 : 0;
+
+                bool widthChanged = content.Width != targetWidth;
+                if (widthChanged)
+                {
+                    content.Width = targetWidth;
+                    var handler = ContentWidthChanged;
+                    if (handler != null) handler(targetWidth);
+                }
+                int max = MaxOffset();
+                offset = Math.Max(0, Math.Min(max, offset));
+                content.Location = new Point(leftX, -offset);
+                Invalidate();
+            }
+
+            private void ClampOffsetAndRedraw()
+            {
+                if (content == null) return;
+                int max = MaxOffset();
+                int next = Math.Max(0, Math.Min(max, offset));
+                if (next != offset)
+                {
+                    offset = next;
+                    content.Location = new Point(content.Location.X, -offset);
+                }
+                Invalidate();
+            }
+
+            private bool HasOverflow()
+            {
+                return content != null && content.Height > ClientSize.Height + 1;
+            }
+
+            private int MaxOffset()
+            {
+                return content == null ? 0 : Math.Max(0, content.Height - ClientSize.Height);
+            }
+
+            private void SetOffset(int value)
+            {
+                int max = MaxOffset();
+                offset = Math.Max(0, Math.Min(max, value));
+                if (content != null)
+                    content.Location = new Point(content.Location.X, -offset);
+                Invalidate();
+            }
+
+            private void ScrollBy(int delta)
+            {
+                if (!HasOverflow()) return;
+                SetOffset(offset + delta);
+            }
+
+            private void GetScrollbarGeometry(out RectangleF track, out RectangleF thumb)
+            {
+                float scale = DeviceDpi / 96f;
+                float width = (dragging || thumbHot ? 4.5f : 3f) * scale;
+                float rightEdge = Width - 7.5f * scale;
+                float top = 8f * scale;
+                float bottom = Math.Max(top + 1f, Height - 8f * scale);
+                float trackHeight = Math.Max(1f, bottom - top);
+                float contentH = content == null ? 1f : Math.Max(1f, content.Height);
+                float thumbHeight = Math.Max(32f * scale, trackHeight * ClientSize.Height / contentH);
+                thumbHeight = Math.Min(trackHeight, thumbHeight);
+                float travel = Math.Max(0f, trackHeight - thumbHeight);
+                float thumbTop = top + travel * offset / Math.Max(1f, MaxOffset());
+                track = new RectangleF(rightEdge - width, top, width, trackHeight);
+                thumb = new RectangleF(rightEdge - width, thumbTop, width, thumbHeight);
             }
         }
 
         internal sealed class IconTile : Control
         {
             private readonly Glyph glyph;
-            private readonly bool solid;
-            private readonly Color customBg;
-            private readonly Color customFg;
+            private readonly bool soft;
+            private Color customBg;
+            private Color customFg;
+            private readonly bool hasCustom;
+            private readonly float customRadius;
 
-            internal IconTile(Glyph glyph, bool solid = false)
-                : this(glyph, solid, solid ? Accent : AccentLight, solid ? Paper : Accent) { }
-
-            internal IconTile(Glyph glyph, bool solid, Color bg, Color fg)
+            internal IconTile(Glyph glyph, bool soft = false)
             {
                 this.glyph = glyph;
-                this.solid = solid;
+                this.soft = soft;
+                this.customRadius = 7f;
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                TabStop = false;
+                DoubleBuffered = true;
+            }
+
+            internal IconTile(Glyph glyph, bool soft, Color bg, Color fg, float radius = 7f) : this(glyph, soft)
+            {
                 customBg = bg;
                 customFg = fg;
-                SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                    | ControlStyles.SupportsTransparentBackColor, true);
-                BackColor = Color.Transparent;
-                Margin = Padding.Empty;
-                Dock = DockStyle.Fill;
-                TabStop = false;
+                hasCustom = true;
+                customRadius = radius;
+            }
+
+            internal void SetColors(Color bg, Color fg)
+            {
+                customBg = bg;
+                customFg = fg;
+                Invalidate();
             }
 
             protected override void OnPaint(PaintEventArgs e)
             {
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                float d = Math.Min(Width - 3, Height - 3);
-                if (d < 4) return;
-                float x = (Width - d) / 2f, y = (Height - d) / 2f;
-                Surface(g, new RectangleF(x, y, d, d), d * 0.28f, customBg, Color.Transparent);
-                DrawGlyph(g, glyph, new RectangleF(x + d * 0.24f, y + d * 0.24f, d * 0.52f, d * 0.52f), customFg);
+                Graphics g = e.Graphics;
+                Color bg = ResolveSurface(this, Paper);
+                g.Clear(bg);
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                float scale = g.DpiX / 96f;
+                float side = Math.Min(Width - 2f, Height - 2f);
+                if (side < 8f) return;
+                var box = new RectangleF((float)Math.Round((Width - side) / 2f), (float)Math.Round((Height - side) / 2f), (float)Math.Round(side), (float)Math.Round(side));
+                Color fill = hasCustom ? customBg : (soft ? SurfaceSubtle : Accent);
+                Color fg = hasCustom ? customFg : (soft ? Accent : Paper);
+                if (fill.A > 0)
+                    Surface(g, box, customRadius * scale, fill, Color.Transparent);
+                float pad = fill.A > 0 ? side * 0.24f : side * 0.14f;
+                DrawGlyph(g, glyph, RectangleF.Inflate(box, -pad, -pad), fg);
             }
         }
 
+        /// <summary>UU 风格紧凑胶囊开关（左侧附带“开 / 关”状态字，右侧蓝色实心/白底灰边胶囊）。</summary>
+        internal sealed class Switch : CheckBox
+        {
+            private bool hovered;
+            internal bool ShowStateText = true;
+
+            internal Switch()
+            {
+                AutoSize = false;
+                Cursor = Cursors.Hand;
+                Margin = Padding.Empty;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
+                    | ControlStyles.SupportsTransparentBackColor, true);
+                BackColor = Color.Transparent;
+            }
+
+            protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                Color bg = ResolveSurface(this, Paper);
+                g.Clear(bg);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                float scale = g.DpiX / 96f;
+                float w = 40f * scale;
+                float h = 22f * scale;
+                float x = Width - w - 1f;
+                float y = (Height - h) / 2f;
+
+                if (ShowStateText && x > 22f * scale)
+                {
+                    string stateText = Checked ? "开" : "关";
+                    var textRect = new Rectangle(0, 0, (int)Math.Floor(x - 8f * scale), Height);
+                    TextRenderer.DrawText(g, stateText, BodyFont, textRect, Enabled ? BodyInk : Muted,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                }
+
+                Color trackFill = Checked
+                    ? (Enabled ? (hovered ? AccentHover : Accent) : AccentBorder)
+                    : (hovered ? SurfaceSubtle : Paper);
+                Color trackBorder = Checked
+                    ? Color.Transparent
+                    : (Enabled ? (hovered ? BodyInk : Muted) : StrokeStrong);
+
+                Surface(g, new RectangleF(x, y, w, h), h / 2f, trackFill, trackBorder, Checked ? 0f : 1.3f * scale);
+
+                float pad = 3.2f * scale;
+                float d = h - pad * 2f;
+                float thumbX = Checked ? x + w - d - pad : x + pad;
+                Color thumbColor = Checked ? Paper : (Enabled ? BodyInk : Muted);
+                using (var dot = new SolidBrush(thumbColor))
+                    g.FillEllipse(dot, thumbX, y + pad, d, d);
+            }
+        }
+
+        /// <summary>轻克制状态标签（匹配 UU远程 `本机` / `离线` / `在线` 微标签）。</summary>
         internal sealed class Badge : Label
         {
             private PillTone tone;
+            internal bool AlignRight;
 
-            internal Badge(string caption, bool healthy)
-                : this(caption, healthy ? PillTone.Success : PillTone.Neutral) { }
+            internal Badge(string caption, bool positive)
+                : this(caption, positive ? PillTone.Success : PillTone.Neutral) { }
 
             internal Badge(string caption, PillTone tone)
             {
@@ -610,15 +1345,15 @@ namespace DualRemote
                 Text = caption;
                 AccessibleName = caption;
                 Dock = DockStyle.Fill;
-                Font = SmallFont;
-                BackColor = Color.Transparent;
                 Margin = Padding.Empty;
-                SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
-                    | ControlStyles.SupportsTransparentBackColor, true);
+                Font = SmallFont;
+                DoubleBuffered = true;
+                ResizeRedraw = true;
             }
 
             internal void UpdateStatus(string caption, PillTone newTone)
             {
+                if (Text == caption && tone == newTone) return;
                 Text = caption;
                 AccessibleName = caption;
                 tone = newTone;
@@ -627,143 +1362,414 @@ namespace DualRemote
 
             protected override void OnPaint(PaintEventArgs e)
             {
-                var g = e.Graphics;
+                Graphics g = e.Graphics;
+                Color parentBg = ResolveSurface(this, Paper);
+                g.Clear(parentBg);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                Color fill = Color.FromArgb(230, 236, 242);
+                Color fg = Color.FromArgb(98, 110, 126);
+                if (tone == PillTone.Success) { fill = SuccessLight; fg = Success; }
+                else if (tone == PillTone.Warning) { fill = WarningLight; fg = Warning; }
+                else if (tone == PillTone.Alert) { fill = AlertLight; fg = Alert; }
+                else if (tone == PillTone.Info) { fill = AccentLight; fg = Accent; }
+
                 float scale = g.DpiX / 96f;
-                Color fg = Muted, bg = SurfaceSubtle, border = Color.Transparent;
-                switch (tone)
-                {
-                    case PillTone.Success: fg = Success; bg = SuccessLight; border = Color.FromArgb(167, 243, 208); break;
-                    case PillTone.Warning: fg = Warning; bg = WarningLight; border = Color.FromArgb(253, 230, 138); break;
-                    case PillTone.Alert: fg = Alert; bg = AlertLight; border = Color.FromArgb(254, 202, 202); break;
-                    case PillTone.Info: fg = Accent; bg = AccentLight; border = AccentBorder; break;
-                    case PillTone.OnHero: fg = Paper; bg = Color.FromArgb(65, 255, 255, 255); border = Color.FromArgb(80, 219, 234, 254); break;
-                }
-                int h = Math.Min(Height - 2, (int)(24 * scale));
-                if (h < 14) h = Height;
-                var rect = RectangleF.FromLTRB(0.5f, (Height - h) * 0.5f, Width - 1.5f, (Height + h) * 0.5f);
-                Surface(g, rect, h * 0.5f, bg, border);
-                using (var dot = new SolidBrush(tone == PillTone.OnHero ? Color.FromArgb(110, 231, 183) : fg))
-                    g.FillEllipse(dot, 9 * scale, Height * 0.5f - 3 * scale, 6 * scale, 6 * scale);
-                TextRenderer.DrawText(g, Text, Font, new Rectangle((int)(19 * scale), 0, Math.Max(1, Width - (int)(22 * scale)), Height),
-                    fg, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            }
-        }
-
-        internal sealed class Switch : CheckBox
-        {
-            internal Switch()
-            {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
-                    | ControlStyles.SupportsTransparentBackColor, true);
-                Cursor = Cursors.Hand;
-                BackColor = Color.Transparent;
-            }
-
-            protected override void OnCheckedChanged(EventArgs e) { base.OnCheckedChanged(e); Invalidate(); }
-
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                if (SystemInformation.HighContrast) { base.OnPaint(e); return; }
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                float scale = g.DpiX / 96f;
-                float h = 22 * scale, w = 42 * scale;
-                float x = Width - w - 1, y = (Height - h) * 0.5f;
-                Color track = !Enabled ? Color.FromArgb(226, 232, 240) : Checked ? Accent : Color.FromArgb(203, 213, 225);
-                Surface(g, new RectangleF(x, y, w, h), h * 0.5f, track, Color.Transparent);
-                float thumbSize = h - 6 * scale;
-                float tx = Checked ? x + w - thumbSize - 3 * scale : x + 3 * scale;
-                using (var shadow = new SolidBrush(Color.FromArgb(30, 15, 23, 42)))
-                    g.FillEllipse(shadow, tx, y + 3.5f * scale, thumbSize, thumbSize);
-                using (var thumb = new SolidBrush(Paper))
-                    g.FillEllipse(thumb, tx, y + 3 * scale, thumbSize, thumbSize);
-                if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, ClientRectangle);
+                Size textSize = TextRenderer.MeasureText(g, Text, Font, new Size(Width, Height),
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                int pillW = Math.Max(22, Math.Min(Width - 2, textSize.Width + (int)Math.Round(18 * scale)));
+                int pillH = Math.Max(16, Math.Min(Height - 2, (int)Math.Round(22 * scale)));
+                float boxX = AlignRight ? Math.Max(1f, Width - pillW - 1f) : 1f;
+                var box = new RectangleF(boxX, (Height - pillH) / 2f, pillW, pillH);
+                Surface(g, box, pillH * 0.5f, fill, Color.Transparent);
+                TextRenderer.DrawText(g, Text, Font, Rectangle.Round(box), fg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
             }
         }
 
         internal sealed class StatusBanner : Panel
         {
-            private PillTone tone = PillTone.Info;
             private readonly Label label;
+            private PillTone tone = PillTone.Info;
 
-            internal StatusBanner(string initialText)
+            internal StatusBanner(string initial)
             {
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
-                Padding = new Padding(32, 5, 14, 5);
+                Padding = new Padding(32, 6, 14, 6);
                 BackColor = Workspace;
                 DoubleBuffered = true;
                 ResizeRedraw = true;
-                label = Text(initialText, TextSize.Small, Muted);
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                label = Text(initial, TextSize.Small, BodyInk);
+                label.AutoEllipsis = true;
+                ApplyToneColors();
                 Controls.Add(label);
             }
 
             internal string Message { get { return label.Text; } }
 
-            internal void Set(string text, PillTone newTone)
+            internal void Set(string message, PillTone newTone = PillTone.Info)
             {
+                label.Text = message ?? "";
                 tone = newTone;
-                label.Text = string.IsNullOrWhiteSpace(text) ? "就绪。" : text;
-                label.AccessibleDescription = label.Text;
-                switch (tone)
-                {
-                    case PillTone.Alert: label.ForeColor = Alert; break;
-                    case PillTone.Warning: label.ForeColor = Warning; break;
-                    case PillTone.Success: label.ForeColor = Success; break;
-                    default: label.ForeColor = Muted; break;
-                }
+                ApplyToneColors();
                 Invalidate();
+            }
+
+            private void GetTonePalette(out Color bg, out Color border, out Color dotColor, out Color textColor)
+            {
+                bg = SurfaceSubtle;
+                border = Stroke;
+                dotColor = Accent;
+                textColor = BodyInk;
+                if (tone == PillTone.Success)
+                {
+                    bg = Color.FromArgb(240, 251, 245);
+                    border = Color.FromArgb(204, 238, 218);
+                    dotColor = Success;
+                    textColor = Color.FromArgb(21, 118, 62);
+                }
+                else if (tone == PillTone.Warning)
+                {
+                    bg = Color.FromArgb(253, 249, 240);
+                    border = Color.FromArgb(242, 226, 192);
+                    dotColor = Warning;
+                    textColor = Color.FromArgb(118, 82, 24);
+                }
+                else if (tone == PillTone.Alert)
+                {
+                    bg = Color.FromArgb(254, 244, 244);
+                    border = Color.FromArgb(248, 210, 212);
+                    dotColor = Alert;
+                    textColor = Color.FromArgb(182, 34, 42);
+                }
+                else if (tone == PillTone.Info)
+                {
+                    bg = Color.FromArgb(240, 247, 255);
+                    border = Color.FromArgb(214, 231, 250);
+                    dotColor = Accent;
+                    textColor = BodyInk;
+                }
+            }
+
+            private void ApplyToneColors()
+            {
+                Color bg, border, dotColor, textColor;
+                GetTonePalette(out bg, out border, out dotColor, out textColor);
+                label.ForeColor = textColor;
+                label.BackColor = bg;
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
             {
-                Color pbg = Parent == null ? Workspace : Parent.BackColor;
-                if (pbg.A == 0) pbg = Workspace;
-                using (var b = new SolidBrush(pbg)) e.Graphics.FillRectangle(b, e.ClipRectangle);
-                var g = e.Graphics;
+                // Paint everything cleanly inside OnPaint with double buffering to prevent any black L-edge artifact
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                Color parentBg = ResolveSurface(this, Workspace);
+                g.Clear(parentBg);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = g.DpiX / 96f;
-                Color bg = Paper, border = Stroke, dotColor = Accent;
-                if (tone == PillTone.Success) { bg = SuccessLight; border = Color.FromArgb(167, 243, 208); dotColor = Success; }
-                else if (tone == PillTone.Warning) { bg = WarningLight; border = Color.FromArgb(253, 230, 138); dotColor = Warning; }
-                else if (tone == PillTone.Alert) { bg = AlertLight; border = Color.FromArgb(254, 202, 202); dotColor = Alert; }
-                Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 10 * scale, bg, border);
+                Color bg, border, dotColor, textColor;
+                GetTonePalette(out bg, out border, out dotColor, out textColor);
+
+                Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 8f * scale, bg, border);
+                float d = 7f * scale;
                 using (var dot = new SolidBrush(dotColor))
-                    g.FillEllipse(dot, 13 * scale, Height * 0.5f - 4 * scale, 8 * scale, 8 * scale);
+                    g.FillEllipse(dot, 14f * scale, (Height - d) / 2f, d, d);
             }
         }
 
-        private static void DrawGlyph(Graphics g, Glyph icon, RectangleF area, Color color)
+        internal static void DrawGlyph(Graphics g, Glyph icon, RectangleF area, Color color)
         {
-            if (icon == Glyph.None) return;
+            if (icon == Glyph.None || area.Width < 2f || area.Height < 2f) return;
             var state = g.Save();
-            g.TranslateTransform(area.X, area.Y);
-            g.ScaleTransform(area.Width / 24f, area.Height / 24f);
-            using (var p = new Pen(color, 1.75f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            g.SmoothingMode = SmoothingMode.HighQuality;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            float dim = Math.Max(8f, (float)Math.Round(Math.Min(area.Width, area.Height)));
+            float ox = (float)Math.Round(area.X + (area.Width - dim) * 0.5f);
+            float oy = (float)Math.Round(area.Y + (area.Height - dim) * 0.5f);
+            g.TranslateTransform(ox, oy);
+            g.ScaleTransform(dim / 24f, dim / 24f);
+            float strokeW = Math.Max(1.85f, Math.Min(2.35f, 1.38f * 24f / dim));
+            using (var p = new Pen(color, strokeW) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            using (var fill = new SolidBrush(color))
             {
                 switch (icon)
                 {
-                    case Glyph.Devices: g.DrawRectangle(p, 2, 4, 14, 11); g.DrawLine(p, 6, 19, 12, 19); g.DrawLine(p, 9, 15, 9, 19); g.DrawRectangle(p, 18, 10, 4, 10); break;
-                    case Glyph.Desktop: g.DrawRectangle(p, 2, 4, 20, 13); g.DrawLine(p, 12, 17, 12, 21); g.DrawLine(p, 7, 21, 17, 21); break;
-                    case Glyph.Link: g.DrawLines(p, new[] { new Point(3, 7), new Point(20, 7), new Point(16, 3) }); g.DrawLine(p, 20, 7, 16, 11); g.DrawLines(p, new[] { new Point(21, 17), new Point(4, 17), new Point(8, 13) }); g.DrawLine(p, 4, 17, 8, 21); break;
-                    case Glyph.Gear: g.DrawEllipse(p, 5, 5, 14, 14); g.DrawEllipse(p, 9, 9, 6, 6); for (int i = 0; i < 8; i++) { double a = i * Math.PI / 4; g.DrawLine(p, 12 + (float)(7 * Math.Cos(a)), 12 + (float)(7 * Math.Sin(a)), 12 + (float)(10 * Math.Cos(a)), 12 + (float)(10 * Math.Sin(a))); } break;
-                    case Glyph.Help: g.DrawEllipse(p, 3, 3, 18, 18); g.DrawArc(p, 9, 7, 6, 6, 190, 220); g.DrawLine(p, 12, 13, 12, 14); g.DrawLine(p, 12, 17, 12.2f, 17); break;
-                    case Glyph.Refresh: g.DrawArc(p, 4, 4, 16, 16, -30, 290); g.DrawLines(p, new[] { new Point(21, 3), new Point(21, 10), new Point(14, 10) }); break;
-                    case Glyph.Folder: g.DrawPolygon(p, new[] { new Point(2, 6), new Point(9, 6), new Point(12, 9), new Point(21, 9), new Point(21, 19), new Point(2, 19) }); break;
-                    case Glyph.Arrow: g.DrawLine(p, 4, 12, 20, 12); g.DrawLines(p, new[] { new Point(14, 6), new Point(20, 12), new Point(14, 18) }); break;
-                    case Glyph.Plus: g.DrawLine(p, 5, 12, 19, 12); g.DrawLine(p, 12, 5, 12, 19); break;
-                    case Glyph.Pin: g.DrawRectangle(p, 4, 10, 16, 10); g.DrawArc(p, 8, 3, 8, 12, 185, 170); g.DrawLine(p, 12, 14, 12, 17); break;
-                    case Glyph.Minus: g.DrawLine(p, 5, 12, 19, 12); break;
-                    case Glyph.Maximize: g.DrawRectangle(p, 5, 5, 14, 14); break;
-                    case Glyph.Restore: g.DrawRectangle(p, 4, 8, 12, 12); g.DrawLines(p, new[] { new Point(8, 8), new Point(8, 4), new Point(20, 4), new Point(20, 16), new Point(16, 16) }); break;
-                    case Glyph.Close: g.DrawLine(p, 6, 6, 18, 18); g.DrawLine(p, 6, 18, 18, 6); break;
-                    case Glyph.Shield: g.DrawPolygon(p, new[] { new PointF(12, 3), new PointF(20, 6.5f), new PointF(19, 14), new PointF(12, 21), new PointF(5, 14), new PointF(4, 6.5f) }); g.DrawLines(p, new[] { new PointF(8.8f, 12f), new PointF(11.2f, 14.4f), new PointF(15.6f, 9.5f) }); break;
-                    case Glyph.Bolt: g.DrawPolygon(p, new[] { new PointF(13, 2), new PointF(5, 13.5f), new PointF(11.5f, 13.5f), new PointF(10.5f, 22), new PointF(19, 10.5f), new PointF(12.5f, 10.5f) }); break;
-                    case Glyph.Copy: g.DrawRectangle(p, 9, 9, 11, 11); g.DrawLines(p, new[] { new Point(5, 15), new Point(4, 15), new Point(4, 4), new Point(15, 4), new Point(15, 5) }); break;
-                    case Glyph.Image: g.DrawRectangle(p, 3, 5, 18, 14); g.DrawEllipse(p, 7, 8, 3, 3); g.DrawLines(p, new[] { new Point(4, 17), new Point(9, 12), new Point(13, 15), new Point(16, 11), new Point(20, 17) }); break;
-                    case Glyph.Eye: g.DrawArc(p, 2, 6, 20, 12, 180, 180); g.DrawArc(p, 2, 6, 20, 12, 0, 180); g.DrawEllipse(p, 9.5f, 9.5f, 5, 5); break;
-                    case Glyph.Check: g.DrawLines(p, new[] { new PointF(5, 12.5f), new PointF(10, 17.5f), new PointF(19, 7) }); break;
+                    case Glyph.Devices:
+                        using (var mon = Round(new RectangleF(2.5f, 4.5f, 12.5f, 9.5f), 1.6f))
+                            g.DrawPath(p, mon);
+                        g.DrawLine(p, 5.8f, 18.2f, 11.8f, 18.2f);
+                        g.DrawLine(p, 8.8f, 14f, 8.8f, 18.2f);
+                        using (var phone = Round(new RectangleF(17.2f, 9.5f, 4.4f, 9.2f), 1.2f))
+                            g.DrawPath(p, phone);
+                        break;
+                    case Glyph.AllDevices:
+                        if (color == Accent)
+                        {
+                            using (var sky = new SolidBrush(AccentSky))
+                            {
+                                g.FillEllipse(fill, 3.6f, 3.6f, 7.2f, 7.2f);
+                                g.FillEllipse(sky, 13.2f, 3.6f, 7.2f, 7.2f);
+                                g.FillEllipse(sky, 3.6f, 13.2f, 7.2f, 7.2f);
+                                g.FillEllipse(fill, 13.2f, 13.2f, 7.2f, 7.2f);
+                            }
+                        }
+                        else
+                        {
+                            using (var r1 = Round(new RectangleF(3.5f, 3.5f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r1);
+                            using (var r2 = Round(new RectangleF(13.3f, 3.5f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r2);
+                            using (var r3 = Round(new RectangleF(3.5f, 13.3f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r3);
+                            using (var r4 = Round(new RectangleF(13.3f, 13.3f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r4);
+                        }
+                        break;
+                    case Glyph.WindowsTile:
+                        using (var r1 = Round(new RectangleF(4f, 4f, 7f, 7f), 1.3f)) g.FillPath(fill, r1);
+                        using (var r2 = Round(new RectangleF(13f, 4f, 7f, 7f), 1.3f)) g.FillPath(fill, r2);
+                        using (var r3 = Round(new RectangleF(4f, 13f, 7f, 7f), 1.3f)) g.FillPath(fill, r3);
+                        using (var r4 = Round(new RectangleF(13f, 13f, 7f, 7f), 1.3f)) g.FillPath(fill, r4);
+                        break;
+                    case Glyph.Desktop:
+                        using (var screen = Round(new RectangleF(3f, 4.2f, 18f, 12.2f), 2f))
+                            g.DrawPath(p, screen);
+                        g.DrawLine(p, 12f, 16.4f, 12f, 19.8f);
+                        g.DrawLine(p, 7.5f, 19.8f, 16.5f, 19.8f);
+                        break;
+                    case Glyph.Assist:
+                        // UU-inspired luminous two-tone linked screens
+                        if (color == Accent)
+                        {
+                            using (var sky = new SolidBrush(AccentSky))
+                            using (var white = new SolidBrush(Paper))
+                            {
+                                using (var backBox = Round(new RectangleF(9.5f, 3.6f, 11.2f, 9f), 2.2f))
+                                    g.FillPath(sky, backBox);
+                                using (var frontBox = Round(new RectangleF(3.3f, 11.2f, 11.6f, 9.2f), 2.2f))
+                                    g.FillPath(fill, frontBox);
+                                using (var inner = Round(new RectangleF(6.2f, 14f, 5.8f, 3.4f), 1.1f))
+                                    g.FillPath(white, inner);
+                            }
+                        }
+                        else
+                        {
+                            using (var topBox = Round(new RectangleF(10.5f, 3.5f, 10f, 8.2f), 1.8f))
+                                g.DrawPath(p, topBox);
+                            using (var botBox = Round(new RectangleF(3.5f, 12.3f, 10f, 8.2f), 1.8f))
+                                g.FillPath(fill, botBox);
+                        }
+                        break;
+                    case Glyph.Star:
+                        if (color == Accent)
+                        {
+                            // UU-style solid azure bookmark ribbon with crisp white star cutout
+                            using (var ribbon = new GraphicsPath())
+                            {
+                                ribbon.AddArc(4.6f, 3.2f, 4.4f, 4.4f, 180, 90);
+                                ribbon.AddArc(15f, 3.2f, 4.4f, 4.4f, 270, 90);
+                                ribbon.AddLine(19.4f, 5.4f, 19.4f, 20.6f);
+                                ribbon.AddLine(19.4f, 20.6f, 12f, 17f);
+                                ribbon.AddLine(12f, 17f, 4.6f, 20.6f);
+                                ribbon.CloseFigure();
+                                g.FillPath(fill, ribbon);
+                            }
+                            PointF[] miniStar = new PointF[10];
+                            for (int i = 0; i < 10; i++)
+                            {
+                                double a = -Math.PI / 2 + i * Math.PI / 5;
+                                float r = (i % 2 == 0) ? 4.3f : 2.0f;
+                                miniStar[i] = new PointF(12f + (float)(r * Math.Cos(a)), 10.6f + (float)(r * Math.Sin(a)));
+                            }
+                            using (var white = new SolidBrush(Paper))
+                                g.FillPolygon(white, miniStar);
+                        }
+                        else
+                        {
+                            PointF[] starPts = new PointF[10];
+                            for (int i = 0; i < 10; i++)
+                            {
+                                double a = -Math.PI / 2 + i * Math.PI / 5;
+                                float r = (i % 2 == 0) ? 8.6f : 3.9f;
+                                starPts[i] = new PointF(12f + (float)(r * Math.Cos(a)), 12.4f + (float)(r * Math.Sin(a)));
+                            }
+                            g.DrawPolygon(p, starPts);
+                        }
+                        break;
+                    case Glyph.Link:
+                        g.DrawLines(p, new[] { new PointF(4f, 8f), new PointF(19.5f, 8f), new PointF(15.5f, 4.2f) });
+                        g.DrawLine(p, 19.5f, 8f, 15.5f, 11.8f);
+                        g.DrawLines(p, new[] { new PointF(20f, 16f), new PointF(4.5f, 16f), new PointF(8.5f, 12.2f) });
+                        g.DrawLine(p, 4.5f, 16f, 8.5f, 19.8f);
+                        break;
+                    case Glyph.Gear:
+                        g.DrawEllipse(p, 6.2f, 6.2f, 11.6f, 11.6f);
+                        g.DrawEllipse(p, 9.6f, 9.6f, 4.8f, 4.8f);
+                        for (int i = 0; i < 6; i++)
+                        {
+                            double a = i * Math.PI / 3;
+                            g.DrawLine(p, 12f + (float)(6.2 * Math.Cos(a)), 12f + (float)(6.2 * Math.Sin(a)),
+                                12f + (float)(8.8 * Math.Cos(a)), 12f + (float)(8.8 * Math.Sin(a)));
+                        }
+                        break;
+                    case Glyph.Help:
+                        g.DrawEllipse(p, 3.5f, 3.5f, 17f, 17f);
+                        g.DrawArc(p, 9.2f, 7.2f, 5.6f, 5.2f, 190, 220);
+                        g.DrawLine(p, 12f, 12.8f, 12f, 14.3f);
+                        g.FillEllipse(fill, 10.9f, 16.5f, 2.2f, 2.2f);
+                        break;
+                    case Glyph.Info:
+                        g.DrawEllipse(p, 3.5f, 3.5f, 17f, 17f);
+                        g.FillEllipse(fill, 10.9f, 7.3f, 2.2f, 2.2f);
+                        g.DrawLine(p, 12f, 11.2f, 12f, 16.5f);
+                        break;
+                    case Glyph.InfoMark:
+                        g.FillEllipse(fill, 10.4f, 4.6f, 3.2f, 3.2f);
+                        using (var boldPen = new Pen(color, Math.Max(2.6f, strokeW * 1.25f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                            g.DrawLine(boldPen, 12f, 10.5f, 12f, 18.6f);
+                        break;
+                    case Glyph.Refresh:
+                        g.DrawArc(p, 4.2f, 4.2f, 15.6f, 15.6f, -35, 295);
+                        g.DrawLines(p, new[] { new PointF(19.8f, 4f), new PointF(19.8f, 9.8f), new PointF(14.2f, 9.8f) });
+                        break;
+                    case Glyph.Folder:
+                        g.DrawPolygon(p, new[] { new PointF(3.2f, 6.2f), new PointF(9.6f, 6.2f), new PointF(11.8f, 8.6f), new PointF(20.8f, 8.6f), new PointF(20.8f, 18.6f), new PointF(3.2f, 18.6f) });
+                        break;
+                    case Glyph.Arrow:
+                        g.DrawLine(p, 4.5f, 12f, 19.5f, 12f);
+                        g.DrawLines(p, new[] { new PointF(14f, 6.5f), new PointF(19.5f, 12f), new PointF(14f, 17.5f) });
+                        break;
+                    case Glyph.ChevronRight:
+                        g.DrawLines(p, new[] { new PointF(9.2f, 6.2f), new PointF(15f, 12f), new PointF(9.2f, 17.8f) });
+                        break;
+                    case Glyph.ChevronDown:
+                        g.DrawLines(p, new[] { new PointF(6.2f, 9.2f), new PointF(12f, 15f), new PointF(17.8f, 9.2f) });
+                        break;
+                    case Glyph.ChevronUp:
+                        g.DrawLines(p, new[] { new PointF(6.2f, 14.8f), new PointF(12f, 9f), new PointF(17.8f, 14.8f) });
+                        break;
+                    case Glyph.Plus:
+                        g.DrawLine(p, 5.2f, 12f, 18.8f, 12f);
+                        g.DrawLine(p, 12f, 5.2f, 12f, 18.8f);
+                        break;
+                    case Glyph.Pin:
+                    case Glyph.Lock:
+                        using (var body = Round(new RectangleF(5.2f, 10.6f, 13.6f, 9.4f), 2f))
+                            g.DrawPath(p, body);
+                        g.DrawArc(p, 8.2f, 4.4f, 7.6f, 9f, 180, 180);
+                        g.DrawLine(p, 12f, 14f, 12f, 16.8f);
+                        break;
+                    case Glyph.Minus:
+                        g.DrawLine(p, 5f, 12f, 19f, 12f);
+                        break;
+                    case Glyph.Maximize:
+                        g.DrawRectangle(p, 5.2f, 5.2f, 13.6f, 13.6f);
+                        break;
+                    case Glyph.Restore:
+                        g.DrawRectangle(p, 4.8f, 8.2f, 11f, 11f);
+                        g.DrawLines(p, new[] { new PointF(8.2f, 8.2f), new PointF(8.2f, 4.8f), new PointF(19.2f, 4.8f), new PointF(19.2f, 15.8f), new PointF(15.8f, 15.8f) });
+                        break;
+                    case Glyph.Close:
+                        g.DrawLine(p, 6.2f, 6.2f, 17.8f, 17.8f);
+                        g.DrawLine(p, 6.2f, 17.8f, 17.8f, 6.2f);
+                        break;
+                    case Glyph.Shield:
+                        g.DrawPolygon(p, new[] { new PointF(12f, 3.4f), new PointF(19.6f, 6.6f), new PointF(18.6f, 14f), new PointF(12f, 20.6f), new PointF(5.4f, 14f), new PointF(4.4f, 6.6f) });
+                        g.DrawLines(p, new[] { new PointF(8.8f, 12f), new PointF(11.1f, 14.3f), new PointF(15.5f, 9.6f) });
+                        break;
+                    case Glyph.Bolt:
+                        g.DrawPolygon(p, new[] { new PointF(13f, 3f), new PointF(5.8f, 13.2f), new PointF(11.6f, 13.2f), new PointF(10.8f, 21f), new PointF(18.2f, 10.8f), new PointF(12.4f, 10.8f) });
+                        break;
+                    case Glyph.Copy:
+                        using (var front = Round(new RectangleF(8.8f, 8.8f, 11f, 11f), 1.6f))
+                            g.DrawPath(p, front);
+                        g.DrawLines(p, new[] { new PointF(6f, 15f), new PointF(4.2f, 15f), new PointF(4.2f, 4.2f), new PointF(15f, 4.2f), new PointF(15f, 6f) });
+                        break;
+                    case Glyph.Image:
+                        using (var frame = Round(new RectangleF(3.2f, 5f, 17.6f, 14f), 1.8f))
+                            g.DrawPath(p, frame);
+                        g.FillEllipse(fill, 7.2f, 8.2f, 2.6f, 2.6f);
+                        g.DrawLines(p, new[] { new PointF(4.5f, 17f), new PointF(9.2f, 12.2f), new PointF(13f, 15.2f), new PointF(16f, 11.4f), new PointF(19.6f, 17f) });
+                        break;
+                    case Glyph.Eye:
+                        if (color == Accent)
+                        {
+                            using (var eye = new GraphicsPath())
+                            using (var sky = new SolidBrush(AccentSky))
+                            using (var white = new SolidBrush(Paper))
+                            {
+                                eye.AddBezier(2.6f, 12f, 6.6f, 5.4f, 17.4f, 5.4f, 21.4f, 12f);
+                                eye.AddBezier(21.4f, 12f, 17.4f, 18.6f, 6.6f, 18.6f, 2.6f, 12f);
+                                g.FillPath(sky, eye);
+                                g.FillEllipse(white, 8.2f, 8.2f, 7.6f, 7.6f);
+                                g.FillEllipse(fill, 9.7f, 9.7f, 4.6f, 4.6f);
+                            }
+                        }
+                        else
+                        {
+                            using (var eye = new GraphicsPath())
+                            {
+                                eye.AddBezier(3f, 12f, 6.8f, 6f, 17.2f, 6f, 21f, 12f);
+                                eye.AddBezier(21f, 12f, 17.2f, 18f, 6.8f, 18f, 3f, 12f);
+                                g.DrawPath(p, eye);
+                            }
+                            g.DrawEllipse(p, 9.3f, 9.3f, 5.4f, 5.4f);
+                        }
+                        break;
+                    case Glyph.EyeOff:
+                        using (var eye = new GraphicsPath())
+                        {
+                            eye.AddBezier(3f, 12f, 6.8f, 6f, 17.2f, 6f, 21f, 12f);
+                            eye.AddBezier(21f, 12f, 17.2f, 18f, 6.8f, 18f, 3f, 12f);
+                            g.DrawPath(p, eye);
+                        }
+                        g.DrawLine(p, 4.5f, 4.5f, 19.5f, 19.5f);
+                        break;
+                    case Glyph.Check:
+                        g.DrawLines(p, new[] { new PointF(5.2f, 12.5f), new PointF(10f, 17.2f), new PointF(18.8f, 7.2f) });
+                        break;
+                    case Glyph.Bell:
+                        g.DrawArc(p, 6.2f, 4.2f, 11.6f, 12.2f, 180, 180);
+                        g.DrawLine(p, 6.2f, 10.3f, 5.2f, 16.2f);
+                        g.DrawLine(p, 17.8f, 10.3f, 18.8f, 16.2f);
+                        g.DrawLine(p, 3.8f, 16.2f, 20.2f, 16.2f);
+                        g.DrawArc(p, 9.8f, 16.8f, 4.4f, 3.2f, 0, 180);
+                        break;
+                    case Glyph.Menu:
+                        g.DrawLine(p, 4.5f, 7f, 19.5f, 7f);
+                        g.DrawLine(p, 4.5f, 12f, 19.5f, 12f);
+                        g.DrawLine(p, 4.5f, 17f, 19.5f, 17f);
+                        break;
+                    case Glyph.Terminal:
+                        using (var term = Round(new RectangleF(3.2f, 4.8f, 17.6f, 14.4f), 1.8f))
+                            g.DrawPath(p, term);
+                        g.DrawLines(p, new[] { new PointF(7f, 9.5f), new PointF(10.5f, 12.3f), new PointF(7f, 15.2f) });
+                        g.DrawLine(p, 12.5f, 15.2f, 17f, 15.2f);
+                        break;
+                    case Glyph.Network:
+                        g.DrawEllipse(p, 3.4f, 3.4f, 17.2f, 17.2f);
+                        g.DrawLine(p, 3.4f, 12f, 20.6f, 12f);
+                        g.DrawEllipse(p, 8.2f, 3.4f, 7.6f, 17.2f);
+                        break;
+                    case Glyph.MoreDots:
+                        g.FillEllipse(fill, 10.5f, 4.8f, 3f, 3f);
+                        g.FillEllipse(fill, 10.5f, 10.5f, 3f, 3f);
+                        g.FillEllipse(fill, 10.5f, 16.2f, 3f, 3f);
+                        break;
+                    case Glyph.Trash:
+                        g.DrawLine(p, 4.4f, 6.6f, 19.6f, 6.6f);
+                        g.DrawLine(p, 9.5f, 4.2f, 14.5f, 4.2f);
+                        using (var bin = Round(new RectangleF(6.6f, 6.6f, 10.8f, 13.2f), 1.4f))
+                            g.DrawPath(p, bin);
+                        g.DrawLine(p, 10.2f, 10f, 10.2f, 16.4f);
+                        g.DrawLine(p, 13.8f, 10f, 13.8f, 16.4f);
+                        break;
                 }
             }
             g.Restore(state);

@@ -20,10 +20,21 @@ namespace DualRemote
         internal string PublicIpv6 = "";
         internal bool SunshineInstalled;
         internal bool SunshineRunning;
+        internal bool SunshinePathUnknown;
+        internal string SunshineRunningExecutable = "";
         internal string SunshineVersion = "";
+        internal bool BundledAvailable;
+        internal bool BundledPrepared;
+        internal bool ActiveUsesBundledRuntime;
+        internal bool HostPathResolved;
+        internal string ActiveRoot = "";
+        internal string ActiveConfigDirectory = "";
+        internal string HostSourceLabel = "";
         internal string Encoder = "";
         internal string DisplayModeLabel = "默认实体屏";
         internal bool AntiLossTuned;
+        internal bool TuningSupported;
+        internal string TuningUnsupportedReason = "";
         internal string TuningSummary = "未检测到本机 Foundation Sunshine";
         internal readonly List<string> Recommendations = new List<string>();
     }
@@ -35,13 +46,29 @@ namespace DualRemote
         internal const string EasyTierReleasesUrl = "https://github.com/EasyTier/EasyTier/releases";
 
         private static readonly Regex SessionsCountRegex = new Regex("\"total_sessions\"\\s*:\\s*(\\d+)", RegexOptions.CultureInvariant);
+        private static readonly Regex SunshineVersionRegex = new Regex(@"^v?\d+(?:\.\d+){1,3}", RegexOptions.CultureInvariant);
 
         /// <summary>收集本机 IP 与 Foundation Sunshine 配置诊断（只读，无副作用，建议在后台线程调用）。</summary>
         internal static HostSnapshot Collect()
         {
             var snap = new HostSnapshot();
             CollectAddresses(snap);
-            CollectSunshineStatus(snap, DefaultSunshineRoot);
+            snap.BundledAvailable = BundledHost.BundledAvailable;
+            snap.BundledPrepared = BundledHost.LocalPrepared;
+            string bundlingRoot = BundledHost.ActiveRoot;
+            string bundlingConfig;
+            string configError;
+            if (!BundledHost.TryGetActiveConfigDirectory(out bundlingConfig, out configError))
+                bundlingConfig = null;
+            if (!BundledHost.ActiveUsesBundledRuntime) bundlingConfig = null;
+            snap.ActiveUsesBundledRuntime = BundledHost.ActiveUsesBundledRuntime;
+            snap.ActiveRoot = bundlingRoot;
+            snap.ActiveConfigDirectory = bundlingConfig ?? "";
+            snap.HostSourceLabel = BundledHost.ActiveHostStateText;
+            snap.HostPathResolved = !string.IsNullOrEmpty(BundledHost.RunningExecutablePath);
+            snap.TuningSupported = BundledHost.TuningSupported;
+            snap.TuningUnsupportedReason = BundledHost.TuningUnsupportedReason;
+            CollectSunshineStatus(snap, bundlingRoot, bundlingConfig);
             return snap;
         }
 
@@ -115,12 +142,57 @@ namespace DualRemote
 
         internal static void CollectSunshineStatus(HostSnapshot snap, string root)
         {
+            string configDirectory;
+            string configError;
+            if (!BundledHost.TryGetActiveConfigDirectory(out configDirectory, out configError))
+                configDirectory = null;
+            CollectSunshineStatus(snap, root, configDirectory);
+        }
+
+        internal static void CollectSunshineStatus(HostSnapshot snap, string root, string configDirectory)
+        {
+            if (string.IsNullOrEmpty(root)) root = BundledHost.ActiveRoot;
+            if (!string.IsNullOrEmpty(configDirectory))
+            {
+                string localRoot = Path.GetFullPath(BundledHost.LocalRoot).TrimEnd('\\') + "\\";
+                string configFull = Path.GetFullPath(configDirectory);
+                if (!configFull.StartsWith(localRoot, StringComparison.OrdinalIgnoreCase)) configDirectory = null;
+            }
+            snap.SunshineRunningExecutable = BundledHost.RunningExecutablePath ?? "";
+            snap.SunshinePathUnknown = BundledHost.AnySunshineProcessRunning
+                && string.IsNullOrEmpty(snap.SunshineRunningExecutable);
+            snap.SunshineRunning = !string.IsNullOrEmpty(snap.SunshineRunningExecutable);
+            snap.SunshineInstalled = false;
+            snap.SunshineVersion = "";
+            snap.Encoder = "";
+            snap.DisplayModeLabel = "默认实体屏";
+            snap.AntiLossTuned = false;
+            snap.Recommendations.Clear();
             string exe = Path.Combine(root, "sunshine.exe");
-            string conf = Path.Combine(root, "config", "sunshine.conf");
+            string conf = string.IsNullOrEmpty(configDirectory)
+                ? null : Path.Combine(configDirectory, "sunshine.conf");
+            snap.BundledAvailable = BundledHost.BundledAvailable;
+            snap.BundledPrepared = BundledHost.LocalPrepared;
+            snap.ActiveUsesBundledRuntime = BundledHost.ActiveUsesBundledRuntime;
+            if (string.IsNullOrEmpty(snap.HostSourceLabel))
+                snap.HostSourceLabel = BundledHost.ActiveHostStateText;
+            if (string.IsNullOrEmpty(snap.TuningUnsupportedReason) && !snap.TuningSupported)
+                snap.TuningUnsupportedReason = BundledHost.TuningUnsupportedReason;
             if (!File.Exists(exe))
             {
-                snap.SunshineInstalled = false;
-                snap.TuningSummary = "本机未安装 Foundation Sunshine（如本机为控制端笔记本可忽略）。";
+                if (snap.BundledAvailable)
+                {
+                    snap.SunshineInstalled = true;
+                    snap.SunshineVersion = BundledHost.BundledVersion;
+                    snap.DisplayModeLabel = "内置宿主待准备";
+                    snap.TuningSummary = "包内 Foundation Sunshine " + BundledHost.BundledVersion
+                        + " 可用，但尚未准备到用户目录；首次使用需在设备页本机点击准备。";
+                }
+                else
+                {
+                    snap.SunshineInstalled = false;
+                    snap.TuningSummary = "本机未安装 Foundation Sunshine，包内也未找到可用的固定版本。";
+                }
                 return;
             }
             snap.SunshineInstalled = true;
@@ -134,22 +206,30 @@ namespace DualRemote
                 snap.SunshineVersion = "已安装";
             }
 
-            try
-            {
-                Process[] procs = Process.GetProcessesByName("sunshine");
-                snap.SunshineRunning = procs.Length > 0;
-                foreach (Process p in procs) { try { p.Dispose(); } catch { } }
-            }
-            catch { }
+            snap.SunshineRunning = !string.IsNullOrEmpty(snap.SunshineRunningExecutable);
 
-            if (!File.Exists(conf))
+            if (string.IsNullOrEmpty(conf) || !File.Exists(conf))
             {
-                snap.TuningSummary = "未找到 sunshine.conf。";
+                if (snap.SunshinePathUnknown)
+                    snap.TuningSummary = "检测到 Sunshine 进程，但无法确认真实 exe 路径，无法确定其配置目录；为避免双开和误读用户配置，未启动宿主。";
+                else if (snap.BundledAvailable && BundledHost.ActiveUsesBundledRuntime)
+                    snap.TuningSummary = "内置宿主程序文件已存在，但尚未生成独立 sunshine.conf 或应用列表；本机点击准备后自动生成。";
+                else if (snap.SunshineRunning)
+                    snap.TuningSummary = "检测到已运行的 Sunshine，但无法确认其配置目录；未读取其用户配置或证书。";
+                else
+                    snap.TuningSummary = "未找到独立 sunshine.conf。";
                 return;
             }
 
             Dictionary<string, string> map = ParseKeyValues(conf);
             AnalyzeConfig(snap, map);
+            if (!snap.TuningSupported)
+            {
+                snap.TuningSummary = "只读诊断：" + snap.TuningSummary + " "
+                    + (string.IsNullOrEmpty(snap.TuningUnsupportedReason)
+                        ? "现有一键调优脚本未适配当前宿主路径。"
+                        : snap.TuningUnsupportedReason);
+            }
         }
 
         internal static void AnalyzeConfig(HostSnapshot snap, Dictionary<string, string> map)
@@ -210,6 +290,8 @@ namespace DualRemote
         internal static string RepairSunshineVersion(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return "";
+            Match version = SunshineVersionRegex.Match(raw.Trim());
+            if (version.Success) return version.Value;
             foreach (char c in raw)
             {
                 if (c >= '\u4e00' && c <= '\u9fff') return raw;
@@ -260,17 +342,22 @@ namespace DualRemote
         internal static bool IsHostBeingControlled()
         {
             int sessions;
-            if (TryQuerySunshineSessionCount(DefaultSunshineRoot, out sessions))
+            string configDirectory;
+            string configError;
+            if (BundledHost.ActiveUsesBundledRuntime
+                && BundledHost.TryGetActiveConfigDirectory(out configDirectory, out configError)
+                && TryQuerySunshineSessionCount(configDirectory, out sessions))
             {
                 return sessions > 0;
             }
             return HasActiveRemoteTcpConnection();
         }
 
-        private static bool TryQuerySunshineSessionCount(string root, out int count)
+        private static bool TryQuerySunshineSessionCount(string configDirectory, out int count)
         {
             count = 0;
-            string pemPath = Path.Combine(root, "config", "credentials", "cacert.pem");
+            if (string.IsNullOrEmpty(configDirectory)) return false;
+            string pemPath = Path.Combine(configDirectory, "credentials", "cacert.pem");
             if (!File.Exists(pemPath)) return false;
 
             string expectedThumbprint;
@@ -285,7 +372,7 @@ namespace DualRemote
             if (string.IsNullOrEmpty(expectedThumbprint)) return false;
 
             int webPort = 47990;
-            string conf = Path.Combine(root, "config", "sunshine.conf");
+            string conf = Path.Combine(configDirectory, "sunshine.conf");
             if (File.Exists(conf))
             {
                 Dictionary<string, string> map = ParseKeyValues(conf);
