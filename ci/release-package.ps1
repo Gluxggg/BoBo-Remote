@@ -55,28 +55,35 @@ $sumsText = "# engines=$enginesStamp`n$hSetup  BoBoRemote-Setup-x64.exe`n$hPort 
 
 $notesPath = Join-Path $assetDir 'release-notes.md'
 $notesTemplate = @'
-## BoBo Remote __TAG__ (Windows x64 · V6.1 全内置单文件架构)
+## BoBo Remote __TAG__（四端互通正式版：Windows / Android / macOS / iOS）
 
 ### 本次核心升级亮点
-- **1. 框内主机小指针 · 框外本机大鼠标无缝分离**：
-  - 被控端内置原生主机光标实时合成（支持彩色透明、阴影及反色 I-Beam 光标，DXGI 与 GDI 路径均精确合成，静态桌面移动光标亦实时刷新）；
-  - 控制端视口进入视频画面区域瞬间零闪烁隐藏本机大鼠标，仅呈现被控端原生小鼠标指针；移出画面框（顶栏、悬浮球、控制中心、窗口外或副屏）瞬间无缝切回本机大鼠标点击，彻底告别双光标重叠；
-  - 修正边缘像素坐标精度及点击瞬间坐标同步，锁鼠模式依然支持 `Ctrl+Alt` 瞬间释放。
-- **2. UU 同款「超级屏」全屏自适应模式（彻底消除笔记本上下黑边）**：
-  - 默认开启超级屏全屏自适应（`scaleMode=2`），在 16:10（如 2880×1800）等异形屏笔记本全屏远控 16:9 台式机时自动消除上下黑边；
-  - 新增 `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` 协议闭环：优先尝试以无闪烁临时模式（`CDS_FULLSCREEN`）匹配被控端原生同比例高分辨率（低于 1440×900 自动保护不降质），未匹配时客户端以 GPU SuperFill 满屏无黑边呈现且鼠标点击 1:1 精准对应，断开/退出自动还原被控端分辨率；
-  - 控制中心「显示屏」新增「切换使用超级屏」，「窗口」菜单提供「全屏自适应（无黑边）/ 等比居中 / 实际大小 1:1」三档实时切换。
-- **3. 被控端真·物理级完全防窥保护（防任务栏/开始菜单/右键刷新/打字外泄）**：
-  - **原生低级物理键鼠锁（`WH_MOUSE_LL` + `WH_KEYBOARD_LL`）**：防窥开启瞬间 100% 阻断被控端现场物理鼠标（点击任务栏、开始菜单、右键刷新、悬停）与物理键盘输入，仅精准放行带 BoBo 专属签名（`kBoBoInjectedMagic`）的远控注入事件及机主紧急退出热键 `Ctrl+Alt+Shift+P`；
-  - **DDC/CI 显示器硬件级深度熄黑（`dxva2.dll`）**：将物理显示器面板亮度/对比度/RGB 增益归零，对 DXGI 远控采集 100% 透明，彻底杜绝 Win11 开始菜单、现代右键刷新菜单及中文输入法打字候选框外泄；熄黑前落盘原始寄存器表，支持退出防窥、锁屏、退出软件及异常重启自动恢复；
-  - **0ms `SetWinEventHook` Z 序守护 + 分辨率变更无缝重绘**：超级屏切分辨率时防窥锁鼠与熄黑全程不中断、不闪烁。
+- **1. 全新 BoBo6.2 四端统一权威协议（TCP+TLS 1.2 :49810 / LAN UDP :49812）**：
+  - 固化 [`protocol/BOBO6-SPEC.md`](https://github.com/__REPO__/blob/main/protocol/BOBO6-SPEC.md) 与 [`protocol/golden-vectors.json`](https://github.com/__REPO__/blob/main/protocol/golden-vectors.json)，C# / Kotlin / Swift 三端 CI 强制字节级一致通过；
+  - 局域网自动发现直连 + Tailscale 虚拟内网 IP 跨网直连，全程零中转服务器费用，保留严格的 4 位临时配对码 HMAC-SHA256 双向认证。
+- **2. Android 原生客户端（`BoBoRemote-Android.apk` · Kotlin + Jetpack Compose）**：
+  - **全功能主控**：MediaCodec 硬件 H.264 零拷贝解码 + 48kHz IMA-ADPCM 立体声音频，支持触控板鼠标与直点触控双模式、贴边悬浮球、控制中心、快捷键盘栏、剪贴板同步与蓝牙键盘映射；
+  - **免 Root 全功能被控**：基于 MediaProjection 硬编 H.264 推流与系统无障碍服务（AccessibilityService），远程支持点击、滑动及返回/主页/多任务/通知栏/音量/锁屏。
+- **3. macOS 原生客户端（`BoBoRemote-macOS.dmg` · Swift + SwiftUI + BoBoAppleCore）**：
+  - **全功能主控**：AVSampleBufferDisplayLayer 零拷贝渲染、超级屏自适应、框内隐藏本机大鼠标、智能 `⌘ → Ctrl` 键位映射；
+  - **全功能被控与防窥**：基于 ScreenCaptureKit（含免驱动 48kHz 系统音频采集）与 VideoToolbox 硬编，防窥遮罩窗口自动从录屏排除并联动 `CGEventTap` 物理键鼠锁（紧急退出 `⌘+⌥+⇧+P`）。
+- **4. iOS / iPadOS 原生客户端（`BoBoRemote-iOS-Unsigned.ipa` · Swift + SwiftUI + ReplayKit）**：
+  - **全功能主控**：60/120Hz 硬件解码、触控板/直点双模式、贴边悬浮球、控制中心与快捷 PC 键盘栏；
+  - **ReplayKit 投屏协助**：内嵌 ReplayKit Broadcast Upload Extension，采用免付费 App Group 的本地回环桥接架构，支持 AltStore / SideStore / Sideloadly / Xcode 免费自签安装。
+- **5. Windows 端同步升级（兼容四端 + 防窥硬件安全加固）**：
+  - 自动识别远端平台（`Windows`/`macOS`/`Android`/`iOS`），连接 Android 时自动展开顶部手机导航条并保持竖屏等比居中，连接 iOS 时自动进入仅查看协助模式；
+  - 防窥硬件调亮升级为安全仅调背光模式（严格只调非 HDR 显示器 VCP `0x10`，默认关闭，绝不触碰对比度与 RGB 增益）。
 
-### 下载说明
-- **`BoBoRemote-Setup-x64.exe`（标准图形化安装包，< 1 MB）**：默认免 UAC 安装至 `%LOCALAPPDATA%\BoBoRemote`，支持无缝静默覆盖升级。
-- **`BoBoRemote-Portable-x64.zip`（绿色便携包，< 1 MB）**：解压后直接双击 `BoBo远程.exe` 即可运行。
-- **`BoBoRemote-Update-x64.zip`（应用内增量更新包）**：供已有 V6 客户端应用内一键升级。
+### 四端下载说明
+- **Windows x64**：
+  - `BoBoRemote-Setup-x64.exe`（图形化安装/静默覆盖升级包）
+  - `BoBoRemote-Portable-x64.zip`（绿色免安装便携包）
+  - `BoBoRemote-Update-x64.zip`（应用内一键增量更新包）
+- **Android 手机/平板**：`BoBoRemote-Android.apk`（直接安装，支持 Android 8.0+）
+- **macOS 电脑**：`BoBoRemote-macOS.dmg`（支持 macOS 13+，拖入 Applications 即可）
+- **iOS / iPadOS**：`BoBoRemote-iOS-Unsigned.ipa`（支持 iOS 16+，使用 Sideloadly / AltStore / SideStore / Xcode 自签安装，详见 [`docs/CROSS-PLATFORM-GUIDE.md`](https://github.com/__REPO__/blob/main/docs/CROSS-PLATFORM-GUIDE.md)）
 
-### SHA-256 校验值
+### Windows 产物 SHA-256 校验值
 ```text
 __H_SETUP__  BoBoRemote-Setup-x64.exe
 __H_PORT__  BoBoRemote-Portable-x64.zip
