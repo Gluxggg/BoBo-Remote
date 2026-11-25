@@ -184,7 +184,9 @@ public final class MacStreamSessionModel: ObservableObject, BoBoStreamClientDele
                 let dimensions = CMSampleBufferGetFormatDescription(frame.sample).map {
                     CMVideoFormatDescriptionGetPresentationDimensions($0, usePixelAspectRatio: true, useCleanAperture: true)
                 } ?? frame.size
-                if !dimensions.isEmpty, dimensions != self.videoSize { self.videoSize = dimensions }
+                if dimensions.width > 0, dimensions.height > 0, dimensions != self.videoSize {
+                    self.videoSize = dimensions
+                }
             }
         }
     }
