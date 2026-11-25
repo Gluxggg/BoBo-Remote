@@ -3,6 +3,18 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val boboVersionName = providers.gradleProperty("boboReleaseVersion").orElse("6.3.0").get()
+val releaseVersionMatch = requireNotNull(
+    Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matchEntire(boboVersionName)
+) { "boboReleaseVersion must be a numeric major.minor.patch version" }
+val (releaseMajor, releaseMinor, releasePatch) = releaseVersionMatch.groupValues.drop(1).map {
+    requireNotNull(it.toIntOrNull()) { "An Android version component is out of range" }
+}
+require(releaseMinor < 100 && releasePatch < 100) { "The Android minor and patch versions must fit in two digits" }
+// Keep upgrades ordered while preserving versionCode 623 for the installed 6.2.3 release.
+val boboVersionCode = releaseMajor * 10_000L + releaseMinor * 100L + releasePatch - 59_580L
+require(boboVersionCode in 1L..2_100_000_000L) { "The Android version code is out of range" }
+
 android {
     namespace = "com.bobo.remote"
     compileSdk = 34
@@ -11,8 +23,8 @@ android {
         applicationId = "com.bobo.remote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 623
-        versionName = "6.2.3"
+        versionCode = boboVersionCode.toInt()
+        versionName = boboVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -22,7 +34,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -73,7 +86,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     testImplementation("junit:junit:4.13.2")

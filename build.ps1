@@ -32,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '6.2.3' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '6.3.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
 $BuildDir       = Join-Path $Root '.cache\build'
 $StageRoot      = Join-Path $BuildDir 'clean-stage'
@@ -62,7 +62,7 @@ function Find-CscExe {
 function Invoke-CoreBuildStage {
     Write-Step '第 1 步：编译并自检内嵌原生内核 BoBoCore.dll'
     if (-not (Test-Path -LiteralPath $CoreScriptPath)) { throw "缺少原生核构建脚本：$CoreScriptPath" }
-    powershell -NoProfile -ExecutionPolicy Bypass -File $CoreScriptPath -RunSelfTest
+    powershell -NoProfile -File $CoreScriptPath -RunSelfTest
     if ($LASTEXITCODE -ne 0) { throw "BoBoCore.dll 编译或自检失败（exit=$LASTEXITCODE）" }
     if (-not (Test-Path -LiteralPath $CoreGzPath)) { throw "未生成内嵌压缩内核：$CoreGzPath" }
     $gzLen = (Get-Item -LiteralPath $CoreGzPath).Length
@@ -87,13 +87,11 @@ function Invoke-CompileStage {
     $verFile = Join-Path $BuildDir 'app-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
 
-    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
+    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
     $refs = @($refNames | ForEach-Object { Join-Path $csc.Framework $_ })
 
     $appIcon = Join-Path $Root 'assets\bobo-remote.ico'
     $brandLogo = Join-Path $Root 'assets\bobo-logo.png'
-    $displayTool = Join-Path $Root 'tools\Set-SunshineDisplay.ps1'
-    $optimizeTool = Join-Path $Root 'tools\Optimize-SunshineStream.ps1'
 
     $argsList = @(
         '/nologo',
@@ -111,8 +109,6 @@ function Invoke-CompileStage {
     )
     if (Test-Path -LiteralPath $appIcon) { $argsList += "/win32icon:$appIcon" }
     if (Test-Path -LiteralPath $brandLogo) { $argsList += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
-    if (Test-Path -LiteralPath $displayTool) { $argsList += "/resource:$displayTool,DualRemote.tools.Set-SunshineDisplay.ps1" }
-    if (Test-Path -LiteralPath $optimizeTool) { $argsList += "/resource:$optimizeTool,DualRemote.tools.Optimize-SunshineStream.ps1" }
     $argsList += $sources
 
     & $csc.Compiler @argsList

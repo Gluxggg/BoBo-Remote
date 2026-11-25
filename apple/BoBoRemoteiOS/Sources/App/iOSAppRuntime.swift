@@ -9,7 +9,6 @@ public final class iOSAppRuntime: ObservableObject {
     public let identity: BoBoIdentityStore
     public let hostServer: BoBoHostServer
     public let discovery: BoBoLanDiscovery
-    public var replayKitBridge: iOSReplayKitBridge?
 
     @Published public var lanPeers: [BoBoDiscoveredPeer] = []
     @Published public var authorizedPeers: [BoBoAuthorizedPeer] = []
@@ -20,6 +19,7 @@ public final class iOSAppRuntime: ObservableObject {
     @Published public var activeViewerName: String?
 
     private var delegateBridge: iOSHostDelegate?
+    private var replayKitBridge: iOSReplayKitBridge?
     private var timer: Timer?
 
     public init() {
@@ -27,43 +27,54 @@ public final class iOSAppRuntime: ObservableObject {
             ?? FileManager.default.temporaryDirectory
         let storageDir = docs.appendingPathComponent("BoBoRemote/v6", isDirectory: true)
         let dlDir = docs.appendingPathComponent("BoBoDownloads", isDirectory: true)
-        let devName = UIDevice.current.name
 
-        self.identity = BoBoIdentityStore(storageDir: storageDir, defaultDeviceName: devName)
-        self.identity.ensureLoaded()
-        // iOS 遵循 Apple 沙盒铁律：本机投屏协助采用 view_only 模式，主控支持 100% 全功能
-        self.hostServer = BoBoHostServer(
+        let identity = BoBoIdentityStore(storageDir: storageDir, defaultDeviceName: UIDevice.current.name)
+        identity.ensureLoaded()
+        let hostServer = BoBoHostServer(
             identity: identity,
             downloadDir: dlDir,
             port: UInt16(BoBoProtocol.defaultTcpPort),
             hostControlMode: BoBoProtocol.controlModeViewOnly
         )
-        self.discovery = BoBoLanDiscovery(
+        self.identity = identity
+        self.hostServer = hostServer
+        discovery = BoBoLanDiscovery(
             identity: identity,
             hostControlMode: BoBoProtocol.controlModeViewOnly,
             tcpPortProvider: { [weak hostServer] in hostServer?.boundPort ?? BoBoProtocol.defaultTcpPort },
             allowIncomingProvider: { [weak hostServer] in hostServer?.allowIncomingControl ?? true },
             onPeersUpdated: nil
         )
-        self.authorizedPeers = identity.listAuthorizedPeers()
+        authorizedPeers = identity.listAuthorizedPeers()
         setupServices()
     }
 
     private func setupServices() {
-        let bridge = iOSHostDelegate(runtime: self)
-        delegateBridge = bridge
-        hostServer.delegate = bridge
-
-        let rk = iOSReplayKitBridge(
-            onVideoFrame: { [weak hostServer] w, h, isKey, data, tsMs in
-                hostServer?.broadcastVideoFrame(width: w, height: h, isKeyframe: isKey, h264: data, timestampMs: tsMs)
+        let bridge = iOSReplayKitBridge(
+            onVideoFrame: { [weak hostServer] frame, timestampMs in
+                hostServer?.broadcastVideoFrame(
+                    width: frame.width, height: frame.height, isKeyframe: frame.isKeyframe,
+                    h264: frame.h264Data, timestampMs: timestampMs
+                )
             },
-            onBroadcastState: { [weak self] active in
-                Task { @MainActor in self?.broadcastActive = active }
+            onCaptureChanged: { [weak self, weak hostServer] dimensions, hadCapture in
+                if let dimensions, hadCapture {
+                    hostServer?.notifyStreamReconfigured(
+                        monitorIndex: 0, width: dimensions.width, height: dimensions.height,
+                        fps: ReplayKitLoopback.framesPerSecond, bitrateKbps: ReplayKitLoopback.bitrateKbps
+                    )
+                } else if dimensions == nil {
+                    hostServer?.disconnectStreamingSessions(reason: "iOS 屏幕共享已停止")
+                }
+                DispatchQueue.main.async { self?.broadcastActive = dimensions != nil }
             }
         )
-        replayKitBridge = rk
-        rk.start()
+        replayKitBridge = bridge
+        let delegate = iOSHostDelegate(runtime: self, bridge: bridge)
+        delegateBridge = delegate
+        hostServer.delegate = delegate
+        updateScreenMetrics()
+        bridge.start()
 
         Task {
             _ = try? await hostServer.start()
@@ -73,12 +84,46 @@ public final class iOSAppRuntime: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.updateScreenMetrics()
                 self.lanPeers = self.discovery.getPeers()
                 self.authorizedPeers = self.identity.listAuthorizedPeers()
                 self.localPairSession = self.hostServer.getActivePairing()
                 self.pairCountdown = self.localPairSession?.remainingSeconds ?? 0
             }
         }
+    }
+
+    func updateScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            updateScreenMetrics()
+            replayKitBridge?.start()
+        case .background:
+            replayKitBridge?.stop()
+        default:
+            break
+        }
+    }
+
+    private func updateScreenMetrics() {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }
+        let nativeBounds = (scene?.screen ?? UIScreen.main).nativeBounds
+        let orientation = scene?.interfaceOrientation ?? .portrait
+        let shortSide = Int(min(nativeBounds.width, nativeBounds.height))
+        let longSide = Int(max(nativeBounds.width, nativeBounds.height))
+        let dimensions = iOSReplayKitBridge.Dimensions(
+            width: orientation.isLandscape ? longSide : shortSide,
+            height: orientation.isLandscape ? shortSide : longSide
+        )
+        let rotation: Int
+        switch orientation {
+        case .landscapeLeft: rotation = 1
+        case .portraitUpsideDown: rotation = 2
+        case .landscapeRight: rotation = 3
+        default: rotation = 0
+        }
+        delegateBridge?.updateScreen(dimensions, rotation: rotation)
     }
 
     public func generatePairingPin() {
@@ -94,17 +139,60 @@ public final class iOSAppRuntime: ObservableObject {
 
 private final class iOSHostDelegate: BoBoHostServerDelegate, @unchecked Sendable {
     private weak var runtime: iOSAppRuntime?
-    init(runtime: iOSAppRuntime) { self.runtime = runtime }
+    private let bridge: iOSReplayKitBridge
+    private let screenLock = NSLock()
+    private var screen = iOSReplayKitBridge.Dimensions(width: 0, height: 0)
+    private var rotation = 0
 
-    func hostMonitors() -> [BoBoMonitorDescriptor] {
-        [BoBoMonitorDescriptor(index: 0, name: "iOS Screen (ReplayKit)", width: 1170, height: 2532, isPrimary: true)]
+    init(runtime: iOSAppRuntime, bridge: iOSReplayKitBridge) {
+        self.runtime = runtime
+        self.bridge = bridge
     }
 
+    func updateScreen(_ dimensions: iOSReplayKitBridge.Dimensions, rotation: Int) {
+        screenLock.lock()
+        screen = dimensions
+        self.rotation = rotation
+        screenLock.unlock()
+    }
+
+    func hostMonitors() -> [BoBoMonitorDescriptor] {
+        screenLock.lock()
+        let screen = self.screen
+        screenLock.unlock()
+        let size = bridge.captureDimensions ?? screen
+        return [BoBoMonitorDescriptor(index: 0, name: "iOS Screen (ReplayKit)", width: size.width, height: size.height, isPrimary: true)]
+    }
+
+    func hostScreenOrientation() -> Int {
+        screenLock.lock()
+        let rotation = self.rotation
+        screenLock.unlock()
+        guard let capture = bridge.captureDimensions else { return rotation }
+        if capture.width > capture.height { return rotation == 3 ? 3 : 1 }
+        return rotation == 2 ? 2 : 0
+    }
+
+    func hostStreamConfiguration(monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int)
+        -> (monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int)? {
+        guard let capture = bridge.captureDimensions else { return nil }
+        return (0, capture.width, capture.height, ReplayKitLoopback.framesPerSecond, ReplayKitLoopback.bitrateKbps)
+    }
+
+    func hostCompositesCursor() -> Bool { false }
     func hostDidStartStream(monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int, muteHost: Bool, requestPrivacy: Bool) {}
     func hostDidStopAllStreams() {}
+    func hostDidRequestKeyframe() { bridge.requestKeyframe() }
 
     func hostSessionStateChanged(active: Bool, peerName: String) {
-        Task { @MainActor in runtime?.activeViewerName = active ? peerName : nil }
+        DispatchQueue.main.async { [weak runtime] in runtime?.activeViewerName = active ? peerName : nil }
+    }
+
+    func hostDidAuthorizePeer(_ peer: BoBoAuthorizedPeer) {
+        DispatchQueue.main.async { [weak runtime] in
+            guard let runtime else { return }
+            runtime.authorizedPeers = runtime.identity.listAuthorizedPeers()
+        }
     }
 }
 
@@ -112,7 +200,7 @@ private final class iOSHostDelegate: BoBoHostServerDelegate, @unchecked Sendable
 public struct ReplayKitPickerView: UIViewRepresentable {
     public func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
         let picker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 60, height: 60))
-        picker.preferredExtension = "com.bobo.remote.ios.broadcast"
+        picker.preferredExtension = Bundle.main.bundleIdentifier.map { $0 + ".broadcast" }
         picker.showsMicrophoneButton = false
         return picker
     }

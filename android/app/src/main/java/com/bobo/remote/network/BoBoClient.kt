@@ -14,9 +14,10 @@ import java.io.FileInputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.security.MessageDigest
+import java.util.ArrayDeque
 import java.util.UUID
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 
@@ -51,11 +52,13 @@ data class BoBoStreamOptions(
     val requestPrivacy: Boolean = false,
     val superDisplay: Boolean = true,
     val clientWidth: Int = 0,
-    val clientHeight: Int = 0
+    val clientHeight: Int = 0,
+    val expectedHostThumbprint: String = "",
+    val expectedHostNodeId: String = ""
 )
 
 /**
- * BoBo V6.2 Android 原生主控客户端（TLS 1.2 + 二进制流 + 配对 + 控制 + 文件发送）。
+ * BoBo V6.3 Android 原生主控客户端（TLS 1.2+ + 严格 TOFU 证书钉扎 + RSA 双向身份证明 + 合并防积压发送队列）。
  */
 class BoBoStreamClient(private val identity: BoBoIdentityStore) {
     interface Listener {
@@ -72,17 +75,25 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
         fun onRttUpdated(rttMs: Double) {}
         fun onPrivacyStateChanged(active: Boolean) {}
         fun onSuperDisplayStateChanged(active: Boolean, nativeMatch: Boolean, width: Int, height: Int) {}
+        fun onReconfigured(width: Int, height: Int, fps: Int) {}
+        fun onHostCursorCompositedChanged(composited: Boolean) {}
         fun onError(code: String, message: String)
         fun onDisconnected(reason: String)
     }
 
-    private val writeLock = Any()
-    private val sendExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "BoBo6-Client-Tx").apply { isDaemon = true }
-    }
+    private data class QueuedFrame(val type: BoBoPacketType, val flags: Long, val payload: ByteArray)
+
+    private val sendLock = Object()
+    private val sendQueue = ArrayDeque<QueuedFrame>()
+    private var pendingAbsMove: BoBoInputPacket? = null
+    private var pendingRelDx: Int = 0
+    private var pendingRelDy: Int = 0
+    private val pendingTouchMoves = LinkedHashMap<Int, BoBoInputPacket>()
+
     private val connected = AtomicBoolean(false)
+    private val lastRxNs = AtomicLong(0L)
     @Volatile private var socket: SSLSocket? = null
-    @Volatile private var outStream: OutputStream? = null
+    private val generation = AtomicLong(0L)
 
     @Volatile var remotePlatform: String = BoBoProtocol.PLATFORM_WINDOWS
         private set
@@ -90,57 +101,90 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
         private set
     @Volatile var remoteMonitors: List<BoBoMonitorDescriptor> = emptyList()
         private set
+    @Volatile var hostCursorComposited: Boolean = false
+        private set
 
     val isConnected: Boolean get() = connected.get()
 
     fun connectAndStartStream(options: BoBoStreamOptions, listener: Listener) {
-        disconnect()
+        val request = resetConnection()
         identity.ensureLoaded()
         Thread({
             var disconnectReason = "连接已断开"
+            var failed = false
+            var currentSocket: SSLSocket? = null
             try {
                 var serverThumb = ""
-                val sslSock = openTlsSocket(options.host, options.port, 8000) { serverThumb = it }
-                socket = sslSock
+                if (generation.get() != request) return@Thread
+                val sslSock = openTlsSocket(options.host, options.port, 10_000) { serverThumb = it }
+                currentSocket = sslSock
+                synchronized(sendLock) {
+                    if (generation.get() != request) return@Thread
+                    socket = sslSock
+                }
                 val out = sslSock.outputStream
                 val inp = sslSock.inputStream
-                outStream = out
 
                 sendHello(out, identity)
-                val ackFrame = BoBoProtocol.readFrame(inp)
+                val ackFrame = BoBoProtocol.readFrame(inp, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
                 if (ackFrame == null || ackFrame.type != BoBoPacketType.CONTROL_JSON) {
                     listener.onError("HANDSHAKE_FAILED", "目标主机未返回有效的 BoBo 握手响应。")
-                    disconnect()
                     return@Thread
                 }
                 val ack = BoBoProtocol.parseJson(ackFrame.payload)
-                if (ack == null || ack.optString("protocol") != BoBoProtocol.PROTOCOL_MAGIC) {
+                if (ack == null || !isHelloAck(ack)) {
                     listener.onError("NOT_BOBO", "目标主机未运行 BoBo远程 V6。")
-                    disconnect()
                     return@Thread
                 }
                 if (!ack.optBoolean("allowIncoming", true)) {
-                    listener.onError("HOST_DISABLED", "对方已关闭「允许本机被控」。")
-                    disconnect()
+                    listener.onError("HOST_DISABLED", "对方已关闭「允许本机被控」或尚未开启录屏权限。")
                     return@Thread
                 }
-                if (!ack.optBoolean("authorized", false)) {
-                    listener.onError("PAIR_REQUIRED", "首次连接需先输入对方 4 位临时配对码。")
-                    disconnect()
+                // Strict Client TOFU Certificate Pinning (never fall back to JSON certThumbprint!)
+                if (serverThumb.isBlank()) {
+                    listener.onError("CERT_MISSING", "未能从 TLS 握手提取对方证书指纹，已拒绝连接。")
                     return@Thread
+                }
+                val hostNodeId = ack.optString("nodeId", "")
+                val hostCode = ack.optString("deviceCode", "")
+                val hostName = ack.optString("deviceName", options.host)
+                if (hasPinMismatch(identity, hostNodeId, serverThumb, options.expectedHostThumbprint, options.expectedHostNodeId)) {
+                    listener.onError(
+                        "CERT_MISMATCH",
+                        "安全警告：目标设备 TLS 证书指纹与本地已配对记录不一致，已拒绝连接。请先删除旧授权后再重新配对。"
+                    )
+                    return@Thread
+                }
+
+                if (!ack.optBoolean("authorized", false) || !identity.isPeerAuthorized(hostNodeId, serverThumb)) {
+                    listener.onError("PAIR_REQUIRED", "请先输入对方 4 位临时配对码。")
+                    return@Thread
+                }
+
+                // Prove private-key possession over host's fresh sessionNonce before issuing START_STREAM
+                if (ack.optBoolean("authChallenge", false)) {
+                    val nonce = ack.optString("nonce", "")
+                    val sig = identity.signAuthChallenge(nonce, serverThumb)
+                    BoBoProtocol.writeJson(out, JSONObject().apply {
+                        put("type", "AUTH_PROOF")
+                        put("signature", sig)
+                        put("clientCertDer", identity.certificateDerBase64)
+                    })
+                    val authFrame = BoBoProtocol.readFrame(inp, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
+                    val authRes = authFrame?.takeIf { it.type == BoBoPacketType.CONTROL_JSON }?.let { BoBoProtocol.parseJson(it.payload) }
+                    if (authRes?.optString("type") != "AUTH_RESULT" || authRes.optBoolean("ok", false) != true) {
+                        listener.onError("AUTH_FAILED", authRes?.optString("error", "客户端身份签名校验失败") ?: "双向身份校验失败")
+                            return@Thread
+                    }
                 }
 
                 remotePlatform = ack.optString("platform", BoBoProtocol.PLATFORM_WINDOWS)
                 remoteHostControlMode = ack.optString("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL)
                 remoteMonitors = BoBoProtocol.parseMonitors(ack)
 
-                val hostNodeId = ack.optString("nodeId", "")
-                val hostCode = ack.optString("deviceCode", "")
-                val hostName = ack.optString("deviceName", options.host)
-                val thumb = serverThumb.ifBlank { ack.optString("certThumbprint", "") }
-                if (hostNodeId.isNotBlank() && thumb.isNotBlank()) {
+                if (hostNodeId.isNotBlank()) {
                     identity.authorizeOrUpdatePeer(
-                        BoBoAuthorizedPeer(hostNodeId, hostCode, hostName, thumb, options.host)
+                        BoBoAuthorizedPeer(hostNodeId, hostCode, hostName, serverThumb, options.host)
                     )
                 }
 
@@ -157,15 +201,21 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                     put("clientWidth", options.clientWidth)
                     put("clientHeight", options.clientHeight)
                 }
-                synchronized(writeLock) {
-                    BoBoProtocol.writeJson(out, startReq)
+                BoBoProtocol.writeJson(out, startReq)
+
+                sslSock.soTimeout = STREAM_READ_TIMEOUT_MS
+                synchronized(sendLock) {
+                    if (generation.get() != request) return@Thread
+                    lastRxNs.set(System.nanoTime())
+                    connected.set(true)
+                    startTxThread(sslSock, request)
                 }
+                Thread({ pingLoop(sslSock, request) }, "BoBo6-Client-Ping").apply { isDaemon = true; start() }
 
-                connected.set(true)
-                Thread({ pingLoop() }, "BoBo6-Client-Ping").apply { isDaemon = true; start() }
-
-                while (connected.get()) {
+                while (generation.get() == request && connected.get()) {
                     val frame = BoBoProtocol.readFrame(inp) ?: break
+                    if (generation.get() != request) break
+                    lastRxNs.set(System.nanoTime())
                     when (frame.type) {
                         BoBoPacketType.VIDEO_H264 -> {
                             BoBoProtocol.parseVideoPayload(frame.payload)?.let {
@@ -177,6 +227,7 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                                 listener.onAudioFrame(it)
                             }
                         }
+                        BoBoPacketType.CURSOR_SHAPE -> Unit
                         BoBoPacketType.CONTROL_JSON -> {
                             val msg = BoBoProtocol.parseJson(frame.payload) ?: continue
                             when (msg.optString("type")) {
@@ -190,12 +241,31 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                                     val w = msg.optInt("width", options.width)
                                     val h = msg.optInt("height", options.height)
                                     val fps = msg.optInt("fps", options.fps)
+                                    val defaultComposited = remotePlatform == BoBoProtocol.PLATFORM_WINDOWS ||
+                                        remotePlatform == BoBoProtocol.PLATFORM_MACOS
+                                    val comp = msg.optBoolean("hostCursorComposited", defaultComposited)
+                                    hostCursorComposited = comp
+                                    listener.onHostCursorCompositedChanged(comp)
                                     listener.onStreamStarted(remoteMonitors, w, h, fps, remotePlatform, remoteHostControlMode)
+                                    if (msg.has("privacyActive")) listener.onPrivacyStateChanged(msg.optBoolean("privacyActive"))
                                     listener.onSuperDisplayStateChanged(
                                         msg.optBoolean("superDisplayActive", false),
                                         msg.optBoolean("superDisplayNativeMatch", false),
                                         w, h
                                     )
+                                }
+                                "CURSOR_MODE_STATE" -> {
+                                    val comp = msg.optBoolean("hostCursorComposited", true)
+                                    hostCursorComposited = comp
+                                    listener.onHostCursorCompositedChanged(comp)
+                                }
+                                "RECONFIGURED" -> {
+                                    val mons = BoBoProtocol.parseMonitors(msg)
+                                    if (mons.isNotEmpty()) remoteMonitors = mons
+                                    val w = msg.optInt("width", 0)
+                                    val h = msg.optInt("height", 0)
+                                    val fps = msg.optInt("fps", 60)
+                                    if (w > 0 && h > 0) listener.onReconfigured(w, h, fps)
                                 }
                                 "SUPER_DISPLAY_STATE" -> {
                                     listener.onSuperDisplayStateChanged(
@@ -218,7 +288,7 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                                 "ERROR" -> {
                                     val code = msg.optString("code", "ERROR")
                                     val emsg = msg.optString("message", "远端返回错误")
-                                    disconnectReason = emsg
+                                    failed = true
                                     listener.onError(code, emsg)
                                     break
                                 }
@@ -232,23 +302,85 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                     }
                 }
             } catch (ex: Exception) {
+                if (generation.get() != request) return@Thread
                 if (connected.get()) {
                     disconnectReason = ex.message ?: "网络连接中断"
                 } else {
                     listener.onError("CONNECT_FAILED", "连接被控端失败：${ex.message}")
-                    return@Thread
                 }
             } finally {
-                val was = connected.getAndSet(false)
-                closeSocketQuietly()
-                if (was) listener.onDisconnected(disconnectReason)
+                val notify = synchronized(sendLock) {
+                    if (generation.get() != request) false else {
+                        val wasConnected = connected.get()
+                        clearConnectionLocked()
+                        wasConnected && !failed
+                    }
+                }
+                try { currentSocket?.close() } catch (_: Exception) {}
+                if (notify) listener.onDisconnected(disconnectReason)
             }
         }, "BoBo6-Client-Rx").apply { isDaemon = true; start() }
     }
 
-    private fun pingLoop() {
-        while (connected.get()) {
+    private fun startTxThread(connection: SSLSocket, request: Long) {
+        Thread({ txLoop(connection, request) }, "BoBo6-Client-Tx").apply { isDaemon = true; start() }
+    }
+
+    private fun txLoop(connection: SSLSocket, request: Long) {
+        try {
+            val out = connection.outputStream
+            while (true) {
+                val item = synchronized(sendLock) {
+                    while (generation.get() == request && connected.get() && sendQueue.isEmpty() &&
+                        pendingAbsMove == null && pendingRelDx == 0 && pendingRelDy == 0 && pendingTouchMoves.isEmpty()) {
+                        sendLock.wait()
+                    }
+                    if (generation.get() != request || !connected.get()) return
+                    if (sendQueue.isNotEmpty()) sendQueue.removeFirst() else takeNextCoalescedMoveLocked() ?: return
+                }
+                BoBoProtocol.writeFrame(out, item.type, item.flags, item.payload)
+            }
+        } catch (_: Exception) {
+            try { connection.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun flushCoalescedMovesLocked() {
+        while (true) {
+            val m = takeNextCoalescedMoveLocked() ?: break
+            sendQueue.addLast(m)
+        }
+    }
+
+    private fun takeNextCoalescedMoveLocked(): QueuedFrame? {
+        pendingAbsMove?.let { abs ->
+            pendingAbsMove = null
+            return QueuedFrame(BoBoPacketType.INPUT_EVENT, 0L, BoBoProtocol.buildInputPayload(abs))
+        }
+        if (pendingRelDx != 0 || pendingRelDy != 0) {
+            val dx = pendingRelDx.coerceIn(-32767, 32767)
+            val dy = pendingRelDy.coerceIn(-32767, 32767)
+            pendingRelDx -= dx
+            pendingRelDy -= dy
+            return QueuedFrame(BoBoPacketType.INPUT_EVENT, 0L, BoBoProtocol.buildInputPayload(BoBoProtocol.buildMouseRel(dx, dy)))
+        }
+        if (pendingTouchMoves.isNotEmpty()) {
+            val it = pendingTouchMoves.entries.iterator()
+            val first = it.next().value
+            it.remove()
+            return QueuedFrame(BoBoPacketType.INPUT_EVENT, 0L, BoBoProtocol.buildInputPayload(first))
+        }
+        return null
+    }
+
+    private fun pingLoop(connection: SSLSocket, request: Long) {
+        while (generation.get() == request && connected.get()) {
             try {
+                val silentMs = (System.nanoTime() - lastRxNs.get()) / 1_000_000L
+                if (silentMs >= STREAM_READ_TIMEOUT_MS.toLong()) {
+                    connection.close()
+                    break
+                }
                 sendJson(JSONObject().apply {
                     put("type", "PING")
                     put("ts", System.nanoTime())
@@ -262,22 +394,36 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
 
     fun sendInput(pkt: BoBoInputPacket) {
         if (!connected.get()) return
-        val payload = BoBoProtocol.buildInputPayload(pkt)
-        sendExecutor.execute {
-            val out = outStream ?: return@execute
-            if (!connected.get()) return@execute
-            try {
-                synchronized(writeLock) {
-                    BoBoProtocol.writeFrame(out, BoBoPacketType.INPUT_EVENT, 0L, payload)
+        synchronized(sendLock) {
+            if (!connected.get()) return
+            when {
+                pkt.kind == BoBoProtocol.INPUT_KIND_MOUSE_ABS -> {
+                    pendingAbsMove = pkt
                 }
-            } catch (_: Exception) {
+                pkt.kind == BoBoProtocol.INPUT_KIND_MOUSE_REL -> {
+                    if (pkt.a.toInt() == 0 && pkt.b.toInt() == 0) return
+                    pendingRelDx = (pendingRelDx + pkt.a.toInt()).coerceIn(-32768, 32767)
+                    pendingRelDy = (pendingRelDy + pkt.b.toInt()).coerceIn(-32768, 32767)
+                }
+                pkt.kind == BoBoProtocol.INPUT_KIND_TOUCH && (pkt.flags and 0x0F) == BoBoProtocol.TOUCH_ACTION_MOVE -> {
+                    val pointerId = (pkt.flags ushr 4) and 0x0F
+                    pendingTouchMoves[pointerId] = pkt
+                }
+                else -> {
+                    flushCoalescedMovesLocked()
+                    if (sendQueue.size >= 256 && pkt.kind == BoBoProtocol.INPUT_KIND_RELEASE_ALL) sendQueue.clear()
+                    if (sendQueue.size < 256) {
+                        sendQueue.addLast(QueuedFrame(BoBoPacketType.INPUT_EVENT, 0L, BoBoProtocol.buildInputPayload(pkt)))
+                    }
+                }
             }
+            sendLock.notifyAll()
         }
     }
 
     fun sendKeyCombo(vks: IntArray) {
-        for (vk in vks) sendInput(BoBoProtocol.buildKey(vk, true))
-        for (i in vks.indices.reversed()) sendInput(BoBoProtocol.buildKey(vks[i], false))
+        for (vk in vks) sendInput(BoBoProtocol.buildKey(vk, true, isExtendedVk(vk)))
+        for (i in vks.indices.reversed()) sendInput(BoBoProtocol.buildKey(vks[i], false, isExtendedVk(vks[i])))
     }
 
     fun sendReconfigure(monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int) {
@@ -315,40 +461,67 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
 
     private fun sendJson(obj: JSONObject) {
         if (!connected.get()) return
-        sendExecutor.execute {
-            val out = outStream ?: return@execute
-            if (!connected.get()) return@execute
-            try {
-                synchronized(writeLock) {
-                    BoBoProtocol.writeJson(out, obj)
-                }
-            } catch (_: Exception) {
+        val bytes = obj.toString().toByteArray(Charsets.UTF_8)
+        synchronized(sendLock) {
+            if (!connected.get()) return
+            flushCoalescedMovesLocked()
+            if (sendQueue.size < 256) {
+                sendQueue.addLast(QueuedFrame(BoBoPacketType.CONTROL_JSON, 0L, bytes))
+                sendLock.notifyAll()
             }
         }
     }
 
     fun disconnect() {
-        val was = connected.getAndSet(false)
-        if (was) {
-            try {
-                outStream?.let { out ->
-                    synchronized(writeLock) {
-                        BoBoProtocol.writeJson(out, JSONObject().put("type", "DISCONNECT"))
-                    }
-                }
-            } catch (_: Exception) {
-            }
-        }
-        closeSocketQuietly()
+        resetConnection()
     }
 
-    private fun closeSocketQuietly() {
-        try { socket?.close() } catch (_: Exception) {}
+    private fun resetConnection(): Long {
+        val (request, oldSocket) = synchronized(sendLock) {
+            val previous = socket
+            val next = generation.incrementAndGet()
+            clearConnectionLocked()
+            next to previous
+        }
+        if (oldSocket != null) {
+            Thread({
+                try { oldSocket.close() } catch (_: Exception) {}
+            }, "BoBo6-Client-Close").apply { isDaemon = true; start() }
+        }
+        return request
+    }
+
+    private fun clearConnectionLocked() {
+        connected.set(false)
         socket = null
-        outStream = null
+        sendQueue.clear()
+        pendingAbsMove = null
+        pendingRelDx = 0
+        pendingRelDy = 0
+        pendingTouchMoves.clear()
+        sendLock.notifyAll()
     }
 
     companion object {
+        private const val STREAM_READ_TIMEOUT_MS = 12_000
+        private const val PIN_MISMATCH_MESSAGE = "目标设备证书与配对记录不一致（CERT_MISMATCH）"
+
+        private fun isHelloAck(ack: JSONObject) =
+            ack.optString("type") == "HELLO_ACK" && ack.optString("protocol") == BoBoProtocol.PROTOCOL_MAGIC
+
+        private fun hasPinMismatch(identity: BoBoIdentityStore, node: String, thumb: String,
+                                   expectedThumb: String = "", expectedNode: String = ""): Boolean {
+            if (expectedNode.isNotBlank() && !expectedNode.equals(node, ignoreCase = true)) return true
+            if (expectedThumb.isNotBlank() && !BoBoIdentityStore.fixedTimeEqualsHex(expectedThumb, thumb)) return true
+            val pinned = identity.findPeerByNodeId(node) ?: return false
+            return !BoBoIdentityStore.fixedTimeEqualsHex(pinned.certThumbprint, thumb)
+        }
+
+        private fun isExtendedVk(vk: Int): Boolean {
+            val v = vk and 0xFF
+            return v == 0x5B || v == 0x5C || v == 0xA3 || v == 0xA5 || (v in 0x21..0x2E)
+        }
+
         fun probeHost(host: String, port: Int, identity: BoBoIdentityStore, timeoutMs: Int = 5000): BoBoProbeResult {
             identity.ensureLoaded()
             val targetPort = if (port > 0) port else BoBoProtocol.DEFAULT_TCP_PORT
@@ -356,27 +529,33 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
             return try {
                 var serverThumb = ""
                 sock = openTlsSocket(host, targetPort, timeoutMs) { serverThumb = it }
-                sock.soTimeout = timeoutMs
                 sendHello(sock.outputStream, identity)
-                val reply = BoBoProtocol.readFrame(sock.inputStream)
+                val reply = BoBoProtocol.readFrame(sock.inputStream, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
                 if (reply == null || reply.type != BoBoPacketType.CONTROL_JSON) {
                     return BoBoProbeResult(reachable = true, host = host, port = targetPort, error = "未返回有效 BoBo 握手")
                 }
                 val ack = BoBoProtocol.parseJson(reply.payload)
-                if (ack == null || ack.optString("protocol") != BoBoProtocol.PROTOCOL_MAGIC) {
+                if (ack == null || !isHelloAck(ack)) {
                     return BoBoProbeResult(reachable = true, host = host, port = targetPort, error = "目标非 BoBo远程 V6")
+                }
+                if (serverThumb.isBlank()) {
+                    return BoBoProbeResult(reachable = true, host = host, port = targetPort, error = "缺少有效 TLS 证书")
+                }
+                val hostNodeId = ack.optString("nodeId", "")
+                if (hasPinMismatch(identity, hostNodeId, serverThumb)) {
+                    return BoBoProbeResult(reachable = true, host = host, port = targetPort, error = PIN_MISMATCH_MESSAGE)
                 }
                 BoBoProbeResult(
                     reachable = true,
                     isBoBoHost = true,
                     allowIncoming = ack.optBoolean("allowIncoming", true),
-                    authorized = ack.optBoolean("authorized", false),
+                    authorized = ack.optBoolean("authorized", false) && identity.isPeerAuthorized(hostNodeId, serverThumb),
                     host = host,
                     port = targetPort,
                     hostNodeId = ack.optString("nodeId", ""),
                     hostDeviceCode = ack.optString("deviceCode", ""),
                     hostName = ack.optString("deviceName", host),
-                    hostThumbprint = serverThumb.ifBlank { ack.optString("certThumbprint", "") },
+                    hostThumbprint = serverThumb,
                     platform = ack.optString("platform", BoBoProtocol.PLATFORM_WINDOWS),
                     hostControlMode = ack.optString("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL),
                     screenOrientation = ack.optInt("screenOrientation", 0),
@@ -400,7 +579,9 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
             port: Int,
             pin: String,
             identity: BoBoIdentityStore,
-            timeoutMs: Int = 10000
+            timeoutMs: Int = 10000,
+            expectedHostThumbprint: String = "",
+            expectedHostNodeId: String = ""
         ): Triple<Boolean, String, String> {
             identity.ensureLoaded()
             val targetPort = if (port > 0) port else BoBoProtocol.DEFAULT_TCP_PORT
@@ -408,13 +589,12 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
             return try {
                 var serverThumb = ""
                 sock = openTlsSocket(host, targetPort, timeoutMs) { serverThumb = it }
-                sock.soTimeout = timeoutMs
                 sendHello(sock.outputStream, identity)
-                val ackFrame = BoBoProtocol.readFrame(sock.inputStream)
+                val ackFrame = BoBoProtocol.readFrame(sock.inputStream, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
                     ?: return Triple(false, "", "被控端未返回握手信息")
                 val ack = BoBoProtocol.parseJson(ackFrame.payload)
                     ?: return Triple(false, "", "握手数据无效")
-                if (ack.optString("protocol") != BoBoProtocol.PROTOCOL_MAGIC) {
+                if (ackFrame.type != BoBoPacketType.CONTROL_JSON || !isHelloAck(ack)) {
                     return Triple(false, "", "目标不是 BoBo远程 V6 设备")
                 }
                 if (!ack.optBoolean("allowIncoming", true)) {
@@ -423,26 +603,35 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                 val hostNodeId = ack.optString("nodeId", "")
                 val hostCode = ack.optString("deviceCode", "")
                 val hostName = ack.optString("deviceName", host)
-                val hostThumb = serverThumb.ifBlank { ack.optString("certThumbprint", "") }
+                if (serverThumb.isBlank()) {
+                    return Triple(false, hostName, "未能从 TLS 握手提取对方证书指纹")
+                }
+                if (hasPinMismatch(identity, hostNodeId, serverThumb, expectedHostThumbprint, expectedHostNodeId)) {
+                    return Triple(false, hostName, PIN_MISMATCH_MESSAGE)
+                }
                 val nonce = ack.optString("nonce", "")
+                if (nonce.isBlank() || hostNodeId.isBlank()) return Triple(false, hostName, "无效的配对身份")
 
-                val proof = BoBoIdentityStore.computePinProof(pin.trim(), nonce, identity.certThumbprint, hostThumb)
+                val proof = BoBoIdentityStore.computePinProof(pin.trim(), nonce, identity.certThumbprint, serverThumb)
+                val authSig = identity.signAuthChallenge(nonce, serverThumb)
                 BoBoProtocol.writeJson(sock.outputStream, JSONObject().apply {
                     put("type", "PAIR_REQUEST")
                     put("proof", proof)
+                    put("authSig", authSig)
+                    put("clientCertDer", identity.certificateDerBase64)
                 })
 
-                val resFrame = BoBoProtocol.readFrame(sock.inputStream)
+                val resFrame = BoBoProtocol.readFrame(sock.inputStream, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
                     ?: return Triple(false, hostName, "被控端未返回配对结果")
                 val res = BoBoProtocol.parseJson(resFrame.payload)
                     ?: return Triple(false, hostName, "配对结果格式错误")
-                if (!res.optBoolean("ok", false)) {
+                if (resFrame.type != BoBoPacketType.CONTROL_JSON || res.optString("type") != "PAIR_RESULT" || !res.optBoolean("ok", false)) {
                     return Triple(false, hostName, res.optString("error", "4 位配对码校验失败"))
                 }
 
-                identity.authorizeOrUpdatePeer(
-                    BoBoAuthorizedPeer(hostNodeId, hostCode, hostName, hostThumb, host)
-                )
+                if (!identity.authorizeOrUpdatePeer(BoBoAuthorizedPeer(hostNodeId, hostCode, hostName, serverThumb, host))) {
+                    return Triple(false, hostName, PIN_MISMATCH_MESSAGE)
+                }
                 Triple(true, hostName, "")
             } catch (ex: Exception) {
                 Triple(false, "", "配对失败：${ex.message}")
@@ -459,6 +648,8 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
             onProgress: ((Long, Long) -> Unit)? = null
         ): Pair<Boolean, String> {
             if (!file.exists() || !file.isFile) return Pair(false, "文件不存在")
+            val total = file.length()
+            if (total > BoBoProtocol.MAX_FILE_TRANSFER_BYTES) return Pair(false, "单文件大小超出 2 GiB 上限")
             identity.ensureLoaded()
             val targetPort = if (port > 0) port else BoBoProtocol.DEFAULT_TCP_PORT
             var sock: SSLSocket? = null
@@ -472,32 +663,51 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                 val shaHex = BoBoProtocol.bytesToHex(digest.digest())
                 val tid = UUID.randomUUID().toString().replace("-", "").substring(0, 16)
 
-                sock = openTlsSocket(host, targetPort, 15000) {}
+                var serverThumb = ""
+                sock = openTlsSocket(host, targetPort, 15_000) { serverThumb = it }
                 val out = sock.outputStream
                 val inp = sock.inputStream
                 sendHello(out, identity)
-                val ackFrame = BoBoProtocol.readFrame(inp) ?: return Pair(false, "握手失败")
+                val ackFrame = BoBoProtocol.readFrame(inp, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
+                    ?: return Pair(false, "握手失败")
                 val ack = BoBoProtocol.parseJson(ackFrame.payload)
-                if (ack == null || !ack.optBoolean("authorized", false)) {
+                if (ackFrame.type != BoBoPacketType.CONTROL_JSON || ack == null || !isHelloAck(ack) || !ack.optBoolean("authorized", false)) {
                     return Pair(false, "请先与目标设备完成 4 位配对授权")
+                }
+                val hostNodeId = ack.optString("nodeId", "")
+                if (serverThumb.isBlank() || !identity.isPeerAuthorized(hostNodeId, serverThumb)) {
+                    return Pair(false, "目标主机 TLS 证书指纹未通过本地信任钉扎校验，已中止发送")
+                }
+                if (ack.optBoolean("authChallenge", false)) {
+                    val nonce = ack.optString("nonce", "")
+                    BoBoProtocol.writeJson(out, JSONObject().apply {
+                        put("type", "AUTH_PROOF")
+                        put("signature", identity.signAuthChallenge(nonce, serverThumb))
+                        put("clientCertDer", identity.certificateDerBase64)
+                    })
+                    val authFrame = BoBoProtocol.readFrame(inp, BoBoProtocol.MAX_PRE_AUTH_PAYLOAD_BYTES)
+                    val authRes = authFrame?.takeIf { it.type == BoBoPacketType.CONTROL_JSON }?.let { BoBoProtocol.parseJson(it.payload) }
+                    if (authRes?.optString("type") != "AUTH_RESULT" || authRes.optBoolean("ok", false) != true) {
+                        return Pair(false, authRes?.optString("error", "双向密钥身份校验失败") ?: "身份校验失败")
+                    }
                 }
 
                 BoBoProtocol.writeJson(out, JSONObject().apply {
                     put("type", "FILE_OFFER")
                     put("transferId", tid)
                     put("fileName", file.name)
-                    put("totalBytes", file.length())
+                    put("totalBytes", total)
                     put("sha256", shaHex)
                 })
                 val accFrame = BoBoProtocol.readFrame(inp) ?: return Pair(false, "对方未接受文件")
                 val acc = BoBoProtocol.parseJson(accFrame.payload)
-                if (acc?.optString("type") != "FILE_ACCEPT") {
+                if (accFrame.type != BoBoPacketType.CONTROL_JSON ||
+                    acc?.optString("type") != "FILE_ACCEPT" || acc.optString("transferId") != tid) {
                     return Pair(false, acc?.optString("message", "对方拒绝了文件传输") ?: "拒绝接收")
                 }
 
                 val buf = ByteArray(65536)
                 var offset = 0L
-                val total = file.length()
                 FileInputStream(file).use { fis ->
                     var n: Int
                     while (fis.read(buf).also { n = it } > 0) {
@@ -507,13 +717,15 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                         onProgress?.invoke(offset, total)
                     }
                 }
+                sock.soTimeout = 30_000
                 BoBoProtocol.writeJson(out, JSONObject().apply {
                     put("type", "FILE_DONE")
                     put("transferId", tid)
                 })
                 val doneFrame = BoBoProtocol.readFrame(inp) ?: return Pair(false, "未收到完成确认")
                 val done = BoBoProtocol.parseJson(doneFrame.payload)
-                if (done?.optBoolean("ok", false) == true) {
+                if (doneFrame.type == BoBoPacketType.CONTROL_JSON && done?.optString("type") == "FILE_ACK" &&
+                    done.optString("transferId") == tid && done.optBoolean("ok", false)) {
                     Pair(true, done.optString("savedPath", file.name))
                 } else {
                     Pair(false, done?.optString("error", "对方保存文件失败") ?: "传输校验失败")
@@ -535,6 +747,7 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                 put("deviceCode", identity.deviceCode)
                 put("deviceName", identity.deviceName)
                 put("certThumbprint", identity.certThumbprint)
+                put("clientCertDer", identity.certificateDerBase64)
                 put("version", BoBoProtocol.APP_VERSION)
             })
         }
@@ -547,14 +760,21 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
         ): SSLSocket {
             val ctx = BoBoIdentityStore.createCapturingClientSslContext(onServerThumb)
             val sock = ctx.socketFactory.createSocket() as SSLSocket
-            sock.tcpNoDelay = true
-            sock.connect(InetSocketAddress(host, port), timeoutMs)
-            sock.enabledProtocols = sock.supportedProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray()
-            val params = sock.sslParameters
-            params.serverNames = listOf(SNIHostName(BoBoProtocol.TLS_SNI_HOST))
-            sock.sslParameters = params
-            sock.startHandshake()
-            return sock
+            try {
+                sock.tcpNoDelay = true
+                sock.keepAlive = true
+                sock.connect(InetSocketAddress(host, port), timeoutMs)
+                sock.soTimeout = timeoutMs
+                sock.enabledProtocols = sock.supportedProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray()
+                val params = sock.sslParameters
+                params.serverNames = listOf(SNIHostName(BoBoProtocol.TLS_SNI_HOST))
+                sock.sslParameters = params
+                sock.startHandshake()
+                return sock
+            } catch (e: Exception) {
+                try { sock.close() } catch (_: Exception) {}
+                throw e
+            }
         }
     }
 }

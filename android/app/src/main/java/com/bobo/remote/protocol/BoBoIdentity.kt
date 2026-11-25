@@ -42,10 +42,15 @@ data class BoBoAuthorizedPeer(
 data class BoBoLocalPairSession(
     val pin: String,
     val createdMs: Long,
-    val expiresMs: Long
+    val expiresMs: Long,
+    var failedAttempts: Int = 0
 ) {
-    val isExpired: Boolean get() = System.currentTimeMillis() >= expiresMs
+    val isExpired: Boolean get() = System.currentTimeMillis() >= expiresMs || failedAttempts >= MAX_FAILED_ATTEMPTS
     val remainingSeconds: Int get() = ((expiresMs - System.currentTimeMillis() + 999L) / 1000L).toInt().coerceAtLeast(0)
+
+    companion object {
+        const val MAX_FAILED_ATTEMPTS = 5
+    }
 }
 
 /**
@@ -75,6 +80,20 @@ class BoBoIdentityStore(
     private val peers = LinkedHashMap<String, BoBoAuthorizedPeer>()
 
     val formattedDeviceCode: String get() = formatDeviceCode(deviceCode)
+    val certificateDerBase64: String
+        get() {
+            ensureLoaded()
+            return java.util.Base64.getEncoder().encodeToString(certificate.encoded)
+        }
+
+    fun signAuthChallenge(nonceHex: String, hostThumbprint: String): String {
+        ensureLoaded()
+        val msg = buildAuthChallengeBytes(nonceHex, certThumbprint, hostThumbprint)
+        val signer = Signature.getInstance("SHA256withRSA")
+        signer.initSign(privateKey)
+        signer.update(msg)
+        return java.util.Base64.getEncoder().encodeToString(signer.sign())
+    }
 
     fun ensureLoaded() {
         synchronized(lock) {
@@ -113,11 +132,17 @@ class BoBoIdentityStore(
             nodeId = certThumbprint.substring(0, 24)
             deviceName = defaultDeviceName
 
+            var needSaveMeta = !restored
             if (metaFile.exists()) {
                 try {
                     val json = JSONObject(metaFile.readText(StandardCharsets.UTF_8))
+                    val savedThumb = json.optString("certThumbprint", "")
                     val savedNode = json.optString("nodeId", "")
-                    if (savedNode.isNotBlank()) nodeId = savedNode
+                    if (savedNode.isNotBlank() && savedThumb.equals(certThumbprint, ignoreCase = true)) {
+                        nodeId = savedNode
+                    } else {
+                        needSaveMeta = true
+                    }
                     val savedName = json.optString("deviceName", "")
                     if (savedName.isNotBlank()) deviceName = savedName
                     val arr = json.optJSONArray("authorizedPeers")
@@ -138,11 +163,13 @@ class BoBoIdentityStore(
                         }
                     }
                 } catch (_: Exception) {
+                    needSaveMeta = true
                 }
             } else {
-                if (nodeId.isBlank()) nodeId = UUID.randomUUID().toString().replace("-", "").substring(0, 24)
-                saveMetaLocked()
+                needSaveMeta = true
             }
+            if (nodeId.isBlank()) nodeId = UUID.randomUUID().toString().replace("-", "").substring(0, 24)
+            if (needSaveMeta) saveMetaLocked()
 
             loaded = true
         }
@@ -161,23 +188,39 @@ class BoBoIdentityStore(
         return ctx
     }
 
-    fun isPeerAuthorized(peerNodeId: String, peerThumbprint: String): Boolean {
+    fun findPeerByNodeId(peerNodeId: String): BoBoAuthorizedPeer? {
         ensureLoaded()
-        val normThumb = peerThumbprint.trim().lowercase(Locale.US)
-        if (normThumb.isEmpty()) return false
+        val nid = peerNodeId.trim()
+        if (nid.isEmpty()) return null
         synchronized(lock) {
-            return peers.containsKey(normThumb) ||
-                peers.values.any { it.nodeId.equals(peerNodeId, ignoreCase = true) && it.certThumbprint == normThumb }
+            return peers.values.firstOrNull { it.nodeId.equals(nid, ignoreCase = true) }
         }
     }
 
-    fun authorizeOrUpdatePeer(peer: BoBoAuthorizedPeer) {
+    fun isPeerAuthorized(peerNodeId: String, peerThumbprint: String): Boolean {
+        ensureLoaded()
+        val normNode = peerNodeId.trim()
+        val normThumb = peerThumbprint.trim().lowercase(Locale.US)
+        if (normNode.isEmpty() || normThumb.isEmpty()) return false
+        synchronized(lock) {
+            return peers.values.any {
+                it.nodeId.equals(normNode, ignoreCase = true) && it.certThumbprint == normThumb
+            }
+        }
+    }
+
+    fun authorizeOrUpdatePeer(peer: BoBoAuthorizedPeer): Boolean {
         ensureLoaded()
         val normThumb = peer.certThumbprint.trim().lowercase(Locale.US)
-        if (normThumb.isEmpty()) return
+        val nodeId = peer.nodeId.trim()
+        if (nodeId.isEmpty() || !BoBoProtocol.isValidHexSha256(normThumb)) return false
         synchronized(lock) {
-            peers[normThumb] = peer.copy(certThumbprint = normThumb)
+            if (peers.values.any { it.nodeId.equals(nodeId, ignoreCase = true) != (it.certThumbprint == normThumb) }) {
+                return false
+            }
+            peers[normThumb] = peer.copy(nodeId = nodeId, certThumbprint = normThumb)
             saveMetaLocked()
+            return true
         }
     }
 
@@ -271,6 +314,48 @@ class BoBoIdentityStore(
                 diff = diff or (a[i].lowercaseChar().code xor b[i].lowercaseChar().code)
             }
             return diff == 0
+        }
+
+        fun buildAuthChallengeBytes(
+            nonceHex: String,
+            clientThumbprint: String,
+            hostThumbprint: String
+        ): ByteArray {
+            val canonical = "BOBO6-AUTH:" +
+                nonceHex.trim().lowercase(Locale.US) + "|" +
+                clientThumbprint.trim().lowercase(Locale.US) + "|" +
+                hostThumbprint.trim().lowercase(Locale.US)
+            return canonical.toByteArray(StandardCharsets.UTF_8)
+        }
+
+        fun verifyAuthChallenge(
+            clientCertDerBase64: String,
+            expectedClientThumbprint: String,
+            nonceHex: String,
+            hostThumbprint: String,
+            signatureBase64: String
+        ): Boolean {
+            if (clientCertDerBase64.isBlank() || expectedClientThumbprint.isBlank() ||
+                nonceHex.isBlank() || hostThumbprint.isBlank() || signatureBase64.isBlank()
+            ) {
+                return false
+            }
+            return try {
+                val der = java.util.Base64.getDecoder().decode(clientCertDerBase64.trim())
+                if (der.size !in 128..16384) return false
+                val actualThumb = computeCertSha256Hex(der)
+                if (!fixedTimeEqualsHex(actualThumb, expectedClientThumbprint.trim())) return false
+                val sig = java.util.Base64.getDecoder().decode(signatureBase64.trim())
+                if (sig.size !in 64..1024) return false
+                val cf = CertificateFactory.getInstance("X.509")
+                val cert = cf.generateCertificate(ByteArrayInputStream(der)) as X509Certificate
+                val verifier = Signature.getInstance("SHA256withRSA")
+                verifier.initVerify(cert.publicKey)
+                verifier.update(buildAuthChallengeBytes(nonceHex, actualThumb, hostThumbprint))
+                verifier.verify(sig)
+            } catch (_: Exception) {
+                false
+            }
         }
 
         fun generateFourDigitPin(): String {

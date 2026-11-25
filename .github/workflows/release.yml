@@ -7,40 +7,106 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v6.2.3)'
+        description: 'Existing release tag (e.g. v6.3.0)'
         required: true
-        default: 'v6.2.3'
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build-windows:
-    name: Build Windows x64 Setup EXE, Portable ZIP & Create Release
-    runs-on: windows-latest
+  release-metadata:
+    name: Resolve release tag and commit
+    runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.metadata.outputs.commit }}
+      tag-object: ${{ steps.metadata.outputs.tag-object }}
+      already-published: ${{ steps.metadata.outputs.already-published }}
+    steps:
+      - name: Validate release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Release tag must have the form vMAJOR.MINOR.PATCH.' >&2
+            exit 1
+          fi
+          printf 'tag=%s\nversion=%s\n' "$RELEASE_TAG" "${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Verify checked-out tag and check for a published release
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          PUSHED_SHA: ${{ github.event.after }}
+        run: |
+          set -o pipefail
+          tag_object=$(git rev-parse --verify "refs/tags/$RELEASE_TAG")
+          commit=$(git rev-parse --verify "$tag_object^{commit}")
+          if [[ "$(git rev-parse HEAD)" != "$commit" ]]; then
+            echo 'The checkout did not resolve to the release tag commit.' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == push && "$PUSHED_SHA" != "$tag_object" && "$PUSHED_SHA" != "$commit" ]]; then
+            echo 'The release tag changed after the triggering push.' >&2
+            exit 1
+          fi
+
+          already_published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s --arg tag "$RELEASE_TAG" 'any(.[][]; .tag_name == $tag and .draft == false)')
+          if [[ "$already_published" == true ]]; then
+            echo "Release $RELEASE_TAG is already published."
+          fi
+          printf 'commit=%s\ntag-object=%s\nalready-published=%s\n' \
+            "$commit" "$tag_object" "$already_published" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Build and test Windows x64 release packages
+    needs: release-metadata
+    if: needs.release-metadata.outputs.already-published != 'true'
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Determine release tag
-        id: meta
+        with:
+          ref: ${{ needs.release-metadata.outputs.commit }}
+          persist-credentials: false
+      - name: Build and self-test Windows packages
         shell: powershell
-        run: |
-          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Build, self-test, and publish GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\release-package.ps1 -Tag "${{ steps.meta.outputs.tag }}" -Repository "${{ github.repository }}"
+          RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: .\ci\release-package.ps1 -Tag $env:RELEASE_TAG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            release-assets/BoBoRemote-Setup-x64.exe
+            release-assets/BoBoRemote-Portable-x64.zip
+            release-assets/BoBoRemote-Update-x64.zip
+          if-no-files-found: error
+          overwrite: true
 
   build-android:
-    name: Build Android APK
+    name: Build and test Android APK
+    needs: release-metadata
+    if: needs.release-metadata.outputs.already-published != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-metadata.outputs.commit }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -48,63 +114,172 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Test & Assemble Android APK
+      - name: Test and assemble Android APK
         working-directory: android
-        run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace
-      - name: Prepare Android Release Asset
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace "-PboboReleaseVersion=$RELEASE_VERSION"
+      - name: Prepare Android release asset
         run: |
-          mkdir -p release-extra
-          cp android/app/build/outputs/apk/release/app-release.apk release-extra/BoBoRemote-Android.apk
+          mkdir -p release-assets
+          cp android/app/build/outputs/apk/release/app-release.apk release-assets/BoBoRemote-Android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: release-android
-          path: release-extra/BoBoRemote-Android.apk
+          path: release-assets/BoBoRemote-Android.apk
+          if-no-files-found: error
+          overwrite: true
 
   build-macos:
-    name: Build macOS DMG
+    name: Build macOS Universal 2 DMG
+    needs: release-metadata
+    if: needs.release-metadata.outputs.already-published != 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-metadata.outputs.commit }}
+          persist-credentials: false
       - name: Test BoBoAppleCore
         working-directory: apple/BoBoAppleCore
         run: swift test
       - name: Package macOS DMG
+        env:
+          BOBO_RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: bash apple/scripts/package-macos-dmg.sh
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos
           path: dist-apple/BoBoRemote-macOS.dmg
+          if-no-files-found: error
+          overwrite: true
 
   build-ios:
-    name: Build iOS Unsigned IPA
+    name: Build iOS unsigned IPA
+    needs: release-metadata
+    if: needs.release-metadata.outputs.already-published != 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Package iOS Unsigned IPA
+        with:
+          ref: ${{ needs.release-metadata.outputs.commit }}
+          persist-credentials: false
+      - name: Install XcodeGen if needed
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+      - name: Package iOS unsigned IPA
+        env:
+          BOBO_RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: bash apple/scripts/package-ios-ipa.sh
       - uses: actions/upload-artifact@v4
         with:
           name: release-ios
           path: dist-apple/BoBoRemote-iOS-Unsigned.ipa
+          if-no-files-found: error
+          overwrite: true
 
-  attach-cross-platform-assets:
-    name: Attach Android APK, macOS DMG & iOS IPA to Release
-    needs: [build-windows, build-android, build-macos, build-ios]
+  publish:
+    name: Verify assets and publish GitHub Release
+    needs: [release-metadata, build-windows, build-android, build-macos, build-ios]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: cross-assets
+          pattern: release-*
+          path: artifacts
 
-      - name: Upload Cross-Platform Installers to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.build-windows.outputs.tag }}
+      - name: Stage canonical assets and generate SHA256SUMS.txt
+        shell: bash
         run: |
-          gh release upload "$TAG" \
-            cross-assets/release-android/BoBoRemote-Android.apk \
-            cross-assets/release-macos/BoBoRemote-macOS.dmg \
-            cross-assets/release-ios/BoBoRemote-iOS-Unsigned.ipa \
-            --repo "${{ github.repository }}" --clobber
+          mkdir release-assets
+          paths=(
+            artifacts/release-windows/BoBoRemote-Setup-x64.exe
+            artifacts/release-windows/BoBoRemote-Portable-x64.zip
+            artifacts/release-windows/BoBoRemote-Update-x64.zip
+            artifacts/release-android/BoBoRemote-Android.apk
+            artifacts/release-macos/BoBoRemote-macOS.dmg
+            artifacts/release-ios/BoBoRemote-iOS-Unsigned.ipa
+          )
+          names=()
+          for path in "${paths[@]}"; do
+            if [[ ! -f "$path" || ! -s "$path" ]]; then
+              echo "Missing or empty release asset: $path" >&2
+              exit 1
+            fi
+            cp "$path" release-assets/
+            names+=("${path##*/}")
+          done
+          cd release-assets
+          {
+            printf '# engines=bobo-v6-allinone-inproc\n'
+            sha256sum --binary "${names[@]}" | sed 's/ \*/  /'
+          } > SHA256SUMS.txt
+
+      - name: Upload and verify draft, then publish
+        shell: bash
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-metadata.outputs.commit }}
+          TAG_OBJECT: ${{ needs.release-metadata.outputs.tag-object }}
+        run: |
+          verify_tag() {
+            local current_tag_object
+            current_tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
+            if [[ "$current_tag_object" != "$TAG_OBJECT" ]]; then
+              echo 'The release tag moved during the workflow.' >&2
+              return 1
+            fi
+          }
+
+          matching_releases() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -cs --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)]'
+          }
+
+          verify_tag
+          releases=$(matching_releases)
+          if jq -e 'any(.[]; .draft == false)' <<< "$releases" >/dev/null; then
+            echo "Release $RELEASE_TAG is already published."
+            exit 0
+          fi
+          if [[ "$(jq 'length' <<< "$releases")" == 0 ]]; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --target "$RELEASE_COMMIT" \
+              --title "BoBo Remote $RELEASE_TAG" --generate-notes
+            releases=$(matching_releases)
+          fi
+          if ! release_id=$(jq -er 'select(length == 1 and .[0].draft == true) | .[0].id' <<< "$releases"); then
+            echo "Expected exactly one draft for $RELEASE_TAG." >&2
+            exit 1
+          fi
+
+          mapfile -t assets < <(sed '1d; s/^[^ ]*  //' SHA256SUMS.txt)
+          assets+=(SHA256SUMS.txt)
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id")
+          expected_names=$(printf '%s\n' "${assets[@]}" | LC_ALL=C sort)
+          uploaded_names=$(jq -er 'select(.draft == true and all(.assets[]; .state == "uploaded")) | .assets[].name' <<< "$draft" | LC_ALL=C sort)
+          if [[ "$uploaded_names" != "$expected_names" ]]; then
+            echo 'The draft does not contain all seven expected assets.' >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            hash_line=$(sha256sum "$asset")
+            digest="sha256:${hash_line%% *}"
+            if ! jq -e --arg name "$asset" --arg digest "$digest" \
+              'any(.assets[]; .name == $name and .digest == $digest)' <<< "$draft" >/dev/null; then
+              echo "Uploaded release asset failed digest verification: $asset" >&2
+              exit 1
+            fi
+          done
+
+          verify_tag
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false -f make_latest=true --jq '.html_url'

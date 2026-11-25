@@ -78,6 +78,7 @@ namespace DualRemote
             internal uint Flags;
             internal byte[] Payload;
             internal TaskCompletionSource<bool> Completion;
+            internal CancellationTokenRegistration CancelReg;
         }
 
         private TcpClient tcp;
@@ -85,6 +86,8 @@ namespace DualRemote
         private CancellationTokenSource cts;
         private BoBoCoreInterop.BoBoClientNativeHandle nativeClient;
         private volatile bool connected;
+        private volatile string forcedDisconnectReason;
+        private long lastRxTicks;
         private double latestRttMs;
         private double latestPacketLossPct;
         private int activeBitrateKbps;
@@ -100,6 +103,7 @@ namespace DualRemote
         private BoBoUdpInputCodec udpInputCodec;
         private volatile bool udpActive;
         private long lastUdpRxTicks;
+        private long udpFallbackSuppressUntilTicks;
         private long lastUdpMoveSentTicks;
         private bool hasDeferredUdpAbsMove;
         private BoBoInputPacket deferredUdpAbsMove;
@@ -137,6 +141,14 @@ namespace DualRemote
         internal long VideoFramesReceived { get { return Interlocked.Read(ref videoFramesReceived); } }
         internal List<BoBoMonitorDescriptor> RemoteMonitors { get { return remoteMonitors; } }
 
+        private const string PinMismatchMessage = "目标设备的 TLS 证书指纹与本地配对记录不一致。请核对设备后移除旧授权并重新配对。";
+
+        private static bool HasPinMismatch(BoBoIdentityStore store, string nodeId, string serverThumb)
+        {
+            BoBoAuthorizedPeer peer = store.FindPeerByNodeId(nodeId);
+            return peer != null && !BoBoIdentityStore.FixedTimeEqualsHex(peer.CertThumbprint, serverThumb);
+        }
+
         internal static async Task<BoBoHostProbeResult> ProbeHostAsync(
             string host,
             int port,
@@ -152,6 +164,7 @@ namespace DualRemote
             {
                 timeoutCts.CancelAfter(timeoutMs > 500 ? timeoutMs : 5000);
                 using (var client = new TcpClient())
+                using (timeoutCts.Token.Register(delegate { try { client.Close(); } catch { } }))
                 {
                     try
                     {
@@ -170,7 +183,7 @@ namespace DualRemote
                             await sslStream.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
                             long helloStart = Stopwatch.GetTimestamp();
                             await SendHelloAsync(sslStream, id, timeoutCts.Token).ConfigureAwait(false);
-                            BoBoFrame? reply = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token).ConfigureAwait(false);
+                            BoBoFrame? reply = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
                             res.HandshakeRttMs = (Stopwatch.GetTimestamp() - helloStart) * 1000.0 / Stopwatch.Frequency;
                             if (!reply.HasValue || reply.Value.Type != BoBoPacketType.ControlJson)
                             {
@@ -185,15 +198,24 @@ namespace DualRemote
                                 return res;
                             }
 
-                            res.IsBoBoHost = true;
+                            if (string.IsNullOrEmpty(serverThumb))
+                            {
+                                res.Error = "未能从 TLS 握手提取目标主机证书指纹。";
+                                return res;
+                            }
                             res.HostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
+                            if (HasPinMismatch(id, res.HostNodeId, serverThumb))
+                            {
+                                res.Error = PinMismatchMessage;
+                                return res;
+                            }
+                            res.IsBoBoHost = true;
                             res.HostDeviceCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
                             res.HostName = BoBoProtocol.GetStr(ack, "deviceName", res.Host);
-                            res.HostThumbprint = string.IsNullOrEmpty(serverThumb)
-                                ? BoBoProtocol.GetStr(ack, "certThumbprint", "")
-                                : serverThumb;
+                            res.HostThumbprint = serverThumb;
                             res.AllowIncoming = BoBoProtocol.GetBool(ack, "allowIncoming", true);
-                            res.Authorized = BoBoProtocol.GetBool(ack, "authorized", false);
+                            res.Authorized = BoBoProtocol.GetBool(ack, "authorized", false)
+                                && id.IsPeerAuthorized(res.HostNodeId, serverThumb);
                             res.Platform = BoBoProtocol.GetStr(ack, "platform", BoBoProtocol.PlatformWindows);
                             res.HostControlMode = BoBoProtocol.GetStr(ack, "hostControlMode", BoBoProtocol.ControlModeFull);
                             res.ScreenOrientation = BoBoProtocol.GetInt(ack, "screenOrientation", 0);
@@ -295,6 +317,7 @@ namespace DualRemote
             {
                 timeoutCts.CancelAfter(12000);
                 using (var client = new TcpClient())
+                using (timeoutCts.Token.Register(delegate { try { client.Close(); } catch { } }))
                 {
                     try
                     {
@@ -310,7 +333,7 @@ namespace DualRemote
                         {
                             await sslStream.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
                             await SendHelloAsync(sslStream, id, timeoutCts.Token).ConfigureAwait(false);
-                            BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token).ConfigureAwait(false);
+                            BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
                             if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson)
                                 return Tuple.Create(false, "", "被控端未返回 BoBo 握手信息。");
 
@@ -324,35 +347,44 @@ namespace DualRemote
                             string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
                             string hostCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
                             string hostName = BoBoProtocol.GetStr(ack, "deviceName", host);
-                            string hostThumb = string.IsNullOrEmpty(serverThumb) ? BoBoProtocol.GetStr(ack, "certThumbprint", "") : serverThumb;
+                            if (string.IsNullOrEmpty(serverThumb))
+                                return Tuple.Create(false, hostName, "未能从 TLS 握手提取对方真实证书指纹。");
+                            if (HasPinMismatch(id, hostNodeId, serverThumb))
+                                return Tuple.Create(false, hostName, PinMismatchMessage);
+                            string hostThumb = serverThumb;
                             string nonce = BoBoProtocol.GetStr(ack, "nonce", "");
+                            if (string.IsNullOrWhiteSpace(hostNodeId) || string.IsNullOrWhiteSpace(nonce))
+                                return Tuple.Create(false, hostName, "对方的配对身份或会话挑战无效。");
 
                             string proof = BoBoIdentityStore.ComputePinProof(fourDigitPin, nonce, id.CertThumbprint, hostThumb);
                             var req = new Dictionary<string, object>();
                             req["type"] = "PAIR_REQUEST";
                             req["proof"] = proof;
+                            req["authSig"] = id.SignAuthChallenge(nonce, hostThumb);
+                            req["clientCertDer"] = id.CertDerBase64;
                             await BoBoProtocol.WriteJsonAsync(sslStream, req, timeoutCts.Token).ConfigureAwait(false);
 
-                            BoBoFrame? resFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token).ConfigureAwait(false);
+                            BoBoFrame? resFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
                             if (!resFrame.HasValue || resFrame.Value.Type != BoBoPacketType.ControlJson)
                                 return Tuple.Create(false, "", "被控端未返回配对结果。");
 
                             var result = BoBoProtocol.ParseJsonPayload(resFrame.Value.Payload);
-                            bool ok = BoBoProtocol.GetBool(result, "ok", false);
+                            bool ok = BoBoProtocol.GetStr(result, "type", "") == "PAIR_RESULT"
+                                && BoBoProtocol.GetBool(result, "ok", false);
                             if (!ok)
                             {
                                 string err = BoBoProtocol.GetStr(result, "error", "4 位配对码校验失败，请重试。");
                                 return Tuple.Create(false, hostName, err);
                             }
 
-                            id.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                            if (!id.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
                             {
                                 NodeId = hostNodeId,
                                 DeviceCode = hostCode,
                                 DeviceName = hostName,
                                 CertThumbprint = hostThumb,
                                 LastHost = host
-                            });
+                            })) return Tuple.Create(false, hostName, PinMismatchMessage);
                             return Tuple.Create(true, hostName, "");
                         }
                     }
@@ -395,74 +427,121 @@ namespace DualRemote
             {
                 var fi = new FileInfo(localFilePath);
                 prog.TotalBytes = fi.Length;
+                if (prog.TotalBytes > BoBoProtocol.MaxFileTransferBytes)
+                {
+                    prog.Error = "单文件大小超出 2 GiB 上限。";
+                    return prog;
+                }
                 string shaHex = ComputeFileSha256(localFilePath);
 
                 using (var client = new TcpClient())
                 {
                     client.NoDelay = true;
-                    await ConnectWithCancelAsync(client, host, targetPort, ct).ConfigureAwait(false);
-                    using (var sslStream = new SslStream(client.GetStream(), false, delegate { return true; }))
+                    using (var hsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    using (hsCts.Token.Register(delegate { try { client.Close(); } catch { } }))
                     {
-                        await sslStream.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
-                        await SendHelloAsync(sslStream, id, ct).ConfigureAwait(false);
-                        BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, ct).ConfigureAwait(false);
-                        if (!ackFrame.HasValue) { prog.Error = "握手失败。"; return prog; }
-                        var ack = BoBoProtocol.ParseJsonPayload(ackFrame.Value.Payload);
-                        if (!BoBoProtocol.GetBool(ack, "authorized", false))
-                        {
-                            prog.Error = "尚未与该设备完成 BoBo 配对授权，请先配对后再传文件。";
-                            return prog;
-                        }
-
-                        var offer = new Dictionary<string, object>();
-                        offer["type"] = "FILE_OFFER";
-                        offer["transferId"] = prog.TransferId;
-                        offer["fileName"] = prog.FileName;
-                        offer["totalBytes"] = prog.TotalBytes;
-                        offer["sha256"] = shaHex;
-                        await BoBoProtocol.WriteJsonAsync(sslStream, offer, ct).ConfigureAwait(false);
-
-                        BoBoFrame? accFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, ct).ConfigureAwait(false);
-                        if (!accFrame.HasValue) { prog.Error = "对方未接受文件传输。"; return prog; }
-                        var acc = BoBoProtocol.ParseJsonPayload(accFrame.Value.Payload);
-                        if (BoBoProtocol.GetStr(acc, "type", "") != "FILE_ACCEPT")
-                        {
-                            prog.Error = BoBoProtocol.GetStr(acc, "message", "对方拒绝了文件传输。");
-                            return prog;
-                        }
-
-                        byte[] chunkBuf = new byte[65536];
-                        long offset = 0;
-                        using (var fs = new FileStream(localFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                        {
-                            int n;
-                            while ((n = await fs.ReadAsync(chunkBuf, 0, chunkBuf.Length, ct).ConfigureAwait(false)) > 0)
+                        hsCts.CancelAfter(15000);
+                        await ConnectWithCancelAsync(client, host, targetPort, hsCts.Token).ConfigureAwait(false);
+                        string serverThumb = "";
+                        using (var sslStream = new SslStream(client.GetStream(), false,
+                            delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
                             {
-                                byte[] framePayload = BoBoProtocol.BuildFileChunkPayload(prog.TransferId, offset, chunkBuf, n);
-                                await BoBoProtocol.WriteFrameAsync(sslStream, BoBoPacketType.FileChunk, 0, framePayload, 0, framePayload.Length, ct).ConfigureAwait(false);
-                                offset += n;
-                                prog.BytesTransferred = offset;
+                                if (cert != null) serverThumb = BoBoIdentityStore.ComputeCertSha256Hex(cert.GetRawCertData());
+                                return cert != null;
+                            }))
+                        {
+                            await sslStream.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
+                            await SendHelloAsync(sslStream, id, hsCts.Token).ConfigureAwait(false);
+                            BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                            if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson) { prog.Error = "握手失败。"; return prog; }
+                            var ack = BoBoProtocol.ParseJsonPayload(ackFrame.Value.Payload);
+                            if (BoBoProtocol.GetStr(ack, "type", "") != "HELLO_ACK" ||
+                                BoBoProtocol.GetStr(ack, "protocol", "") != BoBoProtocol.ProtocolMagic ||
+                                !BoBoProtocol.GetBool(ack, "authorized", false))
+                            {
+                                prog.Error = "尚未与该设备完成 BoBo 配对授权，请先配对后再传文件。";
+                                return prog;
+                            }
+                            string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
+                            if (string.IsNullOrEmpty(serverThumb) || !id.IsPeerAuthorized(hostNodeId, serverThumb))
+                            {
+                                prog.Error = "目标主机 TLS 证书指纹未通过本地信任钉扎校验，已中止文件发送。";
+                                return prog;
+                            }
+                            if (BoBoProtocol.GetBool(ack, "authChallenge", false))
+                            {
+                                string nonce = BoBoProtocol.GetStr(ack, "nonce", "");
+                                var proofMsg = new Dictionary<string, object>();
+                                proofMsg["type"] = "AUTH_PROOF";
+                                proofMsg["signature"] = id.SignAuthChallenge(nonce, serverThumb);
+                                proofMsg["clientCertDer"] = id.CertDerBase64;
+                                await BoBoProtocol.WriteJsonAsync(sslStream, proofMsg, hsCts.Token).ConfigureAwait(false);
+                                BoBoFrame? authFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                                var authRes = authFrame.HasValue && authFrame.Value.Type == BoBoPacketType.ControlJson
+                                    ? BoBoProtocol.ParseJsonPayload(authFrame.Value.Payload) : null;
+                                if (BoBoProtocol.GetStr(authRes, "type", "") != "AUTH_RESULT" || !BoBoProtocol.GetBool(authRes, "ok", false))
+                                {
+                                    prog.Error = BoBoProtocol.GetStr(authRes, "error", "双向密钥身份校验失败。");
+                                    return prog;
+                                }
+                            }
+
+                            var offer = new Dictionary<string, object>();
+                            offer["type"] = "FILE_OFFER";
+                            offer["transferId"] = prog.TransferId;
+                            offer["fileName"] = prog.FileName;
+                            offer["totalBytes"] = prog.TotalBytes;
+                            offer["sha256"] = shaHex;
+                            await BoBoProtocol.WriteJsonAsync(sslStream, offer, hsCts.Token).ConfigureAwait(false);
+
+                            BoBoFrame? accFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                            if (!accFrame.HasValue) { prog.Error = "对方未接受文件传输。"; return prog; }
+                            var acc = BoBoProtocol.ParseJsonPayload(accFrame.Value.Payload);
+                            if (accFrame.Value.Type != BoBoPacketType.ControlJson ||
+                                BoBoProtocol.GetStr(acc, "type", "") != "FILE_ACCEPT" ||
+                                BoBoProtocol.GetStr(acc, "transferId", "") != prog.TransferId)
+                            {
+                                prog.Error = BoBoProtocol.GetStr(acc, "error", BoBoProtocol.GetStr(acc, "message", "对方拒绝了文件传输。"));
+                                return prog;
+                            }
+
+                            // Disable handshake timer once FILE_ACCEPT succeeded; large files stream under caller's ct
+                            hsCts.CancelAfter(Timeout.Infinite);
+
+                            byte[] chunkBuf = new byte[65536];
+                            long offset = 0;
+                            using (var fs = new FileStream(localFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            {
+                                int n;
+                                while ((n = await fs.ReadAsync(chunkBuf, 0, chunkBuf.Length, ct).ConfigureAwait(false)) > 0)
+                                {
+                                    byte[] framePayload = BoBoProtocol.BuildFileChunkPayload(prog.TransferId, offset, chunkBuf, n);
+                                    await BoBoProtocol.WriteFrameAsync(sslStream, BoBoPacketType.FileChunk, 0, framePayload, 0, framePayload.Length, ct).ConfigureAwait(false);
+                                    offset += n;
+                                    prog.BytesTransferred = offset;
+                                    if (onProgress != null) { try { onProgress(prog); } catch { } }
+                                }
+                            }
+
+                            var done = new Dictionary<string, object>();
+                            done["type"] = "FILE_DONE";
+                            done["transferId"] = prog.TransferId;
+                            hsCts.CancelAfter(30000);
+                            await BoBoProtocol.WriteJsonAsync(sslStream, done, hsCts.Token).ConfigureAwait(false);
+
+                            BoBoFrame? finalFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                            if (!finalFrame.HasValue) { prog.Error = "等待对方文件校验回执超时。"; return prog; }
+                            var finalObj = BoBoProtocol.ParseJsonPayload(finalFrame.Value.Payload);
+                            if (BoBoProtocol.GetBool(finalObj, "ok", false))
+                            {
+                                prog.Completed = true;
+                                prog.SavedPath = BoBoProtocol.GetStr(finalObj, "savedPath", "");
                                 if (onProgress != null) { try { onProgress(prog); } catch { } }
                             }
-                        }
-
-                        var done = new Dictionary<string, object>();
-                        done["type"] = "FILE_DONE";
-                        done["transferId"] = prog.TransferId;
-                        await BoBoProtocol.WriteJsonAsync(sslStream, done, ct).ConfigureAwait(false);
-
-                        BoBoFrame? finalFrame = await BoBoProtocol.ReadOneFrameAsync(sslStream, ct).ConfigureAwait(false);
-                        if (!finalFrame.HasValue) { prog.Error = "等待对方文件校验回执超时。"; return prog; }
-                        var finalObj = BoBoProtocol.ParseJsonPayload(finalFrame.Value.Payload);
-                        if (BoBoProtocol.GetBool(finalObj, "ok", false))
-                        {
-                            prog.Completed = true;
-                            prog.SavedPath = BoBoProtocol.GetStr(finalObj, "savedPath", "");
-                            if (onProgress != null) { try { onProgress(prog); } catch { } }
-                        }
-                        else
-                        {
-                            prog.Error = BoBoProtocol.GetStr(finalObj, "error", "对方保存文件失败。");
+                            else
+                            {
+                                prog.Error = BoBoProtocol.GetStr(finalObj, "error", "对方保存文件失败。");
+                            }
                         }
                     }
                 }
@@ -482,6 +561,7 @@ namespace DualRemote
             Disconnect();
             identity.EnsureLoaded();
             nativeClient = nativeHandle;
+            forcedDisconnectReason = null;
             cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
             CancellationToken ct = cts.Token;
 
@@ -495,21 +575,29 @@ namespace DualRemote
                 tcp.SendBufferSize = 65536;
                 BoBoUdpSocketUtil.TrySetTcpDscp(tcp.Client);
                 ConfigureTcpKeepAlive(tcp);
-                await ConnectWithCancelAsync(tcp, options.Host, targetPort, ct).ConfigureAwait(false);
 
                 string serverThumb = "";
-                ssl = new SslStream(tcp.GetStream(), false,
-                    delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
-                    {
-                        if (cert != null) serverThumb = BoBoIdentityStore.ComputeCertSha256Hex(cert.GetRawCertData());
-                        return cert != null;
-                    });
-                await ssl.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
-                long helloStartTicks = Stopwatch.GetTimestamp();
-                await SendHelloAsync(ssl, identity, ct).ConfigureAwait(false);
+                BoBoFrame? ackFrame;
+                double handshakeRttMs;
+                using (var hsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                using (hsCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
+                {
+                    hsCts.CancelAfter(12000);
+                    await ConnectWithCancelAsync(tcp, options.Host, targetPort, hsCts.Token).ConfigureAwait(false);
 
-                BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, ct).ConfigureAwait(false);
-                double handshakeRttMs = (Stopwatch.GetTimestamp() - helloStartTicks) * 1000.0 / Stopwatch.Frequency;
+                    ssl = new SslStream(tcp.GetStream(), false,
+                        delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
+                        {
+                            if (cert != null) serverThumb = BoBoIdentityStore.ComputeCertSha256Hex(cert.GetRawCertData());
+                            return cert != null;
+                        });
+                    await ssl.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
+                    long helloStartTicks = Stopwatch.GetTimestamp();
+                    await SendHelloAsync(ssl, identity, hsCts.Token).ConfigureAwait(false);
+
+                    ackFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                    handshakeRttMs = (Stopwatch.GetTimestamp() - helloStartTicks) * 1000.0 / Stopwatch.Frequency;
+                }
                 if (handshakeRttMs > 0 && handshakeRttMs < 5000) latestRttMs = handshakeRttMs;
                 if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson)
                 {
@@ -530,19 +618,56 @@ namespace DualRemote
                     return Tuple.Create(false, "HOST_DISABLED", "对方已关闭「允许本机被控」，请在被控端 BoBo远程 中开启。");
                 }
 
-                if (!BoBoProtocol.GetBool(ack, "authorized", false))
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "PAIR_REQUIRED", "首次连接这台电脑，请先输入被控端 BoBo远程 生成的 4 位临时配对码。");
-                }
-
                 remoteMonitors = BoBoProtocol.ParseMonitors(ack, "monitors");
                 RemotePlatform = BoBoProtocol.GetStr(ack, "platform", BoBoProtocol.PlatformWindows);
                 RemoteHostControlMode = BoBoProtocol.GetStr(ack, "hostControlMode", BoBoProtocol.ControlModeFull);
                 string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
                 string hostCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
                 string hostName = BoBoProtocol.GetStr(ack, "deviceName", options.Host);
-                if (!string.IsNullOrEmpty(hostNodeId) && !string.IsNullOrEmpty(serverThumb))
+                string nonce = BoBoProtocol.GetStr(ack, "nonce", "");
+
+                // Strict Client TOFU Certificate Pinning: NEVER trust JSON certThumbprint or silently overwrite a pinned mismatch!
+                if (string.IsNullOrEmpty(serverThumb))
+                {
+                    Disconnect();
+                    return Tuple.Create(false, "CERT_MISSING", "未能从 TLS 握手获取目标主机证书指纹，已拒绝连接。");
+                }
+                if (HasPinMismatch(identity, hostNodeId, serverThumb))
+                {
+                    Disconnect();
+                    return Tuple.Create(false, "CERT_MISMATCH", PinMismatchMessage);
+                }
+                if (!BoBoProtocol.GetBool(ack, "authorized", false) || !identity.IsPeerAuthorized(hostNodeId, serverThumb))
+                {
+                    Disconnect();
+                    return Tuple.Create(false, "PAIR_REQUIRED", "请先输入被控端 BoBo远程 生成的 4 位临时配对码。");
+                }
+
+                // Prove private-key possession over host's fresh sessionNonce before issuing START_STREAM
+                if (BoBoProtocol.GetBool(ack, "authChallenge", false))
+                {
+                    var proofMsg = new Dictionary<string, object>();
+                    proofMsg["type"] = "AUTH_PROOF";
+                    proofMsg["signature"] = identity.SignAuthChallenge(nonce, serverThumb);
+                    proofMsg["clientCertDer"] = identity.CertDerBase64;
+                    BoBoFrame? authResFrame;
+                    using (var authCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    using (authCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
+                    {
+                        authCts.CancelAfter(8000);
+                        await BoBoProtocol.WriteJsonAsync(ssl, proofMsg, authCts.Token).ConfigureAwait(false);
+                        authResFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, authCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                    }
+                    var authRes = authResFrame.HasValue && authResFrame.Value.Type == BoBoPacketType.ControlJson
+                        ? BoBoProtocol.ParseJsonPayload(authResFrame.Value.Payload) : null;
+                    if (BoBoProtocol.GetStr(authRes, "type", "") != "AUTH_RESULT" || !BoBoProtocol.GetBool(authRes, "ok", false))
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "AUTH_FAILED", BoBoProtocol.GetStr(authRes, "error", "双向密钥身份校验未通过。"));
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(hostNodeId))
                 {
                     identity.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
                     {
@@ -570,14 +695,21 @@ namespace DualRemote
                 startReq["clientWidth"] = options.ClientWidth;
                 startReq["clientHeight"] = options.ClientHeight;
                 startReq["udpTransport"] = true;
+                startReq["udpInterleavedFec"] = true;
                 startReq["nativeLocalCursor"] = true;
                 startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
                 await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
+                Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
                 connected = true;
                 Task _rx = Task.Run(delegate { return ReceiveLoopAsync(ct); });
                 Task _ping = Task.Run(delegate { return PingLoopAsync(ct); });
                 return Tuple.Create(true, "OK", hostName);
+            }
+            catch (OperationCanceledException)
+            {
+                Disconnect();
+                return Tuple.Create(false, "TIMEOUT", "连接被控端握手超时。请确认对方网络互通且已开启 BoBo远程。");
             }
             catch (SocketException)
             {
@@ -600,6 +732,7 @@ namespace DualRemote
                 {
                     BoBoFrame? frameOpt = await BoBoProtocol.ReadOneFrameAsync(ssl, ct).ConfigureAwait(false);
                     if (!frameOpt.HasValue) break;
+                    Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
                     BoBoFrame frame = frameOpt.Value;
 
                     if (frame.Type == BoBoPacketType.VideoH264)
@@ -750,10 +883,11 @@ namespace DualRemote
             {
                 bool wasConnected = connected;
                 connected = false;
+                string reason = !string.IsNullOrEmpty(forcedDisconnectReason) ? forcedDisconnectReason : disconnectReason;
                 if (wasConnected)
                 {
                     Action<string> discEv = Disconnected;
-                    if (discEv != null) { try { discEv(disconnectReason); } catch { } }
+                    if (discEv != null) { try { discEv(reason); } catch { } }
                 }
             }
         }
@@ -764,6 +898,13 @@ namespace DualRemote
             {
                 try
                 {
+                    long lastRx = Interlocked.Read(ref lastRxTicks);
+                    if (lastRx != 0 && ((Stopwatch.GetTimestamp() - lastRx) / (double)Stopwatch.Frequency) >= 15.0)
+                    {
+                        forcedDisconnectReason = "连接超时（长时间未收到被控端响应）";
+                        try { if (tcp != null) tcp.Close(); } catch { }
+                        break;
+                    }
                     if (!udpActive)
                     {
                         var ping = new Dictionary<string, object>();
@@ -804,9 +945,9 @@ namespace DualRemote
                 if (targetIp.IsIPv4MappedToIPv6) targetIp = targetIp.MapToIPv4();
 
                 var uc = new UdpClient(targetIp.AddressFamily);
-                BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 131072, 1024 * 1024);
+                BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 131072, 2 * 1024 * 1024);
                 var ep = new IPEndPoint(targetIp, udpPort);
-                var crypto = new BoBoUdpCrypto(udpSessionId, key);
+                var crypto = new BoBoUdpCrypto(udpSessionId, key, false);
                 var assembler = new BoBoUdpVideoAssembler();
                 var inCodec = new BoBoUdpInputCodec();
 
@@ -820,46 +961,78 @@ namespace DualRemote
                     udpInputCodec = inCodec;
                     udpActive = false;
                     lastUdpRxTicks = 0;
+                    Interlocked.Exchange(ref udpFallbackSuppressUntilTicks, 0);
                     lastCursorSeq = 0;
                 }
 
-                Task _rx = Task.Run(delegate { return UdpReceiveLoopAsync(uc, crypto, assembler, ct); });
+                var rxThread = new Thread(() => UdpReceiveLoopThread(uc, crypto, assembler, ct))
+                {
+                    IsBackground = true,
+                    Name = "BoBoClientUdpRx",
+                    Priority = ThreadPriority.AboveNormal
+                };
+                rxThread.Start();
                 Task _hb = Task.Run(delegate { return UdpHeartbeatAndFeedbackLoopAsync(uc, crypto, assembler, ep, ct); });
             }
             catch { }
         }
 
-        private async Task UdpReceiveLoopAsync(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpVideoAssembler assembler, CancellationToken ct)
+        private void UdpReceiveLoopThread(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpVideoAssembler assembler, CancellationToken ct)
         {
+            Socket sock = uc.Client;
+            byte[] buf = new byte[2048];
+            EndPoint remoteEp = new IPEndPoint(
+                sock.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            var readyFrames = new List<BoBoReassembledVideoFrame>(4);
+
+            // Bind ephemeral port before ReceiveFrom (send happens immediately in heartbeat loop, but binding avoids WSAEINVAL)
+            try
+            {
+                if (!sock.IsBound)
+                {
+                    sock.Bind(new IPEndPoint(
+                        sock.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
+                }
+            }
+            catch { }
+
             while (!ct.IsCancellationRequested && connected)
             {
                 try
                 {
-                    UdpReceiveResult res = await uc.ReceiveAsync().ConfigureAwait(false);
-                    byte[] buf = res.Buffer;
-                    if (buf == null || buf.Length < BoBoUdpCrypto.OverheadBytes) continue;
+                    int n = sock.ReceiveFrom(buf, 0, buf.Length, SocketFlags.None, ref remoteEp);
+                    if (n < BoBoUdpCrypto.OverheadBytes) continue;
 
                     BoBoUdpPacketType ptype;
                     uint seq;
                     byte[] plain;
-                    if (!crypto.TryOpen(buf, buf.Length, out ptype, out seq, out plain)) continue;
+                    if (!crypto.TryOpen(buf, n, out ptype, out seq, out plain)) continue;
 
-                    Interlocked.Exchange(ref lastUdpRxTicks, Stopwatch.GetTimestamp());
+                    long rxNow = Stopwatch.GetTimestamp();
+                    Interlocked.Exchange(ref lastUdpRxTicks, rxNow);
+                    Interlocked.Exchange(ref lastRxTicks, rxNow);
                     assembler.RecordReceivedUdpSeq(seq);
 
                     if (ptype == BoBoUdpPacketType.HelloAck)
                     {
-                        udpActive = true;
+                        if (rxNow >= Interlocked.Read(ref udpFallbackSuppressUntilTicks))
+                        {
+                            udpActive = true;
+                        }
                         continue;
                     }
 
+                    // Do not let straggling VideoShard / Pong packets silently re-activate UDP after TRANSPORT_FALLBACK!
+                    if (!udpActive) continue;
+
                     if (ptype == BoBoUdpPacketType.VideoShard)
                     {
-                        udpActive = true;
-                        BoBoReassembledVideoFrame doneFrame;
+                        readyFrames.Clear();
                         bool needPli;
-                        if (assembler.ProcessShard(plain, out doneFrame, out needPli))
+                        assembler.ProcessShardBatch(plain, latestRttMs, readyFrames, out needPli);
+                        for (int i = 0; i < readyFrames.Count; i++)
                         {
+                            BoBoReassembledVideoFrame doneFrame = readyFrames[i];
                             Interlocked.Increment(ref videoFramesReceived);
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
                             if (nc != null)
@@ -890,7 +1063,6 @@ namespace DualRemote
 
                     if (ptype == BoBoUdpPacketType.Pong && plain != null && plain.Length >= 8)
                     {
-                        udpActive = true;
                         long sentTicks = BoBoUdpCrypto.ReadInt64LE(plain, 0);
                         if (sentTicks > 0)
                         {
@@ -953,8 +1125,11 @@ namespace DualRemote
                         if (silenceMs > 3500.0)
                         {
                             // UDP path dropped (e.g. campus NAT rebind/block): gracefully fall back to TCP+TLS without disconnecting!
+                            Interlocked.Exchange(ref udpFallbackSuppressUntilTicks,
+                                Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * 2.5));
                             udpActive = false;
                             latestPacketLossPct = 0.0;
+                            tick = 1;
                             var fb = new Dictionary<string, object>();
                             fb["type"] = "TRANSPORT_FALLBACK";
                             SendJsonFireAndForget(fb);
@@ -965,6 +1140,7 @@ namespace DualRemote
                             BoBoUdpCrypto.WriteInt64LE(pingBuf, 0, Stopwatch.GetTimestamp());
                             SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, pingBuf, ep);
 
+                            assembler.RefreshLossWindow(Stopwatch.GetTimestamp());
                             latestPacketLossPct = assembler.LatestLossPct;
                             SendUdpFeedback(uc, crypto, assembler, false);
                         }
@@ -1001,11 +1177,12 @@ namespace DualRemote
         private void SendUdpRaw(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpPacketType type, byte[] plain, IPEndPoint ep)
         {
             if (uc == null || crypto == null || ep == null) return;
-            byte[] sealedPkt = crypto.Seal(type, plain, 0, plain != null ? plain.Length : 0);
-            if (sealedPkt == null) return;
             lock (udpGate)
             {
                 if (udpClient != uc) return;
+                // Seal inside udpGate so UDP sequence numbers match exact wire transmission order
+                byte[] sealedPkt = crypto.Seal(type, plain, 0, plain != null ? plain.Length : 0);
+                if (sealedPkt == null) return;
                 try { uc.Send(sealedPkt, sealedPkt.Length, ep); } catch { }
             }
         }
@@ -1165,8 +1342,10 @@ namespace DualRemote
                     SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, discPkt, ep);
                     if (latestPacketLossPct >= 0.3 || latestRttMs >= 25.0)
                     {
-                        // Redundant copy for lossy Wi-Fi / campus links (deduplicated by seq on host!)
-                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, discPkt, ep);
+                        // Redundant copy for lossy Wi-Fi / campus links: re-send ONLY idempotent abs + seq-deduplicated discrete
+                        // events, NEVER duplicating relative mouse deltas (fdx/fdy)!
+                        byte[] redPkt = codec.BuildPacket(flushAbs, absToFlush, false, 0, 0, null);
+                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, redPkt, ep);
                     }
                     return;
                 }
@@ -1348,11 +1527,12 @@ namespace DualRemote
         {
             if (ssl == null) return Task.FromResult(true);
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            CancellationTokenRegistration reg = default(CancellationTokenRegistration);
             if (ct.CanBeCanceled)
             {
-                ct.Register(delegate { tcs.TrySetCanceled(); });
+                reg = ct.Register(delegate { tcs.TrySetCanceled(); });
             }
-            EnqueueSend(BoBoPacketType.ControlJson, 0, SerializeJsonPayload(obj), tcs);
+            EnqueueSend(BoBoPacketType.ControlJson, 0, SerializeJsonPayload(obj), tcs, reg);
             return tcs.Task;
         }
 
@@ -1418,7 +1598,7 @@ namespace DualRemote
             return null;
         }
 
-        private void EnqueueSend(BoBoPacketType type, uint flags, byte[] payload, TaskCompletionSource<bool> tcs)
+        private void EnqueueSend(BoBoPacketType type, uint flags, byte[] payload, TaskCompletionSource<bool> tcs, CancellationTokenRegistration cancelReg = default(CancellationTokenRegistration))
         {
             bool rejected = false;
             bool startLoop = false;
@@ -1436,7 +1616,8 @@ namespace DualRemote
                         Type = type,
                         Flags = flags,
                         Payload = payload ?? new byte[0],
-                        Completion = tcs
+                        Completion = tcs,
+                        CancelReg = cancelReg
                     });
                     if (!sendLoopRunning)
                     {
@@ -1447,6 +1628,7 @@ namespace DualRemote
             }
             if (rejected)
             {
+                try { cancelReg.Dispose(); } catch { }
                 if (tcs != null) tcs.TrySetResult(false);
                 return;
             }
@@ -1482,6 +1664,7 @@ namespace DualRemote
                 CancellationToken ct = curCts != null ? curCts.Token : CancellationToken.None;
                 if (s == null || ct.IsCancellationRequested)
                 {
+                    try { item.CancelReg.Dispose(); } catch { }
                     if (item.Completion != null) item.Completion.TrySetResult(false);
                     continue;
                 }
@@ -1494,6 +1677,10 @@ namespace DualRemote
                 catch (Exception ex)
                 {
                     if (item.Completion != null) item.Completion.TrySetException(ex);
+                }
+                finally
+                {
+                    try { item.CancelReg.Dispose(); } catch { }
                 }
             }
         }
@@ -1509,6 +1696,7 @@ namespace DualRemote
             PendingSend dropped;
             while (sendQueue.TryDequeue(out dropped))
             {
+                try { dropped.CancelReg.Dispose(); } catch { }
                 if (dropped.Completion != null) dropped.Completion.TrySetResult(false);
             }
         }
@@ -1584,6 +1772,7 @@ namespace DualRemote
             hello["deviceCode"] = id.DeviceCode;
             hello["deviceName"] = id.DeviceName;
             hello["certThumbprint"] = id.CertThumbprint;
+            hello["clientCertDer"] = id.CertDerBase64;
             hello["version"] = AppUpdater.CurrentVersion;
             return BoBoProtocol.WriteJsonAsync(sslStream, hello, ct);
         }

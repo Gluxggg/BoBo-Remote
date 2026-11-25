@@ -67,9 +67,9 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "6.2.3";
+        internal const string FallbackVersion = "6.3.0";
 
-        /// <summary>当前内嵌架构指纹；与 ci/release-package.ps1 写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
+        /// <summary>当前内嵌架构指纹；与发布流水线写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
         internal const string CurrentEnginesStamp = "bobo-v6-allinone-inproc";
 
         private const string UninstallRegSubKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BoBoRemote";
@@ -510,6 +510,15 @@ namespace DualRemote
             return Task.Run(delegate { return CheckForUpdateSync(); });
         }
 
+        internal static bool IsLocalAllInOneInstallIntact()
+        {
+            string exePath = "";
+            try { exePath = Assembly.GetExecutingAssembly().Location ?? ""; } catch { }
+            bool hasExe = (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                || File.Exists(Path.Combine(Engines.AppDir, "BoBo远程.exe"));
+            return hasExe && BoBoCoreInterop.IsLoaded;
+        }
+
         private static UpdateCheckResult CheckForUpdateSync()
         {
             var result = new UpdateCheckResult
@@ -564,10 +573,7 @@ namespace DualRemote
                         Dictionary<string, string> hashes;
                         if (ParseSha256Sums(sumsText, out remoteEngines, out hashes))
                         {
-                            bool localIntact = Engines.RustDeskPresent
-                                && Engines.MoonlightPresent
-                                && FoundationClient.IsAvailable
-                                && BundledHost.BundledAvailable;
+                            bool localIntact = IsLocalAllInOneInstallIntact();
                             bool writable = CanWriteDirectory(Engines.AppDir);
                             SelectBestPlan(release, remoteEngines, hashes, localIntact, writable, result);
                         }
@@ -998,6 +1004,10 @@ namespace DualRemote
             }
             catch (WebException ex)
             {
+                if (ex.Response != null)
+                {
+                    try { ex.Response.Close(); } catch { }
+                }
                 error = "无法连接 GitHub Releases 检查更新（可开启系统代理或稍后重试）：" + SafeOneLine(ex.Message);
                 return false;
             }

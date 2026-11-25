@@ -182,6 +182,7 @@ namespace DualRemote
         internal bool AutoOnRemote = true;
         internal bool ShowOverlayBadge = true;
         internal bool LockOnLocalExit = false;
+        internal bool LockOnRemoteDisconnect = false;
         internal bool BlockLocalInput = true;
         internal bool HardwareBlackout = false;
         internal string Caption = "远程安全防窥保护中";
@@ -191,13 +192,14 @@ namespace DualRemote
             get { return Path.Combine(RecentStore.DirPath, "privacy-wallpaper.txt"); }
         }
 
-        internal static PrivacyWallpaperConfig Load()
+        internal static PrivacyWallpaperConfig Load(string configPath = null)
         {
             var cfg = new PrivacyWallpaperConfig();
             try
             {
-                if (!File.Exists(ConfigPath)) return cfg;
-                foreach (string raw in File.ReadAllLines(ConfigPath, Encoding.UTF8))
+                configPath = configPath ?? ConfigPath;
+                if (!File.Exists(configPath)) return cfg;
+                foreach (string raw in File.ReadAllLines(configPath, Encoding.UTF8))
                 {
                     int sep = raw.IndexOf('=');
                     if (sep <= 0) continue;
@@ -210,6 +212,7 @@ namespace DualRemote
                     else if (k == "auto") cfg.AutoOnRemote = v == "1";
                     else if (k == "badge") cfg.ShowOverlayBadge = v != "0";
                     else if (k == "lock") cfg.LockOnLocalExit = v == "1";
+                    else if (k == "lockOnDisconnect") cfg.LockOnRemoteDisconnect = v == "1";
                     else if (k == "blockInput") cfg.BlockLocalInput = v != "0";
                     else if (k == "hwBlackout") cfg.HardwareBlackout = v == "1";
                     else if (k == "caption" && v.Length <= 60) cfg.Caption = v;
@@ -225,12 +228,13 @@ namespace DualRemote
             return cfg;
         }
 
-        internal bool Save(out string error)
+        internal bool Save(out string error, string configPath = null)
         {
             error = null;
             try
             {
-                Directory.CreateDirectory(RecentStore.DirPath);
+                configPath = configPath ?? ConfigPath;
+                Directory.CreateDirectory(Path.GetDirectoryName(configPath));
                 var sb = new StringBuilder();
                 sb.AppendLine("preset=" + Preset);
                 sb.AppendLine("image=" + (CustomImagePath ?? ""));
@@ -238,10 +242,11 @@ namespace DualRemote
                 sb.AppendLine("auto=" + (AutoOnRemote ? "1" : "0"));
                 sb.AppendLine("badge=" + (ShowOverlayBadge ? "1" : "0"));
                 sb.AppendLine("lock=" + (LockOnLocalExit ? "1" : "0"));
+                sb.AppendLine("lockOnDisconnect=" + (LockOnRemoteDisconnect ? "1" : "0"));
                 sb.AppendLine("blockInput=" + (BlockLocalInput ? "1" : "0"));
                 sb.AppendLine("hwBlackout=" + (HardwareBlackout ? "1" : "0"));
                 sb.AppendLine("caption=" + (Caption ?? "").Replace("\r", "").Replace("\n", ""));
-                File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
+                File.WriteAllText(configPath, sb.ToString(), new UTF8Encoding(false));
                 return true;
             }
             catch (Exception ex)

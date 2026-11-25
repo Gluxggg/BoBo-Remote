@@ -249,7 +249,7 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
     return false;
 }
 
-void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps, bool allowVbr) {
+void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps) {
     if (!api) return;
     VARIANT v = {};
 
@@ -258,19 +258,16 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
     api->SetValue(&CODECAPI_AVEncCommonRealTime, &v);
 
-    // Peak-Constrained VBR eliminates CBR filler padding on static/desktop frames while capping bursts.
+    // Use CBR with a small buffer to limit IDR bursts and apply live bitrate changes.
+    // FilterAndInspectAnnexB removes CBR filler before the frame goes on the wire.
     useVbr_ = false;
-    if (allowVbr) {
-        v.vt = VT_UI4;
+    v.vt = VT_UI4;
+    v.ulVal = eAVEncCommonRateControlMode_CBR;
+    if (FAILED(api->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v))) {
         v.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
         if (SUCCEEDED(api->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v))) {
             useVbr_ = true;
         }
-    }
-    if (!useVbr_) {
-        v.vt = VT_UI4;
-        v.ulVal = eAVEncCommonRateControlMode_CBR;
-        api->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
     }
 
     uint64_t meanBps = static_cast<uint64_t>(bitrateKbps) * 1000ULL;
@@ -280,17 +277,17 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
     if (useVbr_) {
-        uint64_t maxBps = (meanBps * 130ULL) / 100ULL;
+        uint64_t maxBps = (meanBps * 120ULL) / 100ULL;
         if (maxBps > 80000000ULL) maxBps = 80000000ULL;
         v.vt = VT_UI4;
         v.ulVal = static_cast<ULONG>(maxBps);
         api->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
     }
 
-    // Tight ~100ms HRD/VBV buffer prevents giant keyframe bursts from tail-dropping Wi-Fi routers
-    uint64_t vbvBytes = (meanBps / 8ULL) / 10ULL;
-    if (vbvBytes < 32768ULL) vbvBytes = 32768ULL;
-    if (vbvBytes > 1048576ULL) vbvBytes = 1048576ULL;
+    // Tight ~50ms HRD/VBV buffer (capped at 256 KB) prevents giant IDR bursts from tail-dropping Wi-Fi/campus/WireGuard queues
+    uint64_t vbvBytes = (meanBps / 8ULL) / 20ULL;
+    if (vbvBytes < 16384ULL) vbvBytes = 16384ULL;
+    if (vbvBytes > 262144ULL) vbvBytes = 262144ULL;
     v.vt = VT_UI4;
     v.ulVal = static_cast<ULONG>(vbvBytes);
     api->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
@@ -308,7 +305,7 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
 
     v.vt = VT_UI4;
-    v.ulVal = fps * 5u; // 5s GOP (on-demand PLI handles instant recovery without periodic IDR spikes)
+    v.ulVal = fps * 10u; // 10s GOP (on-demand PLI handles instant recovery without periodic IDR spikes)
     api->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
 }
 
@@ -325,15 +322,15 @@ bool MfH264Encoder::UpdateBitrateLive(uint32_t bitrateKbps) {
     HRESULT hr = codecApi_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
     if (useVbr_) {
-        uint64_t maxBps = (meanBps * 130ULL) / 100ULL;
+        uint64_t maxBps = (meanBps * 120ULL) / 100ULL;
         if (maxBps > 80000000ULL) maxBps = 80000000ULL;
         v.ulVal = static_cast<ULONG>(maxBps);
         codecApi_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
     }
 
-    uint64_t vbvBytes = (meanBps / 8ULL) / 10ULL;
-    if (vbvBytes < 32768ULL) vbvBytes = 32768ULL;
-    if (vbvBytes > 1048576ULL) vbvBytes = 1048576ULL;
+    uint64_t vbvBytes = (meanBps / 8ULL) / 20ULL;
+    if (vbvBytes < 16384ULL) vbvBytes = 16384ULL;
+    if (vbvBytes > 262144ULL) vbvBytes = 262144ULL;
     v.ulVal = static_cast<ULONG>(vbvBytes);
     codecApi_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
 
@@ -542,7 +539,7 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t
     // Configure low-latency real-time codec parameters BEFORE media type negotiation
     codecApi_.Reset();
     if (SUCCEEDED(mft->QueryInterface(IID_PPV_ARGS(codecApi_.GetAddressOf()))) && codecApi_) {
-        ApplyCodecApiLowLatency(codecApi_.Get(), fps, bitrateKbps, true);
+        ApplyCodecApiLowLatency(codecApi_.Get(), fps, bitrateKbps);
     }
 
     // Output type MUST be set BEFORE input type on MF video encoders
@@ -590,7 +587,7 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t
 
     // Re-apply ICodecAPI AFTER SetInputType because some GPU MFTs reset rate control / low-latency on type negotiation
     if (codecApi_) {
-        ApplyCodecApiLowLatency(codecApi_.Get(), fps, bitrateKbps, true);
+        ApplyCodecApiLowLatency(codecApi_.Get(), fps, bitrateKbps);
     }
 
     MFT_OUTPUT_STREAM_INFO osi = {};

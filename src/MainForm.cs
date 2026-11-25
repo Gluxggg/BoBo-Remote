@@ -57,13 +57,11 @@ namespace DualRemote
         private const int HotkeyPrivacyEnableId = 0x51A1;
         private const int HotkeyPrivacyDisableId = 0x51A2;
         private const int HotkeyRemoteLockId = 0x51A3;
-        private const int HotkeySuperDisplayId = 0x51A4;
         private const uint ModAlt = 0x0001;
         private const uint ModControl = 0x0002;
         private const uint ModShift = 0x0004;
         private const uint ModNoRepeat = 0x4000;
         private const uint VkP = 0x50;
-        private const uint VkF8 = 0x77;
         private const uint VkF9 = 0x78;
         private const uint VkF11 = 0x7A;
         private const uint VkF12 = 0x7B;
@@ -226,6 +224,8 @@ namespace DualRemote
             quality.DropDownWidth = (int)Math.Round(400f * scale);
             if (settingsDefaultProfileCombo != null)
                 settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(380f * scale);
+            if (settingsHostDisconnectActionCombo != null) settingsHostDisconnectActionCombo.DropDownWidth = DevicePixels(180);
+            if (privacyHostDisconnectActionCombo != null) privacyHostDisconnectActionCombo.DropDownWidth = DevicePixels(180);
 
             for (int i = 0; i < pages.Length; i++)
             {
@@ -285,8 +285,7 @@ namespace DualRemote
                 bool ok1 = RegisterHotKey(Handle, HotkeyPrivacyEnableId, mods, VkF11);
                 bool ok2 = RegisterHotKey(Handle, HotkeyPrivacyDisableId, mods, VkF12);
                 bool ok3 = RegisterHotKey(Handle, HotkeyRemoteLockId, mods, VkF9);
-                bool ok4 = RegisterHotKey(Handle, HotkeySuperDisplayId, mods, VkF8);
-                remoteHotkeysRegistered = ok1 || ok2 || ok3 || ok4;
+                remoteHotkeysRegistered = ok1 || ok2 || ok3;
             }
             catch { remoteHotkeysRegistered = false; }
 
@@ -322,7 +321,6 @@ namespace DualRemote
                 try { UnregisterHotKey(Handle, HotkeyPrivacyEnableId); } catch { }
                 try { UnregisterHotKey(Handle, HotkeyPrivacyDisableId); } catch { }
                 try { UnregisterHotKey(Handle, HotkeyRemoteLockId); } catch { }
-                try { UnregisterHotKey(Handle, HotkeySuperDisplayId); } catch { }
                 remoteHotkeysRegistered = false;
             }
             base.OnHandleDestroyed(e);
@@ -363,11 +361,6 @@ namespace DualRemote
                 if (hkId == HotkeyRemoteLockId)
                 {
                     WindowsSession.TryLockWorkstation();
-                    return;
-                }
-                if (hkId == HotkeySuperDisplayId)
-                {
-                    OpenDisplayTool("Enable", "Virtual");
                     return;
                 }
             }
@@ -634,7 +627,6 @@ namespace DualRemote
                 try { UnregisterHotKey(Handle, HotkeyPrivacyEnableId); } catch { }
                 try { UnregisterHotKey(Handle, HotkeyPrivacyDisableId); } catch { }
                 try { UnregisterHotKey(Handle, HotkeyRemoteLockId); } catch { }
-                try { UnregisterHotKey(Handle, HotkeySuperDisplayId); } catch { }
                 remoteHotkeysRegistered = false;
             }
             privacyCurtain.Dispose();
@@ -1146,7 +1138,7 @@ namespace DualRemote
             if (IsDisposed || !IsHandleCreated) return;
             Action apply = delegate
             {
-                if (IsDisposed) return;
+                if (IsDisposed || (!active && boboHostServer != null && boboHostServer.HasActiveRemoteSession)) return;
                 hostCurrentlyControlled = active;
                 SyncActiveControlIndicators();
                 if (active)
@@ -1171,15 +1163,35 @@ namespace DualRemote
                 }
                 else
                 {
-                    if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
+                    bool hadCurtain = privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+                    if (hadCurtain)
                     {
                         ClearPrivacyButtonFocus();
-                        // 远控正常断开时直接收起防窥幕布，不误触发「仅物理键退出时自动锁屏」；
-                        // 若主控端显式开启「断开后自动锁屏」，由主控端在断开前单独发送 LOCK_WORKSTATION。
                         privacyCurtain.Deactivate(false);
-                        ShowDisplayBanner("远控会话已结束，防窥壁纸已自动收起。", Theme.PillTone.Info);
                     }
-                    deviceBanner.Set("远控会话已结束，本机恢复就绪状态。", Theme.PillTone.Info);
+
+                    string message = hadCurtain
+                        ? "远控会话已结束，已收起防窥壁纸并回到桌面。"
+                        : "远控会话已结束，本机恢复就绪状态。";
+                    Theme.PillTone tone = Theme.PillTone.Info;
+                    if (privacyGuard.SessionLocked)
+                    {
+                        message = "远控会话已结束，Windows 处于锁定状态。";
+                    }
+                    else if (privacyConfig.LockOnRemoteDisconnect)
+                    {
+                        if (WindowsSession.TryLockWorkstation())
+                        {
+                            message = "远控会话已结束，已请求 Windows 自动锁屏。";
+                        }
+                        else
+                        {
+                            message = "远控会话已结束，Windows 未接受自动锁屏请求。";
+                            tone = Theme.PillTone.Warning;
+                        }
+                    }
+                    ShowDisplayBanner(message, tone);
+                    deviceBanner.Set(message, tone);
                 }
             };
             try
@@ -1883,44 +1895,68 @@ namespace DualRemote
             UpdateAssistConnectButtons();
         }
 
+        private bool streamQualityOrRestartBusy;
+
         private async void SwitchActiveStreamQuality(int newIndex)
         {
             if (newIndex < 0 || newIndex >= QualityOptions.Length) return;
-            quality.SelectedIndex = newIndex;
-            SavePreferences();
-            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+            if (streamQualityOrRestartBusy) return;
+            streamQualityOrRestartBusy = true;
+            try
             {
-                QualityOption p = QualityOptions[newIndex];
-                string modeTag = p.Height + "p" + p.Fps + " · D3D11VA";
-                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
-                    activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid);
-                await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, modeTag);
+                quality.SelectedIndex = newIndex;
+                SavePreferences();
+                if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                {
+                    QualityOption p = QualityOptions[newIndex];
+                    string modeTag = p.Height + "p" + p.Fps + " · D3D11VA";
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                        activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid);
+                    await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, modeTag);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsDisposed) SetStatus("切换画质失败：" + ex.Message, Theme.PillTone.Warning);
                 return;
+            }
+            finally
+            {
+                streamQualityOrRestartBusy = false;
             }
             RestartActiveStreamSession();
         }
 
         private async void RestartActiveStreamSession()
         {
+            if (streamQualityOrRestartBusy) return;
             string target = activeStreamHost;
             if (string.IsNullOrEmpty(target)) return;
-            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+            streamQualityOrRestartBusy = true;
+            try
             {
-                var p = quality.SelectedItem as QualityOption ?? QualityOptions[0];
-                await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, p.Height + "p" + p.Fps + " · D3D11VA");
-                return;
+                if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                {
+                    var p = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+                    await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, p.Height + "p" + p.Fps + " · D3D11VA");
+                    return;
+                }
+                activeStreamPid = 0;
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.PauseWatchingForRestart();
+                if (!IsDisposed)
+                {
+                    await StartStreamAsync(target);
+                }
             }
-            int oldPid = activeStreamPid;
-            activeStreamPid = 0;
-            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
-                activeStreamToolbar.PauseWatchingForRestart();
-            if (oldPid > 0)
+            catch (Exception ex)
             {
-                await Task.Run(delegate { Engines.StopStreamProcess(oldPid); });
+                if (!IsDisposed) SetStatus("重连远程会话失败：" + ex.Message, Theme.PillTone.Warning);
             }
-            if (!IsDisposed)
+            finally
             {
-                await StartStreamAsync(target);
+                streamQualityOrRestartBusy = false;
             }
         }
 
@@ -2084,7 +2120,13 @@ namespace DualRemote
                             }
                         }
                     }
-                    RestoreRecents(streamHost, recent.MoonlightHosts);
+                    foreach (string entry in recent.MoonlightHosts)
+                    {
+                        if (!string.IsNullOrWhiteSpace(entry) && seenHosts.Add(entry.Trim()))
+                        {
+                            streamHost.Items.Add(entry);
+                        }
+                    }
                     streamHost.SelectedIndex = -1;
                     streamHost.Text = kept;
                 }
@@ -2096,8 +2138,11 @@ namespace DualRemote
                     return;
                 }
                 SetStatus("已发现 " + foundCount + " 台同网设备，请选择并连接。", Theme.PillTone.Success);
-                streamHost.Focus();
-                streamHost.DroppedDown = true;
+                if (Visible && !IsDisposed && Form.ActiveForm == this && streamHost.Visible && streamHost.Enabled)
+                {
+                    streamHost.Focus();
+                    streamHost.DroppedDown = true;
+                }
             }
             catch
             {
@@ -2165,7 +2210,7 @@ namespace DualRemote
                 catch (System.ComponentModel.Win32Exception) { }
             }
             MessageBox.Show(this,
-                "通用协助：在「开始协助」使用 RustDesk 设备码连接或互传文件。\n低延迟高清串流：输入主机地址直接连接，首次将引导 4 位配对码授权。\n防窥保护：在「防窥与显示」开启防窥壁纸，快捷键 Ctrl+Alt+Shift+P 随时开关。",
+                "远程连接与文件互传：在「远程控制」输入对方 9 位 BoBo 设备码或局域网/Tailscale IP，首次将通过 4 位临时配对码完成 TLS 1.2 双端授权。\n低延迟串流：默认启用加密 UDP+FEC 与 D3D11VA 硬解，并支持超级屏自适应无黑边。\n防窥保护：在「防窥与显示」开启防窥壁纸与物理键鼠锁，快捷键 Ctrl+Alt+Shift+P 随时紧急退出。",
                 "BoBo远程 使用与调优指南", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 

@@ -36,6 +36,7 @@ public struct BoBoStreamOptions: Sendable {
     public var superDisplay: Bool = true
     public var clientWidth: Int = 0
     public var clientHeight: Int = 0
+    public var expectedHostThumbprint: String = ""
 
     public init(host: String, port: Int = BoBoProtocol.defaultTcpPort) {
         self.host = host
@@ -57,6 +58,8 @@ public protocol BoBoStreamClientDelegate: AnyObject, Sendable {
     func streamClientDidUpdateRtt(_ rttMs: Double)
     func streamClientDidUpdatePrivacy(active: Bool)
     func streamClientDidUpdateSuperDisplay(active: Bool, nativeMatch: Bool, width: Int, height: Int)
+    func streamClientDidUpdateCursorMode(hostCursorComposited: Bool)
+    func streamClientDidReconfigure(monitorIndex: Int, width: Int, height: Int, fps: Int)
     func streamClientDidFail(code: String, message: String)
     func streamClientDidDisconnect(reason: String)
 }
@@ -65,20 +68,46 @@ public extension BoBoStreamClientDelegate {
     func streamClientDidUpdateRtt(_ rttMs: Double) {}
     func streamClientDidUpdatePrivacy(active: Bool) {}
     func streamClientDidUpdateSuperDisplay(active: Bool, nativeMatch: Bool, width: Int, height: Int) {}
+    func streamClientDidUpdateCursorMode(hostCursorComposited: Bool) {}
+    func streamClientDidReconfigure(monitorIndex: Int, width: Int, height: Int, fps: Int) {}
 }
 
 /// BoBo V6.2 Apple 全原生主控客户端（macOS / iOS 共享）。
 public final class BoBoStreamClient: @unchecked Sendable {
     private let identity: BoBoIdentityStore
     private let lock = NSLock()
+    private let txLock = NSLock()
+    private let txQueue = DispatchQueue(label: "com.bobo.remote.client.tx", qos: .userInteractive)
+
     private var framedConn: BoBoFramedConnection?
     private var rxTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var _isConnected = false
 
-    public private(set) var remotePlatform: String = BoBoProtocol.platformWindows
-    public private(set) var remoteHostControlMode: String = BoBoProtocol.controlModeFull
-    public private(set) var remoteMonitors: [BoBoMonitorDescriptor] = []
+    private var _remotePlatform: String = BoBoProtocol.platformWindows
+    private var _remoteHostControlMode: String = BoBoProtocol.controlModeFull
+    private var _remoteMonitors: [BoBoMonitorDescriptor] = []
+    private var _hostCursorComposited: Bool = true
+
+    // Coalescing buffer for high-frequency mouse moves (MouseAbs / MouseRel)
+    private var pendingAbs: BoBoInputPacket?
+    private var hasPendingRel = false
+    private var pendingRelDx = 0
+    private var pendingRelDy = 0
+    private var txFlushScheduled = false
+
+    public var remotePlatform: String {
+        lock.lock(); defer { lock.unlock() }; return _remotePlatform
+    }
+    public var remoteHostControlMode: String {
+        lock.lock(); defer { lock.unlock() }; return _remoteHostControlMode
+    }
+    public var remoteMonitors: [BoBoMonitorDescriptor] {
+        lock.lock(); defer { lock.unlock() }; return _remoteMonitors
+    }
+    public var hostCursorComposited: Bool {
+        lock.lock(); defer { lock.unlock() }; return _hostCursorComposited
+    }
 
     public var isConnected: Bool {
         lock.lock()
@@ -92,59 +121,106 @@ public final class BoBoStreamClient: @unchecked Sendable {
 
     public func connectAndStartStream(options: BoBoStreamOptions, delegate: BoBoStreamClientDelegate) {
         disconnect()
+        guard let port = Self.validPort(options.port) else {
+            delegate.streamClientDidFail(code: "INVALID_PORT", message: "目标端口无效。")
+            return
+        }
         identity.ensureLoaded()
-
+        let thumbBox = ThumbBox()
+        let nwConn = NWConnection(host: NWEndpoint.Host(options.host), port: port,
+                                  using: BoBoFramedConnection.makeClientParameters { thumbBox.set($0) })
+        let conn = BoBoFramedConnection(connection: nwConn, queueLabel: "com.bobo.remote.client")
+        lock.lock()
+        framedConn = conn
         rxTask = Task.detached(priority: .userInteractive) { [weak self, weak delegate] in
-            guard let self else { return }
+            guard let self else { conn.close(); return }
             var disconnectReason = "连接已断开"
+            var endedWithError = false
+            defer {
+                let wasConnected = self.finishConnection(conn)
+                if wasConnected && !endedWithError {
+                    delegate?.streamClientDidDisconnect(reason: disconnectReason)
+                }
+            }
             do {
-                let thumbBox = ThumbBox()
-                let nwParams = BoBoFramedConnection.makeClientParameters { thumbBox.set($0) }
-                let nwConn = NWConnection(
-                    host: NWEndpoint.Host(options.host),
-                    port: NWEndpoint.Port(integerLiteral: UInt16(options.port > 0 ? options.port : BoBoProtocol.defaultTcpPort)),
-                    using: nwParams
-                )
-                let conn = BoBoFramedConnection(connection: nwConn, queueLabel: "com.bobo.remote.client")
-                self.setConn(conn)
+                guard self.isCurrent(conn) else { return }
                 try await conn.start(timeoutSeconds: 8.0)
 
                 try await conn.sendJson(Self.buildHelloDict(identity: self.identity))
-                guard let ackFrame = try await conn.readFrame(),
+                guard let ackFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 8.0),
                       ackFrame.type == .controlJson,
                       let ack = BoBoProtocol.parseJson(ackFrame.payload),
-                      (ack["protocol"] as? String) == BoBoProtocol.protocolMagic else {
+                      Self.isHelloAck(ack), self.isCurrent(conn) else {
                     delegate?.streamClientDidFail(code: "HANDSHAKE_FAILED", message: "目标主机未返回有效 BoBo V6 握手。")
-                    self.disconnect()
+                    return
+                }
+
+                let serverThumb = thumbBox.get()
+                guard !serverThumb.isEmpty else {
+                    delegate?.streamClientDidFail(code: "TLS_CERT_MISSING", message: "未能获取远端主机 TLS 证书指纹。")
+                    return
+                }
+
+                let hostNodeId = (ack["nodeId"] as? String) ?? ""
+                let hostCode = (ack["deviceCode"] as? String) ?? ""
+                let hostName = (ack["deviceName"] as? String) ?? options.host
+                let nonce = (ack["nonce"] as? String) ?? ""
+
+                // 严格客户端 TOFU 证书钉扎：若本机已记录该主机 nodeId，证书指纹必须完全一致
+                if Self.hasPinMismatch(identity: self.identity, nodeId: hostNodeId, thumb: serverThumb,
+                                       expected: options.expectedHostThumbprint) {
+                    delegate?.streamClientDidFail(
+                        code: "CERT_MISMATCH",
+                        message: "远端主机证书指纹与已配对记录不一致，疑似中间人攻击或主机已重装。请先删除旧配对记录后重新配对。"
+                    )
                     return
                 }
 
                 if ((ack["allowIncoming"] as? NSNumber)?.boolValue ?? true) == false {
                     delegate?.streamClientDidFail(code: "HOST_DISABLED", message: "对方已关闭「允许本机被控」。")
-                    self.disconnect()
                     return
                 }
-                if ((ack["authorized"] as? NSNumber)?.boolValue ?? false) == false {
+                if ((ack["authorized"] as? NSNumber)?.boolValue ?? false) == false ||
+                    !self.identity.isPeerAuthorized(peerNodeId: hostNodeId, peerThumbprint: serverThumb) {
                     delegate?.streamClientDidFail(code: "PAIR_REQUIRED", message: "首次连接需输入对方 4 位临时配对码。")
-                    self.disconnect()
                     return
                 }
 
-                self.remotePlatform = (ack["platform"] as? String) ?? BoBoProtocol.platformWindows
-                self.remoteHostControlMode = (ack["hostControlMode"] as? String) ?? BoBoProtocol.controlModeFull
-                self.remoteMonitors = BoBoProtocol.parseMonitors(from: ack)
+                // 服务端下发挑战时必须完成 RSA 私钥签名验证
+                if ((ack["authChallenge"] as? NSNumber)?.boolValue ?? false) {
+                    let sig = self.identity.signAuthChallenge(nonceHex: nonce, hostThumbprint: serverThumb)
+                    try await conn.sendJson([
+                        "type": "AUTH_PROOF",
+                        "signature": sig,
+                        "clientCertDer": self.identity.certificateDerBase64
+                    ])
+                    guard let authFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 8.0),
+                          authFrame.type == .controlJson,
+                          let authRes = BoBoProtocol.parseJson(authFrame.payload),
+                          (authRes["type"] as? String) == "AUTH_RESULT" else {
+                        delegate?.streamClientDidFail(code: "AUTH_FAILED", message: "设备私钥身份校验未通过，请重新配对。")
+                            return
+                    }
+                    if ((authRes["ok"] as? NSNumber)?.boolValue ?? false) == false {
+                        let emsg = (authRes["error"] as? String) ?? "设备私钥身份校验未通过，请重新配对。"
+                        delegate?.streamClientDidFail(code: "AUTH_FAILED", message: emsg)
+                            return
+                    }
+                }
 
-                let hostNodeId = (ack["nodeId"] as? String) ?? ""
-                let hostCode = (ack["deviceCode"] as? String) ?? ""
-                let hostName = (ack["deviceName"] as? String) ?? options.host
-                let serverThumb = thumbBox.get()
-                let hostThumb = serverThumb.isEmpty ? ((ack["certThumbprint"] as? String) ?? "") : serverThumb
-                if !hostNodeId.isEmpty && !hostThumb.isEmpty {
+                self.lock.lock()
+                self._remotePlatform = (ack["platform"] as? String) ?? BoBoProtocol.platformWindows
+                self._remoteHostControlMode = (ack["hostControlMode"] as? String) ?? BoBoProtocol.controlModeFull
+                self._remoteMonitors = BoBoProtocol.parseMonitors(from: ack)
+                self._hostCursorComposited = true
+                self.lock.unlock()
+
+                if !hostNodeId.isEmpty {
                     self.identity.authorizeOrUpdatePeer(BoBoAuthorizedPeer(
                         nodeId: hostNodeId,
                         deviceCode: hostCode,
                         deviceName: hostName,
-                        certThumbprint: hostThumb,
+                        certThumbprint: serverThumb,
                         lastHost: options.host
                     ))
                 }
@@ -163,18 +239,10 @@ public final class BoBoStreamClient: @unchecked Sendable {
                     "clientHeight": options.clientHeight
                 ]
                 try await conn.sendJson(startReq)
-                self.setConnected(true)
+                guard self.didConnect(conn) else { return }
 
-                self.pingTask = Task.detached(priority: .utility) { [weak self] in
-                    while let self, self.isConnected, !Task.isCancelled {
-                        let ts = Int64(DispatchTime.now().uptimeNanoseconds)
-                        self.sendJson(["type": "PING", "ts": ts])
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    }
-                }
-
-                while self.isConnected, !Task.isCancelled {
-                    guard let frame = try await conn.readFrame() else { break }
+                while !Task.isCancelled {
+                    guard let frame = try await conn.readFrame(timeoutSeconds: 12.0), self.isCurrent(conn) else { break }
                     switch frame.type {
                     case .videoH264:
                         if let vp = BoBoProtocol.parseVideoPayload(frame.payload) {
@@ -184,29 +252,58 @@ public final class BoBoStreamClient: @unchecked Sendable {
                         if let ap = BoBoProtocol.parseAudioPayload(frame.payload) {
                             delegate?.streamClientDidReceiveAudio(ap)
                         }
+                    case .cursorShape:
+                        break
                     case .controlJson:
                         guard let msg = BoBoProtocol.parseJson(frame.payload),
                               let t = msg["type"] as? String else { continue }
                         switch t {
                         case "STREAM_STARTED":
                             let mons = BoBoProtocol.parseMonitors(from: msg)
-                            if !mons.isEmpty { self.remoteMonitors = mons }
-                            if let sp = msg["platform"] as? String, !sp.isEmpty { self.remotePlatform = sp }
-                            if let sm = msg["hostControlMode"] as? String, !sm.isEmpty { self.remoteHostControlMode = sm }
+                            let cursorComp = (msg["hostCursorComposited"] as? NSNumber)?.boolValue ?? true
+                            self.lock.lock()
+                            if !mons.isEmpty { self._remoteMonitors = mons }
+                            if let sp = msg["platform"] as? String, !sp.isEmpty { self._remotePlatform = sp }
+                            if let sm = msg["hostControlMode"] as? String, !sm.isEmpty { self._remoteHostControlMode = sm }
+                            self._hostCursorComposited = cursorComp
+                            let curMons = self._remoteMonitors
+                            let curPlat = self._remotePlatform
+                            let curMode = self._remoteHostControlMode
+                            self.lock.unlock()
+
                             let w = (msg["width"] as? NSNumber)?.intValue ?? options.width
                             let h = (msg["height"] as? NSNumber)?.intValue ?? options.height
                             let fps = (msg["fps"] as? NSNumber)?.intValue ?? options.fps
                             let sdAct = (msg["superDisplayActive"] as? NSNumber)?.boolValue ?? false
                             let sdNat = (msg["superDisplayNativeMatch"] as? NSNumber)?.boolValue ?? false
                             delegate?.streamClientDidStart(
-                                monitors: self.remoteMonitors,
+                                monitors: curMons,
                                 width: w,
                                 height: h,
                                 fps: fps,
-                                remotePlatform: self.remotePlatform,
-                                hostControlMode: self.remoteHostControlMode
+                                remotePlatform: curPlat,
+                                hostControlMode: curMode
                             )
+                            delegate?.streamClientDidUpdateCursorMode(hostCursorComposited: cursorComp)
+                            if let privacyActive = msg["privacyActive"] as? NSNumber {
+                                delegate?.streamClientDidUpdatePrivacy(active: privacyActive.boolValue)
+                            }
                             delegate?.streamClientDidUpdateSuperDisplay(active: sdAct, nativeMatch: sdNat, width: w, height: h)
+                        case "CURSOR_MODE_STATE":
+                            if let cursor = msg["hostCursorComposited"] as? NSNumber {
+                                self.lock.withLock { self._hostCursorComposited = cursor.boolValue }
+                                delegate?.streamClientDidUpdateCursorMode(hostCursorComposited: cursor.boolValue)
+                            }
+                        case "RECONFIGURED":
+                            let monitors = BoBoProtocol.parseMonitors(from: msg)
+                            if !monitors.isEmpty {
+                                self.lock.withLock { self._remoteMonitors = monitors }
+                            }
+                            let mon = (msg["monitorIndex"] as? NSNumber)?.intValue ?? 0
+                            let w = (msg["width"] as? NSNumber)?.intValue ?? 0
+                            let h = (msg["height"] as? NSNumber)?.intValue ?? 0
+                            let fps = (msg["fps"] as? NSNumber)?.intValue ?? 0
+                            delegate?.streamClientDidReconfigure(monitorIndex: mon, width: w, height: h, fps: fps)
                         case "SUPER_DISPLAY_STATE":
                             delegate?.streamClientDidUpdateSuperDisplay(
                                 active: (msg["active"] as? NSNumber)?.boolValue ?? false,
@@ -227,12 +324,12 @@ public final class BoBoStreamClient: @unchecked Sendable {
                         case "ERROR":
                             let code = (msg["code"] as? String) ?? "ERROR"
                             let emsg = (msg["message"] as? String) ?? "远端返回错误"
-                            disconnectReason = emsg
+                            endedWithError = true
                             delegate?.streamClientDidFail(code: code, message: emsg)
-                            self.setConnected(false)
+                            return
                         case "DISCONNECT":
                             disconnectReason = "对方已断开远控"
-                            self.setConnected(false)
+                            return
                         default:
                             break
                         }
@@ -241,28 +338,96 @@ public final class BoBoStreamClient: @unchecked Sendable {
                     }
                 }
             } catch {
+                guard self.isCurrent(conn) else { return }
                 if !self.isConnected {
                     delegate?.streamClientDidFail(code: "CONNECT_FAILED", message: "连接失败：\(error.localizedDescription)")
-                    return
                 }
                 disconnectReason = error.localizedDescription
             }
-            let wasConnected = self.takeConnectedFalse()
-            self.closeConnectionOnly()
-            if wasConnected {
-                delegate?.streamClientDidDisconnect(reason: disconnectReason)
-            }
         }
+        lock.unlock()
     }
 
     public func sendInput(_ pkt: BoBoInputPacket) {
-        guard isConnected, let conn = currentConn() else { return }
-        conn.sendFrameFireAndForget(type: .inputEvent, flagsOrTimestamp: 0, payload: BoBoProtocol.buildInputPayload(pkt))
+        guard let conn = connectedConnection() else { return }
+        if pkt.kind == BoBoProtocol.inputKindMouseAbs {
+            var schedule = false
+            txLock.lock()
+            pendingAbs = pkt
+            if !txFlushScheduled {
+                txFlushScheduled = true
+                schedule = true
+            }
+            txLock.unlock()
+            if schedule {
+                txQueue.async { [weak self] in self?.flushPendingMoves(conn: conn) }
+            }
+            return
+        }
+        if pkt.kind == BoBoProtocol.inputKindMouseRel {
+            var schedule = false
+            txLock.lock()
+            hasPendingRel = true
+            pendingRelDx = max(-32768, min(32767, pendingRelDx + Int(pkt.a)))
+            pendingRelDy = max(-32768, min(32767, pendingRelDy + Int(pkt.b)))
+            if !txFlushScheduled {
+                txFlushScheduled = true
+                schedule = true
+            }
+            txLock.unlock()
+            if schedule {
+                txQueue.async { [weak self] in self?.flushPendingMoves(conn: conn) }
+            }
+            return
+        }
+
+        // Discrete input (click / wheel / key / touch / mobileNav / releaseAll):
+        // Flush any buffered moves immediately ahead of it on the serial TX queue.
+        txQueue.async { [weak self] in
+            guard let self, self.isCurrent(conn) else { return }
+            self.flushPendingMovesOnTxQueue(conn: conn)
+            conn.sendFrameFireAndForget(type: .inputEvent, flagsOrTimestamp: 0, payload: BoBoProtocol.buildInputPayload(pkt))
+        }
+    }
+
+    private func flushPendingMoves(conn: BoBoFramedConnection) {
+        if isCurrent(conn) { flushPendingMovesOnTxQueue(conn: conn) }
+    }
+
+    private func flushPendingMovesOnTxQueue(conn: BoBoFramedConnection) {
+        txLock.lock()
+        let absPkt = pendingAbs
+        pendingAbs = nil
+        let rel = hasPendingRel
+        let rdx = pendingRelDx
+        let rdy = pendingRelDy
+        hasPendingRel = false
+        pendingRelDx = 0
+        pendingRelDy = 0
+        txFlushScheduled = false
+        txLock.unlock()
+
+        if let absPkt {
+            conn.sendFrameFireAndForget(type: .inputEvent, flagsOrTimestamp: 0, payload: BoBoProtocol.buildInputPayload(absPkt))
+        }
+        if rel && (rdx != 0 || rdy != 0) {
+            let relPkt = BoBoProtocol.buildMouseRel(dx: rdx, dy: rdy)
+            conn.sendFrameFireAndForget(type: .inputEvent, flagsOrTimestamp: 0, payload: BoBoProtocol.buildInputPayload(relPkt))
+        }
     }
 
     public func sendKeyCombo(_ vks: [UInt8]) {
-        for vk in vks { sendInput(BoBoProtocol.buildKey(vk: vk, down: true)) }
-        for vk in vks.reversed() { sendInput(BoBoProtocol.buildKey(vk: vk, down: false)) }
+        for vk in vks { sendInput(BoBoProtocol.buildKey(vk: vk, down: true, extended: Self.isExtendedVk(vk))) }
+        for vk in vks.reversed() { sendInput(BoBoProtocol.buildKey(vk: vk, down: false, extended: Self.isExtendedVk(vk))) }
+    }
+
+    private static func isExtendedVk(_ vk: UInt8) -> Bool {
+        switch vk {
+        case 0x21...0x28, 0x2D, 0x2E, 0x5B, 0x5C, 0xA3, 0xA5:
+            return true
+        default:
+            return false
+        }
     }
 
     public func sendReconfigure(monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int) {
@@ -295,54 +460,98 @@ public final class BoBoStreamClient: @unchecked Sendable {
     }
 
     public func disconnect() {
-        let was = takeConnectedFalse()
-        if was, let conn = currentConn(), let raw = try? BoBoProtocol.encodeJsonFrame(["type": "DISCONNECT"]) {
-            conn.connection.send(content: raw, completion: .idempotent)
+        lock.lock()
+        let conn = framedConn
+        let wasConnected = _isConnected
+        clearConnectionLocked()
+        lock.unlock()
+        guard let conn else { return }
+        if wasConnected, let disconnect = try? BoBoProtocol.encodeJsonFrame(["type": "DISCONNECT"]) {
+            let release = BoBoProtocol.encodeFrame(type: .inputEvent,
+                                                    payload: BoBoProtocol.buildInputPayload(BoBoProtocol.buildReleaseAll()))
+            txQueue.async {
+                conn.connection.send(content: release + disconnect, completion: .contentProcessed { _ in conn.close() })
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) { conn.close() }
+        } else {
+            conn.close()
         }
+    }
+
+    private func sendJson(_ dict: [String: Any]) {
+        guard let conn = connectedConnection(), let raw = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        txQueue.async { [weak self] in
+            guard let self, self.isCurrent(conn) else { return }
+            self.flushPendingMovesOnTxQueue(conn: conn)
+            conn.sendFrameFireAndForget(type: .controlJson, flagsOrTimestamp: 0, payload: raw)
+        }
+    }
+
+    private func connectedConnection() -> BoBoFramedConnection? {
+        lock.withLock { _isConnected ? framedConn : nil }
+    }
+
+    private func isCurrent(_ conn: BoBoFramedConnection) -> Bool {
+        lock.withLock { framedConn === conn }
+    }
+
+    private func didConnect(_ conn: BoBoFramedConnection) -> Bool {
+        lock.withLock {
+            guard framedConn === conn else { return false }
+            _isConnected = true
+            pingTask = Task.detached(priority: .utility) { [weak self] in
+                while let self, self.isCurrent(conn), !Task.isCancelled {
+                    let ts = Int64(DispatchTime.now().uptimeNanoseconds)
+                    if let raw = try? JSONSerialization.data(withJSONObject: ["type": "PING", "ts": ts]) {
+                        conn.sendFrameFireAndForget(type: .controlJson, payload: raw)
+                    }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                }
+            }
+            return true
+        }
+    }
+
+    private func finishConnection(_ conn: BoBoFramedConnection) -> Bool {
+        lock.withLock {
+            guard framedConn === conn else { return false }
+            let wasConnected = _isConnected
+            clearConnectionLocked()
+            conn.close()
+            return wasConnected
+        }
+    }
+
+    private func clearConnectionLocked() {
+        framedConn = nil
+        _isConnected = false
         pingTask?.cancel()
         pingTask = nil
         rxTask?.cancel()
         rxTask = nil
-        closeConnectionOnly()
+        txLock.withLock {
+            pendingAbs = nil
+            hasPendingRel = false
+            pendingRelDx = 0
+            pendingRelDy = 0
+            txFlushScheduled = false
+        }
     }
 
-    private func sendJson(_ dict: [String: Any]) {
-        guard isConnected, let conn = currentConn(), let raw = try? JSONSerialization.data(withJSONObject: dict) else { return }
-        conn.sendFrameFireAndForget(type: .controlJson, flagsOrTimestamp: 0, payload: raw)
+    private static func validPort(_ port: Int) -> NWEndpoint.Port? {
+        let value = port == 0 ? BoBoProtocol.defaultTcpPort : port
+        guard (1...65535).contains(value) else { return nil }
+        return NWEndpoint.Port(rawValue: UInt16(value))
     }
 
-    private func setConn(_ conn: BoBoFramedConnection?) {
-        lock.lock()
-        framedConn = conn
-        lock.unlock()
+    private static func hasPinMismatch(identity: BoBoIdentityStore, nodeId: String, thumb: String, expected: String = "") -> Bool {
+        if !expected.isEmpty && !BoBoIdentityStore.fixedTimeEqualsHex(expected, thumb) { return true }
+        guard let peer = identity.findPeerByNodeId(nodeId) else { return false }
+        return !BoBoIdentityStore.fixedTimeEqualsHex(peer.certThumbprint, thumb)
     }
 
-    private func currentConn() -> BoBoFramedConnection? {
-        lock.lock()
-        defer { lock.unlock() }
-        return framedConn
-    }
-
-    private func setConnected(_ val: Bool) {
-        lock.lock()
-        _isConnected = val
-        lock.unlock()
-    }
-
-    private func takeConnectedFalse() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        let was = _isConnected
-        _isConnected = false
-        return was
-    }
-
-    private func closeConnectionOnly() {
-        lock.lock()
-        let c = framedConn
-        framedConn = nil
-        lock.unlock()
-        c?.close()
+    private static func isHelloAck(_ ack: [String: Any]) -> Bool {
+        (ack["type"] as? String) == "HELLO_ACK" && (ack["protocol"] as? String) == BoBoProtocol.protocolMagic
     }
 
     // MARK: - One-Shot Probe, Pair & File Transfer
@@ -356,12 +565,13 @@ public final class BoBoStreamClient: @unchecked Sendable {
         identity.ensureLoaded()
         var res = BoBoProbeResult()
         res.host = host
-        res.port = port > 0 ? port : BoBoProtocol.defaultTcpPort
+        guard let endpointPort = validPort(port) else { res.error = "目标端口无效"; return res }
+        res.port = Int(endpointPort.rawValue)
 
         let thumbBox = ThumbBox()
         let nwConn = NWConnection(
             host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(integerLiteral: UInt16(res.port)),
+            port: endpointPort,
             using: BoBoFramedConnection.makeClientParameters { thumbBox.set($0) }
         )
         let conn = BoBoFramedConnection(connection: nwConn, queueLabel: "com.bobo.remote.probe")
@@ -371,21 +581,30 @@ public final class BoBoStreamClient: @unchecked Sendable {
             try await conn.start(timeoutSeconds: timeoutSeconds)
             res.reachable = true
             try await conn.sendJson(buildHelloDict(identity: identity))
-            guard let reply = try await conn.readFrame(),
+            guard let reply = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: timeoutSeconds),
                   reply.type == .controlJson,
                   let ack = BoBoProtocol.parseJson(reply.payload),
-                  (ack["protocol"] as? String) == BoBoProtocol.protocolMagic else {
+                  isHelloAck(ack) else {
                 res.error = "目标不是 BoBo远程 V6 客户端"
                 return res
             }
-            res.isBoBoHost = true
+            let srvThumb = thumbBox.get()
+            guard !srvThumb.isEmpty else {
+                res.error = "未能获取远端主机 TLS 证书指纹"
+                return res
+            }
             res.hostNodeId = (ack["nodeId"] as? String) ?? ""
+            if hasPinMismatch(identity: identity, nodeId: res.hostNodeId, thumb: srvThumb) {
+                res.error = "目标设备证书与已配对记录不一致（CERT_MISMATCH）"
+                return res
+            }
+            res.isBoBoHost = true
             res.hostDeviceCode = (ack["deviceCode"] as? String) ?? ""
             res.hostName = (ack["deviceName"] as? String) ?? host
-            let srvThumb = thumbBox.get()
-            res.hostThumbprint = srvThumb.isEmpty ? ((ack["certThumbprint"] as? String) ?? "") : srvThumb
+            res.hostThumbprint = srvThumb
             res.allowIncoming = (ack["allowIncoming"] as? NSNumber)?.boolValue ?? true
-            res.authorized = (ack["authorized"] as? NSNumber)?.boolValue ?? false
+            res.authorized = ((ack["authorized"] as? NSNumber)?.boolValue ?? false) &&
+                identity.isPeerAuthorized(peerNodeId: res.hostNodeId, peerThumbprint: srvThumb)
             res.platform = (ack["platform"] as? String) ?? BoBoProtocol.platformWindows
             res.hostControlMode = (ack["hostControlMode"] as? String) ?? BoBoProtocol.controlModeFull
             res.screenOrientation = (ack["screenOrientation"] as? NSNumber)?.intValue ?? 0
@@ -403,14 +622,15 @@ public final class BoBoStreamClient: @unchecked Sendable {
         port: Int = BoBoProtocol.defaultTcpPort,
         pin: String,
         identity: BoBoIdentityStore,
-        timeoutSeconds: Double = 10.0
+        timeoutSeconds: Double = 10.0,
+        expectedHostThumbprint: String = ""
     ) async -> (ok: Bool, hostName: String, error: String) {
         identity.ensureLoaded()
-        let targetPort = port > 0 ? port : BoBoProtocol.defaultTcpPort
+        guard let endpointPort = validPort(port) else { return (false, "", "目标端口无效") }
         let thumbBox = ThumbBox()
         let nwConn = NWConnection(
             host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(integerLiteral: UInt16(targetPort)),
+            port: endpointPort,
             using: BoBoFramedConnection.makeClientParameters { thumbBox.set($0) }
         )
         let conn = BoBoFramedConnection(connection: nwConn, queueLabel: "com.bobo.remote.pair")
@@ -419,9 +639,10 @@ public final class BoBoStreamClient: @unchecked Sendable {
         do {
             try await conn.start(timeoutSeconds: timeoutSeconds)
             try await conn.sendJson(buildHelloDict(identity: identity))
-            guard let ackFrame = try await conn.readFrame(),
+            guard let ackFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: timeoutSeconds),
+                  ackFrame.type == .controlJson,
                   let ack = BoBoProtocol.parseJson(ackFrame.payload),
-                  (ack["protocol"] as? String) == BoBoProtocol.protocolMagic else {
+                  isHelloAck(ack) else {
                 return (false, "", "被控端未返回有效 BoBo 握手")
             }
             if ((ack["allowIncoming"] as? NSNumber)?.boolValue ?? true) == false {
@@ -431,30 +652,45 @@ public final class BoBoStreamClient: @unchecked Sendable {
             let hostCode = (ack["deviceCode"] as? String) ?? ""
             let hostName = (ack["deviceName"] as? String) ?? host
             let srvThumb = thumbBox.get()
-            let hostThumb = srvThumb.isEmpty ? ((ack["certThumbprint"] as? String) ?? "") : srvThumb
+            guard !srvThumb.isEmpty else {
+                return (false, hostName, "未能获取被控端 TLS 证书指纹")
+            }
+            if hasPinMismatch(identity: identity, nodeId: hostNodeId, thumb: srvThumb, expected: expectedHostThumbprint) {
+                return (false, hostName, "目标设备证书与已配对记录不一致（CERT_MISMATCH）")
+            }
             let nonce = (ack["nonce"] as? String) ?? ""
+            guard !nonce.isEmpty, !hostNodeId.isEmpty else { return (false, hostName, "无效的配对身份") }
 
             let proof = BoBoIdentityStore.computePinProof(
                 pin: pin.trimmingCharacters(in: .whitespacesAndNewlines),
                 nonceHex: nonce,
                 clientThumbprint: identity.certThumbprint,
-                hostThumbprint: hostThumb
+                hostThumbprint: srvThumb
             )
-            try await conn.sendJson(["type": "PAIR_REQUEST", "proof": proof])
-            guard let resFrame = try await conn.readFrame(),
-                  let res = BoBoProtocol.parseJson(resFrame.payload) else {
+            let authSig = identity.signAuthChallenge(nonceHex: nonce, hostThumbprint: srvThumb)
+            try await conn.sendJson([
+                "type": "PAIR_REQUEST",
+                "proof": proof,
+                "authSig": authSig,
+                "clientCertDer": identity.certificateDerBase64
+            ])
+            guard let resFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: timeoutSeconds),
+                  resFrame.type == .controlJson, let res = BoBoProtocol.parseJson(resFrame.payload),
+                  (res["type"] as? String) == "PAIR_RESULT" else {
                 return (false, hostName, "被控端未返回配对结果")
             }
             guard ((res["ok"] as? NSNumber)?.boolValue ?? false) else {
                 return (false, hostName, (res["error"] as? String) ?? "4 位配对码校验失败")
             }
-            identity.authorizeOrUpdatePeer(BoBoAuthorizedPeer(
+            guard identity.authorizeOrUpdatePeer(BoBoAuthorizedPeer(
                 nodeId: hostNodeId,
                 deviceCode: hostCode,
                 deviceName: hostName,
-                certThumbprint: hostThumb,
+                certThumbprint: srvThumb,
                 lastHost: host
-            ))
+            )) else {
+                return (false, hostName, "目标设备证书与已配对记录不一致（CERT_MISMATCH）")
+            }
             return (true, hostName, "")
         } catch {
             return (false, "", "配对失败：\(error.localizedDescription)")
@@ -469,17 +705,28 @@ public final class BoBoStreamClient: @unchecked Sendable {
         onProgress: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async -> (ok: Bool, info: String) {
         identity.ensureLoaded()
-        guard let fileData = try? Data(contentsOf: fileURL) else {
-            return (false, "无法读取本地文件")
+        guard let attrs = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              attrs.isRegularFile == true, let size = attrs.fileSize else {
+            return (false, "无法读取本地文件信息")
         }
-        let shaHex = BoBoProtocol.bytesToHex(Data(SHA256.hash(data: fileData)))
-        let tid = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16))
-        let targetPort = port > 0 ? port : BoBoProtocol.defaultTcpPort
+        let total = Int64(size)
+        guard total >= 0 && total <= BoBoProtocol.maxFileTransferBytes else {
+            return (false, "文件体积超过 2 GiB 上限")
+        }
 
+        guard let endpointPort = validPort(port) else { return (false, "目标端口无效") }
+        guard let fh = try? FileHandle(forReadingFrom: fileURL) else { return (false, "无法读取本地文件") }
+        defer { try? fh.close() }
+        guard let shaHex = computeFileSha256Streaming(handle: fh, total: total) else {
+            return (false, "无法读取本地文件或文件已变化")
+        }
+        let tid = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16))
+
+        let thumbBox = ThumbBox()
         let nwConn = NWConnection(
             host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(integerLiteral: UInt16(targetPort)),
-            using: BoBoFramedConnection.makeClientParameters { _ in }
+            port: endpointPort,
+            using: BoBoFramedConnection.makeClientParameters { thumbBox.set($0) }
         )
         let conn = BoBoFramedConnection(connection: nwConn, queueLabel: "com.bobo.remote.file")
         defer { conn.close() }
@@ -487,38 +734,74 @@ public final class BoBoStreamClient: @unchecked Sendable {
         do {
             try await conn.start(timeoutSeconds: 12.0)
             try await conn.sendJson(buildHelloDict(identity: identity))
-            guard let ackFrame = try await conn.readFrame(),
+            guard let ackFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 15.0),
+                  ackFrame.type == .controlJson,
                   let ack = BoBoProtocol.parseJson(ackFrame.payload),
+                  isHelloAck(ack) else {
+                return (false, "目标设备未返回有效 BoBo V6 握手")
+            }
+
+            let serverThumb = thumbBox.get()
+            let hostNodeId = (ack["nodeId"] as? String) ?? ""
+            guard !serverThumb.isEmpty else {
+                return (false, "未能获取目标设备 TLS 证书指纹")
+            }
+            if !hostNodeId.isEmpty, let existing = identity.findPeerByNodeId(hostNodeId),
+               existing.certThumbprint.caseInsensitiveCompare(serverThumb) != .orderedSame {
+                return (false, "远端主机证书指纹与已配对记录不一致（CERT_MISMATCH）")
+            }
+            guard identity.isPeerAuthorized(peerNodeId: hostNodeId, peerThumbprint: serverThumb),
                   ((ack["authorized"] as? NSNumber)?.boolValue ?? false) else {
                 return (false, "请先与目标设备完成 4 位配对授权")
             }
+
+            if ((ack["authChallenge"] as? NSNumber)?.boolValue ?? false) {
+                let nonce = (ack["nonce"] as? String) ?? ""
+                let sig = identity.signAuthChallenge(nonceHex: nonce, hostThumbprint: serverThumb)
+                try await conn.sendJson([
+                    "type": "AUTH_PROOF",
+                    "signature": sig,
+                    "clientCertDer": identity.certificateDerBase64
+                ])
+                guard let authFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 15.0),
+                      authFrame.type == .controlJson, let authRes = BoBoProtocol.parseJson(authFrame.payload),
+                      (authRes["type"] as? String) == "AUTH_RESULT",
+                      ((authRes["ok"] as? NSNumber)?.boolValue ?? false) else {
+                    return (false, "设备私钥身份校验未通过")
+                }
+            }
+
             try await conn.sendJson([
                 "type": "FILE_OFFER",
                 "transferId": tid,
                 "fileName": fileURL.lastPathComponent,
-                "totalBytes": fileData.count,
+                "totalBytes": total,
                 "sha256": shaHex
             ])
-            guard let accFrame = try await conn.readFrame(),
-                  let acc = BoBoProtocol.parseJson(accFrame.payload),
-                  (acc["type"] as? String) == "FILE_ACCEPT" else {
-                return (false, "对方拒绝了文件传输")
+            guard let accFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 15.0),
+                  accFrame.type == .controlJson, let acc = BoBoProtocol.parseJson(accFrame.payload) else {
+                return (false, "对方未响应文件传输请求")
+            }
+            guard (acc["type"] as? String) == "FILE_ACCEPT", (acc["transferId"] as? String) == tid else {
+                let errText = (acc["error"] as? String) ?? (acc["message"] as? String) ?? "对方拒绝了文件传输"
+                return (false, errText)
             }
 
-            let chunkSize = 65536
-            var offset = 0
-            let total = Int64(fileData.count)
-            while offset < fileData.count {
-                let end = min(offset + chunkSize, fileData.count)
-                let slice = fileData.subdata(in: offset..<end)
-                let payload = BoBoProtocol.buildFileChunkPayload(transferId16: tid, offset: Int64(offset), data: slice)
+            try fh.seek(toOffset: 0)
+            var offset: Int64 = 0
+            while offset < total {
+                guard let slice = try fh.read(upToCount: Int(min(65536, total - offset))), !slice.isEmpty else {
+                    return (false, "文件在传输过程中发生变化")
+                }
+                let payload = BoBoProtocol.buildFileChunkPayload(transferId16: tid, offset: offset, data: slice)
                 try await conn.sendFrame(type: .fileChunk, flagsOrTimestamp: 0, payload: payload)
-                offset = end
-                onProgress?(Int64(offset), total)
+                offset += Int64(slice.count)
+                onProgress?(offset, total)
             }
             try await conn.sendJson(["type": "FILE_DONE", "transferId": tid])
-            guard let doneFrame = try await conn.readFrame(),
-                  let done = BoBoProtocol.parseJson(doneFrame.payload) else {
+            guard let doneFrame = try await conn.readFrame(maxPayloadOverride: BoBoProtocol.maxPreAuthPayloadBytes, timeoutSeconds: 30.0),
+                  doneFrame.type == .controlJson, let done = BoBoProtocol.parseJson(doneFrame.payload),
+                  (done["type"] as? String) == "FILE_ACK", (done["transferId"] as? String) == tid else {
                 return (false, "未收到对方完成确认")
             }
             if ((done["ok"] as? NSNumber)?.boolValue ?? false) {
@@ -527,6 +810,21 @@ public final class BoBoStreamClient: @unchecked Sendable {
             return (false, (done["error"] as? String) ?? "对方保存文件失败")
         } catch {
             return (false, "文件传输失败：\(error.localizedDescription)")
+        }
+    }
+
+    private static func computeFileSha256Streaming(handle: FileHandle, total: Int64) -> String? {
+        do {
+            var hasher = SHA256()
+            var remaining = total
+            while remaining > 0 {
+                guard let chunk = try handle.read(upToCount: Int(min(65536, remaining))), !chunk.isEmpty else { return nil }
+                hasher.update(data: chunk)
+                remaining -= Int64(chunk.count)
+            }
+            return BoBoProtocol.bytesToHex(Data(hasher.finalize()))
+        } catch {
+            return nil
         }
     }
 
@@ -540,6 +838,7 @@ public final class BoBoStreamClient: @unchecked Sendable {
             "deviceCode": identity.deviceCode,
             "deviceName": identity.deviceName,
             "certThumbprint": identity.certThumbprint,
+            "clientCertDer": identity.certificateDerBase64,
             "version": BoBoProtocol.appVersion
         ]
     }

@@ -1,298 +1,420 @@
 import AppKit
 import AVFoundation
 import BoBoAppleCore
+import CoreMedia
 import SwiftUI
+
+private struct MacStreamQuality {
+    var width = 2560
+    var height = 1440
+    var fps = 60
+    var bitrateKbps = 18_000
+}
 
 @MainActor
 public final class MacStreamSessionModel: ObservableObject, BoBoStreamClientDelegate {
-    public let host: String
-    public let port: Int
     public let hostName: String
     public let displayLayer = AVSampleBufferDisplayLayer()
 
     private let client: BoBoStreamClient
-    private let converter = H264AnnexBToSampleBufferConverter()
-    private let audioPlayer = BoBoAudioPlayer()
+    private let media = MacStreamMedia()
+    private var quality = MacStreamQuality()
+    private var requestedQuality: MacStreamQuality?
+    private var reconfigureTimeout: Task<Void, Never>?
+    private var lastKeyframeRequest: TimeInterval = -.infinity
+    private var finished = false
 
-    @Published public var connected = false
-    @Published public var statusText = "正在建立 BoBo V6.2 加密连接..."
-    @Published public var rttMs: Double = 0
-    @Published public var remotePlatform = BoBoProtocol.platformWindows
-    @Published public var viewOnly = false
-    @Published public var scaleMode = 2 // 2=超级屏全屏自适应无黑边
-    @Published public var superDisplay = true
-    @Published public var privacyActive = false
-    @Published public var muted = false
+    @Published public private(set) var connected = false
+    @Published public private(set) var rttMs: Double = 0
+    @Published public private(set) var remotePlatform = BoBoProtocol.platformWindows
+    @Published public private(set) var viewOnly = false
+    @Published public private(set) var hostCursorComposited = false
+    @Published public private(set) var videoSize = CGSize.zero
+    @Published public private(set) var privacyActive = false
+    @Published public private(set) var superDisplayActive = false
+    @Published public private(set) var muted = false
+    @Published public private(set) var monitors: [BoBoMonitorDescriptor] = []
+    @Published public private(set) var activeMonitorIndex = 0
+    @Published public private(set) var receivedFPS = 0
+    @Published public private(set) var reconfiguring = false
+    @Published public private(set) var reconfigureNotice: String?
+    @Published public private(set) var closedReason: String?
+    @Published public var scale = MacVideoScale.fit
     @Published public var mapCommandToControl = true
-    @Published public var monitors: [BoBoMonitorDescriptor] = []
-    @Published public var activeMonitorIndex = 0
-    @Published public var closedReason: String?
 
-    public init(identity: BoBoIdentityStore, host: String, port: Int, hostName: String, autoPrivacy: Bool) {
-        self.host = host
-        self.port = port
+    var inputEnabled: Bool { connected && !viewOnly && !reconfiguring && videoSize != .zero }
+    var supportsPrivacy: Bool { connected && !viewOnly && (remotePlatform == BoBoProtocol.platformWindows || remotePlatform == BoBoProtocol.platformMacOS) }
+    var supportsSuperDisplay: Bool { connected && !viewOnly && remotePlatform == BoBoProtocol.platformWindows }
+
+    public init(identity: BoBoIdentityStore, host: String, port: Int, hostName: String, autoPrivacy: Bool,
+                expectedHostThumbprint: String) {
         self.hostName = hostName
-        self.client = BoBoStreamClient(identity: identity)
-
-        var opts = BoBoStreamOptions(host: host, port: port)
-        opts.width = 2560
-        opts.height = 1440
-        opts.fps = 60
-        opts.bitrateKbps = 18000
-        opts.requestPrivacy = autoPrivacy
-        opts.superDisplay = true
-        if let scr = NSScreen.main {
-            opts.clientWidth = Int(scr.frame.width * scr.backingScaleFactor)
-            opts.clientHeight = Int(scr.frame.height * scr.backingScaleFactor)
+        client = BoBoStreamClient(identity: identity)
+        var options = BoBoStreamOptions(host: host, port: port)
+        options.width = quality.width
+        options.height = quality.height
+        options.fps = quality.fps
+        options.bitrateKbps = quality.bitrateKbps
+        options.requestPrivacy = autoPrivacy
+        options.expectedHostThumbprint = expectedHostThumbprint
+        if let screen = NSScreen.main {
+            options.clientWidth = Int(screen.frame.width * screen.backingScaleFactor)
+            options.clientHeight = Int(screen.frame.height * screen.backingScaleFactor)
         }
-        client.connectAndStartStream(options: opts, delegate: self)
+        client.connectAndStartStream(options: options, delegate: self)
     }
 
-    public func sendInput(_ pkt: BoBoInputPacket) { client.sendInput(pkt) }
-    public func sendMobileNav(_ action: Int16) { client.sendInput(BoBoProtocol.buildMobileNav(action)) }
-    public func sendKeyCombo(_ vks: [UInt8]) { client.sendKeyCombo(vks) }
+    func sendInput(_ packet: BoBoInputPacket) {
+        if connected && (inputEnabled || packet.kind == BoBoProtocol.inputKindReleaseAll) { client.sendInput(packet) }
+    }
 
-    public func toggleMute() {
+    func sendMobileNav(_ action: Int16) { sendInput(BoBoProtocol.buildMobileNav(action)) }
+    func sendKeyCombo(_ vks: [UInt8]) { if inputEnabled { client.sendKeyCombo(vks) } }
+
+    func toggleMute() {
         muted.toggle()
-        audioPlayer.muted = muted
+        media.audioPlayer.muted = muted
     }
 
-    public func togglePrivacy() {
-        privacyActive.toggle()
-        client.sendSetPrivacy(privacyActive)
+    func setPrivacy(_ enable: Bool) {
+        if supportsPrivacy { client.sendSetPrivacy(enable) }
     }
 
-    public func toggleSuperDisplay() {
-        superDisplay.toggle()
-        scaleMode = superDisplay ? 2 : 1
-        let scr = NSScreen.main
-        let w = Int((scr?.frame.width ?? 1920) * (scr?.backingScaleFactor ?? 1))
-        let h = Int((scr?.frame.height ?? 1080) * (scr?.backingScaleFactor ?? 1))
-        client.sendSetSuperDisplay(enable: superDisplay, clientWidth: w, clientHeight: h)
+    func setSuperDisplay(_ enable: Bool) {
+        guard supportsSuperDisplay else { return }
+        let screen = NSScreen.main
+        let w = Int((screen?.frame.width ?? 1920) * (screen?.backingScaleFactor ?? 1))
+        let h = Int((screen?.frame.height ?? 1080) * (screen?.backingScaleFactor ?? 1))
+        client.sendSetSuperDisplay(enable: enable, clientWidth: w, clientHeight: h)
     }
 
-    public func switchMonitor(_ idx: Int) {
-        activeMonitorIndex = idx
-        client.sendReconfigure(monitorIndex: idx, width: 2560, height: 1440, fps: 60, bitrateKbps: 18000)
+    func switchMonitor(_ index: Int) {
+        guard index != activeMonitorIndex else { return }
+        reconfigure(monitorIndex: index, quality: quality)
     }
 
-    public func switchQuality(width: Int, height: Int, fps: Int, bitrateKbps: Int) {
-        client.sendReconfigure(monitorIndex: activeMonitorIndex, width: width, height: height, fps: fps, bitrateKbps: bitrateKbps)
+    func switchQuality(width: Int, height: Int, fps: Int, bitrateKbps: Int) {
+        reconfigure(monitorIndex: activeMonitorIndex,
+                    quality: MacStreamQuality(width: width, height: height, fps: fps, bitrateKbps: bitrateKbps))
     }
 
-    public func syncClipboardToRemote() {
-        if let txt = NSPasteboard.general.string(forType: .string), !txt.isEmpty {
-            client.sendClipboardText(txt, injectUnicode: true)
+    private func reconfigure(monitorIndex: Int, quality: MacStreamQuality) {
+        guard connected, !reconfiguring else { return }
+        client.sendInput(BoBoProtocol.buildReleaseAll())
+        requestedQuality = quality
+        reconfiguring = true
+        reconfigureNotice = nil
+        client.sendReconfigure(monitorIndex: monitorIndex, width: quality.width, height: quality.height,
+                               fps: quality.fps, bitrateKbps: quality.bitrateKbps)
+        reconfigureTimeout = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            guard let self else { return }
+            self.requestedQuality = nil
+            self.reconfiguring = false
+            self.reconfigureNotice = "远端未确认显示设置"
         }
     }
 
-    public func lockHost() { client.sendLockWorkstation() }
-
-    public func disconnect() {
-        client.disconnect()
-        audioPlayer.stop()
-        converter.reset()
-        connected = false
+    func syncClipboardToRemote() {
+        guard inputEnabled, let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        client.sendClipboardText(text, injectUnicode: true)
     }
 
-    // MARK: - BoBoStreamClientDelegate
+    func lockHost() { if inputEnabled { client.sendLockWorkstation() } }
 
-    nonisolated public func streamClientDidStart(
-        monitors: [BoBoMonitorDescriptor],
-        width: Int,
-        height: Int,
-        fps: Int,
-        remotePlatform: String,
-        hostControlMode: String
-    ) {
-        Task { @MainActor in
+    func disconnect() { endSession(reason: nil, sendRelease: true) }
+
+    private func endSession(reason: String?, sendRelease: Bool) {
+        guard !finished else { return }
+        if sendRelease && connected { client.sendInput(BoBoProtocol.buildReleaseAll()) }
+        finished = true
+        reconfigureTimeout?.cancel()
+        client.disconnect()
+        media.finish()
+        displayLayer.flushAndRemoveImage()
+        videoSize = .zero
+        connected = false
+        closedReason = reason
+    }
+
+    private func requestKeyframe() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard connected, now - lastKeyframeRequest >= 0.5 else { return }
+        lastKeyframeRequest = now
+        client.sendRequestKeyframe()
+    }
+
+    private func recoverVideo() {
+        media.resetVideo()
+        displayLayer.flushAndRemoveImage()
+        videoSize = .zero
+        requestKeyframe()
+    }
+
+    nonisolated public func streamClientDidStart(monitors: [BoBoMonitorDescriptor], width: Int, height: Int, fps: Int,
+                                                remotePlatform: String, hostControlMode: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.finished else { return }
             self.monitors = monitors
             self.remotePlatform = remotePlatform
-            self.viewOnly = (hostControlMode == BoBoProtocol.controlModeViewOnly)
-            if remotePlatform == BoBoProtocol.platformAndroid || remotePlatform == BoBoProtocol.platformIOS || height > width {
-                self.superDisplay = false
-                self.scaleMode = 1
-            }
+            self.viewOnly = hostControlMode == BoBoProtocol.controlModeViewOnly
+            self.mapCommandToControl = remotePlatform != BoBoProtocol.platformMacOS
+            self.receivedFPS = fps
             self.connected = true
-            self.statusText = ""
+            self.requestKeyframe()
         }
     }
 
     nonisolated public func streamClientDidReceiveVideo(_ payload: BoBoVideoPayload, timestampMs: UInt32) {
-        guard let sb = converter.convert(annexB: payload.h264Data, timestampMs: timestampMs, isKeyframeHint: payload.isKeyframe) else {
-            return
-        }
+        guard let frame = media.convert(payload, timestampMs: timestampMs) else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let layer = self?.displayLayer else { return }
-            if layer.status == .failed { layer.flush() }
-            layer.enqueue(sb)
+            guard let self, !self.finished else { return }
+            switch self.media.consume(frame) {
+            case .discard:
+                return
+            case .recover:
+                self.recoverVideo()
+            case .display:
+                guard self.displayLayer.status != .failed, !self.displayLayer.requiresFlushToResumeDecoding,
+                      self.displayLayer.isReadyForMoreMediaData else {
+                    self.recoverVideo()
+                    return
+                }
+                self.displayLayer.enqueue(frame.sample)
+                let dimensions = CMSampleBufferGetFormatDescription(frame.sample).map {
+                    CMVideoFormatDescriptionGetPresentationDimensions($0, usePixelAspectRatio: true, useCleanAperture: true)
+                } ?? frame.size
+                if !dimensions.isEmpty, dimensions != self.videoSize { self.videoSize = dimensions }
+            }
         }
     }
 
-    nonisolated public func streamClientDidReceiveAudio(_ payload: BoBoAudioPayload) {
-        audioPlayer.playAdpcm(sampleRate: payload.sampleRate, channels: payload.channels, sampleCount: payload.sampleCount, adpcmData: payload.adpcmData)
-    }
+    nonisolated public func streamClientDidReceiveAudio(_ payload: BoBoAudioPayload) { media.play(payload) }
 
     nonisolated public func streamClientDidUpdateRtt(_ rttMs: Double) {
-        Task { @MainActor in self.rttMs = rttMs }
+        DispatchQueue.main.async { [weak self] in self?.rttMs = rttMs }
     }
 
     nonisolated public func streamClientDidUpdatePrivacy(active: Bool) {
-        Task { @MainActor in self.privacyActive = active }
+        DispatchQueue.main.async { [weak self] in self?.privacyActive = active }
+    }
+
+    nonisolated public func streamClientDidUpdateCursorMode(hostCursorComposited: Bool) {
+        DispatchQueue.main.async { [weak self] in self?.hostCursorComposited = hostCursorComposited }
+    }
+
+    nonisolated public func streamClientDidUpdateSuperDisplay(active: Bool, nativeMatch: Bool, width: Int, height: Int) {
+        DispatchQueue.main.async { [weak self] in self?.superDisplayActive = active }
+    }
+
+    nonisolated public func streamClientDidReconfigure(monitorIndex: Int, width: Int, height: Int, fps: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.finished else { return }
+            self.reconfigureTimeout?.cancel()
+            self.activeMonitorIndex = monitorIndex
+            self.receivedFPS = fps
+            if let requested = self.requestedQuality { self.quality = requested }
+            self.requestedQuality = nil
+            self.reconfiguring = false
+            self.reconfigureNotice = nil
+            self.recoverVideo()
+        }
     }
 
     nonisolated public func streamClientDidFail(code: String, message: String) {
-        Task { @MainActor in self.closedReason = message }
+        DispatchQueue.main.async { [weak self] in self?.endSession(reason: message, sendRelease: false) }
     }
 
     nonisolated public func streamClientDidDisconnect(reason: String) {
-        Task { @MainActor in self.closedReason = reason }
+        DispatchQueue.main.async { [weak self] in self?.endSession(reason: reason, sendRelease: false) }
     }
 }
 
+private final class MacStreamMedia: @unchecked Sendable {
+    struct Frame: @unchecked Sendable {
+        let sample: CMSampleBuffer
+        let size: CGSize
+        let generation: UInt
+    }
+
+    enum Disposition { case discard, recover, display }
+
+    let audioPlayer = BoBoAudioPlayer()
+    private let converter = H264AnnexBToSampleBufferConverter()
+    private let lock = NSLock()
+    private var generation: UInt = 0
+    private var pendingFrames = 0
+    private var framesDropped = false
+    private var finished = false
+
+    func convert(_ payload: BoBoVideoPayload, timestampMs: UInt32) -> Frame? {
+        lock.withLock {
+            guard !finished, !framesDropped else { return nil }
+            guard pendingFrames < 3 else { framesDropped = true; return nil }
+            guard let sample = converter.convert(annexB: payload.h264Data, timestampMs: timestampMs,
+                                                 isKeyframeHint: payload.isKeyframe) else { return nil }
+            pendingFrames += 1
+            return Frame(sample: sample, size: CGSize(width: payload.width, height: payload.height), generation: generation)
+        }
+    }
+
+    func consume(_ frame: Frame) -> Disposition {
+        lock.withLock {
+            guard !finished, generation == frame.generation else { return .discard }
+            pendingFrames -= 1
+            return framesDropped ? .recover : .display
+        }
+    }
+
+    func play(_ payload: BoBoAudioPayload) {
+        lock.withLock {
+            guard !finished else { return }
+            audioPlayer.playAdpcm(sampleRate: payload.sampleRate, channels: payload.channels,
+                                  sampleCount: payload.sampleCount, adpcmData: payload.adpcmData)
+        }
+    }
+
+    func resetVideo() { lock.withLock { resetVideoLocked() } }
+
+    func finish() {
+        lock.withLock {
+            finished = true
+            resetVideoLocked()
+        }
+        audioPlayer.stop()
+    }
+
+    private func resetVideoLocked() {
+        generation &+= 1
+        pendingFrames = 0
+        framesDropped = false
+        converter.reset()
+    }
+}
+
+@MainActor
 public struct MacStreamView: View {
     @ObservedObject var model: MacStreamSessionModel
     let onClose: () -> Void
-    @State private var showControlCenter = false
+    @State private var showControls = false
 
     public var body: some View {
         VStack(spacing: 0) {
-            // UU-style light compact top bar
             HStack(spacing: 10) {
-                Text("BoBo远程 · \(model.hostName)")
-                    .font(.system(size: 13, weight: .bold))
+                Text("BoBo远程 · \(model.hostName)").font(.system(size: 13, weight: .bold))
                 if model.rttMs > 0 {
-                    Text("\(Int(model.rttMs.rounded())) ms")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Color.green.opacity(0.15))
-                        .foregroundColor(.green)
-                        .cornerRadius(6)
+                    Text("\(Int(model.rttMs.rounded())) ms").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                if model.viewOnly {
-                    Text("仅查看模式（iOS 投屏）")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Color.orange.opacity(0.18))
-                        .foregroundColor(.orange)
-                        .cornerRadius(6)
-                }
+                if model.viewOnly { Text("仅查看模式").font(.caption).foregroundStyle(.secondary) }
                 Spacer()
-                Button(action: { model.toggleMute() }) {
+                Button(action: model.toggleMute) {
                     Image(systemName: model.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 }
-                .buttonStyle(.bordered)
-
-                Button("控制中心") { showControlCenter.toggle() }
-                    .buttonStyle(.bordered)
-                    .popover(isPresented: $showControlCenter, arrowEdge: .bottom) {
-                        controlCenterPopover
-                    }
-
-                Button("退出远控") {
-                    model.disconnect()
-                    onClose()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .help(model.muted ? "恢复播放声音" : "静音本机播放")
+                Button("控制中心") { showControls.toggle() }
+                    .popover(isPresented: $showControls, arrowEdge: .bottom) { controlCenter }
+                Button("退出远控", action: close)
+                    .help("退出远控（⌃⌥⇧Esc）")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .background(Color(NSColor.windowBackgroundColor))
 
-            // Android Mobile Nav Bar when controlling Android phone
             if model.remotePlatform == BoBoProtocol.platformAndroid && !model.viewOnly {
                 HStack(spacing: 8) {
-                    Button("◀ 返回") { model.sendMobileNav(BoBoProtocol.mobileNavBack) }
-                    Button("● 主页") { model.sendMobileNav(BoBoProtocol.mobileNavHome) }
-                    Button("▢ 多任务") { model.sendMobileNav(BoBoProtocol.mobileNavRecents) }
-                    Button("🔔 通知栏") { model.sendMobileNav(BoBoProtocol.mobileNavNotifications) }
-                    Button("🔊 音量+") { model.sendMobileNav(BoBoProtocol.mobileNavVolumeUp) }
-                    Button("🔉 音量-") { model.sendMobileNav(BoBoProtocol.mobileNavVolumeDown) }
-                    Button("🔒 锁屏") { model.sendMobileNav(BoBoProtocol.mobileNavLock) }
+                    Button("返回") { model.sendMobileNav(BoBoProtocol.mobileNavBack) }
+                    Button("主页") { model.sendMobileNav(BoBoProtocol.mobileNavHome) }
+                    Button("多任务") { model.sendMobileNav(BoBoProtocol.mobileNavRecents) }
+                    Button("通知栏") { model.sendMobileNav(BoBoProtocol.mobileNavNotifications) }
+                    Button("音量+") { model.sendMobileNav(BoBoProtocol.mobileNavVolumeUp) }
+                    Button("音量-") { model.sendMobileNav(BoBoProtocol.mobileNavVolumeDown) }
+                    Button("锁屏") { model.sendMobileNav(BoBoProtocol.mobileNavLock) }
                     Spacer()
                 }
-                .buttonStyle(.bordered)
+                .disabled(!model.inputEnabled)
                 .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(Color(red: 0.09, green: 0.13, blue: 0.20))
             }
 
             ZStack {
-                MacRemoteVideoView(
-                    displayLayer: model.displayLayer,
-                    scaleMode: model.scaleMode,
-                    viewOnly: model.viewOnly,
-                    mapCommandToControl: model.mapCommandToControl,
-                    onInput: { model.sendInput($0) }
-                )
-
-                if !model.connected {
+                MacRemoteVideoView(displayLayer: model.displayLayer, videoSize: model.videoSize, scale: model.scale,
+                                   inputEnabled: model.inputEnabled, hostCursorComposited: model.hostCursorComposited,
+                                   mapCommandToControl: model.mapCommandToControl, onInput: model.sendInput, onClose: close)
+                if !model.connected || model.videoSize == .zero {
                     VStack(spacing: 12) {
-                        ProgressView().scaleEffect(1.1)
-                        Text(model.closedReason ?? model.statusText)
+                        if model.closedReason == nil { ProgressView() }
+                        Text(model.closedReason ?? (model.connected ? "正在等待远端画面…" : "正在建立加密连接…"))
                             .font(.headline)
-                            .foregroundColor(.white)
-                        Button("返回主界面") {
-                            model.disconnect()
-                            onClose()
-                        }
-                        .buttonStyle(.borderedProminent)
+                            .foregroundStyle(.white)
+                        if model.closedReason != nil { Button("返回主界面", action: close) }
                     }
-                    .padding(28)
-                    .background(Color.black.opacity(0.78))
-                    .cornerRadius(16)
+                    .padding(24)
+                    .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 12))
                 }
             }
         }
+        .buttonStyle(.bordered)
         .frame(minWidth: 960, minHeight: 600)
-        .onChange(of: model.closedReason) { newVal in
-            if newVal != nil { model.connected = false }
-        }
+        .onDisappear { model.disconnect() }
     }
 
-    private var controlCenterPopover: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("控制中心 · \(model.hostName)").font(.headline)
-            Divider()
-            Toggle("超级屏自适应（消除黑边）", isOn: Binding(
-                get: { model.superDisplay },
-                set: { _ in model.toggleSuperDisplay() }
-            ))
-            Toggle("被控端防窥黑屏保护", isOn: Binding(
-                get: { model.privacyActive },
-                set: { _ in model.togglePrivacy() }
-            ))
-            Toggle("智能键位映射（⌘ → Ctrl）", isOn: $model.mapCommandToControl)
+    private func close() {
+        model.disconnect()
+        onClose()
+    }
 
+    private var controlCenter: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("窗口缩放", selection: $model.scale) {
+                Text("等比适配").tag(MacVideoScale.fit)
+                Text("铺满窗口").tag(MacVideoScale.fill)
+                Text("实际大小 1:1").tag(MacVideoScale.actualSize)
+            }
+            if model.supportsSuperDisplay {
+                Toggle("远端超级屏", isOn: Binding(get: { model.superDisplayActive }, set: model.setSuperDisplay))
+            }
+            if model.supportsPrivacy {
+                Toggle("远端防窥屏", isOn: Binding(get: { model.privacyActive }, set: model.setPrivacy))
+            }
+            if model.connected && !model.viewOnly {
+                Toggle("交换 ⌘ 与 Ctrl", isOn: $model.mapCommandToControl)
+            }
             if model.monitors.count > 1 {
+                Picker("远端显示器", selection: Binding(get: { model.activeMonitorIndex }, set: model.switchMonitor)) {
+                    ForEach(model.monitors) { monitor in Text(monitor.name).tag(monitor.index) }
+                }
+                .disabled(!model.connected || model.reconfiguring)
+            }
+            if model.connected {
                 Divider()
-                Text("切换远端显示器").font(.subheadline).foregroundColor(.secondary)
+                if model.videoSize != .zero {
+                    Text("\(Int(model.videoSize.width)) × \(Int(model.videoSize.height)) · \(model.receivedFPS) fps")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !model.viewOnly {
+                    HStack {
+                        Button("720p") { model.switchQuality(width: 1280, height: 720, fps: 30, bitrateKbps: 5000) }
+                        Button("1080p") { model.switchQuality(width: 1920, height: 1080, fps: 60, bitrateKbps: 14_000) }
+                        Button("1440p") { model.switchQuality(width: 2560, height: 1440, fps: 60, bitrateKbps: 24_000) }
+                    }
+                    .disabled(model.reconfiguring)
+                }
+                if let notice = model.reconfigureNotice { Text(notice).font(.caption).foregroundStyle(.secondary) }
+            }
+            if model.connected && !model.viewOnly {
+                Divider()
                 HStack {
-                    ForEach(model.monitors) { mon in
-                        Button("屏 \(mon.index + 1)") { model.switchMonitor(mon.index) }
-                            .buttonStyle(.bordered)
+                    Button("同步剪贴板", action: model.syncClipboardToRemote)
+                    if model.remotePlatform == BoBoProtocol.platformWindows || model.remotePlatform == BoBoProtocol.platformMacOS {
+                        Button("锁定远端", action: model.lockHost)
+                    }
+                    if model.remotePlatform == BoBoProtocol.platformWindows {
+                        Button("Ctrl+Alt+Del") { model.sendKeyCombo([0x11, 0x12, 0x2E]) }
                     }
                 }
+                .disabled(!model.inputEnabled)
             }
-
-            Divider()
-            Text("画质与帧率").font(.subheadline).foregroundColor(.secondary)
-            HStack {
-                Button("流畅 720p") { model.switchQuality(width: 1280, height: 720, fps: 30, bitrateKbps: 5000) }
-                Button("超清 1080p") { model.switchQuality(width: 1920, height: 1080, fps: 60, bitrateKbps: 14000) }
-                Button("原画 2K") { model.switchQuality(width: 2560, height: 1440, fps: 60, bitrateKbps: 24000) }
-            }
-            .buttonStyle(.bordered)
-
-            Divider()
-            HStack {
-                Button("同步剪贴板") { model.syncClipboardToRemote() }
-                Button("锁定远端") { model.lockHost() }
-                Button("Ctrl+Alt+Del") { model.sendKeyCombo([0x11, 0x12, 0x2E]) }
-            }
-            .buttonStyle(.bordered)
         }
         .padding(16)
-        .frame(width: 310)
+        .frame(width: 320)
     }
 }

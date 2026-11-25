@@ -78,8 +78,10 @@ $libPaths = @(
 
 $coreSrcDir = Join-Path $root 'src'
 $playerSrcDir = Join-Path (Split-Path -Parent $root) 'bobo-stream-player\src'
-$objDir = Join-Path $outDir 'obj'
+$buildTmpDir = Join-Path $env:TEMP ('bobo-core-build-' + [Guid]::NewGuid().ToString('N'))
+$objDir = Join-Path $buildTmpDir 'obj'
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
+$tmpDllOut = Join-Path $buildTmpDir 'BoBoCore.dll'
 $dllOut = Join-Path $outDir 'BoBoCore.dll'
 $gzOut = Join-Path $outDir 'BoBoCore.dll.gz'
 
@@ -111,8 +113,8 @@ try {
             '/DUNICODE', '/D_UNICODE', '/DNOMINMAX', '/D_CRT_SECURE_NO_WARNINGS', '/DBOBOCORE_EXPORTS',
             '/Isrc',
             '/I..\bobo-stream-player\src',
-            '/Foout\obj\',
-            '/Feout\BoBoCore.dll'
+            "/Fo$objDir\",
+            "/Fe$tmpDllOut"
         ) + $sources + @(
             '/link', '/NOLOGO', '/OPT:REF', '/OPT:ICF',
             'd3d11.lib', 'dxgi.lib', 'mfplat.lib', 'mfuuid.lib', 'wmcodecdspuuid.lib',
@@ -124,9 +126,15 @@ try {
     } finally {
         Pop-Location
     }
-    if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
-        $defaultDll = Join-Path $root 'out\BoBoCore.dll'
-        if ($defaultDll -ne $dllOut) { Copy-Item -LiteralPath $defaultDll -Destination $dllOut -Force }
+    if (-not (Test-Path -LiteralPath $tmpDllOut)) { throw "Missing compiled DLL: $tmpDllOut" }
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $tmpDllOut -Destination $dllOut -Force
+            break
+        } catch {
+            if ($attempt -ge 7) { throw }
+            Start-Sleep -Milliseconds 250
+        }
     }
     if (-not (Test-Path -LiteralPath $dllOut)) { throw "Missing output DLL: $dllOut" }
 
@@ -176,4 +184,7 @@ public static class BoBoCoreSelfTestRunner {
     $env:INCLUDE = $prevInclude
     $env:LIB = $prevLib
     $env:PATH = $prevPath
+    if (-not [string]::IsNullOrWhiteSpace($buildTmpDir) -and (Test-Path -LiteralPath $buildTmpDir)) {
+        Remove-Item -LiteralPath $buildTmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

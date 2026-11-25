@@ -8,7 +8,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $OutputDirectory = 'ci-out'
+    [string] $OutputDirectory = 'ci-out',
+    [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
+    [string] $ReleaseVersion = '6.3.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +20,7 @@ if ([string]::IsNullOrWhiteSpace($repoRoot)) { $repoRoot = (Get-Location).Path }
 
 Write-Host '=== Step 1: Build & self-test embedded BoBoCore.dll ==='
 $coreScript = Join-Path $repoRoot 'native\bobo-core\build-core.ps1'
-powershell -NoProfile -ExecutionPolicy Bypass -File $coreScript -RunSelfTest
+powershell -NoProfile -File $coreScript -RunSelfTest
 if ($LASTEXITCODE -ne 0) { throw "build-core.ps1 failed with exit code $LASTEXITCODE" }
 
 $coreGz = Join-Path $repoRoot 'native\bobo-core\out\BoBoCore.dll.gz'
@@ -38,14 +40,14 @@ $manifest = Join-Path $sourceDir 'app.manifest'
 if (-not (Test-Path -LiteralPath $manifest)) { throw "missing manifest: $manifest" }
 $appIcon = Join-Path $repoRoot 'assets\bobo-remote.ico'
 $brandLogo = Join-Path $repoRoot 'assets\bobo-logo.png'
-$displayTool = Join-Path $repoRoot 'tools\Set-SunshineDisplay.ps1'
-$optimizeTool = Join-Path $repoRoot 'tools\Optimize-SunshineStream.ps1'
 
-$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
+$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
 $references = @($referenceNames | ForEach-Object { Join-Path $framework $_ })
 
 $outputRoot = Join-Path $repoRoot $OutputDirectory
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
+$versionPath = Join-Path $outputRoot 'app-version.txt'
+[System.IO.File]::WriteAllText($versionPath, $ReleaseVersion, (New-Object System.Text.UTF8Encoding($false)))
 $exePath = Join-Path $outputRoot 'BoBoRemote.exe'
 if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
@@ -63,11 +65,10 @@ $compilerArgs = @(
     "/win32manifest:$manifest"
     "/reference:$($references -join ',')"
     "/resource:$coreGz,DualRemote.BoBoCore.dll.gz"
+    "/resource:$versionPath,DualRemote.app-version.txt"
 )
 if (Test-Path -LiteralPath $appIcon) { $compilerArgs += "/win32icon:$appIcon" }
 if (Test-Path -LiteralPath $brandLogo) { $compilerArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
-if (Test-Path -LiteralPath $displayTool) { $compilerArgs += "/resource:$displayTool,DualRemote.tools.Set-SunshineDisplay.ps1" }
-if (Test-Path -LiteralPath $optimizeTool) { $compilerArgs += "/resource:$optimizeTool,DualRemote.tools.Optimize-SunshineStream.ps1" }
 $compilerArgs += $sources
 & $compiler @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
@@ -104,7 +105,7 @@ if (Test-Path -LiteralPath $setupSource) {
     $setupArgs = @(
         '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/warn:4', '/warnaserror+',
         '/codepage:65001', '/utf8output', "/out:$setupExe", "/win32manifest:$manifest",
-        "/reference:$($setupRefs -join ',')"
+        "/reference:$($setupRefs -join ',')", "/resource:$versionPath,DualRemote.setup-version.txt"
     )
     if (Test-Path -LiteralPath $appIcon) { $setupArgs += "/win32icon:$appIcon" }
     if (Test-Path -LiteralPath $brandLogo) { $setupArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }

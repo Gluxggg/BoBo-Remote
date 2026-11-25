@@ -37,7 +37,7 @@ namespace DualRemote
         internal string DeviceName = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
-        internal string Version = "6.2.3";
+        internal string Version = AppUpdater.FallbackVersion;
         internal string Platform = BoBoProtocol.PlatformWindows;
         internal string HostControlMode = BoBoProtocol.ControlModeFull;
         internal bool AllowIncoming = true;
@@ -46,9 +46,11 @@ namespace DualRemote
 
     internal sealed class BoBoLocalPairSession
     {
+        internal const int MaxFailedAttempts = 5;
         internal string Pin = "";
         internal DateTime CreatedUtc;
         internal DateTime ExpiresUtc;
+        internal int FailedAttempts;
 
         internal int RemainingSeconds
         {
@@ -61,7 +63,7 @@ namespace DualRemote
 
         internal bool IsExpired
         {
-            get { return DateTime.UtcNow >= ExpiresUtc; }
+            get { return DateTime.UtcNow >= ExpiresUtc || FailedAttempts >= MaxFailedAttempts; }
         }
     }
 
@@ -114,9 +116,57 @@ namespace DualRemote
         internal const int DefaultUdpPort = 49811;
         internal const int DiscoveryUdpPort = 49812;
         internal const int HeaderBytes = 9;
+        internal const int MaxPreAuthPayloadBytes = 64 * 1024;
         internal const int MaxControlPayloadBytes = 2 * 1024 * 1024;
         internal const int MaxVideoPayloadBytes = 16 * 1024 * 1024;
         internal const int MaxFileChunkPayloadBytes = 512 * 1024;
+        internal const long MaxFileTransferBytes = 2L * 1024L * 1024L * 1024L;
+
+        private static readonly HashSet<string> WindowsReservedFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+
+        internal static string SanitizeReceivedFileName(string rawName)
+        {
+            if (string.IsNullOrWhiteSpace(rawName)) return "received.bin";
+            string s = rawName.Replace('\\', '/');
+            int slash = s.LastIndexOf('/');
+            if (slash >= 0) s = s.Substring(slash + 1);
+
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c < 0x20 || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                    continue;
+                sb.Append(c);
+            }
+            string cleaned = sb.ToString().Trim().TrimEnd('.');
+            if (cleaned.Length > 180) cleaned = cleaned.Substring(0, 180).Trim().TrimEnd('.');
+            if (string.IsNullOrEmpty(cleaned) || cleaned == "." || cleaned == "..") return "received.bin";
+
+            string stem = Path.GetFileNameWithoutExtension(cleaned);
+            if (!string.IsNullOrEmpty(stem) && WindowsReservedFileNames.Contains(stem))
+            {
+                cleaned = "_" + cleaned;
+            }
+            return cleaned;
+        }
+
+        internal static bool IsValidHexSha256(string hex)
+        {
+            if (string.IsNullOrEmpty(hex) || hex.Length != 64) return false;
+            for (int i = 0; i < 64; i++)
+            {
+                char c = hex[i];
+                bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!ok) return false;
+            }
+            return true;
+        }
 
         internal static async Task WriteFrameAsync(
             Stream stream,
@@ -164,7 +214,7 @@ namespace DualRemote
             return WriteFrameAsync(stream, BoBoPacketType.ControlJson, 0, bytes, 0, bytes.Length, ct);
         }
 
-        internal static async Task<bool> ReadFrameAsync(Stream stream, CancellationToken ct, Action<BoBoFrame> onFrame)
+        internal static async Task<bool> ReadFrameAsync(Stream stream, CancellationToken ct, Action<BoBoFrame> onFrame, int maxPayloadOverride = 0)
         {
             byte[] header = new byte[HeaderBytes];
             if (!await ReadExactAsync(stream, header, 0, HeaderBytes, ct).ConfigureAwait(false))
@@ -177,6 +227,10 @@ namespace DualRemote
             uint flags = ReadUInt32LE(header, 5);
 
             int maxAllowed = type == BoBoPacketType.VideoH264 ? MaxVideoPayloadBytes : MaxControlPayloadBytes;
+            if (maxPayloadOverride > 0 && maxPayloadOverride < maxAllowed)
+            {
+                maxAllowed = maxPayloadOverride;
+            }
             if (length < 0 || length > maxAllowed)
             {
                 throw new InvalidDataException("BoBo6 frame payload length out of bounds: " + length);
@@ -200,10 +254,10 @@ namespace DualRemote
             return true;
         }
 
-        internal static async Task<BoBoFrame?> ReadOneFrameAsync(Stream stream, CancellationToken ct)
+        internal static async Task<BoBoFrame?> ReadOneFrameAsync(Stream stream, CancellationToken ct, int maxPayloadOverride = 0)
         {
             BoBoFrame? result = null;
-            bool ok = await ReadFrameAsync(stream, ct, delegate(BoBoFrame f) { result = f; }).ConfigureAwait(false);
+            bool ok = await ReadFrameAsync(stream, ct, delegate(BoBoFrame f) { result = f; }, maxPayloadOverride).ConfigureAwait(false);
             return ok ? result : null;
         }
 
@@ -517,6 +571,21 @@ namespace DualRemote
             if (!IPAddress.TryParse(host ?? "", out ip) || ip.AddressFamily != AddressFamily.InterNetwork) return false;
             byte[] b = ip.GetAddressBytes();
             return b.Length == 4 && b[0] == 100 && b[1] >= 64 && b[1] <= 127;
+        }
+
+        internal static bool IsPrivateLanIp(string host)
+        {
+            IPAddress ip;
+            if (!IPAddress.TryParse(host ?? "", out ip)) return false;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            if (IPAddress.IsLoopback(ip)) return true;
+            if (ip.AddressFamily != AddressFamily.InterNetwork) return false;
+            byte[] b = ip.GetAddressBytes();
+            if (b.Length != 4) return false;
+            if (b[0] == 10) return true;
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+            if (b[0] == 192 && b[1] == 168) return true;
+            return false;
         }
 
         internal static List<string> ParseStringList(Dictionary<string, object> map, string key)

@@ -30,17 +30,21 @@ public struct BoBoAuthorizedPeer: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct BoBoLocalPairSession: Equatable, Sendable {
+    public static let maxFailedAttempts = 5
+
     public var pin: String
     public var createdAt: Date
     public var expiresAt: Date
+    public var failedAttempts: Int
 
-    public var isExpired: Bool { Date() >= expiresAt }
+    public var isExpired: Bool { Date() >= expiresAt || failedAttempts >= Self.maxFailedAttempts }
     public var remainingSeconds: Int { max(0, Int(ceil(expiresAt.timeIntervalSinceNow))) }
 
-    public init(pin: String, createdAt: Date, expiresAt: Date) {
+    public init(pin: String, createdAt: Date, expiresAt: Date, failedAttempts: Int = 0) {
         self.pin = pin
         self.createdAt = createdAt
         self.expiresAt = expiresAt
+        self.failedAttempts = failedAttempts
     }
 }
 
@@ -66,6 +70,13 @@ public final class BoBoIdentityStore: @unchecked Sendable {
 
     public var formattedDeviceCode: String { Self.formatDeviceCode(deviceCode) }
 
+    public var certificateDerBase64: String {
+        ensureLoaded()
+        lock.lock()
+        defer { lock.unlock() }
+        return certificateDer.base64EncodedString()
+    }
+
     public init(storageDir: URL, defaultDeviceName: String) {
         self.storageDir = storageDir
         self.defaultDeviceName = defaultDeviceName
@@ -78,6 +89,7 @@ public final class BoBoIdentityStore: @unchecked Sendable {
         if loaded { return }
 
         try? FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storageDir.path)
         let keyURL = storageDir.appendingPathComponent("bobo_identity_key.der")
         let certURL = storageDir.appendingPathComponent("bobo_identity_cert.der")
         let metaURL = storageDir.appendingPathComponent("bobo_identity.json")
@@ -94,6 +106,7 @@ public final class BoBoIdentityStore: @unchecked Sendable {
             try? privateKeyDer.write(to: keyURL, options: .atomic)
             try? certificateDer.write(to: certURL, options: .atomic)
         }
+        Self.hardenKeyFilePermissions(keyURL)
 
         certThumbprint = Self.computeCertSha256Hex(certificateDer)
         deviceCode = Self.deriveNineDigitCode(certThumbprint)
@@ -102,10 +115,14 @@ public final class BoBoIdentityStore: @unchecked Sendable {
 
         if let metaData = try? Data(contentsOf: metaURL),
            let meta = try? JSONDecoder().decode(PersistedMeta.self, from: metaData) {
-            if !meta.nodeId.isEmpty { nodeId = meta.nodeId }
+            let certMatches = meta.certThumbprint.caseInsensitiveCompare(certThumbprint) == .orderedSame
+            if certMatches && !meta.nodeId.isEmpty { nodeId = meta.nodeId }
             if !meta.deviceName.isEmpty { deviceName = meta.deviceName }
             for p in meta.authorizedPeers where !p.certThumbprint.isEmpty {
                 peers[p.certThumbprint.lowercased()] = p
+            }
+            if !certMatches || meta.deviceCode != deviceCode {
+                saveMetaLocked()
             }
         } else {
             saveMetaLocked()
@@ -113,21 +130,33 @@ public final class BoBoIdentityStore: @unchecked Sendable {
         loaded = true
     }
 
+    private static func hardenKeyFilePermissions(_ keyURL: URL) {
+        guard FileManager.default.fileExists(atPath: keyURL.path) else { return }
+        var attrs: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+        #if os(iOS)
+        attrs[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
+        #endif
+        try? FileManager.default.setAttributes(attrs, ofItemAtPath: keyURL.path)
+    }
+
     public func loadSecIdentity() throws -> SecIdentity {
         ensureLoaded()
         lock.lock()
-        if let cached = cachedSecIdentity {
-            lock.unlock()
-            return cached
-        }
-        let pkcs1 = privateKeyDer
-        let cert = certificateDer
-        lock.unlock()
+        defer { lock.unlock() }
+        if let cached = cachedSecIdentity { return cached }
 
         let password = "bobo6"
-        let p12 = try Self.buildPkcs12(privateKeyPkcs1Der: pkcs1, certificateDer: cert, password: password)
+        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        #if os(macOS)
+        if #available(macOS 15.0, *) {
+            options[kSecImportToMemoryOnly as String] = true
+        } else if let existing = Self.findKeychainIdentity(matchingCertDer: certificateDer) {
+            cachedSecIdentity = existing
+            return existing
+        }
+        #endif
+        let p12 = try Self.buildPkcs12(privateKeyPkcs1Der: privateKeyDer, certificateDer: certificateDer, password: password)
         var rawItems: CFArray?
-        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
         let status = SecPKCS12Import(p12 as CFData, options as CFDictionary, &rawItems)
         guard status == errSecSuccess,
               let items = rawItems as? [[String: Any]],
@@ -138,34 +167,167 @@ public final class BoBoIdentityStore: @unchecked Sendable {
             ])
         }
         let identity = identityVal as! SecIdentity
-        lock.lock()
         cachedSecIdentity = identity
-        lock.unlock()
         return identity
     }
 
+    /// 清理 macOS Keychain 中由当前身份导入的测试/临时项（生产环境请勿调用）。
+    func removeKeychainIdentity() {
+        lock.lock()
+        let cert = certificateDer
+        cachedSecIdentity = nil
+        lock.unlock()
+        guard !cert.isEmpty else { return }
+        #if os(macOS)
+        if let ident = Self.findKeychainIdentity(matchingCertDer: cert) {
+            var privKey: SecKey?
+            if SecIdentityCopyPrivateKey(ident, &privKey) == errSecSuccess, let privKey {
+                let keyQuery: [String: Any] = [
+                    kSecClass as String: kSecClassKey,
+                    kSecValueRef as String: privKey
+                ]
+                SecItemDelete(keyQuery as CFDictionary)
+            }
+            var secCert: SecCertificate?
+            if SecIdentityCopyCertificate(ident, &secCert) == errSecSuccess, let secCert {
+                let certQuery: [String: Any] = [
+                    kSecClass as String: kSecClassCertificate,
+                    kSecValueRef as String: secCert
+                ]
+                SecItemDelete(certQuery as CFDictionary)
+            }
+            let idQuery: [String: Any] = [
+                kSecClass as String: kSecClassIdentity,
+                kSecValueRef as String: ident
+            ]
+            SecItemDelete(idQuery as CFDictionary)
+        }
+        #endif
+    }
+
+    #if os(macOS)
+    private static func findKeychainIdentity(matchingCertDer certDer: Data) -> SecIdentity? {
+        guard !certDer.isEmpty else { return nil }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let identities = result as? [SecIdentity] else {
+            return nil
+        }
+        for ident in identities {
+            var secCert: SecCertificate?
+            if SecIdentityCopyCertificate(ident, &secCert) == errSecSuccess,
+               let secCert,
+               (SecCertificateCopyData(secCert) as Data) == certDer {
+                return ident
+            }
+        }
+        return nil
+    }
+    #endif
+
     public func isPeerAuthorized(peerNodeId: String, peerThumbprint: String) -> Bool {
         ensureLoaded()
-        let norm = peerThumbprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !norm.isEmpty else { return false }
+        let normThumb = peerThumbprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normNode = peerNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normThumb.isEmpty, !normNode.isEmpty else { return false }
         lock.lock()
         defer { lock.unlock() }
-        if peers[norm] != nil { return true }
+        if let p = peers[normThumb] {
+            return p.nodeId.caseInsensitiveCompare(normNode) == .orderedSame
+        }
         return peers.values.contains {
-            $0.nodeId.caseInsensitiveCompare(peerNodeId) == .orderedSame && $0.certThumbprint == norm
+            $0.nodeId.caseInsensitiveCompare(normNode) == .orderedSame && $0.certThumbprint == normThumb
         }
     }
 
-    public func authorizeOrUpdatePeer(_ peer: BoBoAuthorizedPeer) {
+    public func findPeerByNodeId(_ peerNodeId: String) -> BoBoAuthorizedPeer? {
         ensureLoaded()
-        let norm = peer.certThumbprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !norm.isEmpty else { return }
+        let norm = peerNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !norm.isEmpty else { return nil }
         lock.lock()
-        var copy = peer
-        copy.certThumbprint = norm
-        peers[norm] = copy
-        saveMetaLocked()
+        defer { lock.unlock() }
+        return peers.values.first { $0.nodeId.caseInsensitiveCompare(norm) == .orderedSame }
+    }
+
+    /// 使用本机 RSA 私钥对会话挑战签名（RSASSA-PKCS1-v1_5 + SHA-256），证明本机真正持有配对证书对应的私钥。
+    public func signAuthChallenge(nonceHex: String, hostThumbprint: String) -> String {
+        ensureLoaded()
+        lock.lock()
+        let pkcs1 = privateKeyDer
+        let myThumb = certThumbprint
         lock.unlock()
+        guard !pkcs1.isEmpty, !nonceHex.isEmpty, BoBoProtocol.isValidHexSha256(hostThumbprint) else { return "" }
+
+        let attrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 2048
+        ]
+        guard let privKey = SecKeyCreateWithData(pkcs1 as CFData, attrs as CFDictionary, nil) else {
+            return ""
+        }
+        let msg = Self.buildAuthChallengeBytes(nonceHex: nonceHex, clientThumbprint: myThumb, hostThumbprint: hostThumbprint)
+        guard let sig = SecKeyCreateSignature(privKey, .rsaSignatureMessagePKCS1v15SHA256, msg as CFData, nil) as Data? else {
+            return ""
+        }
+        return sig.base64EncodedString()
+    }
+
+    /// 验证客户端提交的 DER X.509 证书与挑战签名（与 Windows / Android 字节级互通）。
+    public static func verifyAuthChallenge(
+        clientCertDerBase64: String,
+        expectedClientThumbprint: String,
+        nonceHex: String,
+        hostThumbprint: String,
+        signatureBase64: String
+    ) -> Bool {
+        let certTrim = clientCertDerBase64.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sigTrim = signatureBase64.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expThumb = expectedClientThumbprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !certTrim.isEmpty, !sigTrim.isEmpty, !expThumb.isEmpty,
+              !nonceHex.isEmpty, !hostThumbprint.isEmpty,
+              let certDer = Data(base64Encoded: certTrim),
+              let sigBytes = Data(base64Encoded: sigTrim),
+              (128...16384).contains(certDer.count), (64...1024).contains(sigBytes.count) else {
+            return false
+        }
+        let actualThumb = computeCertSha256Hex(certDer)
+        guard fixedTimeEqualsHex(actualThumb, expThumb) else { return false }
+        guard let secCert = SecCertificateCreateWithData(nil, certDer as CFData),
+              let pubKey = SecCertificateCopyKey(secCert) else {
+            return false
+        }
+        let msg = buildAuthChallengeBytes(nonceHex: nonceHex, clientThumbprint: expThumb, hostThumbprint: hostThumbprint)
+        return SecKeyVerifySignature(pubKey, .rsaSignatureMessagePKCS1v15SHA256, msg as CFData, sigBytes as CFData, nil)
+    }
+
+    private static func buildAuthChallengeBytes(nonceHex: String, clientThumbprint: String, hostThumbprint: String) -> Data {
+        Data("BOBO6-AUTH:\(nonceHex.lowercased())|\(clientThumbprint.lowercased())|\(hostThumbprint.lowercased())".utf8)
+    }
+
+    @discardableResult
+    public func authorizeOrUpdatePeer(_ peer: BoBoAuthorizedPeer) -> Bool {
+        ensureLoaded()
+        let thumb = peer.certThumbprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let node = peer.nodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !node.isEmpty, BoBoProtocol.isValidHexSha256(thumb) else { return false }
+        return lock.withLock {
+            let conflict = peers.values.contains {
+                ($0.nodeId.caseInsensitiveCompare(node) == .orderedSame) != ($0.certThumbprint.caseInsensitiveCompare(thumb) == .orderedSame)
+            }
+            guard !conflict else { return false }
+            var copy = peer
+            copy.nodeId = node
+            copy.certThumbprint = thumb
+            peers[thumb] = copy
+            saveMetaLocked()
+            return true
+        }
     }
 
     public func listAuthorizedPeers() -> [BoBoAuthorizedPeer] {
@@ -318,13 +480,20 @@ public final class BoBoIdentityStore: @unchecked Sendable {
                 derSeq([derOid([2, 5, 4, 3]), derUtf8String(commonName)])
             ])
         ])
-        let validity = derSeq([derUtcTime(notBefore), derUtcTime(notAfter)])
+        let validity = derSeq([derAsn1Time(notBefore), derAsn1Time(notAfter)])
 
-        // Extensions: BasicConstraints + SAN DNS:<commonName>
+        // Extensions: BasicConstraints (CA=false), KeyUsage (digitalSignature | keyEncipherment),
+        // ExtendedKeyUsage (serverAuth, clientAuth), SAN DNS:<commonName>
         let bcExt = derSeq([derOid([2, 5, 29, 19]), Data([0x01, 0x01, 0xFF]), derOctetString(derSeq([]))])
+        let kuExt = derSeq([derOid([2, 5, 29, 15]), Data([0x01, 0x01, 0xFF]), derOctetString(derTag(0x03, Data([0x05, 0xA0])))])
+        let ekuVal = derSeq([
+            derOid([1, 3, 6, 1, 5, 5, 7, 3, 1]), // id-kp-serverAuth
+            derOid([1, 3, 6, 1, 5, 5, 7, 3, 2])  // id-kp-clientAuth
+        ])
+        let ekuExt = derSeq([derOid([2, 5, 29, 37]), derOctetString(ekuVal)])
         let sanVal = derSeq([derTag(0x82, Data(commonName.utf8))])
         let sanExt = derSeq([derOid([2, 5, 29, 17]), derOctetString(sanVal)])
-        let exts = derTag(0xA3, derSeq([bcExt, sanExt]))
+        let exts = derTag(0xA3, derSeq([bcExt, kuExt, ekuExt, sanExt]))
 
         let tbs = derSeq([
             derTag(0xA0, derInteger(Data([0x02]))), // v3
@@ -622,12 +791,20 @@ public final class BoBoIdentityStore: @unchecked Sendable {
         return derTag(0x03, body)
     }
 
-    private static func derUtcTime(_ date: Date) -> Data {
+    private static func derAsn1Time(_ date: Date) -> Data {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let year = cal.component(.year, from: date)
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.timeZone = TimeZone(secondsFromGMT: 0)
-        fmt.dateFormat = "yyMMddHHmmss'Z'"
-        return derTag(0x17, Data(fmt.string(from: date).utf8))
+        if year >= 2050 {
+            fmt.dateFormat = "yyyyMMddHHmmss'Z'"
+            return derTag(0x18, Data(fmt.string(from: date).utf8))
+        } else {
+            fmt.dateFormat = "yyMMddHHmmss'Z'"
+            return derTag(0x17, Data(fmt.string(from: date).utf8))
+        }
     }
 
     private static func derOid(_ arcs: [Int]) -> Data {

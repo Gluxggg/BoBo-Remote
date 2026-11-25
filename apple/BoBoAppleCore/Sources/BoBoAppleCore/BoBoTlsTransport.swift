@@ -31,16 +31,18 @@ public final class BoBoFramedConnection: @unchecked Sendable {
             }
             timer.resume()
 
-            connection.stateUpdateHandler = { state in
+            connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
                     timer.cancel()
                     if resumed.trySet() { cont.resume() }
                 case .failed(let err):
                     timer.cancel()
+                    self?.markClosed()
                     if resumed.trySet() { cont.resume(throwing: err) }
                 case .cancelled:
                     timer.cancel()
+                    self?.markClosed()
                     if resumed.trySet() {
                         cont.resume(throwing: NSError(domain: "BoBoTls", code: -1002, userInfo: [
                             NSLocalizedDescriptionKey: "连接已取消"
@@ -83,8 +85,9 @@ public final class BoBoFramedConnection: @unchecked Sendable {
         })
     }
 
-    public func readFrame() async throws -> BoBoFrame? {
-        guard let header = try await readExact(count: BoBoProtocol.headerBytes) else {
+    public func readFrame(maxPayloadOverride: Int = 0, timeoutSeconds: Double? = nil) async throws -> BoBoFrame? {
+        let deadline: DispatchTime? = timeoutSeconds.map { .now() + $0 }
+        guard let header = try await readExact(count: BoBoProtocol.headerBytes, deadline: deadline) else {
             return nil
         }
         guard let type = BoBoPacketType(rawValue: header[header.startIndex]) else {
@@ -94,27 +97,38 @@ public final class BoBoFramedConnection: @unchecked Sendable {
         }
         let length = Int(BoBoProtocol.readInt32LE(header, offset: 1))
         let flagsOrTs = BoBoProtocol.readUInt32LE(header, offset: 5)
-        let maxLen = (type == .videoH264) ? BoBoProtocol.maxVideoPayloadBytes : BoBoProtocol.maxControlPayloadBytes
+        let defaultMaxLen: Int
+        switch type {
+        case .videoH264: defaultMaxLen = BoBoProtocol.maxVideoPayloadBytes
+        case .fileChunk: defaultMaxLen = BoBoProtocol.maxFileChunkPayloadBytes
+        default: defaultMaxLen = BoBoProtocol.maxControlPayloadBytes
+        }
+        let maxLen = maxPayloadOverride > 0 ? min(maxPayloadOverride, defaultMaxLen) : defaultMaxLen
         guard length >= 0 && length <= maxLen else {
             throw NSError(domain: "BoBoTls", code: -2002, userInfo: [
-                NSLocalizedDescriptionKey: "BoBo6 帧长度越界: \(length)"
+                NSLocalizedDescriptionKey: "BoBo6 帧长度越界: \(length) > \(maxLen)"
             ])
         }
         if length == 0 {
             return BoBoFrame(type: type, flagsOrTimestamp: flagsOrTs, payload: Data())
         }
-        guard let payload = try await readExact(count: length) else {
+        guard let payload = try await readExact(count: length, deadline: deadline) else {
             return nil
         }
         return BoBoFrame(type: type, flagsOrTimestamp: flagsOrTs, payload: payload)
     }
 
-    private func readExact(count: Int) async throws -> Data? {
+    private func readExact(count: Int, deadline: DispatchTime?) async throws -> Data? {
         while true {
             stateLock.lock()
             if readBuffer.count >= count {
                 let slice = readBuffer.prefix(count)
                 readBuffer.removeFirst(count)
+                if readBuffer.isEmpty {
+                    readBuffer = Data()
+                } else if readBuffer.startIndex > 65536 {
+                    readBuffer = Data(readBuffer)
+                }
                 stateLock.unlock()
                 return Data(slice)
             }
@@ -124,11 +138,23 @@ public final class BoBoFramedConnection: @unchecked Sendable {
             }
             stateLock.unlock()
 
-            let chunk = try await receiveChunk(minLength: 1, maxLength: max(65536, count))
+            let remaining: Double?
+            if let deadline {
+                let remNs = Int64(deadline.uptimeNanoseconds) - Int64(DispatchTime.now().uptimeNanoseconds)
+                if remNs <= 0 {
+                    close()
+                    throw NSError(domain: "BoBoTls", code: -1003, userInfo: [
+                        NSLocalizedDescriptionKey: "等待远端数据超时"
+                    ])
+                }
+                remaining = Double(remNs) / 1_000_000_000.0
+            } else {
+                remaining = nil
+            }
+
+            let chunk = try await receiveChunk(minLength: 1, maxLength: 65536, timeoutSeconds: remaining)
             guard let chunk, !chunk.isEmpty else {
-                stateLock.lock()
-                closed = true
-                stateLock.unlock()
+                markClosed()
                 return nil
             }
             stateLock.lock()
@@ -137,26 +163,65 @@ public final class BoBoFramedConnection: @unchecked Sendable {
         }
     }
 
-    private func receiveChunk(minLength: Int, maxLength: Int) async throws -> Data? {
+    private func receiveChunk(minLength: Int, maxLength: Int, timeoutSeconds: Double?) async throws -> Data? {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data?, Error>) in
-            connection.receive(minimumIncompleteLength: minLength, maximumLength: maxLength) { content, _, isComplete, error in
-                if let error {
-                    cont.resume(throwing: error)
-                } else if let content, !content.isEmpty {
-                    cont.resume(returning: content)
-                } else if isComplete {
-                    cont.resume(returning: nil)
-                } else {
-                    cont.resume(returning: nil)
+            let resumed = LockedFlag()
+            var timer: DispatchSourceTimer?
+            if let timeoutSeconds {
+                let t = DispatchSource.makeTimerSource(queue: queue)
+                t.schedule(deadline: .now() + timeoutSeconds)
+                t.setEventHandler { [weak self] in
+                    if resumed.trySet() {
+                        self?.close()
+                        cont.resume(throwing: NSError(domain: "BoBoTls", code: -1003, userInfo: [
+                            NSLocalizedDescriptionKey: "等待远端数据超时"
+                        ]))
+                    }
+                }
+                t.resume()
+                timer = t
+            }
+
+            func attemptReceive() {
+                if self.isClosed() {
+                    timer?.cancel()
+                    if resumed.trySet() { cont.resume(returning: nil) }
+                    return
+                }
+                self.connection.receive(minimumIncompleteLength: minLength, maximumLength: maxLength) { content, _, isComplete, error in
+                    if let error {
+                        timer?.cancel()
+                        if resumed.trySet() { cont.resume(throwing: error) }
+                    } else if let content, !content.isEmpty {
+                        timer?.cancel()
+                        if resumed.trySet() { cont.resume(returning: content) }
+                    } else if isComplete {
+                        timer?.cancel()
+                        if resumed.trySet() { cont.resume(returning: nil) }
+                    } else if !resumed.isSet() {
+                        // Network.framework TLS 记录/控制帧边界可能返回空 content 且 isComplete == false，必须继续接收而非误判 EOF
+                        attemptReceive()
+                    }
                 }
             }
+            attemptReceive()
         }
     }
 
-    public func close() {
+    private func markClosed() {
         stateLock.lock()
         closed = true
         stateLock.unlock()
+    }
+
+    private func isClosed() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return closed
+    }
+
+    public func close() {
+        markClosed()
         connection.cancel()
     }
 
@@ -181,17 +246,28 @@ public final class BoBoFramedConnection: @unchecked Sendable {
 
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 4
         return NWParameters(tls: tlsOptions, tcp: tcpOptions)
     }
 
-    public static func makeServerParameters(identity: SecIdentity) -> NWParameters {
+    public static func makeServerParameters(identity: SecIdentity) throws -> NWParameters {
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv12)
-        if let secId = sec_identity_create(identity) {
-            sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secId)
+        guard let secId = sec_identity_create(identity) else {
+            throw NSError(domain: "BoBoTls", code: -2003, userInfo: [
+                NSLocalizedDescriptionKey: "无法从本地 SecIdentity 初始化 TLS 服务端身份"
+            ])
         }
+        sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secId)
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 4
         return NWParameters(tls: tlsOptions, tcp: tcpOptions)
     }
 }
@@ -205,5 +281,10 @@ private final class LockedFlag: @unchecked Sendable {
         if flag { return false }
         flag = true
         return true
+    }
+    func isSet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
     }
 }

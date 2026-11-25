@@ -35,8 +35,12 @@ namespace DualRemote
         internal const int OverheadBytes = HeaderBytes + TagBytes;
 
         private readonly uint sessionId;
-        private readonly byte[] aesKey;
-        private readonly byte[] hmacKey;
+        private readonly byte sendDir;
+        private readonly byte recvDir;
+        private readonly byte[] encAesKey;
+        private readonly byte[] encHmacKey;
+        private readonly byte[] decAesKey;
+        private readonly byte[] decHmacKey;
         private readonly object encGate = new object();
         private readonly object decGate = new object();
         private readonly AesCryptoServiceProvider encAes;
@@ -45,34 +49,58 @@ namespace DualRemote
         private readonly ICryptoTransform decBlock;
         private readonly HMACSHA256 encHmac;
         private readonly HMACSHA256 decHmac;
-        private readonly byte[] encCtrIn = new byte[16];
-        private readonly byte[] encCtrOut = new byte[16];
-        private readonly byte[] decCtrIn = new byte[16];
-        private readonly byte[] decCtrOut = new byte[16];
+        private byte[] encCtrBatch = new byte[1536];
+        private byte[] encKsBatch = new byte[1536];
+        private byte[] decCtrBatch = new byte[1536];
+        private byte[] decKsBatch = new byte[1536];
 
-        private int sendSeq;
+        private uint sendSeq;
         private bool hasRecvSeq;
         private uint maxRecvSeq;
-        private ulong replayMask;
+        private readonly ulong[] replayMask = new ulong[8]; // 512-packet sliding anti-replay window
         private volatile bool disposed;
 
-        internal BoBoUdpCrypto(uint sessionId, byte[] key32)
+        internal BoBoUdpCrypto(uint sessionId, byte[] key32, bool isHost)
         {
             if (key32 == null || key32.Length < 32)
                 throw new ArgumentException("UDP session key must be at least 32 bytes.");
 
             this.sessionId = sessionId;
-            aesKey = new byte[16];
-            hmacKey = new byte[16];
-            Buffer.BlockCopy(key32, 0, aesKey, 0, 16);
-            Buffer.BlockCopy(key32, 16, hmacKey, 0, 16);
+            sendDir = isHost ? (byte)1 : (byte)0;
+            recvDir = isHost ? (byte)0 : (byte)1;
 
-            encAes = new AesCryptoServiceProvider { Key = aesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
-            decAes = new AesCryptoServiceProvider { Key = aesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
+            byte[] h2c = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-H2C");
+            byte[] c2h = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-C2H");
+            byte[] txMat = isHost ? h2c : c2h;
+            byte[] rxMat = isHost ? c2h : h2c;
+
+            encAesKey = new byte[16];
+            encHmacKey = new byte[16];
+            decAesKey = new byte[16];
+            decHmacKey = new byte[16];
+            Buffer.BlockCopy(txMat, 0, encAesKey, 0, 16);
+            Buffer.BlockCopy(txMat, 16, encHmacKey, 0, 16);
+            Buffer.BlockCopy(rxMat, 0, decAesKey, 0, 16);
+            Buffer.BlockCopy(rxMat, 16, decHmacKey, 0, 16);
+
+            encAes = new AesCryptoServiceProvider { Key = encAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
+            decAes = new AesCryptoServiceProvider { Key = decAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
             encBlock = encAes.CreateEncryptor();
             decBlock = decAes.CreateEncryptor();
-            encHmac = new HMACSHA256(hmacKey);
-            decHmac = new HMACSHA256(hmacKey);
+            encHmac = new HMACSHA256(encHmacKey);
+            decHmac = new HMACSHA256(decHmacKey);
+        }
+
+        private static byte[] DeriveDirectionKey(byte[] masterKey32, uint sid, string label)
+        {
+            byte[] labelBytes = System.Text.Encoding.ASCII.GetBytes(label);
+            byte[] msg = new byte[labelBytes.Length + 4];
+            Buffer.BlockCopy(labelBytes, 0, msg, 0, labelBytes.Length);
+            WriteUInt32LE(msg, labelBytes.Length, sid);
+            using (var h = new HMACSHA256(masterKey32))
+            {
+                return h.ComputeHash(msg);
+            }
         }
 
         internal uint SessionId { get { return sessionId; } }
@@ -102,18 +130,19 @@ namespace DualRemote
         {
             if (disposed) return null;
             int bodyLen = (plaintext != null && count > 0) ? count : 0;
-            uint seq = unchecked((uint)Interlocked.Increment(ref sendSeq));
             byte[] packet = new byte[OverheadBytes + bodyLen];
-            WriteUInt32LE(packet, 0, sessionId);
-            WriteUInt32LE(packet, 4, seq);
-            packet[8] = (byte)type;
 
             lock (encGate)
             {
                 if (disposed) return null;
+                uint seq = unchecked(++sendSeq);
+                WriteUInt32LE(packet, 0, sessionId);
+                WriteUInt32LE(packet, 4, seq);
+                packet[8] = (byte)type;
+
                 if (bodyLen > 0)
                 {
-                    ApplyCtr(encBlock, encCtrIn, encCtrOut, sessionId, seq, (byte)type,
+                    ApplyCtr(encBlock, ref encCtrBatch, ref encKsBatch, sessionId, seq, (byte)type, sendDir,
                         plaintext, offset, packet, HeaderBytes, bodyLen);
                 }
                 byte[] mac = encHmac.ComputeHash(packet, 0, HeaderBytes + bodyLen);
@@ -138,7 +167,7 @@ namespace DualRemote
             {
                 if (disposed) return false;
 
-                // Verify 64-bit HMAC-SHA256 tag in constant time before decrypting
+                // Verify 64-bit directional HMAC-SHA256 tag in constant time before touching anti-replay state or decrypting
                 byte[] expected = decHmac.ComputeHash(datagram, 0, HeaderBytes + bodyLen);
                 int diff = 0;
                 int tagOff = HeaderBytes + bodyLen;
@@ -148,7 +177,7 @@ namespace DualRemote
                 }
                 if (diff != 0) return false;
 
-                // 64-packet sliding anti-replay window (accepts out-of-order Wi-Fi packets cleanly)
+                // 512-packet sliding anti-replay window (tolerates heavy Wi-Fi/campus burst reordering cleanly)
                 if (hasRecvSeq)
                 {
                     int delta = unchecked((int)(seq - maxRecvSeq));
@@ -156,15 +185,16 @@ namespace DualRemote
                     if (delta < 0)
                     {
                         int back = -delta;
-                        if (back >= 64) return false;
-                        ulong bit = 1UL << back;
-                        if ((replayMask & bit) != 0) return false;
-                        replayMask |= bit;
+                        if (back >= 512) return false;
+                        int wordIdx = back >> 6;
+                        ulong bit = 1UL << (back & 63);
+                        if ((replayMask[wordIdx] & bit) != 0) return false;
+                        replayMask[wordIdx] |= bit;
                     }
                     else
                     {
-                        if (delta >= 64) replayMask = 1UL;
-                        else replayMask = (replayMask << delta) | 1UL;
+                        ShiftReplayWindowLeft(replayMask, delta);
+                        replayMask[0] |= 1UL;
                         maxRecvSeq = seq;
                     }
                 }
@@ -172,52 +202,101 @@ namespace DualRemote
                 {
                     hasRecvSeq = true;
                     maxRecvSeq = seq;
-                    replayMask = 1UL;
+                    Array.Clear(replayMask, 0, replayMask.Length);
+                    replayMask[0] = 1UL;
                 }
 
                 plaintext = new byte[bodyLen];
                 if (bodyLen > 0)
                 {
-                    ApplyCtr(decBlock, decCtrIn, decCtrOut, sessionId, seq, (byte)type,
+                    ApplyCtr(decBlock, ref decCtrBatch, ref decKsBatch, sessionId, seq, (byte)type, recvDir,
                         datagram, HeaderBytes, plaintext, 0, bodyLen);
                 }
                 return true;
             }
         }
 
+        private static void ShiftReplayWindowLeft(ulong[] words, int shift)
+        {
+            int n = words.Length;
+            int totalBits = n * 64;
+            if (shift >= totalBits)
+            {
+                Array.Clear(words, 0, n);
+                return;
+            }
+            int wordShift = shift >> 6;
+            int bitShift = shift & 63;
+            for (int i = n - 1; i >= 0; i--)
+            {
+                int src = i - wordShift;
+                ulong val = (src >= 0) ? words[src] : 0UL;
+                if (bitShift != 0 && src >= 0)
+                {
+                    ulong carry = (src - 1 >= 0) ? (words[src - 1] >> (64 - bitShift)) : 0UL;
+                    val = (val << bitShift) | carry;
+                }
+                words[i] = val;
+            }
+        }
+
         private static void ApplyCtr(
             ICryptoTransform aesEcb,
-            byte[] ctrIn,
-            byte[] ctrOut,
+            ref byte[] ctrBatch,
+            ref byte[] ksBatch,
             uint sessId,
             uint seq,
             byte pktType,
+            byte dir,
             byte[] src,
             int srcOffset,
             byte[] dst,
             int dstOffset,
             int count)
         {
-            WriteUInt32LE(ctrIn, 0, sessId);
-            WriteUInt32LE(ctrIn, 4, seq);
-            ctrIn[8] = pktType;
-            ctrIn[9] = 0;
-            ctrIn[10] = 0;
-            ctrIn[11] = 0;
-
-            uint blockIdx = 0;
-            int pos = 0;
-            while (pos < count)
+            int blocks = (count + 15) >> 4;
+            int totalBlockBytes = blocks << 4;
+            if (ctrBatch.Length < totalBlockBytes)
             {
-                WriteUInt32LE(ctrIn, 12, blockIdx++);
-                aesEcb.TransformBlock(ctrIn, 0, 16, ctrOut, 0);
-                int chunk = count - pos;
-                if (chunk > 16) chunk = 16;
-                for (int i = 0; i < chunk; i++)
-                {
-                    dst[dstOffset + pos + i] = (byte)(src[srcOffset + pos + i] ^ ctrOut[i]);
-                }
-                pos += chunk;
+                ctrBatch = new byte[totalBlockBytes];
+                ksBatch = new byte[totalBlockBytes];
+            }
+
+            // Build all 16-byte counter blocks in one contiguous buffer -> SINGLE native CryptoAPI TransformBlock call (3x faster!)
+            byte s0 = (byte)(sessId & 0xFF);
+            byte s1 = (byte)((sessId >> 8) & 0xFF);
+            byte s2 = (byte)((sessId >> 16) & 0xFF);
+            byte s3 = (byte)((sessId >> 24) & 0xFF);
+            byte q0 = (byte)(seq & 0xFF);
+            byte q1 = (byte)((seq >> 8) & 0xFF);
+            byte q2 = (byte)((seq >> 16) & 0xFF);
+            byte q3 = (byte)((seq >> 24) & 0xFF);
+
+            for (int b = 0; b < blocks; b++)
+            {
+                int o = b << 4;
+                ctrBatch[o] = s0;
+                ctrBatch[o + 1] = s1;
+                ctrBatch[o + 2] = s2;
+                ctrBatch[o + 3] = s3;
+                ctrBatch[o + 4] = q0;
+                ctrBatch[o + 5] = q1;
+                ctrBatch[o + 6] = q2;
+                ctrBatch[o + 7] = q3;
+                ctrBatch[o + 8] = pktType;
+                ctrBatch[o + 9] = dir;
+                ctrBatch[o + 10] = 0;
+                ctrBatch[o + 11] = 0;
+                ctrBatch[o + 12] = (byte)(b & 0xFF);
+                ctrBatch[o + 13] = (byte)((b >> 8) & 0xFF);
+                ctrBatch[o + 14] = (byte)((b >> 16) & 0xFF);
+                ctrBatch[o + 15] = (byte)((b >> 24) & 0xFF);
+            }
+
+            aesEcb.TransformBlock(ctrBatch, 0, totalBlockBytes, ksBatch, 0);
+            for (int i = 0; i < count; i++)
+            {
+                dst[dstOffset + i] = (byte)(src[srcOffset + i] ^ ksBatch[i]);
             }
         }
 
@@ -295,6 +374,7 @@ namespace DualRemote
     {
         internal const int MaxShardPayloadBytes = 1140;
         internal const int ShardHeaderBytes = 19;
+        internal const int MaxDataShardsPerFrame = 4096;
 
         internal static List<byte[]> BuildVideoShards(
             uint frameId,
@@ -303,14 +383,15 @@ namespace DualRemote
             int height,
             bool isKeyframe,
             byte[] h264Data,
-            double recentLossPct)
+            double recentLossPct,
+            bool interleavedFec = false)
         {
             var shards = new List<byte[]>();
             if (h264Data == null || h264Data.Length == 0) return shards;
 
             int totalLen = h264Data.Length;
             int dataCount = (totalLen + MaxShardPayloadBytes - 1) / MaxShardPayloadBytes;
-            if (dataCount > 60000) return shards;
+            if (dataCount > MaxDataShardsPerFrame) return shards;
 
             // Choose adaptive XOR FEC group size:
             // - Keyframes / lossy links (>1.5% loss): stronger FEC (groupSize = 2..3)
@@ -351,37 +432,34 @@ namespace DualRemote
                 parityCount = (dataCount + groupSize - 1) / groupSize;
             }
 
-            // 1. Emit data shards
+            // Flag 0x04 selects stride-interleaved parity for clients that negotiated it.
+            bool useInterleavedFec = interleavedFec && parityCount > 0;
+            byte dataFlags = (byte)((isKeyframe ? 1 : 0) | (useInterleavedFec ? 4 : 0));
             for (int i = 0; i < dataCount; i++)
             {
                 int off = i * MaxShardPayloadBytes;
                 int len = Math.Min(MaxShardPayloadBytes, totalLen - off);
                 byte[] pkt = new byte[ShardHeaderBytes + len];
                 WriteShardHeader(pkt, frameId, timestampMs, width, height,
-                    (byte)(isKeyframe ? 1 : 0), (ushort)i, (ushort)dataCount, (byte)groupSize, (byte)parityCount);
+                    dataFlags, (ushort)i, (ushort)dataCount, (byte)groupSize, (byte)parityCount);
                 Buffer.BlockCopy(h264Data, off, pkt, ShardHeaderBytes, len);
                 shards.Add(pkt);
             }
 
-            // 2. Emit grouped XOR parity shards (first 2 bytes of XOR payload encode XOR of member lengths)
+            byte parityFlags = (byte)(dataFlags | 2);
             for (int g = 0; g < parityCount; g++)
             {
-                int start = g * groupSize;
-                int end = Math.Min(dataCount, start + groupSize);
-                int maxMemberLen = 0;
-                for (int i = start; i < end; i++)
-                {
-                    int off = i * MaxShardPayloadBytes;
-                    int len = Math.Min(MaxShardPayloadBytes, totalLen - off);
-                    if (len > maxMemberLen) maxMemberLen = len;
-                }
+                int start = useInterleavedFec ? g : g * groupSize;
+                int end = useInterleavedFec ? dataCount : Math.Min(dataCount, start + groupSize);
+                int step = useInterleavedFec ? parityCount : 1;
+                int maxMemberLen = Math.Min(MaxShardPayloadBytes, totalLen - start * MaxShardPayloadBytes);
 
                 byte[] pkt = new byte[ShardHeaderBytes + 2 + maxMemberLen];
                 WriteShardHeader(pkt, frameId, timestampMs, width, height,
-                    (byte)((isKeyframe ? 1 : 0) | 2), (ushort)g, (ushort)dataCount, (byte)groupSize, (byte)parityCount);
+                    parityFlags, (ushort)g, (ushort)dataCount, (byte)groupSize, (byte)parityCount);
 
                 ushort xorLen = 0;
-                for (int i = start; i < end; i++)
+                for (int i = start; i < end; i += step)
                 {
                     int off = i * MaxShardPayloadBytes;
                     int len = Math.Min(MaxShardPayloadBytes, totalLen - off);
@@ -450,17 +528,22 @@ namespace DualRemote
             internal int DataCount;
             internal int GroupSize;
             internal int ParityCount;
+            internal bool InterleavedFec;
             internal byte[][] DataShards;
             internal byte[][] ParityShards;
             internal int ReceivedDataCount;
             internal long CreatedTicks;
+            internal bool IsComplete;
+            internal byte[] AssembledData;
         }
 
+        private const double BaseOutOfOrderGraceMs = 48.0;
         private readonly object gate = new object();
         private readonly Dictionary<uint, FrameBucket> buckets = new Dictionary<uint, FrameBucket>();
         private uint lastDeliveredFrameId;
         private bool hasDeliveredFrame;
         private bool awaitingKeyframe;
+        private long gapFirstSeenTicks;
         private long lastPliTicks;
         private int fecRecoveredPackets;
         private int droppedIncompleteFrames;
@@ -498,27 +581,58 @@ namespace DualRemote
                     windowExpected += diff;
                     highestSeq = seq;
                 }
-                long now = Stopwatch.GetTimestamp();
-                double elapsedSec = (now - windowStartTicks) / (double)Stopwatch.Frequency;
-                if (elapsedSec >= 1.2 && windowExpected >= 10)
-                {
-                    int lost = windowExpected - windowReceived;
-                    if (lost < 0) lost = 0;
-                    double instant = (lost * 100.0) / windowExpected;
-                    latestLossPct = latestLossPct * 0.35 + instant * 0.65;
-                    if (latestLossPct < 0.05) latestLossPct = 0.0;
-                    windowReceived = 0;
-                    windowExpected = 0;
-                    windowStartTicks = now;
-                }
+                EvaluateLossWindowLocked(Stopwatch.GetTimestamp());
+            }
+        }
+
+        /// <summary>Periodic decay check so VFR idle desktops do not keep a stale historical loss spike frozen forever.</summary>
+        internal void RefreshLossWindow(long nowTicks)
+        {
+            lock (gate)
+            {
+                if (!hasSeqBaseline) return;
+                EvaluateLossWindowLocked(nowTicks);
+            }
+        }
+
+        private void EvaluateLossWindowLocked(long now)
+        {
+            double elapsedSec = (now - windowStartTicks) / (double)Stopwatch.Frequency;
+            if (elapsedSec >= 2.0 || (elapsedSec >= 1.1 && windowExpected >= 6))
+            {
+                int lost = windowExpected - windowReceived;
+                if (lost < 0) lost = 0;
+                double instant = windowExpected > 0 ? ((lost * 100.0) / windowExpected) : 0.0;
+                latestLossPct = latestLossPct * 0.35 + instant * 0.65;
+                if (latestLossPct < 0.05) latestLossPct = 0.0;
+                windowReceived = 0;
+                windowExpected = 0;
+                windowStartTicks = now;
             }
         }
 
         internal bool ProcessShard(byte[] payload, out BoBoReassembledVideoFrame completed, out bool needPli)
         {
+            var ready = new List<BoBoReassembledVideoFrame>(2);
+            ProcessShardBatch(payload, 20.0, ready, out needPli);
+            if (ready.Count > 0)
+            {
+                completed = ready[ready.Count - 1];
+                return true;
+            }
             completed = new BoBoReassembledVideoFrame();
+            return false;
+        }
+
+        internal void ProcessShardBatch(byte[] payload, List<BoBoReassembledVideoFrame> outReadyFrames, out bool needPli)
+        {
+            ProcessShardBatch(payload, 20.0, outReadyFrames, out needPli);
+        }
+
+        internal void ProcessShardBatch(byte[] payload, double currentRttMs, List<BoBoReassembledVideoFrame> outReadyFrames, out bool needPli)
+        {
             needPli = false;
-            if (payload == null || payload.Length < BoBoUdpFec.ShardHeaderBytes) return false;
+            if (outReadyFrames == null || payload == null || payload.Length < BoBoUdpFec.ShardHeaderBytes) return;
 
             uint frameId = BoBoUdpCrypto.ReadUInt32LE(payload, 0);
             uint tsMs = BoBoUdpCrypto.ReadUInt32LE(payload, 4);
@@ -527,25 +641,29 @@ namespace DualRemote
             byte flags = payload[12];
             bool isKey = (flags & 1) != 0;
             bool isParity = (flags & 2) != 0;
+            bool interleaved = (flags & 4) != 0;
             int shardIdx = BoBoUdpCrypto.ReadUInt16LE(payload, 13);
             int dataCount = BoBoUdpCrypto.ReadUInt16LE(payload, 15);
             int groupSize = payload[17];
             int parityCount = payload[18];
 
-            if (dataCount <= 0 || dataCount > 60000 || groupSize <= 0) return false;
+            if (dataCount <= 0 || dataCount > BoBoUdpFec.MaxDataShardsPerFrame || groupSize <= 0) return;
             int bodyLen = payload.Length - BoBoUdpFec.ShardHeaderBytes;
-            if (bodyLen <= 0) return false;
+            if (bodyLen <= 0 || bodyLen > BoBoUdpFec.MaxShardPayloadBytes + 2) return;
+
+            long nowTicks = Stopwatch.GetTimestamp();
+            double jitterGraceMs = Math.Max(BaseOutOfOrderGraceMs, Math.Min(120.0, currentRttMs * 0.9));
 
             lock (gate)
             {
                 if (hasDeliveredFrame && unchecked((int)(frameId - lastDeliveredFrameId)) <= 0)
                 {
-                    return false; // Late shard for already-delivered or superseded frame
+                    return; // Late shard for already-delivered or superseded frame
                 }
                 if (awaitingKeyframe && !isKey)
                 {
-                    needPli = ShouldTriggerPliLocked();
-                    return false;
+                    needPli = ShouldTriggerPliLocked(currentRttMs);
+                    return;
                 }
 
                 FrameBucket b;
@@ -561,140 +679,209 @@ namespace DualRemote
                         DataCount = dataCount,
                         GroupSize = groupSize,
                         ParityCount = parityCount,
+                        InterleavedFec = interleaved,
                         DataShards = new byte[dataCount][],
                         ParityShards = parityCount > 0 ? new byte[parityCount][] : null,
-                        CreatedTicks = Stopwatch.GetTimestamp()
+                        CreatedTicks = nowTicks
                     };
                     buckets[frameId] = b;
-                    PruneStaleBucketsLocked(frameId, ref needPli);
+                    PruneStaleBucketsLocked(frameId, currentRttMs, ref needPli);
                 }
 
-                byte[] slice = new byte[bodyLen];
-                Buffer.BlockCopy(payload, BoBoUdpFec.ShardHeaderBytes, slice, 0, bodyLen);
-
-                if (!isParity)
+                if (!b.IsComplete)
                 {
-                    if (shardIdx < b.DataCount && b.DataShards[shardIdx] == null)
+                    byte[] slice = new byte[bodyLen];
+                    Buffer.BlockCopy(payload, BoBoUdpFec.ShardHeaderBytes, slice, 0, bodyLen);
+
+                    int affectedGroup = -1;
+                    if (!isParity)
                     {
-                        b.DataShards[shardIdx] = slice;
-                        b.ReceivedDataCount++;
+                        if (shardIdx < b.DataCount && b.DataShards[shardIdx] == null)
+                        {
+                            b.DataShards[shardIdx] = slice;
+                            b.ReceivedDataCount++;
+                            if (b.ParityCount > 0)
+                            {
+                                affectedGroup = b.InterleavedFec ? (shardIdx % b.ParityCount) : (shardIdx / b.GroupSize);
+                            }
+                        }
                     }
+                    else
+                    {
+                        if (b.ParityShards != null && shardIdx < b.ParityShards.Length && b.ParityShards[shardIdx] == null)
+                        {
+                            b.ParityShards[shardIdx] = slice;
+                            affectedGroup = shardIdx;
+                        }
+                    }
+
+                    // O(1) instant 0-RTT XOR FEC recovery for the single affected parity group
+                    if (b.ReceivedDataCount < b.DataCount && b.ParityShards != null && affectedGroup >= 0)
+                    {
+                        TryFecRecoverGroupLocked(b, affectedGroup);
+                    }
+
+                    if (b.ReceivedDataCount >= b.DataCount)
+                    {
+                        AssembleBucketLocked(b);
+                    }
+                }
+
+                // 1. If a completed keyframe is ready, it cleanly resets any prior missing gap and delivers immediately
+                if (b.IsComplete && b.IsKeyframe)
+                {
+                    DeliverBucketAndFollowingLocked(b, outReadyFrames);
+                    return;
+                }
+
+                // 2. If this completed frame is the exact next frame in sequence (or the very first frame), deliver it and any buffered contiguous successors!
+                if (b.IsComplete && (!hasDeliveredFrame || unchecked((int)(frameId - lastDeliveredFrameId)) == 1))
+                {
+                    DeliverBucketAndFollowingLocked(b, outReadyFrames);
+                    return;
+                }
+
+                // 3. Out-of-order later frame completed while an older frame is still in flight:
+                // hold briefly (adaptive jitterGraceMs) so Wi-Fi/campus jitter & FEC parity can arrive before declaring a gap!
+                if (hasDeliveredFrame && !awaitingKeyframe)
+                {
+                    bool hasCompletedFutureFrame = false;
+                    uint maxCompleteFuture = lastDeliveredFrameId;
+                    foreach (KeyValuePair<uint, FrameBucket> kv in buckets)
+                    {
+                        if (kv.Value.IsComplete && unchecked((int)(kv.Key - lastDeliveredFrameId)) > 1)
+                        {
+                            hasCompletedFutureFrame = true;
+                            if (unchecked((int)(kv.Key - maxCompleteFuture)) > 0)
+                                maxCompleteFuture = kv.Key;
+                        }
+                    }
+
+                    if (hasCompletedFutureFrame)
+                    {
+                        if (gapFirstSeenTicks == 0) gapFirstSeenTicks = nowTicks;
+                        double waitMs = (nowTicks - gapFirstSeenTicks) * 1000.0 / Stopwatch.Frequency;
+                        int aheadFrames = unchecked((int)(maxCompleteFuture - lastDeliveredFrameId));
+                        if (waitMs >= jitterGraceMs || aheadFrames >= 6)
+                        {
+                            // Prior P-frame truly vanished beyond jitter grace -> drop broken chain & request single debounced PLI
+                            Interlocked.Increment(ref droppedIncompleteFrames);
+                            buckets.Clear();
+                            gapFirstSeenTicks = 0;
+                            awaitingKeyframe = true;
+                            needPli = ShouldTriggerPliLocked(currentRttMs);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void AssembleBucketLocked(FrameBucket b)
+        {
+            int totalBytes = 0;
+            for (int i = 0; i < b.DataCount; i++) totalBytes += b.DataShards[i].Length;
+            byte[] full = new byte[totalBytes];
+            int writePos = 0;
+            for (int i = 0; i < b.DataCount; i++)
+            {
+                byte[] s = b.DataShards[i];
+                Buffer.BlockCopy(s, 0, full, writePos, s.Length);
+                writePos += s.Length;
+            }
+            b.AssembledData = full;
+            b.IsComplete = true;
+            b.DataShards = null;
+            b.ParityShards = null;
+        }
+
+        private void DeliverBucketAndFollowingLocked(FrameBucket first, List<BoBoReassembledVideoFrame> outReady)
+        {
+            FrameBucket cur = first;
+            while (cur != null && cur.IsComplete)
+            {
+                uint fid = cur.FrameId;
+                outReady.Add(new BoBoReassembledVideoFrame
+                {
+                    FrameId = fid,
+                    TimestampMs = cur.TimestampMs,
+                    Width = cur.Width,
+                    Height = cur.Height,
+                    IsKeyframe = cur.IsKeyframe,
+                    H264Data = cur.AssembledData
+                });
+                lastDeliveredFrameId = fid;
+                hasDeliveredFrame = true;
+                if (cur.IsKeyframe) awaitingKeyframe = false;
+                RemoveOlderBucketsLocked(fid);
+                buckets.Remove(fid);
+                gapFirstSeenTicks = 0;
+
+                FrameBucket nextB;
+                if (buckets.TryGetValue(unchecked(fid + 1), out nextB) && nextB.IsComplete)
+                {
+                    cur = nextB;
                 }
                 else
                 {
-                    if (b.ParityShards != null && shardIdx < b.ParityShards.Length && b.ParityShards[shardIdx] == null)
-                    {
-                        b.ParityShards[shardIdx] = slice;
-                    }
+                    cur = null;
                 }
-
-                // Attempt instant 0-RTT XOR FEC recovery for any group with exactly 1 missing data shard
-                if (b.ReceivedDataCount < b.DataCount && b.ParityShards != null)
-                {
-                    TryFecRecoverBucketLocked(b);
-                }
-
-                if (b.ReceivedDataCount < b.DataCount)
-                {
-                    return false;
-                }
-
-                // Frame complete! Check if any intermediate older frame was skipped
-                bool skippedGap = hasDeliveredFrame && !isKey && unchecked((int)(frameId - lastDeliveredFrameId)) > 1;
-                if (skippedGap)
-                {
-                    // A prior P-frame never arrived -> H.264 reference chain is broken until next IDR!
-                    Interlocked.Increment(ref droppedIncompleteFrames);
-                    RemoveOlderBucketsLocked(frameId);
-                    buckets.Remove(frameId);
-                    awaitingKeyframe = true;
-                    needPli = ShouldTriggerPliLocked();
-                    return false;
-                }
-
-                // Assemble contiguous Annex-B H.264 access unit
-                int totalBytes = 0;
-                for (int i = 0; i < b.DataCount; i++) totalBytes += b.DataShards[i].Length;
-                byte[] full = new byte[totalBytes];
-                int writePos = 0;
-                for (int i = 0; i < b.DataCount; i++)
-                {
-                    byte[] s = b.DataShards[i];
-                    Buffer.BlockCopy(s, 0, full, writePos, s.Length);
-                    writePos += s.Length;
-                }
-
-                lastDeliveredFrameId = frameId;
-                hasDeliveredFrame = true;
-                if (isKey) awaitingKeyframe = false;
-                RemoveOlderBucketsLocked(frameId);
-                buckets.Remove(frameId);
-
-                completed = new BoBoReassembledVideoFrame
-                {
-                    FrameId = frameId,
-                    TimestampMs = b.TimestampMs,
-                    Width = b.Width,
-                    Height = b.Height,
-                    IsKeyframe = b.IsKeyframe,
-                    H264Data = full
-                };
-                return true;
             }
         }
 
-        private void TryFecRecoverBucketLocked(FrameBucket b)
+        private void TryFecRecoverGroupLocked(FrameBucket b, int g)
         {
-            for (int g = 0; g < b.ParityShards.Length; g++)
+            if (b.ParityShards == null || g < 0 || g >= b.ParityShards.Length) return;
+            byte[] par = b.ParityShards[g];
+            if (par == null || par.Length < 2) return;
+
+            int start = b.InterleavedFec ? g : (g * b.GroupSize);
+            int step = b.InterleavedFec ? b.ParityCount : 1;
+            int end = b.InterleavedFec ? b.DataCount : Math.Min(b.DataCount, start + b.GroupSize);
+            if (step <= 0) return;
+
+            int missingIdx = -1;
+            int missingCount = 0;
+            for (int i = start; i < end; i += step)
             {
-                byte[] par = b.ParityShards[g];
-                if (par == null || par.Length < 2) continue;
-
-                int start = g * b.GroupSize;
-                int end = Math.Min(b.DataCount, start + b.GroupSize);
-                int missingIdx = -1;
-                int missingCount = 0;
-                for (int i = start; i < end; i++)
+                if (b.DataShards[i] == null)
                 {
-                    if (b.DataShards[i] == null)
-                    {
-                        missingIdx = i;
-                        missingCount++;
-                    }
+                    missingIdx = i;
+                    missingCount++;
+                    if (missingCount > 1) return;
                 }
-                if (missingCount != 1 || missingIdx < 0) continue;
-
-                ushort recLen = BoBoUdpCrypto.ReadUInt16LE(par, 0);
-                for (int i = start; i < end; i++)
-                {
-                    if (i == missingIdx) continue;
-                    recLen ^= (ushort)b.DataShards[i].Length;
-                }
-                if (recLen == 0 || recLen > BoBoUdpFec.MaxShardPayloadBytes || recLen + 2 > par.Length) continue;
-
-                byte[] recovered = new byte[recLen];
-                Buffer.BlockCopy(par, 2, recovered, 0, recLen);
-                for (int i = start; i < end; i++)
-                {
-                    if (i == missingIdx) continue;
-                    byte[] other = b.DataShards[i];
-                    int n = Math.Min(recLen, other.Length);
-                    for (int k = 0; k < n; k++) recovered[k] ^= other[k];
-                }
-
-                b.DataShards[missingIdx] = recovered;
-                b.ReceivedDataCount++;
-                Interlocked.Increment(ref fecRecoveredPackets);
             }
+            if (missingCount != 1 || missingIdx < 0) return;
+
+            ushort recLen = BoBoUdpCrypto.ReadUInt16LE(par, 0);
+            for (int i = start; i < end; i += step)
+            {
+                if (i == missingIdx) continue;
+                recLen ^= (ushort)b.DataShards[i].Length;
+            }
+            if (recLen == 0 || recLen > BoBoUdpFec.MaxShardPayloadBytes || recLen + 2 > par.Length) return;
+
+            byte[] recovered = new byte[recLen];
+            Buffer.BlockCopy(par, 2, recovered, 0, recLen);
+            for (int i = start; i < end; i += step)
+            {
+                if (i == missingIdx) continue;
+                byte[] other = b.DataShards[i];
+                int n = Math.Min(recLen, other.Length);
+                for (int k = 0; k < n; k++) recovered[k] ^= other[k];
+            }
+
+            b.DataShards[missingIdx] = recovered;
+            b.ReceivedDataCount++;
+            Interlocked.Increment(ref fecRecoveredPackets);
         }
 
-        private void PruneStaleBucketsLocked(uint newestFrameId, ref bool needPli)
+        private void PruneStaleBucketsLocked(uint newestFrameId, double currentRttMs, ref bool needPli)
         {
-            if (buckets.Count <= 4) return;
+            if (buckets.Count <= 8) return;
             var toRemove = new List<uint>();
             foreach (KeyValuePair<uint, FrameBucket> kv in buckets)
             {
-                if (unchecked((int)(newestFrameId - kv.Key)) >= 4)
+                if (unchecked((int)(newestFrameId - kv.Key)) >= 8)
                 {
                     toRemove.Add(kv.Key);
                 }
@@ -706,7 +893,7 @@ namespace DualRemote
                 if (!awaitingKeyframe)
                 {
                     awaitingKeyframe = true;
-                    needPli = ShouldTriggerPliLocked();
+                    needPli = ShouldTriggerPliLocked(currentRttMs);
                 }
             }
         }
@@ -722,11 +909,12 @@ namespace DualRemote
             for (int i = 0; i < toRemove.Count; i++) buckets.Remove(toRemove[i]);
         }
 
-        private bool ShouldTriggerPliLocked()
+        private bool ShouldTriggerPliLocked(double currentRttMs)
         {
             long now = Stopwatch.GetTimestamp();
             double ms = (now - lastPliTicks) * 1000.0 / Stopwatch.Frequency;
-            if (lastPliTicks == 0 || ms >= 450.0)
+            double cooldownMs = Math.Max(500.0, Math.Min(1200.0, currentRttMs * 4.0));
+            if (lastPliTicks == 0 || ms >= cooldownMs)
             {
                 lastPliTicks = now;
                 return true;
@@ -743,6 +931,7 @@ namespace DualRemote
     internal sealed class BoBoAdaptiveBitrateController
     {
         private readonly object gate = new object();
+        private readonly bool isLanLink;
         private bool enabled;
         private int targetBitrateKbps;
         private int targetFps;
@@ -755,20 +944,29 @@ namespace DualRemote
         private long lastIncreaseTicks;
         private long lowBitrateSinceTicks;
 
-        internal BoBoAdaptiveBitrateController(bool autoEnabled, int targetBitrateKbps, int targetFps, double initialRttMs)
+        internal BoBoAdaptiveBitrateController(bool autoEnabled, int targetBitrateKbps, int targetFps, double initialRttMs, bool isLan = true)
         {
             enabled = autoEnabled;
+            isLanLink = isLan && (initialRttMs <= 18.0);
             this.targetBitrateKbps = ClampBitrate(targetBitrateKbps);
             this.targetFps = ClampFps(targetFps);
             this.currentFps = this.targetFps;
 
-            // On WAN / Campus / Tailscale DERP links (high initial RTT), start conservatively and ramp up smoothly
-            if (autoEnabled && initialRttMs > 55.0)
-                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 3200);
-            else if (autoEnabled && initialRttMs > 22.0)
-                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 6000);
+            // On WAN / Campus / Cellular / Tailscale links, start conservatively and ramp up smoothly with 0% loss
+            if (autoEnabled && initialRttMs > 60.0)
+            {
+                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 2500);
+                this.currentFps = Math.Min(this.targetFps, 30);
+            }
+            else if (autoEnabled && !isLanLink)
+            {
+                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 4500);
+                this.currentFps = Math.Min(this.targetFps, 60);
+            }
             else
+            {
                 this.currentBitrateKbps = this.targetBitrateKbps;
+            }
 
             if (initialRttMs > 0.1)
             {
@@ -787,13 +985,21 @@ namespace DualRemote
         {
             lock (gate)
             {
+                bool enablingAuto = autoEnabled && !enabled;
                 enabled = autoEnabled;
                 targetBitrateKbps = ClampBitrate(newTargetBitrateKbps);
                 targetFps = ClampFps(newTargetFps);
-                if (!enabled || currentBitrateKbps > targetBitrateKbps)
+                if (!enabled)
+                {
                     currentBitrateKbps = targetBitrateKbps;
-                if (!enabled || currentFps > targetFps)
                     currentFps = targetFps;
+                    return;
+                }
+                int maxBitrate = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, enablingAuto ? 4500 : 14000);
+                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 60);
+                currentBitrateKbps = Math.Min(currentBitrateKbps, maxBitrate);
+                currentFps = Math.Min(currentFps, maxFps);
+                if (enablingAuto) lastIncreaseTicks = Stopwatch.GetTimestamp();
             }
         }
 
@@ -849,11 +1055,11 @@ namespace DualRemote
                 double queueDelayMs = (minRttMs > 0 && smoothedRttMs > minRttMs) ? (smoothedRttMs - minRttMs) : 0.0;
                 bool changed = false;
 
-                if (lossPct >= 4.0 || queueDelayMs >= 75.0)
+                if (lossPct >= 4.0 || queueDelayMs >= 120.0)
                 {
-                    if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 700.0)
+                    if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 750.0)
                     {
-                        int next = ClampBitrate((int)(currentBitrateKbps * 0.64));
+                        int next = ClampBitrate((int)(currentBitrateKbps * 0.65));
                         if (next != currentBitrateKbps)
                         {
                             currentBitrateKbps = next;
@@ -863,9 +1069,9 @@ namespace DualRemote
                         lastIncreaseTicks = now;
                     }
                 }
-                else if (lossPct >= 1.5 || queueDelayMs >= 38.0)
+                else if (lossPct >= 1.5 || queueDelayMs >= 65.0)
                 {
-                    if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 900.0)
+                    if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 950.0)
                     {
                         int next = ClampBitrate((int)(currentBitrateKbps * 0.84));
                         if (next != currentBitrateKbps)
@@ -877,12 +1083,13 @@ namespace DualRemote
                         lastIncreaseTicks = now;
                     }
                 }
-                else if (smoothedLossPct < 0.5 && queueDelayMs < 18.0)
+                else if (smoothedLossPct < 0.5 && queueDelayMs < 30.0)
                 {
-                    if (currentBitrateKbps < targetBitrateKbps && ElapsedMs(lastIncreaseTicks, now) >= 2000.0)
+                    int maxBps = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, 14000);
+                    if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= 2000.0)
                     {
-                        int step = Math.Max(450, (int)(currentBitrateKbps * 0.12));
-                        int next = Math.Min(targetBitrateKbps, currentBitrateKbps + step);
+                        int step = Math.Max(400, (int)(currentBitrateKbps * 0.12));
+                        int next = Math.Min(maxBps, currentBitrateKbps + step);
                         if (next != currentBitrateKbps)
                         {
                             currentBitrateKbps = next;
@@ -892,8 +1099,9 @@ namespace DualRemote
                     }
                 }
 
-                // Adaptive FPS step-down on severely constrained links (<=2.2Mbps -> 30fps keeps frame clarity high)
-                if (currentBitrateKbps <= 2200)
+                // Adaptive FPS step-down on severely constrained links (<=2.0Mbps -> 30fps keeps per-frame clarity high)
+                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 60);
+                if (currentBitrateKbps <= 2000)
                 {
                     if (lowBitrateSinceTicks == 0) lowBitrateSinceTicks = now;
                     else if (ElapsedMs(lowBitrateSinceTicks, now) >= 1800.0 && currentFps > 30)
@@ -905,9 +1113,9 @@ namespace DualRemote
                 else
                 {
                     lowBitrateSinceTicks = 0;
-                    if (currentBitrateKbps >= 3600 && currentFps < targetFps && smoothedLossPct < 0.5 && queueDelayMs < 20.0)
+                    if (currentBitrateKbps >= 3600 && currentFps < maxFps && smoothedLossPct < 0.5 && queueDelayMs < 30.0)
                     {
-                        currentFps = targetFps;
+                        currentFps = maxFps;
                         changed = true;
                     }
                 }

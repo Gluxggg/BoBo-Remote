@@ -15,7 +15,7 @@ namespace DualRemote
         private readonly Theme.StatusBanner deviceBanner = new Theme.StatusBanner("正在检查本机与同网设备…");
         private readonly List<SavedDevice> favorites = new List<SavedDevice>();
         private readonly List<TsPeer> cachedPeers = new List<TsPeer>();
-        private readonly Theme.Badge heroSunshineBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
+        private readonly Theme.Badge heroHostStatusBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
         private readonly Theme.Badge heroPrivacyBadge = new Theme.Badge("防窥未开", Theme.PillTone.Neutral);
         private readonly Label heroLanLabel = Theme.Text("检测中…", Theme.TextSize.Code, Theme.Ink);
         private readonly Label heroTsLabel = Theme.Text("检测中…", Theme.TextSize.Code, Theme.Ink);
@@ -147,13 +147,13 @@ namespace DualRemote
             Theme.FixedColumn(top, 252);
 
             var infoIcon = new Theme.IconTile(Theme.Glyph.InfoMark, false, Theme.Accent, Theme.Paper, 13f);
-            heroSunshineBadge.AlignRight = true;
+            heroHostStatusBadge.AlignRight = true;
             heroPrivacyBadge.AlignRight = true;
             var badges = Theme.Grid(3);
             Theme.FixedColumn(badges, 126);
             Theme.FixedColumn(badges, 8);
             Theme.FixedColumn(badges, 118);
-            Theme.Row(badges, 28, heroSunshineBadge, null, heroPrivacyBadge);
+            Theme.Row(badges, 28, heroHostStatusBadge, null, heroPrivacyBadge);
             Theme.Row(top, 28, infoIcon, null, Theme.Text("添加或连接你的其他设备", Theme.TextSize.LabelBold, Theme.Ink), null, badges);
             Theme.Row(content, 28, top);
             Theme.Row(content, 6);
@@ -451,11 +451,11 @@ namespace DualRemote
             if (heroCopyV6 != null) heroCopyV6.Enabled = !string.IsNullOrEmpty(hostSnapshot.PublicIpv6);
 
             if (boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl)
-                heroSunshineBadge.UpdateStatus("V6 本机可被控 · 49810", Theme.PillTone.Success);
+                heroHostStatusBadge.UpdateStatus("V6 本机可被控 · 49810", Theme.PillTone.Success);
             else if (boboHostServer != null && boboHostServer.IsRunning)
-                heroSunshineBadge.UpdateStatus("已关闭本机被控", Theme.PillTone.Neutral);
+                heroHostStatusBadge.UpdateStatus("已关闭本机被控", Theme.PillTone.Neutral);
             else
-                heroSunshineBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Warning);
+                heroHostStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Warning);
 
             UpdateLocalAssistAddressLabel();
             UpdateDiagnosticsUi();
@@ -466,24 +466,6 @@ namespace DualRemote
         {
             if (string.IsNullOrEmpty(ipv6) || ipv6.Length <= 24) return ipv6;
             return ipv6.Substring(0, 12) + "…" + ipv6.Substring(ipv6.Length - 8);
-        }
-
-        private async Task OpenLocalRustDesk(Button receive)
-        {
-            if (receive != null) receive.Enabled = false;
-            deviceBanner.Set("正在打开本机 RustDesk…", Theme.PillTone.Info);
-            try
-            {
-                string error = await Task.Run(() =>
-                {
-                    string detail;
-                    return Engines.LaunchRustDesk(out detail) ? null : detail;
-                });
-                if (IsDisposed) return;
-                deviceBanner.Set(error ?? "已打开临时协助窗口，请在其中查看 9 位设备码并确认连接。",
-                    error == null ? Theme.PillTone.Success : Theme.PillTone.Alert);
-            }
-            finally { if (receive != null && !IsDisposed) receive.Enabled = true; }
         }
 
         private async Task RefreshNetworkDevices()
@@ -1264,7 +1246,7 @@ namespace DualRemote
             bool isStream = addFavoriteKind != null && addFavoriteKind.SelectedIndex == 0;
             string raw = addFavoriteInput == null ? "" : (addFavoriteInput.Text ?? "").Trim();
             string error;
-            string clean = isStream ? Engines.NormalizeHost(raw, out error) : Engines.NormalizeRustDeskId(raw, out error);
+            string clean = NormalizeFavoriteTarget(raw, out error);
             if (clean == null)
             {
                 favoritesBanner.Set(error ?? "请输入有效的设备地址或设备码。", Theme.PillTone.Warning);
@@ -1513,6 +1495,14 @@ namespace DualRemote
             await ConnectToDeviceAsync(selected.Address, null);
         }
 
+        private static string NormalizeFavoriteTarget(string raw, out string error)
+        {
+            string code = BoBoIdentityStore.NormalizeDeviceCode(raw);
+            if (code.Length == 0) return Engines.NormalizeHost(raw, out error);
+            error = null;
+            return code;
+        }
+
         private static string FavoritesPath { get { return Path.Combine(RecentStore.DirPath, "favorites.txt"); } }
 
         private void LoadFavorites()
@@ -1524,9 +1514,10 @@ namespace DualRemote
                 {
                     if (line.Length < 3 || line[1] != '\t' || (line[0] != 'S' && line[0] != 'R')) continue;
                     bool stream = line[0] == 'S';
+                    string raw = line.Substring(2);
                     string error;
-                    string address = stream ? Engines.NormalizeHost(line.Substring(2), out error)
-                        : Engines.NormalizeRustDeskId(line.Substring(2), out error);
+                    string address = NormalizeFavoriteTarget(raw, out error);
+                    if (address == null && !stream) address = Engines.NormalizeRustDeskId(raw, out error);
                     if (address == null) continue;
                     var item = new SavedDevice(stream, address);
                     if (!favorites.Exists(value => value.SameAs(item))) favorites.Add(item);

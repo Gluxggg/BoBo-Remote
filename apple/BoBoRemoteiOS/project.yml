@@ -9,9 +9,9 @@ packages:
     path: ../BoBoAppleCore
 settings:
   base:
-    SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "6.2.3"
-    CURRENT_PROJECT_VERSION: "623"
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "6.3.0"
+    CURRENT_PROJECT_VERSION: "720"
     CODE_SIGNING_ALLOWED: "NO"
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
@@ -23,6 +23,7 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - path: Sources/App
+      - path: Sources/Loopback
     dependencies:
       - package: BoBoAppleCore
         product: BoBoAppleCore
@@ -31,8 +32,8 @@ targets:
       path: Sources/App/Info.plist
       properties:
         CFBundleDisplayName: BoBo远程
-        CFBundleShortVersionString: "6.2.3"
-        CFBundleVersion: "623"
+        CFBundleShortVersionString: "6.3.0"
+        CFBundleVersion: "720"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -58,6 +59,7 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - path: Sources/BroadcastExtension
+      - path: Sources/Loopback
     dependencies:
       - package: BoBoAppleCore
         product: BoBoAppleCore
@@ -65,8 +67,8 @@ targets:
       path: Sources/BroadcastExtension/Info.plist
       properties:
         CFBundleDisplayName: BoBo投屏扩展
-        CFBundleShortVersionString: "6.2.3"
-        CFBundleVersion: "623"
+        CFBundleShortVersionString: "6.3.0"
+        CFBundleVersion: "720"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.broadcast-services-upload
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BoBoBroadcastSampleHandler"

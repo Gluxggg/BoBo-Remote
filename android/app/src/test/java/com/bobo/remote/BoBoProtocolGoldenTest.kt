@@ -160,13 +160,27 @@ class BoBoProtocolGoldenTest {
                 assertEquals(BoBoProtocol.PLATFORM_ANDROID, probe1.platform)
                 assertEquals(BoBoProtocol.CONTROL_MODE_FULL, probe1.hostControlMode)
 
-                // 2. Pair with 4-digit PIN
+                // 2. PIN brute-force lockout (5 wrong attempts invalidate PIN)
+                val lockSess = server.beginPairing(120)
+                val badLockPin = if (lockSess.pin == "0000") "1111" else "0000"
+                repeat(5) {
+                    assertFalse(BoBoStreamClient.pairWithPin("127.0.0.1", port, badLockPin, clientId).first)
+                }
+                assertFalse(BoBoStreamClient.pairWithPin("127.0.0.1", port, lockSess.pin, clientId).first)
+                assertTrue(server.getActivePairing() == null)
+
+                // 2b. Pair with fresh 4-digit PIN + RSA signature proof
                 val pairSess = server.beginPairing(120)
-                val wrongPair = BoBoStreamClient.pairWithPin("127.0.0.1", port, "0000", clientId)
-                if (pairSess.pin != "0000") assertFalse(wrongPair.first)
+                val wrongPair = BoBoStreamClient.pairWithPin("127.0.0.1", port, if (pairSess.pin == "0000") "1111" else "0000", clientId)
+                assertFalse(wrongPair.first)
 
                 val okPair = BoBoStreamClient.pairWithPin("127.0.0.1", port, pairSess.pin, clientId)
                 assertTrue("Pairing with valid PIN must succeed: ${okPair.third}", okPair.first)
+
+                // 2c. Filename sanitization check
+                assertEquals("evil.exe", BoBoProtocol.sanitizeFileName("..\\..\\Windows\\evil.exe"))
+                assertEquals("received.bin", BoBoProtocol.sanitizeFileName(".."))
+                assertEquals("_CON.txt", BoBoProtocol.sanitizeFileName("CON.txt"))
 
                 // 3. Probe after pairing -> authorized
                 val probe2 = BoBoStreamClient.probeHost("127.0.0.1", port, clientId)

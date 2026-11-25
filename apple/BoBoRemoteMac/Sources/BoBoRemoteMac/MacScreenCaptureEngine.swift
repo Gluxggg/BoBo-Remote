@@ -1,322 +1,466 @@
-import AppKit
-import AVFoundation
+import AudioToolbox
 import BoBoAppleCore
+import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
 import ScreenCaptureKit
 import VideoToolbox
 
-/// macOS 原生 ScreenCaptureKit + VideoToolbox H.264 硬件采编与免驱动系统音频采集引擎。
-/// - 自动排除 BoBo 防窥黑屏遮罩窗口（远端主控仍看到完整清晰桌面，机前完全黑屏防窥）
-/// - 原生包含主机光标（showsCursor = true）
-/// - 硬件编码产出 H.264 Annex-B（每个 IDR 前自动附带 SPS+PPS），48kHz 立体声音频经 IMA-ADPCM 编码推送
-public final class MacScreenCaptureEngine: NSObject, SCStreamOutput, @unchecked Sendable {
+struct MacCaptureFormat: Sendable {
+    let displayID: CGDirectDisplayID
+    let monitorIndex: Int
+    let width: Int
+    let height: Int
+    let fps: Int
+    let bitrateKbps: Int
+}
+
+public final class MacScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private struct Capture {
+        let stream: SCStream
+        let encoder: VTCompressionSession
+        let format: MacCaptureFormat
+        let generation: UInt
+        let startTimeMs: UInt64
+        var ready = false
+        var forceNextKeyframe = true
+        var keyframeScheduled = false
+        var lastImage: CVImageBuffer?
+        var lastImageTime = CMTime.invalid
+        var lastEncodedTime = CMTime.invalid
+    }
+
     private let videoQueue = DispatchQueue(label: "com.bobo.remote.mac.capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "com.bobo.remote.mac.capture.audio", qos: .userInteractive)
     private let lock = NSLock()
-
-    private var stream: SCStream?
-    private var compressionSession: VTCompressionSession?
-    private var startTimeMs: UInt64 = 0
-    private var encodeWidth: Int = 1920
-    private var encodeHeight: Int = 1080
-    private var forceNextKeyframe = false
+    private var capture: Capture?
+    private var audioSampleRate = 0
     private var audioPcmScratch: [Int16] = []
+    @MainActor private var generation: UInt = 0
 
-    public var onEncodedVideo: ((Int, Int, Bool, Data, UInt32) -> Void)?
-    public var onEncodedAudio: ((Int, Int, Int, Data) -> Void)?
+    private let onVideo: @Sendable (Int, Int, Bool, Data, UInt32) -> Void
+    private let onAudio: @Sendable (Int, Int, Int, Data) -> Void
+    @MainActor var onCaptureError: ((Error) -> Void)?
 
-    public func enumerateMonitors() async -> [BoBoMonitorDescriptor] {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
-            return [BoBoMonitorDescriptor()]
-        }
-        return content.displays.enumerated().map { idx, disp in
-            BoBoMonitorDescriptor(
-                index: idx,
-                name: "Display \(idx + 1) (\(disp.width)x\(disp.height))",
-                width: disp.width,
-                height: disp.height,
-                isPrimary: idx == 0
-            )
+    init(onVideo: @escaping @Sendable (Int, Int, Bool, Data, UInt32) -> Void,
+         onAudio: @escaping @Sendable (Int, Int, Int, Data) -> Void) {
+        self.onVideo = onVideo
+        self.onAudio = onAudio
+        super.init()
+    }
+
+    private static func displays() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        let primary = CGMainDisplayID()
+        return ids.prefix(Int(count)).filter { $0 != 0 }.sorted { a, b in
+            if a == primary { return b != primary }
+            if b == primary { return false }
+            return a < b
         }
     }
 
-    public func start(
-        monitorIndex: Int,
-        width: Int,
-        height: Int,
-        fps: Int,
-        bitrateKbps: Int,
-        excludeWindowIDs: Set<CGWindowID>
-    ) async throws {
-        await stop()
+    private static func pixelSize(of id: CGDirectDisplayID) -> (width: Int, height: Int) {
+        if let mode = CGDisplayCopyDisplayMode(id) { return (mode.pixelWidth, mode.pixelHeight) }
+        return (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id))
+    }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard !content.displays.isEmpty else {
-            throw NSError(domain: "MacCapture", code: -1, userInfo: [NSLocalizedDescriptionKey: "未找到可采集显示器"])
+    static func monitors() -> [BoBoMonitorDescriptor] {
+        displays().enumerated().map { index, id in
+            let size = pixelSize(of: id)
+            return BoBoMonitorDescriptor(index: index, name: "Display \(index + 1) (\(size.width)x\(size.height))",
+                                         width: size.width, height: size.height, isPrimary: id == CGMainDisplayID())
         }
-        let idx = max(0, min(monitorIndex, content.displays.count - 1))
-        let display = content.displays[idx]
+    }
 
-        let targetW = max(640, min(width > 0 ? width : display.width, 3840)) & ~1
-        let targetH = max(360, min(height > 0 ? height : display.height, 2160)) & ~1
-        let targetFps = max(15, min(fps, 120))
+    static func configuration(monitorIndex: Int, width: Int, height: Int, fps: Int, bitrateKbps: Int) -> MacCaptureFormat? {
+        let ids = displays()
+        guard !ids.isEmpty else { return nil }
+        let index = min(max(0, monitorIndex), ids.count - 1)
+        let id = ids[index]
+        let native = pixelSize(of: id)
+        guard native.width > 1, native.height > 1 else { return nil }
+        let maxWidth = min(3840, width > 0 ? width : native.width)
+        let maxHeight = min(2160, height > 0 ? height : native.height)
+        let scale = min(1, Double(maxWidth) / Double(native.width), Double(maxHeight) / Double(native.height))
+        return MacCaptureFormat(displayID: id, monitorIndex: index,
+                                width: max(2, Int(Double(native.width) * scale) & ~1),
+                                height: max(2, Int(Double(native.height) * scale) & ~1),
+                                fps: max(15, min(120, fps)), bitrateKbps: max(250, min(100_000, bitrateKbps)))
+    }
 
+    var currentFormat: MacCaptureFormat? {
+        lock.withLock { capture?.ready == true ? capture?.format : nil }
+    }
+
+    @MainActor func start(format: MacCaptureFormat, excludeWindowIDs: Set<CGWindowID>) async throws {
+        generation &+= 1
+        let ticket = generation
+        if let previous = detachCapture() { await retire(previous) }
+        try checkGeneration(ticket)
+
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        try checkGeneration(ticket)
+        let filter = try makeFilter(content: content, displayID: format.displayID, excludeWindowIDs: excludeWindowIDs)
+        let config = SCStreamConfiguration()
+        config.width = format.width
+        config.height = format.height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(format.fps))
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        config.showsCursor = true
+        config.capturesAudio = true
+        config.sampleRate = 48_000
+        config.channelCount = 2
+        config.queueDepth = 3
+
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        let encoder = try createEncoder(format: format)
+        lock.withLock {
+            capture = Capture(stream: stream, encoder: encoder, format: format, generation: ticket,
+                              startTimeMs: DispatchTime.now().uptimeNanoseconds / 1_000_000)
+        }
+        do {
+            try await stream.startCapture()
+            try checkGeneration(ticket)
+            lock.withLock { capture?.ready = true }
+        } catch {
+            if let failed = detachCapture(generation: ticket) { await retire(failed) }
+            else { try? await stream.stopCapture() }
+            throw error
+        }
+    }
+
+    @MainActor func updateExcludedWindows(_ ids: Set<CGWindowID>) async throws {
+        guard let active = lock.withLock({ capture }), active.ready else { throw CancellationError() }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        try checkGeneration(active.generation)
+        let filter = try makeFilter(content: content, displayID: active.format.displayID, excludeWindowIDs: ids)
+        try await active.stream.updateContentFilter(filter)
+        try checkGeneration(active.generation)
+    }
+
+    private func makeFilter(content: SCShareableContent, displayID: CGDirectDisplayID,
+                            excludeWindowIDs: Set<CGWindowID>) throws -> SCContentFilter {
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            throw captureError("所选屏幕已断开或无法采集")
+        }
         let excluded = content.windows.filter { excludeWindowIDs.contains($0.windowID) }
-        let filter = SCContentFilter(display: display, excludingWindows: excluded)
+        if excluded.count == excludeWindowIDs.count { return SCContentFilter(display: display, excludingWindows: excluded) }
 
-        let cfg = SCStreamConfiguration()
-        cfg.width = targetW
-        cfg.height = targetH
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-        cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        cfg.showsCursor = true
-        cfg.capturesAudio = true
-        cfg.sampleRate = 48000
-        cfg.channelCount = 2
-        cfg.queueDepth = 3
-
-        try createEncoder(width: targetW, height: targetH, fps: targetFps, bitrateKbps: bitrateKbps)
-
-        lock.lock()
-        encodeWidth = targetW
-        encodeHeight = targetH
-        startTimeMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        forceNextKeyframe = true
-        audioPcmScratch.removeAll(keepingCapacity: true)
-        lock.unlock()
-
-        let scStream = SCStream(filter: filter, configuration: cfg, delegate: nil)
-        try scStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-        try scStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        try await scStream.startCapture()
-
-        lock.lock()
-        stream = scStream
-        lock.unlock()
-    }
-
-    public func updateExcludedWindows(_ excludeWindowIDs: Set<CGWindowID>, monitorIndex: Int = 0) async {
-        lock.lock()
-        let curStream = stream
-        lock.unlock()
-        guard let curStream else { return }
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
-              !content.displays.isEmpty else { return }
-        let idx = max(0, min(monitorIndex, content.displays.count - 1))
-        let excluded = content.windows.filter { excludeWindowIDs.contains($0.windowID) }
-        let filter = SCContentFilter(display: content.displays[idx], excludingWindows: excluded)
-        try? await curStream.updateContentFilter(filter)
-    }
-
-    public func requestKeyframe() {
-        lock.lock()
-        forceNextKeyframe = true
-        lock.unlock()
-    }
-
-    public func stop() async {
-        lock.lock()
-        let curStream = stream
-        stream = nil
-        let sess = compressionSession
-        compressionSession = nil
-        lock.unlock()
-
-        if let curStream {
-            try? await curStream.stopCapture()
+        // Some macOS versions omit windows that are hidden or marked as nonshareable.
+        // Exclude our application and include its other known windows before ordering the curtain front.
+        let pid = ProcessInfo.processInfo.processIdentifier
+        guard let app = content.applications.first(where: { $0.processID == pid }) else {
+            throw captureError("无法从远程画面中排除防窥窗口")
         }
-        if let sess {
-            VTCompressionSessionInvalidate(sess)
+        let visibleAppWindows = content.windows.filter {
+            $0.owningApplication?.processID == pid && !excludeWindowIDs.contains($0.windowID)
+        }
+        return SCContentFilter(display: display, excludingApplications: [app], exceptingWindows: visibleAppWindows)
+    }
+
+    @MainActor private func checkGeneration(_ ticket: UInt) throws {
+        try Task.checkCancellation()
+        guard generation == ticket else { throw CancellationError() }
+    }
+
+    func requestKeyframe() {
+        let ticket = lock.withLock { () -> UInt? in
+            guard let active = capture, active.ready else { return nil }
+            capture?.forceNextKeyframe = true
+            guard active.lastImage != nil, !active.keyframeScheduled else { return nil }
+            capture?.keyframeScheduled = true
+            return active.generation
+        }
+        if let ticket {
+            // ScreenCaptureKit may deliver only idle frames until something changes on screen.
+            videoQueue.async { [weak self] in self?.encodeLatestFrame(generation: ticket, keyframeOnly: true) }
         }
     }
 
-    // MARK: - SCStreamOutput
+    @MainActor public func stop() async {
+        generation &+= 1
+        if let active = detachCapture() { await retire(active) }
+    }
+
+    private func detachCapture(generation ticket: UInt? = nil) -> Capture? {
+        lock.withLock {
+            guard let active = capture, ticket == nil || active.generation == ticket else { return nil }
+            capture = nil
+            audioSampleRate = 0
+            audioPcmScratch.removeAll(keepingCapacity: true)
+            return active
+        }
+    }
+
+    private func retire(_ active: Capture) async {
+        await withCheckedContinuation { continuation in
+            // Do not invalidate the encoder while the capture queue is submitting a frame.
+            videoQueue.async {
+                VTCompressionSessionInvalidate(active.encoder)
+                continuation.resume()
+            }
+        }
+        try? await active.stream.stopCapture()
+    }
+
+    public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        Task { @MainActor in
+            guard self.lock.withLock({ self.capture?.stream === stream }) else { return }
+            self.onCaptureError?(error)
+        }
+    }
 
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard CMSampleBufferIsValid(sampleBuffer) else { return }
+        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return }
         switch type {
         case .screen:
-            handleVideoSample(sampleBuffer)
+            handleVideoSample(sampleBuffer, stream: stream)
         case .audio:
-            handleAudioSample(sampleBuffer)
+            guard let ticket = lock.withLock({ capture?.stream === stream && capture?.ready == true ? capture?.generation : nil }) else { return }
+            handleAudioSample(sampleBuffer, generation: ticket)
         @unknown default:
             break
         }
     }
 
-    private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let pixelBuf = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        lock.lock()
-        guard let sess = compressionSession else { lock.unlock(); return }
-        let forceKey = forceNextKeyframe
-        forceNextKeyframe = false
-        lock.unlock()
-
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        var props: CFDictionary?
-        if forceKey {
-            props = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+    private func handleVideoSample(_ sampleBuffer: CMSampleBuffer, stream: SCStream) {
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+           let status = attachments.first?[.status] as? Int, status != SCFrameStatus.complete.rawValue { return }
+        guard let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ticket = lock.withLock { () -> UInt? in
+            guard let active = capture, active.stream === stream else { return nil }
+            capture?.lastImage = image
+            capture?.lastImageTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            return active.generation
         }
-        VTCompressionSessionEncodeFrame(sess, imageBuffer: pixelBuf, presentationTimeStamp: pts, duration: .invalid, frameProperties: props, sourceFrameRefcon: nil, infoFlagsOut: nil)
+        if let ticket { encodeLatestFrame(generation: ticket, keyframeOnly: false) }
     }
 
-    private func handleAudioSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) else { return }
-        let asbd = asbdPtr.pointee
-        let numFrames = CMSampleBufferGetNumSamples(sampleBuffer)
-        guard numFrames > 0 else { return }
+    // All frame submission and encoder invalidation run on the video queue.
+    private func encodeLatestFrame(generation ticket: UInt, keyframeOnly: Bool) {
+        let submission = lock.withLock { () -> (VTCompressionSession, CVImageBuffer, CMTime, Bool)? in
+            guard let active = capture, active.generation == ticket else { return nil }
+            if keyframeOnly { capture?.keyframeScheduled = false }
+            guard active.ready, let image = active.lastImage,
+                  !keyframeOnly || active.forceNextKeyframe else { return nil }
+            var time = active.lastImageTime
+            if !time.isValid { time = CMClockGetTime(CMClockGetHostTimeClock()) }
+            if active.lastEncodedTime.isValid, CMTimeCompare(time, active.lastEncodedTime) <= 0 {
+                time = CMTimeAdd(active.lastEncodedTime, CMTime(value: 1, timescale: 1000))
+            }
+            capture?.lastEncodedTime = time
+            capture?.forceNextKeyframe = false
+            return (active.encoder, image, time, active.forceNextKeyframe)
+        }
+        guard let (encoder, image, time, forceKeyframe) = submission else { return }
+        let properties = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
+        let status = VTCompressionSessionEncodeFrame(encoder, imageBuffer: image,
+                                                      presentationTimeStamp: time, duration: .invalid, frameProperties: properties,
+                                                      sourceFrameRefcon: UnsafeMutableRawPointer(bitPattern: ticket), infoFlagsOut: nil)
+        if status != noErr, forceKeyframe {
+            lock.withLock {
+                if capture?.generation == ticket { capture?.forceNextKeyframe = true }
+            }
+        }
+    }
 
-        var blockBuf: CMBlockBuffer?
-        var abl = AudioBufferList()
+    private func handleAudioSample(_ sampleBuffer: CMSampleBuffer, generation ticket: UInt) {
+        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let format = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee,
+              format.mFormatID == kAudioFormatLinearPCM,
+              format.mSampleRate.isFinite, (1...192_000).contains(format.mSampleRate),
+              format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0 else { return }
+        let sampleRate = Int(format.mSampleRate.rounded())
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0, frames <= sampleRate else { return }
+
+        let isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        let planar = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+        let channels = Int(format.mChannelsPerFrame)
+        let sampleBytes = isFloat ? MemoryLayout<Float>.size : MemoryLayout<Int16>.size
+        let stride = Int(format.mBytesPerFrame)
+        guard channels > 0, Int(format.mBitsPerChannel) == sampleBytes * 8,
+              isFloat || (format.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0),
+              stride == sampleBytes * (planar ? 1 : channels) else { return }
+
+        var listSize = 0
+        _ = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: &listSize, bufferListOut: nil, bufferListSize: 0,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: nil
+        )
+        guard listSize >= MemoryLayout<AudioBufferList>.size else { return }
+        let memory = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { memory.deallocate() }
+        let list = memory.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var block: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: &abl,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuf
+            sampleBuffer, bufferListSizeNeededOut: nil, bufferListOut: list, bufferListSize: listSize,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment), blockBufferOut: &block
         )
         guard status == noErr else { return }
-
-        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        let channels = max(1, Int(asbd.mChannelsPerFrame))
-
-        var interleaved = [Int16](repeating: 0, count: numFrames * 2)
-        if isFloat && !isNonInterleaved, let rawPtr = abl.mBuffers.mData {
-            let fPtr = rawPtr.assumingMemoryBound(to: Float.self)
-            for i in 0..<numFrames {
-                let l = fPtr[i * channels]
-                let r = channels >= 2 ? fPtr[i * channels + 1] : l
-                interleaved[i * 2] = Int16(max(-32768.0, min(32767.0, l * 32767.0)))
-                interleaved[i * 2 + 1] = Int16(max(-32768.0, min(32767.0, r * 32767.0)))
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        guard let first = buffers.first, let left = first.mData, Int(first.mDataByteSize) / stride >= frames,
+              first.mNumberChannels == (planar ? 1 : format.mChannelsPerFrame) else { return }
+        var right = left
+        if channels > 1 {
+            if planar {
+                guard buffers.count > 1, buffers[1].mNumberChannels == 1, let second = buffers[1].mData,
+                      Int(buffers[1].mDataByteSize) / stride >= frames else { return }
+                right = second
+            } else {
+                right = left.advanced(by: sampleBytes)
             }
-        } else if isFloat && isNonInterleaved, let rawPtr = abl.mBuffers.mData {
-            let fPtr = rawPtr.assumingMemoryBound(to: Float.self)
-            for i in 0..<numFrames {
-                let s = Int16(max(-32768.0, min(32767.0, fPtr[i] * 32767.0)))
-                interleaved[i * 2] = s
-                interleaved[i * 2 + 1] = s
-            }
-        } else {
-            return
         }
 
-        lock.lock()
-        audioPcmScratch.append(contentsOf: interleaved)
-        let chunkFrames = 480 // 10ms @ 48kHz
-        while audioPcmScratch.count >= chunkFrames * 2 {
-            let slice = Array(audioPcmScratch.prefix(chunkFrames * 2))
-            audioPcmScratch.removeFirst(chunkFrames * 2)
-            let adpcm = ImaAdpcmCodec.encodeStereo(slice, sampleFrames: chunkFrames)
-            let cb = onEncodedAudio
-            lock.unlock()
-            cb?(48000, 2, chunkFrames, adpcm)
-            lock.lock()
+        let pcm = withExtendedLifetime(block) {
+            var pcm = [Int16](repeating: 0, count: frames * 2)
+            for frame in 0..<frames {
+                let offset = frame * stride
+                if isFloat {
+                    pcm[frame * 2] = Self.pcmSample(left.loadUnaligned(fromByteOffset: offset, as: Float.self))
+                    pcm[frame * 2 + 1] = Self.pcmSample(right.loadUnaligned(fromByteOffset: offset, as: Float.self))
+                } else {
+                    pcm[frame * 2] = left.loadUnaligned(fromByteOffset: offset, as: Int16.self)
+                    pcm[frame * 2 + 1] = right.loadUnaligned(fromByteOffset: offset, as: Int16.self)
+                }
+            }
+            return pcm
         }
-        lock.unlock()
+        let chunkFrames = max(1, sampleRate / 100)
+        let chunks: [[Int16]] = lock.withLock {
+            guard capture?.generation == ticket else { return [] }
+            if audioSampleRate != sampleRate {
+                audioPcmScratch.removeAll(keepingCapacity: true)
+                audioSampleRate = sampleRate
+            }
+            audioPcmScratch.append(contentsOf: pcm)
+            var chunks: [[Int16]] = []
+            let chunkSamples = chunkFrames * 2
+            let consumed = audioPcmScratch.count / chunkSamples * chunkSamples
+            for start in Swift.stride(from: 0, to: consumed, by: chunkSamples) {
+                chunks.append(Array(audioPcmScratch[start..<(start + chunkSamples)]))
+            }
+            audioPcmScratch.removeFirst(consumed)
+            return chunks
+        }
+        for chunk in chunks {
+            let adpcm = ImaAdpcmCodec.encodeStereo(chunk, sampleFrames: chunkFrames)
+            guard lock.withLock({ capture?.generation == ticket }) else { return }
+            onAudio(sampleRate, 2, chunkFrames, adpcm)
+        }
     }
 
-    // MARK: - VideoToolbox H.264 Encoder
+    private static func pcmSample(_ value: Float) -> Int16 {
+        guard value.isFinite else { return 0 }
+        return Int16(max(-32_768, min(32_767, value * 32_768)))
+    }
 
-    private func createEncoder(width: Int, height: Int, fps: Int, bitrateKbps: Int) throws {
-        let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
-            guard status == noErr, let refcon, let sb = sampleBuffer else { return }
+    private func createEncoder(format: MacCaptureFormat) throws -> VTCompressionSession {
+        let callback: VTCompressionOutputCallback = { refcon, frameRefcon, status, _, sampleBuffer in
+            guard status == noErr, let refcon, let frameRefcon, let sampleBuffer else { return }
             let engine = Unmanaged<MacScreenCaptureEngine>.fromOpaque(refcon).takeUnretainedValue()
-            engine.emitEncodedSample(sb)
+            engine.emitEncodedSample(sampleBuffer, generation: UInt(bitPattern: frameRefcon))
         }
-
-        var sess: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: Int32(width),
-            height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: callback,
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
-            compressionSessionOut: &sess
-        )
-        guard status == noErr, let session = sess else {
-            throw NSError(domain: "MacCapture", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "VideoToolbox H.264 编码器初始化失败"])
+        var encoder: VTCompressionSession?
+        let status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault,
+                                                 width: Int32(format.width), height: Int32(format.height),
+                                                 codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
+                                                 imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                 outputCallback: callback, refcon: Unmanaged.passUnretained(self).toOpaque(),
+                                                 compressionSessionOut: &encoder)
+        guard status == noErr, let encoder else { throw captureError("无法初始化 VideoToolbox H.264 编码器", status: status) }
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: format.fps))
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: format.fps * 2))
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: format.bitrateKbps * 1000))
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(encoder)
+        guard prepareStatus == noErr else {
+            VTCompressionSessionInvalidate(encoder)
+            throw captureError("无法启动 VideoToolbox H.264 编码器", status: prepareStatus)
         }
-
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps * 2))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrateKbps * 1000))
-        VTCompressionSessionPrepareToEncodeFrames(session)
-
-        lock.lock()
-        compressionSession = session
-        lock.unlock()
+        return encoder
     }
 
-    private func emitEncodedSample(_ sampleBuffer: CMSampleBuffer) {
-        var isKeyframe = true
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
-           let first = attachments.first,
-           let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool {
-            isKeyframe = !notSync
+    private func emitEncodedSample(_ sampleBuffer: CMSampleBuffer, generation ticket: UInt) {
+        guard let active = lock.withLock({ capture }), active.generation == ticket, active.ready,
+              let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var parameterCount = 0
+        var headerLength: Int32 = 0
+        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(description, parameterSetIndex: 0,
+                                                                 parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                                                                 parameterSetCountOut: &parameterCount, nalUnitHeaderLengthOut: &headerLength) == noErr,
+              (1...4).contains(headerLength) else { return }
+
+        let startCode: [UInt8] = [0, 0, 0, 1]
+        let total = CMBlockBufferGetDataLength(block)
+        guard total > Int(headerLength), total <= BoBoProtocol.maxVideoPayloadBytes else { return }
+        var annexB = Data(capacity: total)
+        var idr = false
+        func appendNALUnits(_ bytes: UnsafeRawBufferPointer) -> Bool {
+            guard let base = bytes.bindMemory(to: UInt8.self).baseAddress else { return false }
+            let header = Int(headerLength)
+            var offset = 0
+            while offset < total {
+                guard total - offset >= header else { return false }
+                var length = 0
+                for _ in 0..<header {
+                    length = length * 256 + Int(base[offset])
+                    offset += 1
+                }
+                guard length > 0, length <= total - offset else { return false }
+                idr = idr || base[offset] & 0x1F == 5
+                annexB.append(contentsOf: startCode)
+                annexB.append(base.advanced(by: offset), count: length)
+                offset += length
+            }
+            return true
         }
 
-        var annexB = Data()
-        let startCode = Data([0x00, 0x00, 0x00, 0x01])
-
-        // Always prepend SPS + PPS before IDR keyframes per BOBO6-SPEC
-        if isKeyframe, let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
-            var spsPtr: UnsafePointer<UInt8>?
-            var spsLen = 0
-            var ppsPtr: UnsafePointer<UInt8>?
-            var ppsLen = 0
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmtDesc, parameterSetIndex: 0, parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
-               let spsPtr, spsLen > 0 {
-                annexB.append(startCode)
-                annexB.append(spsPtr, count: spsLen)
+        var contiguousLength = 0
+        var pointer: UnsafeMutablePointer<Int8>?
+        if CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: &contiguousLength,
+                                       totalLengthOut: nil, dataPointerOut: &pointer) == kCMBlockBufferNoErr,
+           contiguousLength >= total, let pointer {
+            guard appendNALUnits(UnsafeRawBufferPointer(start: pointer, count: total)) else { return }
+        } else {
+            var bytes = Data(count: total)
+            let status = bytes.withUnsafeMutableBytes { raw in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: total, destination: raw.baseAddress!)
             }
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmtDesc, parameterSetIndex: 1, parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
-               let ppsPtr, ppsLen > 0 {
-                annexB.append(startCode)
-                annexB.append(ppsPtr, count: ppsLen)
-            }
+            guard status == kCMBlockBufferNoErr, bytes.withUnsafeBytes(appendNALUnits) else { return }
         }
 
-        guard let dataBuf = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var totalLen = 0
-        var dataPtr: UnsafeMutablePointer<Int8>?
-        guard CMBlockBufferGetDataPointer(dataBuf, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLen, dataPointerOut: &dataPtr) == kCMBlockBufferNoErr,
-              let base = dataPtr, totalLen > 4 else { return }
-
-        var offset = 0
-        while offset + 4 <= totalLen {
-            var nalLenBE: UInt32 = 0
-            memcpy(&nalLenBE, base.advanced(by: offset), 4)
-            let nalLen = Int(UInt32(bigEndian: nalLenBE))
-            offset += 4
-            guard nalLen > 0, offset + nalLen <= totalLen else { break }
-            annexB.append(startCode)
-            base.advanced(by: offset).withMemoryRebound(to: UInt8.self, capacity: nalLen) { u8 in
-                annexB.append(u8, count: nalLen)
+        if idr {
+            var parameters = Data()
+            for index in 0..<parameterCount {
+                var pointer: UnsafePointer<UInt8>?
+                var length = 0
+                guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(description, parameterSetIndex: index,
+                                                                         parameterSetPointerOut: &pointer, parameterSetSizeOut: &length,
+                                                                         parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
+                      let pointer, length > 0 else { return }
+                parameters.append(contentsOf: startCode)
+                parameters.append(pointer, count: length)
             }
-            offset += nalLen
+            parameters.append(annexB)
+            annexB = parameters
         }
+        guard lock.withLock({ capture?.generation == ticket }) else { return }
+        let timestamp = DispatchTime.now().uptimeNanoseconds / 1_000_000 - active.startTimeMs
+        onVideo(active.format.width, active.format.height, idr, annexB, UInt32(truncatingIfNeeded: timestamp))
+    }
 
-        guard !annexB.isEmpty else { return }
-        lock.lock()
-        let w = encodeWidth
-        let h = encodeHeight
-        let nowMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        let tsMs = UInt32(truncatingIfNeeded: nowMs >= startTimeMs ? (nowMs - startTimeMs) : 0)
-        let cb = onEncodedVideo
-        lock.unlock()
-        cb?(w, h, isKeyframe, annexB, tsMs)
+    private func captureError(_ message: String, status: OSStatus = -1) -> NSError {
+        NSError(domain: "MacCapture", code: Int(status), userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

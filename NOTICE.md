@@ -1,38 +1,21 @@
 # NOTICE
 
-本仓库的启动器（`src\`）、工具脚本（`tools\`、`ci\`）、构建脚本（`build.ps1`）
-与文档以 [MIT](LICENSE) 发布，版权归仓库作者。
+BoBo Remote V6 的项目源码、安装器、构建脚本和文档以 [MIT](LICENSE) 发布，版权归仓库作者。Windows 构建在主程序资源中内嵌自研 `BoBoCore.dll`。RustDesk、Moonlight、Moonlight V+ 和 Foundation Sunshine 属于早期 Windows 发行包。其界面、调用代码及相关资源已从当前 Windows 应用和构建中移除，仓库中的 Sunshine 调优脚本作为历史资料保留。 [第三方组件记录](THIRD-PARTY.md)
 
-仓库本身不包含第三方引擎二进制；构建产物包含下列上游组件。启动器把它们作为
-独立进程调用，不修改其源码。包内 `engines\Sunshine` 保留 Foundation Sunshine
-官方 portable 文件及其 `LICENSE`、`NOTICE`、`licenses\` 清单。
+## 历史 Windows 发行包
 
 | 组件 | 版本 | 许可证 | 上游仓库与源码 |
 | --- | --- | --- | --- |
-| moonlight-common-c | master (vendored) | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-common-c> |
+| moonlight-common-c | master（vendored） | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-common-c> |
 | RustDesk | 1.5.3 | AGPL-3.0 | <https://github.com/rustdesk/rustdesk/tree/1.5.3> |
 | Moonlight | 6.2.0 | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-qt/tree/v6.2.0> |
 | Moonlight V+ | 6.5.6 | GPL-3.0 | <https://github.com/qiin2333/moonlight-qt/tree/v6.5.6> |
 | Foundation Sunshine | v2026.1123.185102 | GPL-3.0 | <https://github.com/AlkaidLab/foundation-sunshine/tree/v2026.1123.185102.%E6%9D%82%E9%B1%BC> |
 
-许可证全文随构建产物放在：
+早期启动器以独立进程运行上游二进制，原生播放器以 GPL-3.0 许可链接 `moonlight-common-c`。其源码与许可仍可查阅。 [V5 计划归档](docs/V5-NATIVE-STREAM-PLAN.md) · [moonlight-common-c 许可](native/third_party/moonlight-common-c/LICENSE.txt)
 
-- `LICENSES\AGPL-3.0.txt`
-- `LICENSES\GPL-3.0.txt`
-- `engines\Sunshine\LICENSE`
+历史成包许可文件包括 `LICENSES\AGPL-3.0.txt`、`LICENSES\GPL-3.0.txt` 和 `engines\Sunshine\LICENSE`。Foundation Sunshine 官方便携包还保留了 `NOTICE` 和 `licenses\manifest.json`，其中列出 ViGEmBus、usbip-win2、nefcon、ZakoVDD、Zako Virtual Mouse、zlib 和 foundation-ui 等组件。 [AGPL-3.0 全文](LICENSES/AGPL-3.0.txt) · [GPL-3.0 全文](LICENSES/GPL-3.0.txt)
 
-Foundation Sunshine 的 `NOTICE` 和 `licenses\manifest.json` 还列出了 ViGEmBus、
-usbip-win2、nefcon、ZakoVDD、Zako Virtual Mouse、zlib、foundation-ui 等组件的
-许可与来源；这些文件原样保留，具体以 `engines\Sunshine` 内文本为准。启动器不会
-自动运行驱动安装、服务注册、防火墙或注册表修改脚本；官方包中的安装批处理仅作为
-上游原始文件存在，本工具不调用。需要这些可选能力时，由用户自行确认并承担系统
-配置变化。
+旧版二进制再分发适用各自的许可证及对应源码要求，Foundation Sunshine 的随附驱动和专有组件适用其上游清单。各版本的下载地址、字节数、SHA-256 和源码获取方式见历史记录。 [第三方组件记录](THIRD-PARTY.md)
 
-各版本的下载地址、字节数与 SHA-256 见 [THIRD-PARTY.md](THIRD-PARTY.md)。
-
-若你把构建产物分发给他人：GPL-3.0 与 AGPL-3.0 都要求向接收者提供对应源码，
-或提供符合 GPL 第 6 条的书面要约；只给一个下载链接通常不足以履行义务。Foundation
-Sunshine 的驱动和专有组件还要按它自己的 NOTICE 与清单单独复核。
-
-本项目不是 RustDesk、Moonlight、Moonlight V+、Foundation Sunshine 或网易 UU
-远程的官方发行版，也不代表任何上游项目的背书。
+RustDesk、Moonlight、Moonlight V+、Foundation Sunshine 和网易 UU 远程的名称与商标归各自所有者。

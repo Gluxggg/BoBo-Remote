@@ -9,9 +9,10 @@
 | 项目 | 约定 |
 |---|---|
 | 协议魔数 | `BOBO6` |
-| 控制与媒体端口 | `TCP 49810`（强制 **TLS 1.2+**，SNI = `BoBoRemote-V6-Node`） |
+| 控制与媒体端口 | `TCP 49810`，使用 TLS 1.2+ 和 SNI `BoBoRemote-V6-Node`。Windows 两端可协商加密 UDP+FEC，端口为 `UDP 49811`。iOS ReplayKit 有独立的本机桥接，使用 `TCP 127.0.0.1:49811`。 |
 | 局域网发现端口 | `UDP 49812`（UTF-8 JSON 广播） |
-| 证书模型 | 被控端持有本地生成的自签名 RSA-2048 X.509 证书；控制端通过回调提取对端 DER 证书的 `SHA-256` 小写十六进制指纹（`certThumbprint`），不要求客户端 TLS 双向证书（客户端身份在 TLS 隧道内通过 `HELLO` 声明并在 `PAIR_REQUEST` 中以 PIN HMAC 校验）。 |
+| 证书与双向身份证明模型 | 被控端持有本地生成的自签名 RSA-2048 X.509 证书；控制端必须直接从 TLS 握手叶证书计算 `SHA-256` 小写十六进制指纹（`certThumbprint`）并执行严格 TOFU 钉扎（绝不信任 JSON 自报指纹或静默覆盖变更指纹）。控制端在 `HELLO` 附带自身 `clientCertDer`（Base64 X.509 DER），并在已配对重连（`AUTH_PROOF`）或首次配对（`PAIR_REQUEST.authSig`）时使用自身 RSA 私钥对 `BOBO6-AUTH:<nonce>\|<clientThumb>\|<hostThumb>` 签名（RSASSA-PKCS1-v1_5 + SHA-256），由被控端核验 `SHA256(clientCertDer) == clientThumbprint` 及公钥验签，彻底杜绝伪造 JSON `certThumbprint` 绕过鉴权。 |
+| 预认证帧限制与防爆破 | 完成鉴权前单帧载荷上限严格限制为 `64 KiB`；4 位临时配对码连续失败 `5` 次立即作废，每次失败延迟 `500 ms` 并立即断开当前连接。 |
 | 跨网互联 | 局域网直连（UDP `49812` 自动发现）或 Tailscale 虚拟内网 IP（`100.x.y.z`）直连。 |
 
 ---
@@ -38,8 +39,8 @@
 
 ```
 Offset  Size  Type      Field
-0       1     uint8     type          (0x01..0x05)
-1       4     int32 LE  payloadLength (Video <= 16 MiB; 其他 <= 2 MiB)
+0       1     uint8     type          (0x01..0x06)
+1       4     int32 LE  payloadLength (预认证 <= 64 KiB，Video <= 16 MiB，FileChunk <= 512 KiB，其他 <= 2 MiB)
 5       4     uint32 LE flagsOrTimestamp
 9       N     bytes     payload
 ```
@@ -52,7 +53,8 @@ Offset  Size  Type      Field
 | `0x02` | `VideoH264` | `[0..1] uint16 LE width`, `[2..3] uint16 LE height`, `[4] uint8 keyframeFlag (bit0=1 表示 IDR)`, `[5..] H.264 Annex-B 码流 (00 00 00 01 起始码，IDR 前必须含 SPS+PPS)` |
 | `0x03` | `AudioAdpcm` | `[0..3] int32 LE sampleRate (48000)`, `[4] uint8 channels (2)`, `[5..6] uint16 LE sampleCount`, `[7..] IMA-ADPCM 立体声数据` |
 | `0x04` | `InputEvent` | 固定 6 字节：`[0] uint8 kind`, `[1] uint8 flags`, `[2..3] int16 LE a`, `[4..5] int16 LE b` |
-| `0x05` | `FileChunk` | `[0..15] 16B ASCII transferId (右补 0x00)`, `[16..23] int64 LE fileOffset`, `[24..] 文件块原始字节` |
+| `0x05` | `FileChunk` | `[0..15] 16B ASCII transferId (右补 0x00)`, `[16..23] int64 LE fileOffset`, `[24..] 文件块原始字节`（单块 `<= 512 KiB`，单文件 `<= 2 GiB`，强制校验 `offset >= 0 && offset + len <= totalBytes` 及必填 64 位 SHA-256） |
+| `0x06` | `CursorShape` | `[0] uint8 standardCursorId (0=Hidden, 1=Arrow, 2=IBeam, ... 13=Help)`（可选，未识别端可安全忽略） |
 
 ### 3.2 `InputEvent`（`0x04`）编码表
 
@@ -127,29 +129,36 @@ Host → Client:
 - `platform` 取值：`"windows"` | `"macos"` | `"android"` | `"ios"`（旧版缺失时默认 `"windows"`）。
 - `hostControlMode` 取值：`"full"`（完整键鼠/触控控制）或 `"view_only"`（如 iOS ReplayKit 仅查看投屏协助）。
 
-### 4.2 配对（`PAIR_REQUEST` → `PAIR_RESULT`）
+### 4.2 会话身份验证与配对
 
-当 `HELLO_ACK.authorized == false` 时，Client 计算 `proof` 发送：
-- `{"type": "PAIR_REQUEST", "proof": "<64-hex>"}`
-- Host 回复 `{"type": "PAIR_RESULT", "ok": true, "hostName": "...", "hostDeviceCode": "..."}`（失败带 `"error"`）。
+控制端在免码串流或发送文件前校验本地配对记录中的设备 ID 和实际 TLS 证书指纹。`HELLO_ACK.authorized` 表示被控端已保存该控制设备的配对记录。升级后的被控端还要求会话私钥签名，使用旧版控制端连接时需升级控制端。
+
+- 当 `HELLO_ACK.authorized == true` 且 `HELLO_ACK.authChallenge == true` 时，Client 在发起 `START_STREAM` 或 `FILE_OFFER` 前必须发送：
+  - `{"type": "AUTH_PROOF", "signature": "<base64-RSA-PKCS1v15-SHA256>", "clientCertDer": "<base64-X509-DER>"}`
+  - 签名原文为 UTF-8 字符串：`BOBO6-AUTH:<lower(nonce)>|<lower(clientThumbprint)>|<lower(hostThumbprint)>`
+  - Host 验证通过后回复 `{"type": "AUTH_RESULT", "ok": true}`；验证失败则回复 `{"type": "AUTH_RESULT", "ok": false, "error": "..."}` 并立即关闭连接。
+- 当 `HELLO_ACK.authorized == false` 时，Client 计算 `proof` 与 `authSig` 发送：
+  - `{"type": "PAIR_REQUEST", "proof": "<64-hex>", "authSig": "<base64-RSA-PKCS1v15-SHA256>", "clientCertDer": "<base64-X509-DER>"}`
+  - Host 回复 `{"type": "PAIR_RESULT", "ok": true, "hostName": "...", "hostDeviceCode": "..."}`（失败带 `"error"`，延迟 500ms 并立即关闭连接；单次 PIN 累计失败 5 次自动作废）。
 
 ### 4.3 推流与动态控制
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight` |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode` |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `nativeLocalCursor`, `initialRttMs`，支持交错 FEC 时发送 `udpInterleavedFec: true`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3 可选：`udpPort`, `udpSessionId`, `udpKey`） |
 | `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps` |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |
+| `SET_CURSOR_MODE` / `CURSOR_MODE_STATE` | C ↔ H | `composite` / `hostCursorComposited` |
 | `REQUEST_KEYFRAME` | C → H | 无 |
 | `SET_MUTE_HOST` | C → H | `mute` |
 | `SET_PRIVACY` / `PRIVACY_STATE` | C ↔ H | `enable`/`active` |
 | `LOCK_WORKSTATION` | C → H | 无 |
 | `CLIPBOARD_TEXT` | C → H | `text`, `injectUnicode` |
 | `PING` / `PONG` | C ↔ H | `ts`（回传相同数值） |
-| `FILE_OFFER` → `FILE_ACCEPT` → `0x05 FileChunk*` → `FILE_DONE` → `FILE_ACK` | C ↔ H | `transferId` (16B ASCII), `fileName`, `totalBytes`, `sha256`, `ok`, `savedPath` |
+| `FILE_OFFER` → `FILE_ACCEPT` → `0x05 FileChunk*` → `FILE_DONE` → `FILE_ACK` | C ↔ H | `transferId` (16B ASCII), `fileName`, `totalBytes` (`<= 2 GiB`), `sha256` (必填 64-hex), `ok`, `savedPath`, `error` |
 | `DISCONNECT` | 双向 | 优雅断开 |
-| `ERROR` | H → C | `code`, `message` |
+| `ERROR` | H → C | `code`, `message`。Android 和 Apple 被控端在有活动串流时可返回 `HOST_BUSY`，采集未就绪时可返回 `CAPTURE_NOT_READY`。 |
 
 ---
 

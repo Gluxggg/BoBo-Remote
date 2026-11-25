@@ -20,9 +20,8 @@ namespace DualRemote
         private readonly Control[] pages = new Control[6];
         private readonly Theme.StatusBanner settingsBanner = new Theme.StatusBanner("设置变更会自动保存到本机。");
         private readonly Theme.Badge diagStatusBadge = new Theme.Badge("检测本机宿主中…", Theme.PillTone.Neutral);
-        private readonly Label diagVersionLabel = Theme.Text("正在读取 Foundation Sunshine 版本与编码参数…", Theme.TextSize.Small, Theme.Muted);
+        private readonly Label diagVersionLabel = Theme.Text("正在检查本机 BoBo V6 状态…", Theme.TextSize.Small, Theme.Muted);
         private readonly Label diagDetailsLabel = Theme.Text("", Theme.TextSize.Small, Theme.BodyInk);
-        private Theme.Badge sunshineComponentBadge;
 
         private Button navQuickDevice;
         private int navQuickDeviceRow = -1;
@@ -67,10 +66,6 @@ namespace DualRemote
         private bool playAudioOnHost = false;
         private bool windowedStream = false;
         private bool preferHevc = true;
-        private bool useNativeStream = true;
-        private bool useFoundationClient = true;
-        private bool lowLatencyNoVsync = true;
-        private bool enableFramePacing = false;
         private bool useAbsoluteMouse = true;
         private bool minimizeToTray = false;
         private bool keepThisComputerAwake = false;
@@ -594,6 +589,11 @@ namespace DualRemote
                 "发起低延迟桌面串流时默认采用的分辨率、帧率与码率档位",
                 Theme.WrapInput(defaultProfile), 336);
 
+            settingsHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
+            AddStandaloneSettingCard(page, Theme.Glyph.Lock, "本机被远控退出后",
+                "远控会话结束时解除防窥，并按此设置保留登录或锁定 Windows",
+                Theme.WrapInput(settingsHostDisconnectActionCombo), 180);
+
             updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
             updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
             updateStatusCardText = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Bolt,
@@ -616,43 +616,14 @@ namespace DualRemote
             return page;
         }
 
-        private bool ShouldUseNativeStream()
-        {
-            return useNativeStream && NativeStreamCore.IsAvailable;
-        }
-
         private Control BuildStreamSettingsTab()
         {
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            var nativeToggle = PreferenceToggle("一体化内置串流内核", useNativeStream,
-                value => { useNativeStream = value; UpdateStreamHint(); });
-            nativeToggle.Enabled = NativeStreamCore.IsAvailable;
-            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "一体化内置串流内核（零外置窗口 · 推荐）",
-                nativeToggle.Enabled
-                    ? "直接在 BoBo 内部窗口完成 4 位码配对、D3D11VA 硬解渲染与键鼠控制，不再弹出第三方 Moonlight 窗口"
-                    : "当前目录缺少 BoBoStreamPlayer.exe，已自动回退到外置兼容模式",
-                nativeToggle);
-
-            var enhanced = PreferenceToggle("Foundation 自适应码率", useFoundationClient,
-                value => { useFoundationClient = value; UpdateStreamHint(); });
-            enhanced.Enabled = FoundationClient.IsAvailable;
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "Foundation 自适应码率（外置兼容模式 ABR）",
-                enhanced.Enabled ? "仅在关闭内置内核、使用外置 Moonlight V+ 兼容模式时按丢包与 RTT 动态调优码率" : "当前目录缺少 engines\\MoonlightVPlus 组件",
-                enhanced);
-
             AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "优先使用 HEVC (H.265) 硬件编解码",
                 "同等高清画质节省约 35%–40% 带宽，外网与高刷场景文字更锐利（默认开启）",
                 PreferenceToggle("优先使用 HEVC 编码", preferHevc, value => { preferHevc = value; UpdateStreamHint(); }));
-
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "极速低延迟模式（关闭垂直同步 VSync）",
-                "向串流引擎传入 --no-vsync，减少约 1 帧显示缓冲延迟，键鼠更跟手（默认开启）",
-                PreferenceToggle("极速低延迟", lowLatencyNoVsync, value => lowLatencyNoVsync = value));
-
-            AddStandaloneSettingCard(page, Theme.Glyph.Refresh, "帧节奏平滑（Frame Pacing）",
-                "关闭时端到端延迟最低；若高刷屏拖动窗口有微抖动可开启平滑",
-                PreferenceToggle("帧节奏平滑", enableFramePacing, value => enableFramePacing = value));
 
             AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "自由出框桌面鼠标（绝对坐标 · 推荐）",
                 "鼠标精确映射到远控画面并可自由滑出窗口或触碰顶部悬浮条，不锁死本机键鼠；玩 3D FPS 时可在悬浮条切为「锁鼠模式」",
@@ -686,7 +657,6 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            // Card 1: Host Sunshine Diagnostic + One-click Anti-Loss Tuning
             var hostCard = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
             perfDiagCard = hostCard;
             var h = Theme.Grid(1);
@@ -697,7 +667,7 @@ namespace DualRemote
             Theme.FillColumn(head);
             Theme.FixedColumn(head, 12);
             Theme.FixedColumn(head, 188);
-            Theme.Row(head, 30, Theme.Text("被控端抗丢包诊断与一键调优", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
+            Theme.Row(head, 30, Theme.Text("本机被控诊断", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
             Theme.Row(h, 30, head);
             Theme.Row(h, 4);
             Theme.Row(h, 24, diagVersionLabel);
@@ -707,67 +677,47 @@ namespace DualRemote
             Theme.Row(h, 74, diagDetailsLabel);
             Theme.Row(h, 12);
 
-            var btnBar = Theme.Grid(8);
-            Theme.FixedColumn(btnBar, 160);
-            Theme.FixedColumn(btnBar, 8);
-            Theme.FixedColumn(btnBar, 132);
-            Theme.FixedColumn(btnBar, 8);
-            Theme.FixedColumn(btnBar, 118);
-            Theme.FixedColumn(btnBar, 8);
+            var btnBar = Theme.Grid(2);
             Theme.FixedColumn(btnBar, 118);
             Theme.FillColumn(btnBar);
-
-            var applyWan = Theme.Action("外网抗丢包调优", Theme.ButtonStyle.Primary, Theme.Glyph.Bolt);
-            var applyLan = Theme.Action("局域网高刷档", Theme.ButtonStyle.Secondary);
-            var restoreCfg = Theme.Action("还原原配置", Theme.ButtonStyle.Secondary);
             var refreshDiag = Theme.Action("刷新诊断", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
-            applyWan.Click += delegate { OpenOptimizeTool("Apply", "WanAntiLoss"); };
-            applyLan.Click += delegate { OpenOptimizeTool("Apply", "LanUltraLow"); };
-            restoreCfg.Click += delegate { OpenOptimizeTool("Restore", "WanAntiLoss"); };
             refreshDiag.Click += async delegate
             {
                 refreshDiag.Enabled = false;
                 try { await RefreshHostDiagnosticsAsync(); }
                 finally { if (!IsDisposed) refreshDiag.Enabled = true; }
             };
-            Theme.Row(btnBar, 38, applyWan, null, applyLan, null, restoreCfg, null, refreshDiag, null);
+            Theme.Row(btnBar, 38, refreshDiag, null);
             Theme.Row(h, 38, btnBar);
             hostCard.Controls.Add(h);
 
             Theme.Row(page, 232, hostCard);
             Theme.Row(page, 12);
 
-            // Card 2: Architecture checklist learned from UU / Moonlight / Parsec
             var guideCard = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
             var g = Theme.Grid(1);
             Theme.FillColumn(g);
-            Theme.Row(g, 28, Theme.Text("高清高帧率 · 抗丢包架构要点", Theme.TextSize.Section, Theme.Ink));
+            Theme.Row(g, 28, Theme.Text("串流与网络建议", Theme.TextSize.Section, Theme.Ink));
             Theme.Row(g, 8);
-            Theme.Row(g, 26, Theme.Text("• 编码层：硬编零拷贝 + CBR & HRD 硬码率约束 + LTR 参考帧 + 按需 GOP，杜绝突发大帧拖垮 Wi-Fi 缓冲。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 26, Theme.Text("• 传输层：UDP 动态 Auto-FEC（0 额外 RTT 本地纠错）+ Moonlight V+ ABR 实时降码率防花屏断流。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 26, Theme.Text("• 网络层：同局域网直连或双端公网 IPv6 / Tailscale 直连优先；高跳数中继时可搭配 EasyTier。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 26, Theme.Text("优先使用局域网直连。跨公网连接时，可使用公网 IPv6 或 Tailscale 组网。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 26, Theme.Text("发现延迟或卡顿时，可在串流控制中心查看链路状态并调低分辨率、帧率或码率。", Theme.TextSize.Small, Theme.BodyInk));
             Theme.Row(g, 12);
 
-            var links = Theme.Grid(7);
+            var links = Theme.Grid(4);
             Theme.FixedColumn(links, 150);
             Theme.FixedColumn(links, 10);
-            Theme.FixedColumn(links, 162);
-            Theme.FixedColumn(links, 10);
             Theme.FixedColumn(links, 166);
-            Theme.FixedColumn(links, 10);
             Theme.FillColumn(links);
 
-            var openGuide = Theme.Action("打开调优指南", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
-            var openFs = Theme.Action("Sunshine Releases", Theme.ButtonStyle.Secondary);
+            var openGuide = Theme.Action("打开使用指南", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
             var openEt = Theme.Action("EasyTier 组网加速", Theme.ButtonStyle.Secondary);
-            openGuide.Click += delegate { OpenGuide(); };
-            openFs.Click += delegate { OpenExternalUrl(HostNetworkInfo.FoundationReleasesUrl, "已打开 Foundation Sunshine Releases 页。"); };
+            openGuide.Click += delegate { OpenGuide("README.md"); };
             openEt.Click += delegate { OpenExternalUrl(HostNetworkInfo.EasyTierReleasesUrl, "已打开 EasyTier 开源异地组网 Releases 页。"); };
-            Theme.Row(links, 36, openGuide, null, openFs, null, openEt, null, null);
+            Theme.Row(links, 36, openGuide, null, openEt, null);
             Theme.Row(g, 36, links);
             guideCard.Controls.Add(g);
 
-            Theme.Row(page, 198, guideCard);
+            Theme.Row(page, 172, guideCard);
             return page;
         }
 
@@ -789,7 +739,6 @@ namespace DualRemote
                     ApplyHostSnapshotToUi();
                 }));
 
-            sunshineComponentBadge = new Theme.Badge("V6 运行中", Theme.PillTone.Success);
             AddStandaloneSettingCard(page, Theme.Glyph.Pin, "本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
                 "已授权设备保存在本机独立安全名单中，可随时查看并一键撤销授权",
                 BuildEngineActionRow(true, "管理授权", delegate { ShowAuthorizedPeersDialog(); }), 186);
@@ -872,14 +821,9 @@ namespace DualRemote
             else
                 diagStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Alert);
 
-            diagVersionLabel.Text = "架构：BoBo V6 全内置单文件（零外置 Sunshine/Moonlight/RustDesk） · 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
+            diagVersionLabel.Text = "全内置 BoBo V6 · 本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
             diagDetailsLabel.Text = "• 已授权可连本机设备：" + peerCount + " 台（双端必须同时打开 BoBo远程 且通过 4 位临时码双向加密授权）\r\n"
                 + "• 传输通道：专属 TLS 1.2 端口 " + BoBoProtocol.DefaultTcpPort + " + 局域网 UDP " + BoBoProtocol.DiscoveryUdpPort + " 自动发现";
-            if (sunshineComponentBadge != null)
-            {
-                sunshineComponentBadge.UpdateStatus(allowing ? "V6 运行中" : "已暂停",
-                    allowing ? Theme.PillTone.Success : Theme.PillTone.Warning);
-            }
         }
 
         // ==================== TOP BAR POPOVERS (UU IMAGE 9 & 10 STYLE) ====================
@@ -909,7 +853,7 @@ namespace DualRemote
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "管理已授权设备（本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + "）", delegate { ShowAuthorizedPeersDialog(); });
             AddPopupItem(menu, "运行 V6 全内置内核自检", delegate { RunNativeCoreSelfTestDialog(); });
-            AddPopupItem(menu, "低延迟调优与防窥指南", delegate { OpenGuide(); });
+            AddPopupItem(menu, "BoBo远程使用指南", delegate { OpenGuide("README.md"); });
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "断开当前远控会话", delegate { DisconnectAllRemoteSessionsFromUi(); });
             AddPopupItem(menu, "关于 BoBo远程", delegate { ShowAboutDialog(); });
@@ -1393,7 +1337,7 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "欢迎使用 BoBo远程 · 功能导航栏",
-                    Description = "局域网高清串流、RustDesk 跨网协助/传文件与防窥壁纸均已内置，下载双击即用，无需注册账号或额外装引擎。左侧导航分为「我的设备」「远程协助」「防窥与显示」与底部「设置」四大区。",
+                    Description = "局域网高清串流、加密文件互传与防窥壁纸均已内置。左侧导航分为「我的设备」「远程协助」「防窥与显示」与底部「设置」四大区。",
                     Tip = "仅跨外网 2K 高帧串流与硬件级彻底熄屏属于可选进阶能力，后续步骤会说明。支持 ←/→ 翻页，Esc 跳过。",
                     PaddingPx = 4,
                     Prepare = delegate
@@ -1439,8 +1383,8 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "远程协助 · 4 位配对码与 9 位跨网设备码",
-                    Description = "上方「本设备」默认脱敏显示本机地址（点眼睛图标显隐），可一键生成 120 秒 4 位串流配对码；下方支持高清串流与内置 RustDesk 9 位码双通道切换——跨外网临时协助与文件互传开箱即用。",
-                    Tip = "无需提前注册账号或安装组网工具，对方发来 9 位设备码即可直接跨外网协助和传文件。",
+                    Description = "上方「本设备」显示本机地址与设备码，可生成 120 秒有效的 4 位配对码；下方可切换高清串流与加密文件传输。两端同时打开 BoBo远程，首次连接完成配对后即可使用。",
+                    Tip = "跨公网连接可使用 Tailscale 或可达的公网 IPv6；设备码可用于查找同网及已授权设备。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1455,9 +1399,9 @@ namespace DualRemote
                 },
                 new OnboardingStep
                 {
-                    Title = "软件防窥壁纸与可选硬件熄屏",
+                    Title = "防窥壁纸与显示保护",
                     Description = "软件防窥壁纸开箱即用：开启后物理屏立刻覆盖安全壁纸，而远程画面依然清晰可见，支持远控自动开启与退出自动锁屏。紧急解除按 Ctrl+Alt+Shift+P（系统锁屏解锁后不会误重拉）。",
-                    Tip = "可选进阶：若要硬件级彻底熄屏（关闭物理显示器信号），需额外搭配 Zako 虚拟屏与系统安装版 Sunshine。",
+                    Tip = "可在串流控制中心切换超级屏和显示缩放。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1468,9 +1412,9 @@ namespace DualRemote
                 },
                 new OnboardingStep
                 {
-                    Title = "低延迟抗丢包一键调优",
-                    Description = "内置宿主已默认启用 Auto-FEC 动态纠错；若额外安装了系统版 Sunshine，点击「外网抗丢包调优」可自动检测显卡并写入 CBR + HRD 硬码率约束与 LTR 参考帧，显著减少跨网花屏和延迟。",
-                    Tip = "所有参数修改前均会自动备份，点「还原原配置」随时一键恢复。",
+                    Title = "检查本机被控状态",
+                    Description = "查看本机被控服务是否运行、已授权设备数量与监听端口。点击「刷新诊断」可重新检查当前网络状态。",
+                    Tip = "串流时可在控制中心查看网络状态并调整画质。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1579,11 +1523,7 @@ namespace DualRemote
 
         private void LoadPreferences()
         {
-            useNativeStream = NativeStreamCore.IsAvailable;
-            useFoundationClient = FoundationClient.IsAvailable;
             preferHevc = true;
-            lowLatencyNoVsync = true;
-            enableFramePacing = false;
             useAbsoluteMouse = true;
             minimizeToTray = false;
             autoCheckUpdates = true;
@@ -1603,13 +1543,9 @@ namespace DualRemote
                     playAudioOnHost = ReadFlag(lines, 4, false);
                     windowedStream = ReadFlag(lines, 5, false);
                     preferHevc = ReadFlag(lines, 6, true);
-                    useFoundationClient = FoundationClient.IsAvailable && ReadFlag(lines, 7, true);
-                    lowLatencyNoVsync = ReadFlag(lines, 8, true);
-                    enableFramePacing = ReadFlag(lines, 9, false);
                     minimizeToTray = ReadFlag(lines, 10, false);
                     autoCheckUpdates = ReadFlag(lines, 11, true);
                     useAbsoluteMouse = ReadFlag(lines, 12, true);
-                    useNativeStream = true;
                     autoRemotePrivacyOnConnect = ReadFlag(lines, 14, false);
                     lockHostOnDisconnect = ReadFlag(lines, 15, false);
                     hideFloatBallInFullscreen = ReadFlag(lines, 16, false);
@@ -1654,13 +1590,13 @@ namespace DualRemote
                     WriteFlag(playAudioOnHost),
                     WriteFlag(windowedStream),
                     WriteFlag(preferHevc),
-                    WriteFlag(useFoundationClient),
-                    WriteFlag(lowLatencyNoVsync),
-                    WriteFlag(enableFramePacing),
+                    "0", // 保留 v2 的旧外置客户端设置位置
+                    "1", // 保留 v2 的旧垂直同步设置位置
+                    "0", // 保留 v2 的旧帧节奏设置位置
                     WriteFlag(minimizeToTray),
                     WriteFlag(autoCheckUpdates),
                     WriteFlag(useAbsoluteMouse),
-                    WriteFlag(useNativeStream),
+                    "1", // 保留 v2 的旧内核选择设置位置
                     WriteFlag(autoRemotePrivacyOnConnect),
                     WriteFlag(lockHostOnDisconnect),
                     WriteFlag(hideFloatBallInFullscreen),

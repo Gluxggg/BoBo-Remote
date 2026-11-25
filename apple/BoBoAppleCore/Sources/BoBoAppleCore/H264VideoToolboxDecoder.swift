@@ -34,23 +34,25 @@ public final class H264AnnexBToSampleBufferConverter: @unchecked Sendable {
         var spsChanged = false
         var ppsChanged = false
         var videoNals: [Data] = []
-        var hasIdr = isKeyframeHint
+        var hasIdr = false
 
         for nal in nalUnits {
             guard let first = nal.first else { continue }
             let nalType = first & 0x1F
             switch nalType {
-            case 7: // SPS
-                if cachedSps != nal {
-                    cachedSps = nal
+            case 7: // SPS (剥离末尾可能由 4 字节起始码切分残留的 0x00)
+                let cleanSps = stripTrailingZeroBytes(nal)
+                if !cleanSps.isEmpty && cachedSps != cleanSps {
+                    cachedSps = cleanSps
                     spsChanged = true
                 }
             case 8: // PPS
-                if cachedPps != nal {
-                    cachedPps = nal
+                let cleanPps = stripTrailingZeroBytes(nal)
+                if !cleanPps.isEmpty && cachedPps != cleanPps {
+                    cachedPps = cleanPps
                     ppsChanged = true
                 }
-            case 5: // IDR
+            case 5: // IDR (仅依据实际 NAL=5 判断关键帧，防止误把非 IDR 当同步帧喂给 VideoToolbox)
                 hasIdr = true
                 videoNals.append(nal)
             case 1, 2, 3, 4: // Non-IDR VCL slices
@@ -155,35 +157,46 @@ public final class H264AnnexBToSampleBufferConverter: @unchecked Sendable {
         return status == noErr ? desc : nil
     }
 
+    private func stripTrailingZeroBytes(_ data: Data) -> Data {
+        var end = data.endIndex
+        while end > data.startIndex && data[data.index(before: end)] == 0 {
+            end = data.index(before: end)
+        }
+        return end == data.endIndex ? data : Data(data[data.startIndex..<end])
+    }
+
     private func splitAnnexBNalUnits(_ data: Data) -> [Data] {
-        let bytes = [UInt8](data)
-        let n = bytes.count
-        var starts: [(offset: Int, codeLen: Int)] = []
-        var i = 0
-        while i + 3 < n {
-            if bytes[i] == 0 && bytes[i + 1] == 0 {
-                if bytes[i + 2] == 1 {
-                    starts.append((i, 3))
-                    i += 3
-                    continue
-                } else if i + 3 < n && bytes[i + 2] == 0 && bytes[i + 3] == 1 {
-                    starts.append((i, 4))
-                    i += 4
-                    continue
+        let n = data.count
+        guard n >= 4 else { return [] }
+        return data.withUnsafeBytes { rawBuf -> [Data] in
+            guard let base = rawBuf.bindMemory(to: UInt8.self).baseAddress else { return [] }
+            var starts: [(offset: Int, codeLen: Int)] = []
+            var i = 0
+            while i + 3 < n {
+                if base[i] == 0 && base[i + 1] == 0 {
+                    if base[i + 2] == 1 {
+                        starts.append((i, 3))
+                        i += 3
+                        continue
+                    } else if base[i + 2] == 0 && base[i + 3] == 1 {
+                        starts.append((i, 4))
+                        i += 4
+                        continue
+                    }
+                }
+                i += 1
+            }
+            guard !starts.isEmpty else { return [] }
+            var out: [Data] = []
+            out.reserveCapacity(starts.count)
+            for idx in 0..<starts.count {
+                let nalStart = starts[idx].offset + starts[idx].codeLen
+                let nalEnd = (idx + 1 < starts.count) ? starts[idx + 1].offset : n
+                if nalEnd > nalStart {
+                    out.append(Data(bytes: base.advanced(by: nalStart), count: nalEnd - nalStart))
                 }
             }
-            i += 1
+            return out
         }
-        guard !starts.isEmpty else { return [] }
-        var out: [Data] = []
-        out.reserveCapacity(starts.count)
-        for idx in 0..<starts.count {
-            let nalStart = starts[idx].offset + starts[idx].codeLen
-            let nalEnd = (idx + 1 < starts.count) ? starts[idx + 1].offset : n
-            if nalEnd > nalStart {
-                out.append(Data(bytes[nalStart..<nalEnd]))
-            }
-        }
-        return out
     }
 }

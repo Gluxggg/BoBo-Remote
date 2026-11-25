@@ -1,148 +1,348 @@
 import BoBoAppleCore
+import CoreImage
 import CoreMedia
 import Foundation
 import Network
 import ReplayKit
 import VideoToolbox
 
-/// iOS ReplayKit Broadcast Upload Extension：
-/// 将系统录屏 CMSampleBuffer 通过硬件 VideoToolbox 编码为 H.264 Annex-B，
-/// 并通过本地回环 127.0.0.1:49811 推送给主 App 的 BoBoHostServer（低内存 <25MB，兼容自签分发）。
 public final class BoBoBroadcastSampleHandler: RPBroadcastSampleHandler, @unchecked Sendable {
+    private static let frameIntervalNs = 1_000_000_000 / UInt64(ReplayKitLoopback.framesPerSecond)
+    private static let connectionTimeoutNs: UInt64 = 2_000_000_000
+    private static let startCode = Data([0, 0, 0, 1])
+
+    // ReplayKit, VideoToolbox, and Network.framework call back on different threads.
     private let queue = DispatchQueue(label: "com.bobo.remote.ios.broadcast.enc", qos: .userInteractive)
-    private var bridgeConn: NWConnection?
+    private var watchdog: DispatchSourceTimer?
+    private var running = false
+    private var broadcastStartNs: UInt64 = 0
+    private var lastFrameSlot: UInt64?
+
+    private var bridgeConnection: NWConnection?
+    private var bridgeReady = false
+    private var connectionDeadlineNs: UInt64?
+    private var waitingForSend = false
+    private var waitingForAck = false
+    private var nextConnectionNs: UInt64 = 0
+    private var retryDelayNs: UInt64 = 500_000_000
+
     private var compressionSession: VTCompressionSession?
-    private var encWidth: Int32 = 0
-    private var encHeight: Int32 = 0
-    private var startMs: UInt64 = 0
+    private var encoderSize = CMVideoDimensions(width: 0, height: 0)
+    private var encoderUsesBgra = false
+    private var imageContext: CIContext?
+    private var lastOrientation: Int32?
+    private var frameNumber: UInt64 = 0
+    private var encodingFrame: UInt64?
+    private var encodeDeadlineNs: UInt64 = 0
+    private var needsKeyframe = true
 
     public override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-        startMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        let conn = NWConnection(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: 49811)!, using: .tcp)
-        conn.start(queue: queue)
-        bridgeConn = conn
+        queue.sync {
+            broadcastStartNs = DispatchTime.now().uptimeNanoseconds
+            lastFrameSlot = nil
+            resumeCapture()
+        }
+    }
+
+    public override func broadcastPaused() {
+        queue.sync { pauseCapture() }
+    }
+
+    public override func broadcastResumed() {
+        queue.sync { resumeCapture() }
     }
 
     public override func broadcastFinished() {
-        if let sess = compressionSession {
-            VTCompressionSessionInvalidate(sess)
-            compressionSession = nil
-        }
-        bridgeConn?.cancel()
-        bridgeConn = nil
+        queue.sync { pauseCapture() }
     }
 
     public override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video,
-              let pixelBuf = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard sampleBufferType == .video else { return }
+        // Enter synchronously so a busy encoder or paused app cannot retain a queue of ReplayKit buffers.
+        queue.sync { encodeIfReady(sampleBuffer) }
+    }
 
-        let srcW = Int32(CVPixelBufferGetWidth(pixelBuf))
-        let srcH = Int32(CVPixelBufferGetHeight(pixelBuf))
-        guard srcW > 0, srcH > 0 else { return }
+    private func resumeCapture() {
+        guard !running else { return }
+        running = true
+        nextConnectionNs = 0
+        retryDelayNs = 500_000_000
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(50))
+        timer.setEventHandler { [weak self] in self?.checkConnection() }
+        watchdog = timer
+        timer.resume()
+    }
 
-        // Keep memory well within iOS Broadcast Extension 50MB cap
-        let maxSide: Int32 = 1280
-        let scale = min(1.0, Double(maxSide) / Double(max(srcW, srcH)))
-        let targetW = max(320, (Int32(Double(srcW) * scale) & ~1))
-        let targetH = max(320, (Int32(Double(srcH) * scale) & ~1))
+    private func pauseCapture() {
+        running = false
+        watchdog?.cancel()
+        watchdog = nil
+        closeConnection()
+    }
 
-        if compressionSession == nil || targetW != encWidth || targetH != encHeight {
-            recreateEncoder(width: targetW, height: targetH)
+    private func checkConnection() {
+        guard running else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let deadline = connectionDeadlineNs, now >= deadline {
+            closeConnection()
         }
-        guard let sess = compressionSession else { return }
+        guard bridgeConnection == nil, now >= nextConnectionNs else { return }
+
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let connection = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: ReplayKitLoopback.port)!,
+            using: NWParameters(tls: nil, tcp: tcp)
+        )
+        bridgeConnection = connection
+        connectionDeadlineNs = now + Self.connectionTimeoutNs
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection, self.bridgeConnection === connection else { return }
+            switch state {
+            case .ready:
+                self.bridgeReady = true
+                self.connectionDeadlineNs = nil
+                self.receiveAcknowledgment(from: connection)
+            case .waiting, .failed, .cancelled:
+                self.closeConnection()
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func closeConnection() {
+        let connection = bridgeConnection
+        bridgeConnection = nil
+        bridgeReady = false
+        connectionDeadlineNs = nil
+        waitingForSend = false
+        waitingForAck = false
+        connection?.cancel()
+        nextConnectionNs = DispatchTime.now().uptimeNanoseconds + retryDelayNs
+        retryDelayNs = min(8_000_000_000, retryDelayNs * 2)
+        resetEncoder()
+        imageContext = nil
+    }
+
+    private func receiveAcknowledgment(from connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self, weak connection] data, _, complete, error in
+            guard let self, let connection, self.bridgeConnection === connection else { return }
+            guard error == nil, !complete else {
+                self.closeConnection()
+                return
+            }
+            if let flags = data?.first {
+                guard self.waitingForAck, flags & ReplayKitLoopback.acknowledge != 0 else {
+                    self.closeConnection()
+                    return
+                }
+                self.waitingForAck = false
+                if !self.waitingForSend { self.connectionDeadlineNs = nil }
+                self.retryDelayNs = 500_000_000
+                if flags & ReplayKitLoopback.requestKeyframe != 0 { self.needsKeyframe = true }
+            }
+            self.receiveAcknowledgment(from: connection)
+        }
+    }
+
+    private func encodeIfReady(_ sampleBuffer: CMSampleBuffer) {
+        guard bridgeReady, !waitingForSend, !waitingForAck,
+              let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if encodingFrame != nil {
+            guard now >= encodeDeadlineNs else { return }
+            resetEncoder()
+        }
+        let slot = (now - broadcastStartNs) / Self.frameIntervalNs
+        guard slot != lastFrameSlot else { return }
+        lastFrameSlot = slot
+
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        VTCompressionSessionEncodeFrame(sess, imageBuffer: pixelBuf, presentationTimeStamp: pts, duration: .invalid, frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
+        guard pts.isNumeric else { return }
+        let exifOrientation = (CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber)?.int32Value ?? 1
+        let orientation = (1...8).contains(exifOrientation) ? exifOrientation : 1
+        let sourceWidth = CVPixelBufferGetWidth(source)
+        let sourceHeight = CVPixelBufferGetHeight(source)
+        let rotated = (5...8).contains(orientation)
+        let width = rotated ? sourceHeight : sourceWidth
+        let height = rotated ? sourceWidth : sourceHeight
+        guard width > 0, height > 0 else { return }
+        let scale = min(1, Double(ReplayKitLoopback.maxSide) / Double(max(width, height)))
+        let target = CMVideoDimensions(
+            width: max(2, Int32(Double(width) * scale) & ~1),
+            height: max(2, Int32(Double(height) * scale) & ~1)
+        )
+        let requiresConversion = orientation != 1 || Int(target.width) != sourceWidth || Int(target.height) != sourceHeight
+        if compressionSession == nil || target.width != encoderSize.width || target.height != encoderSize.height
+            || lastOrientation != orientation || encoderUsesBgra != requiresConversion {
+            resetEncoder()
+            createEncoder(size: target, useBgraInput: requiresConversion)
+            lastOrientation = orientation
+            encoderUsesBgra = requiresConversion
+        }
+        guard let session = compressionSession else { return }
+        let input: CVPixelBuffer
+        if requiresConversion {
+            guard let scaled = scaledImage(source, orientation: orientation, session: session, size: target) else { return }
+            input = scaled
+        } else {
+            input = source
+        }
+
+        frameNumber &+= 1
+        let number = frameNumber
+        encodingFrame = number
+        encodeDeadlineNs = now + Self.connectionTimeoutNs
+        let timestampMs = UInt32(truncatingIfNeeded: (now - broadcastStartNs) / 1_000_000)
+        let properties = needsKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
+        let status = VTCompressionSessionEncodeFrame(
+            session, imageBuffer: input, presentationTimeStamp: pts, duration: .invalid,
+            frameProperties: properties, infoFlagsOut: nil
+        ) { [weak self] status, flags, encoded in
+            self?.queue.async { [weak self] in
+                self?.finishEncoding(number: number, timestampMs: timestampMs, status: status, dropped: flags.contains(.frameDropped), sample: encoded)
+            }
+        }
+        if status != noErr { resetEncoder() }
     }
 
-    private func recreateEncoder(width: Int32, height: Int32) {
-        if let old = compressionSession {
-            VTCompressionSessionInvalidate(old)
-            compressionSession = nil
-        }
-        let cb: VTCompressionOutputCallback = { refcon, _, status, _, sb in
-            guard status == noErr, let refcon, let sb else { return }
-            let handler = Unmanaged<BoBoBroadcastSampleHandler>.fromOpaque(refcon).takeUnretainedValue()
-            handler.emitEncoded(sb)
-        }
-        var sess: VTCompressionSession?
+    private func resetEncoder() {
+        encodingFrame = nil
+        if let session = compressionSession { VTCompressionSessionInvalidate(session) }
+        compressionSession = nil
+        needsKeyframe = true
+    }
+
+    private func createEncoder(size: CMVideoDimensions, useBgraInput: Bool) {
+        let attributes: CFDictionary? = useBgraInput ? [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: size.width,
+            kCVPixelBufferHeightKey as String: size.height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+        ] as CFDictionary : nil
+        var session: VTCompressionSession?
         guard VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: width,
-            height: height,
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: cb,
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
-            compressionSessionOut: &sess
-        ) == noErr, let created = sess else { return }
-
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: 30))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: 60))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: 4_000_000))
-        VTCompressionSessionPrepareToEncodeFrames(created)
-
-        compressionSession = created
-        encWidth = width
-        encHeight = height
+            allocator: kCFAllocatorDefault, width: size.width, height: size.height, codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil, imageBufferAttributes: attributes, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &session
+        ) == noErr, let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: ReplayKitLoopback.framesPerSecond))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: ReplayKitLoopback.framesPerSecond * 2))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: 2))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: ReplayKitLoopback.bitrateKbps * 1000))
+        guard VTCompressionSessionPrepareToEncodeFrames(session) == noErr else {
+            VTCompressionSessionInvalidate(session)
+            return
+        }
+        encoderSize = size
+        compressionSession = session
     }
 
-    private func emitEncoded(_ sampleBuffer: CMSampleBuffer) {
-        guard let conn = bridgeConn else { return }
-        var isKey = true
-        if let arr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
-           let first = arr.first,
-           let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool {
-            isKey = !notSync
-        }
+    private func scaledImage(_ source: CVPixelBuffer, orientation: Int32, session: VTCompressionSession, size: CMVideoDimensions) -> CVPixelBuffer? {
+        guard let pool = VTCompressionSessionGetPixelBufferPool(session) else { return nil }
+        var destination: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
+              let destination else { return nil }
+        let oriented = CIImage(cvPixelBuffer: source).oriented(forExifOrientation: orientation)
+        let extent = oriented.extent
+        let image = oriented
+            .transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+            .transformed(by: CGAffineTransform(scaleX: CGFloat(size.width) / extent.width, y: CGFloat(size.height) / extent.height))
+        let context = imageContext ?? CIContext(options: [.cacheIntermediates: false])
+        imageContext = context
+        context.render(image, to: destination)
+        return destination
+    }
 
-        let startCode = Data([0x00, 0x00, 0x00, 0x01])
-        var annexB = Data()
-        if isKey, let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) {
-            var spsPtr: UnsafePointer<UInt8>?
-            var spsLen = 0
-            var ppsPtr: UnsafePointer<UInt8>?
-            var ppsLen = 0
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, parameterSetIndex: 0, parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
-               let spsPtr, spsLen > 0 {
+    private func finishEncoding(number: UInt64, timestampMs: UInt32, status: OSStatus, dropped: Bool, sample: CMSampleBuffer?) {
+        guard encodingFrame == number else { return }
+        encodingFrame = nil
+        guard let connection = bridgeConnection, bridgeReady else { return }
+        guard status == noErr, !dropped, let sample, let format = CMSampleBufferGetFormatDescription(sample),
+              let (annexB, isKeyframe) = Self.annexB(from: sample, format: format) else {
+            needsKeyframe = true
+            return
+        }
+        guard !needsKeyframe || isKeyframe else { return }
+        needsKeyframe = false
+        let size = CMVideoFormatDescriptionGetDimensions(format)
+        let payload = BoBoProtocol.buildVideoPayload(width: Int(size.width), height: Int(size.height), isKeyframe: isKeyframe, h264Data: annexB)
+        guard payload.count <= ReplayKitLoopback.maxVideoPayloadBytes else {
+            needsKeyframe = true
+            return
+        }
+        let frame = BoBoProtocol.encodeFrame(type: .videoH264, flagsOrTimestamp: timestampMs, payload: payload)
+        waitingForSend = true
+        waitingForAck = true
+        connectionDeadlineNs = DispatchTime.now().uptimeNanoseconds + Self.connectionTimeoutNs
+        connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+            guard let self, let connection, self.bridgeConnection === connection else { return }
+            if error != nil {
+                self.closeConnection()
+            } else {
+                self.waitingForSend = false
+                if !self.waitingForAck { self.connectionDeadlineNs = nil }
+            }
+        })
+    }
+
+    private static func annexB(from sample: CMSampleBuffer, format: CMFormatDescription) -> (Data, Bool)? {
+        guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
+        let length = CMBlockBufferGetDataLength(block)
+        guard length > 0, length < ReplayKitLoopback.maxVideoPayloadBytes else { return nil }
+        var headerLength: Int32 = 0
+        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            format, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+            parameterSetCountOut: nil, nalUnitHeaderLengthOut: &headerLength
+        ) == noErr, [1, 2, 4].contains(headerLength) else { return nil }
+
+        var avcc = Data(count: length)
+        let copied = avcc.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: bytes.baseAddress!)
+        }
+        guard copied == kCMBlockBufferNoErr else { return nil }
+        var annexB = Data(capacity: length)
+        var containsIdr = false
+        let parsed = avcc.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            let base = bytes.bindMemory(to: UInt8.self).baseAddress!
+            let prefixBytes = Int(headerLength)
+            var offset = 0
+            while offset < length {
+                guard length - offset >= prefixBytes else { return false }
+                var nalLength = 0
+                for index in 0..<prefixBytes { nalLength = (nalLength << 8) | Int(base[offset + index]) }
+                offset += prefixBytes
+                guard nalLength > 0, nalLength <= length - offset,
+                      annexB.count + startCode.count + nalLength < ReplayKitLoopback.maxVideoPayloadBytes else { return false }
+                containsIdr = containsIdr || (base[offset] & 0x1f == 5)
                 annexB.append(startCode)
-                annexB.append(spsPtr, count: spsLen)
+                annexB.append(base.advanced(by: offset), count: nalLength)
+                offset += nalLength
             }
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, parameterSetIndex: 1, parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
-               let ppsPtr, ppsLen > 0 {
-                annexB.append(startCode)
-                annexB.append(ppsPtr, count: ppsLen)
-            }
+            return true
         }
-
-        guard let dataBuf = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var totalLen = 0
-        var dataPtr: UnsafeMutablePointer<Int8>?
-        guard CMBlockBufferGetDataPointer(dataBuf, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLen, dataPointerOut: &dataPtr) == kCMBlockBufferNoErr,
-              let base = dataPtr, totalLen > 4 else { return }
-
-        var off = 0
-        while off + 4 <= totalLen {
-            var nalLenBE: UInt32 = 0
-            memcpy(&nalLenBE, base.advanced(by: off), 4)
-            let nalLen = Int(UInt32(bigEndian: nalLenBE))
-            off += 4
-            guard nalLen > 0, off + nalLen <= totalLen else { break }
-            annexB.append(startCode)
-            base.advanced(by: off).withMemoryRebound(to: UInt8.self, capacity: nalLen) { u8 in
-                annexB.append(u8, count: nalLen)
+        guard parsed, !annexB.isEmpty else { return nil }
+        if containsIdr {
+            var parameterSets = Data()
+            for index in 0...1 {
+                var pointer: UnsafePointer<UInt8>?
+                var count = 0
+                guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    format, parameterSetIndex: index, parameterSetPointerOut: &pointer, parameterSetSizeOut: &count,
+                    parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil
+                ) == noErr, let pointer, count > 0, count <= ReplayKitLoopback.maxVideoPayloadBytes - parameterSets.count - startCode.count else { return nil }
+                parameterSets.append(startCode)
+                parameterSets.append(pointer, count: count)
             }
-            off += nalLen
+            guard annexB.count + parameterSets.count < ReplayKitLoopback.maxVideoPayloadBytes else { return nil }
+            annexB.insert(contentsOf: parameterSets, at: annexB.startIndex)
         }
-
-        guard !annexB.isEmpty else { return }
-        let nowMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        let ts = UInt32(truncatingIfNeeded: nowMs >= startMs ? (nowMs - startMs) : 0)
-        let payload = BoBoProtocol.buildVideoPayload(width: Int(encWidth), height: Int(encHeight), isKeyframe: isKey, h264Data: annexB)
-        let frame = BoBoProtocol.encodeFrame(type: .videoH264, flagsOrTimestamp: ts, payload: payload)
-        conn.send(content: frame, completion: .idempotent)
+        return (annexB, containsIdr)
     }
 }

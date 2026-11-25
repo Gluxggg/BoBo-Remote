@@ -65,7 +65,7 @@ public enum WindowsVkMap {
         case 0x38: return (0xA0, false) // LShift
         case 0x3C: return (0xA1, false) // RShift
         case 0x3B: return (mapCommandToControl ? 0x5B : 0xA2, mapCommandToControl) // LCtrl
-        case 0x3E: return (0xA3, true)  // RCtrl
+        case 0x3E: return (mapCommandToControl ? 0x5C : 0xA3, true)  // RCtrl
         case 0x3A: return (0xA4, false) // LOption -> LAlt
         case 0x3D: return (0xA5, true)  // ROption -> RAlt
         case 0x37: return (mapCommandToControl ? 0xA2 : 0x5B, !mapCommandToControl) // LCommand
@@ -159,8 +159,8 @@ public enum WindowsVkMap {
         case 0xA3: return mapControlToCommand ? 0x36 : 0x3E
         case 0x12, 0xA4: return 0x3A // Alt -> Option
         case 0xA5: return 0x3D
-        case 0x5B: return 0x37 // LWin -> LCommand
-        case 0x5C: return 0x36 // RWin -> RCommand
+        case 0x5B: return mapControlToCommand ? 0x3B : 0x37 // LWin -> LCommand (or LCtrl when swapped)
+        case 0x5C: return mapControlToCommand ? 0x3E : 0x36 // RWin -> RCommand (or RCtrl when swapped)
         case 0x70: return 0x7A // F1
         case 0x71: return 0x78 // F2
         case 0x72: return 0x63 // F3

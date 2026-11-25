@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -11,7 +10,6 @@ namespace DualRemote
     internal sealed partial class MainForm
     {
         private readonly Theme.StatusBanner displayBanner = new Theme.StatusBanner("防窥壁纸采用系统级捕获排除（WDA_EXCLUDEFROMCAPTURE），物理屏遮挡、远控画面透明无干扰。");
-        private readonly Theme.Badge displayModeBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
         private readonly Theme.Badge curtainStateBadge = new Theme.Badge("防窥壁纸未开启", Theme.PillTone.Neutral);
         private readonly Button[] presetButtons = new Button[4];
         private WallpaperPreviewPanel wallpaperPreview;
@@ -25,20 +23,13 @@ namespace DualRemote
         private Theme.SlimScrollViewport privacyViewport;
         private Button toggleCurtainBtn;
         private ComboBox wallpaperFitCombo;
+        private ComboBox privacyHostDisconnectActionCombo;
+        private ComboBox settingsHostDisconnectActionCombo;
+        private bool syncingHostDisconnectAction;
         private TextBox wallpaperCaptionBox;
         private Label customImageHint;
         private Bitmap previewCustomImage;
         private TableLayoutPanel privacyDesk;
-
-        private static string DisplayTool
-        {
-            get { return EmbeddedTools.ResolveDisplayTool(); }
-        }
-
-        private static string OptimizeTool
-        {
-            get { return EmbeddedTools.ResolveOptimizeTool(); }
-        }
 
         private Control BuildPrivacyAndDisplayPage()
         {
@@ -48,8 +39,7 @@ namespace DualRemote
             privacyDesk = desk;
 
             curtainStateBadge.AlignRight = true;
-            displayModeBadge.AlignRight = true;
-            AddPageHeader(desk, "防窥与显示", "自定义被控端物理屏防窥壁纸，以及虚拟屏与硬件级熄屏防窥", curtainStateBadge, 164);
+            AddPageHeader(desk, "防窥与显示", "设置被控端防窥壁纸、物理键鼠锁与背光亮度", curtainStateBadge, 164);
             Theme.Row(desk, 18);
 
             var wallpaperCard = BuildPrivacyWallpaperCard();
@@ -117,6 +107,11 @@ namespace DualRemote
             AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "物理键退出防窥时自动锁屏",
                 "按下快捷键 Ctrl+Alt+Shift+P 退出防窥时立即锁定本机，防止旁人窥视", lockSwitch);
 
+            privacyHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
+            AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "远控退出后主机动作",
+                "远控会话结束时解除防窥，并按此设置保留登录或锁定 Windows",
+                Theme.WrapInput(privacyHostDisconnectActionCombo), 180);
+
             var badgeSwitch = BuildToggle("显示时间与提示文案", privacyConfig.ShowOverlayBadge);
             badgeSwitch.CheckedChanged += delegate
             {
@@ -127,38 +122,6 @@ namespace DualRemote
             AddStandaloneSettingCard(desk, Theme.Glyph.Eye, "壁纸居中显示时间与保护文案",
                 "关闭后仅展示纯壁纸画面；防窥壁纸不显示退出提示，仅进入时短暂提醒快捷键", badgeSwitch);
 
-            Theme.Row(desk, 12);
-            var hostHeader = Theme.Grid(3);
-            Theme.FillColumn(hostHeader);
-            Theme.FixedColumn(hostHeader, 12);
-            Theme.FixedColumn(hostHeader, 168);
-            Theme.Row(hostHeader, 26, Theme.Text("虚拟屏与硬件熄屏（可选进阶 · 需 Zako + 系统版 Sunshine）", Theme.TextSize.Label, Theme.Muted), null, displayModeBadge);
-            Theme.Row(desk, 26, hostHeader);
-            Theme.Row(desk, 10);
-
-            var preserve = Theme.Action("启用虚拟屏", Theme.ButtonStyle.Secondary);
-            preserve.AccessibleName = "启用虚拟屏为主屏，保留实体屏";
-            preserve.Click += delegate { OpenDisplayTool("Apply", "Virtual"); };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Desktop, "铺满 16:10 虚拟屏（设为主屏 · 保留实体屏）",
-                "将 Zako 虚拟屏设为远程主屏（任务栏与新窗口直出，避免只见副屏壁纸）；已打开的旧窗口若需自动迁入请改用下方「熄屏防窥」或恢复实体屏", preserve, 132);
-
-            var privacy = Theme.Action("启用熄屏防窥", Theme.ButtonStyle.Primary);
-            privacy.Click += delegate { OpenDisplayTool("Apply", "Privacy"); };
-            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "硬件级熄屏防窥（仅虚拟屏 · 窗口自动迁入）",
-                "远程时关闭物理屏信号，全部已打开窗口、桌面图标与鼠标自动集中到远控虚拟屏，断开自动恢复物理屏", privacy, 132);
-
-            var restoreRow = Theme.Grid(3);
-            Theme.FillColumn(restoreRow);
-            Theme.FixedColumn(restoreRow, 8);
-            Theme.FixedColumn(restoreRow, 98);
-            var undo = Theme.Action("恢复原设置", Theme.ButtonStyle.Secondary);
-            undo.Click += delegate { OpenDisplayTool("Restore", "Privacy"); };
-            var inspect = Theme.Action("详细状态", Theme.ButtonStyle.Secondary);
-            inspect.Click += delegate { OpenDisplayTool("Status", "Privacy"); };
-            Theme.Row(restoreRow, 36, undo, null, inspect);
-            AddStandaloneSettingCard(desk, Theme.Glyph.Refresh, "显示拓扑还原与诊断",
-                "一键还原 Sunshine 显示配置备份，或检查 Zako 虚拟屏驱动状态", restoreRow, 224);
-
             Theme.Row(desk, 6);
             Theme.Row(desk, 42, displayBanner);
 
@@ -166,6 +129,40 @@ namespace DualRemote
             viewport.ContentWidthChanged += delegate(int contentW) { ApplyPrivacyWallpaperResponsiveLayout(contentW); };
             desk.Height = SumRows(desk);
             return viewport;
+        }
+
+        private ComboBox CreateHostDisconnectActionCombo()
+        {
+            var combo = Theme.Choice("远控退出后主机动作", false);
+            combo.Items.AddRange(new object[] { "回到桌面", "自动锁屏" });
+            combo.SelectedIndex = privacyConfig.LockOnRemoteDisconnect ? 1 : 0;
+            combo.SelectedIndexChanged += delegate
+            {
+                if (syncingHostDisconnectAction || combo.SelectedIndex < 0) return;
+                bool previous = privacyConfig.LockOnRemoteDisconnect;
+                privacyConfig.LockOnRemoteDisconnect = combo.SelectedIndex == 1;
+                string error;
+                if (!privacyConfig.Save(out error)) privacyConfig.LockOnRemoteDisconnect = previous;
+
+                syncingHostDisconnectAction = true;
+                try
+                {
+                    int index = privacyConfig.LockOnRemoteDisconnect ? 1 : 0;
+                    if (privacyHostDisconnectActionCombo != null) privacyHostDisconnectActionCombo.SelectedIndex = index;
+                    if (settingsHostDisconnectActionCombo != null) settingsHostDisconnectActionCombo.SelectedIndex = index;
+                }
+                finally
+                {
+                    syncingHostDisconnectAction = false;
+                }
+
+                if (error != null)
+                {
+                    ShowDisplayBanner(error, Theme.PillTone.Warning);
+                    SetStatus(error, Theme.PillTone.Warning);
+                }
+            };
+            return combo;
         }
 
         private Control BuildPrivacyWallpaperCard()
@@ -445,103 +442,6 @@ namespace DualRemote
             }
             if (topPrivacyBtn != null)
                 Theme.SetIndicatorDot(topPrivacyBtn, running || privacyConfig.AutoOnRemote, running ? Theme.Success : Theme.Accent);
-            if (displayModeBadge != null)
-            {
-                string mode = string.IsNullOrEmpty(hostSnapshot.DisplayModeLabel) ? "未检测到宿主" : hostSnapshot.DisplayModeLabel;
-                bool legacySecondary = mode.IndexOf("副屏扩展", StringComparison.Ordinal) >= 0;
-                displayModeBadge.UpdateStatus(mode, legacySecondary
-                    ? Theme.PillTone.Warning
-                    : (hostSnapshot.SunshineInstalled ? Theme.PillTone.Info : Theme.PillTone.Neutral));
-                if (legacySecondary)
-                {
-                    ShowDisplayBanner("检测到当前为旧版副屏扩展（ensure_secondary），远控端可能只显示壁纸且鼠标停在实体屏；建议点击「恢复原设置」或「启用熄屏防窥 / 启用虚拟屏」。", Theme.PillTone.Warning);
-                }
-            }
-        }
-
-        private void OpenDisplayTool(string action, string mode)
-        {
-            if (hostSnapshot.ActiveUsesBundledRuntime || !hostSnapshot.TuningSupported)
-            {
-                string reason = string.IsNullOrEmpty(hostSnapshot.TuningUnsupportedReason)
-                    ? "当前内置宿主不支持一键显示调整；不会改动本机已安装的 Sunshine。"
-                    : hostSnapshot.TuningUnsupportedReason;
-                ShowDisplayBanner("本次未执行显示调整。" + reason + " 防窥壁纸仍可直接使用。", Theme.PillTone.Warning);
-                return;
-            }
-            if (!File.Exists(DisplayTool))
-            {
-                ShowDisplayBanner("缺少 tools\\Set-SunshineDisplay.ps1，请完整解压发行包。", Theme.PillTone.Alert);
-                return;
-            }
-            bool changesConfiguration = action != "Status";
-            if (changesConfiguration)
-            {
-                string title = action == "Restore" ? "恢复原显示设置" : mode == "Privacy" ? "启用熄屏防窥" : "启用虚拟屏";
-                if (MessageBox.Show(this, "应用后会安全重启空闲的本机 Sunshine 服务。请确认当前没有正在进行的串流。",
-                    title, MessageBoxButtons.OKCancel, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2) != DialogResult.OK)
-                    return;
-            }
-            LaunchPowerShellTool(DisplayTool,
-                "-Action " + action + " -Mode " + mode + (changesConfiguration ? " -RestartSunshine" : ""),
-                changesConfiguration,
-                delegate(string msg, Theme.PillTone tone) { ShowDisplayBanner(msg, tone); });
-        }
-
-        private void OpenOptimizeTool(string action, string profile)
-        {
-            if (hostSnapshot.ActiveUsesBundledRuntime || !hostSnapshot.TuningSupported)
-            {
-                string reason = string.IsNullOrEmpty(hostSnapshot.TuningUnsupportedReason)
-                    ? "当前内置宿主已在初始化时默认启用 Auto-FEC 与双栈；系统版一键调优仅针对本机安装版 Sunshine。"
-                    : hostSnapshot.TuningUnsupportedReason;
-                ShowSettingsBanner(reason, Theme.PillTone.Warning);
-                return;
-            }
-            if (!File.Exists(OptimizeTool))
-            {
-                ShowSettingsBanner("缺少 tools\\Optimize-SunshineStream.ps1，请完整解压发行包。", Theme.PillTone.Alert);
-                return;
-            }
-            bool changesConfiguration = action == "Apply" || action == "Restore";
-            if (changesConfiguration)
-            {
-                string title = action == "Restore" ? "还原原始编码与网络配置" : "应用低延迟与抗丢包调优";
-                string prompt = action == "Restore"
-                    ? "将从备份还原调优前的原始 sunshine.conf 编码/网络参数并重启 Sunshine 服务，是否继续？"
-                    : "将自动备份原始配置，并应用 CBR + HRD 硬码率约束 + LTR 弱网参考帧 + 自动 FEC，然后重启 Sunshine 服务，是否继续？";
-                if (MessageBox.Show(this, prompt, title, MessageBoxButtons.OKCancel, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1) != DialogResult.OK)
-                    return;
-            }
-            LaunchPowerShellTool(OptimizeTool,
-                "-Action " + action + " -Profile " + profile + (changesConfiguration ? " -RestartSunshine" : ""),
-                changesConfiguration,
-                delegate(string msg, Theme.PillTone tone) { ShowSettingsBanner(msg, tone); });
-        }
-
-        private void LaunchPowerShellTool(string scriptPath, string extraArgs, bool runElevated, Action<string, Theme.PillTone> feedback)
-        {
-            try
-            {
-                string shell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-                var start = new ProcessStartInfo(shell)
-                {
-                    Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File \"" + scriptPath + "\" " + extraArgs,
-                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
-                    UseShellExecute = true,
-                    Verb = runElevated ? "runas" : "open"
-                };
-                using (Process launched = Process.Start(start)) { }
-                feedback("已在独立窗口执行操作，完成后点「刷新诊断」即可同步最新状态。", Theme.PillTone.Success);
-            }
-            catch (System.ComponentModel.Win32Exception error)
-            {
-                feedback(error.NativeErrorCode == 1223 ? "已取消权限授权，未做任何修改。" : "无法启动本地调优脚本。", Theme.PillTone.Warning);
-            }
-            catch (InvalidOperationException)
-            {
-                feedback("无法启动本地调优脚本。", Theme.PillTone.Alert);
-            }
         }
 
         private void ShowDisplayBanner(string text, Theme.PillTone tone)

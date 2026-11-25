@@ -1,171 +1,220 @@
 package com.bobo.remote.network
 
+import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.SystemClock
+import android.util.Log
+import com.bobo.remote.BuildConfig
 import com.bobo.remote.protocol.BoBoDiscoveredPeer
 import com.bobo.remote.protocol.BoBoIdentityStore
 import com.bobo.remote.protocol.BoBoProtocol
+import org.json.JSONException
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.nio.charset.StandardCharsets
-import java.util.concurrent.ConcurrentHashMap
+import java.net.NetworkInterface
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * 局域网 UDP 49812 发现服务（四端互通：Windows / macOS / Android / iOS）。
- */
+/** Owns the discovery socket and Wi-Fi multicast lock on one background thread. */
 class BoBoLanDiscovery(
+    context: Context,
     private val identity: BoBoIdentityStore,
     private val tcpPortProvider: () -> Int = { BoBoProtocol.DEFAULT_TCP_PORT },
     private val allowIncomingProvider: () -> Boolean = { true },
     private val onPeersUpdated: ((List<BoBoDiscoveredPeer>) -> Unit)? = null
 ) {
-    private val peers = ConcurrentHashMap<String, BoBoDiscoveredPeer>()
-    private val running = AtomicBoolean(false)
-    @Volatile private var socket: DatagramSocket? = null
-    private var rxThread: Thread? = null
-    private var txThread: Thread? = null
+    private class Session {
+        val stopping = AtomicBoolean(false)
+        val probePending = AtomicBoolean(true)
+    }
 
-    fun start() {
-        if (!running.compareAndSet(false, true)) return
-        identity.ensureLoaded()
-        try {
-            val sock = DatagramSocket(null).apply {
-                reuseAddress = true
-                broadcast = true
-                soTimeout = 1000
-                bind(InetSocketAddress(BoBoProtocol.DISCOVERY_UDP_PORT))
-            }
-            socket = sock
+    private data class SeenPeer(val peer: BoBoDiscoveredPeer, val elapsedMs: Long)
 
-            rxThread = Thread({ receiveLoop(sock) }, "BoBo6-UDP-Rx").apply { isDaemon = true; start() }
-            txThread = Thread({ beaconLoop() }, "BoBo6-UDP-Tx").apply { isDaemon = true; start() }
-        } catch (_: Exception) {
-            running.set(false)
-        }
+    private val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
+    private val lock = Any()
+    private var session: Session? = null
+    private var started = false
+    @Volatile private var snapshot = emptyList<BoBoDiscoveredPeer>()
+
+    fun start() = synchronized(lock) {
+        started = true
+        startWorker()
     }
 
     fun stop() {
-        if (!running.compareAndSet(true, false)) return
-        try {
-            broadcastPacket("BOBO6_BYE")
-        } catch (_: Exception) {
+        synchronized(lock) {
+            started = false
+            session?.stopping?.set(true)
         }
-        try {
-            socket?.close()
-        } catch (_: Exception) {
-        }
-        socket = null
     }
 
     fun sendProbeNow() {
-        if (!running.get()) return
-        Thread({
-            try { broadcastPacket("BOBO6_PROBE") } catch (_: Exception) {}
-        }, "BoBo6-UDP-Probe").start()
-    }
-
-    fun getPeers(): List<BoBoDiscoveredPeer> {
-        val cutoff = System.currentTimeMillis() - 18_000L
-        val alive = ArrayList<BoBoDiscoveredPeer>()
-        val iter = peers.entries.iterator()
-        while (iter.hasNext()) {
-            val e = iter.next()
-            if (e.value.lastSeenMs >= cutoff) alive.add(e.value) else iter.remove()
+        synchronized(lock) {
+            if (!started) return
+            startWorker()
+            session?.probePending?.set(true)
         }
-        return alive.sortedBy { it.deviceName.lowercase() }
     }
 
-    fun resolveHostByDeviceCode(input: String): String {
-        val norm = BoBoIdentityStore.normalizeDeviceCode(input)
-        if (norm.length == 9) {
-            getPeers().firstOrNull {
-                BoBoIdentityStore.normalizeDeviceCode(it.deviceCode) == norm
-            }?.let { return it.host }
-            identity.findPeerByCodeOrHost(norm)?.lastHost?.takeIf { it.isNotBlank() }?.let { return it }
-        }
-        return input.trim()
+    fun getPeers(): List<BoBoDiscoveredPeer> = snapshot
+
+    private fun startWorker() {
+        if (session != null) return
+        val current = Session()
+        session = current
+        Thread({ runDiscovery(current) }, "BoBo6-UDP-Discovery").apply { isDaemon = true; start() }
     }
 
-    private fun beaconLoop() {
+    private fun runDiscovery(current: Session) {
+        var multicast: WifiManager.MulticastLock? = null
         try {
-            broadcastPacket("BOBO6_PROBE")
-            while (running.get()) {
-                broadcastPacket("BOBO6_HELLO")
-                Thread.sleep(3500L)
+            if (current.stopping.get()) return
+            identity.ensureLoaded()
+            multicast = runCatching {
+                wifi?.createMulticastLock("BoBoRemote:discovery")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.getOrNull()
+            DatagramSocket(null).use { socket ->
+                socket.reuseAddress = true
+                socket.broadcast = true
+                socket.soTimeout = 250
+                socket.bind(InetSocketAddress(BoBoProtocol.DISCOVERY_UDP_PORT))
+                receiveAndAdvertise(current, socket)
+                if (current.stopping.get()) broadcast(socket, "BOBO6_BYE")
             }
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun receiveLoop(sock: DatagramSocket) {
-        val buf = ByteArray(4096)
-        while (running.get()) {
-            try {
-                val pkt = DatagramPacket(buf, buf.size)
-                sock.receive(pkt)
-                val text = String(pkt.data, pkt.offset, pkt.length, StandardCharsets.UTF_8)
-                val obj = JSONObject(text)
-                val kind = obj.optString("kind", "")
-                val peerNodeId = obj.optString("nodeId", "")
-                if (peerNodeId.isBlank() || peerNodeId.equals(identity.nodeId, ignoreCase = true)) continue
-                var senderIp = pkt.address?.hostAddress ?: continue
-                if (senderIp.startsWith("::ffff:", ignoreCase = true)) senderIp = senderIp.substring(7)
-
-                if (kind == "BOBO6_BYE") {
-                    peers.remove(peerNodeId)
-                    onPeersUpdated?.invoke(getPeers())
-                    continue
-                }
-                if (kind == "BOBO6_HELLO" || kind == "BOBO6_PROBE") {
-                    peers[peerNodeId] = BoBoDiscoveredPeer(
-                        nodeId = peerNodeId,
-                        deviceCode = obj.optString("deviceCode", ""),
-                        deviceName = obj.optString("deviceName", senderIp),
-                        host = senderIp,
-                        port = obj.optInt("port", BoBoProtocol.DEFAULT_TCP_PORT),
-                        version = obj.optString("version", "6.2.3"),
-                        platform = obj.optString("platform", BoBoProtocol.PLATFORM_WINDOWS),
-                        hostControlMode = obj.optString("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL),
-                        allowIncoming = obj.optBoolean("allowIncoming", true),
-                        lastSeenMs = System.currentTimeMillis()
-                    )
-                    if (kind == "BOBO6_PROBE") {
-                        sendPacketTo("BOBO6_HELLO", pkt.address, BoBoProtocol.DISCOVERY_UDP_PORT)
-                    }
-                    onPeersUpdated?.invoke(getPeers())
-                }
-            } catch (_: java.net.SocketTimeoutException) {
-                // Periodic wakeup
-            } catch (_: Exception) {
-                if (!running.get()) break
+        } catch (error: Exception) {
+            Log.w(TAG, "LAN discovery socket stopped", error)
+        } finally {
+            runCatching { multicast?.let { if (it.isHeld) it.release() } }
+            publish(emptyList())
+            synchronized(lock) {
+                session = null
+                if (started && current.stopping.get()) startWorker()
             }
         }
     }
 
-    private fun broadcastPacket(kind: String) {
-        sendPacketTo(kind, InetAddress.getByName("255.255.255.255"), BoBoProtocol.DISCOVERY_UDP_PORT)
+    private fun receiveAndAdvertise(current: Session, socket: DatagramSocket) {
+        val peers = LinkedHashMap<String, SeenPeer>()
+        val bytes = ByteArray(4096)
+        val packet = DatagramPacket(bytes, bytes.size)
+        var nextBeacon = 0L
+        while (!current.stopping.get()) {
+            val now = SystemClock.elapsedRealtime()
+            if (current.probePending.getAndSet(false)) {
+                broadcast(socket, "BOBO6_PROBE")
+                nextBeacon = now + BEACON_INTERVAL_MS
+            } else if (now >= nextBeacon) {
+                broadcast(socket, "BOBO6_HELLO")
+                nextBeacon = now + BEACON_INTERVAL_MS
+            }
+            val expired = peers.entries.removeAll { now - it.value.elapsedMs > PEER_TIMEOUT_MS }
+            val changed = try {
+                packet.length = bytes.size
+                socket.receive(packet)
+                receivePeer(socket, packet, peers)
+            } catch (_: SocketTimeoutException) {
+                false
+            } catch (_: JSONException) {
+                false
+            }
+            if (expired || changed) publish(peers.values.map { it.peer }.sortedBy { it.deviceName.lowercase() })
+        }
     }
 
-    private fun sendPacketTo(kind: String, address: InetAddress, port: Int) {
-        val sock = socket ?: return
-        try {
-            val payload = JSONObject().apply {
-                put("kind", kind)
-                put("protocol", BoBoProtocol.PROTOCOL_MAGIC)
-                put("protocolVersion", BoBoProtocol.PROTOCOL_VERSION)
-                put("platform", BoBoProtocol.PLATFORM_ANDROID)
-                put("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL)
-                put("nodeId", identity.nodeId)
-                put("deviceCode", identity.deviceCode)
-                put("deviceName", identity.deviceName)
-                put("port", tcpPortProvider())
-                put("version", BoBoProtocol.APP_VERSION)
-                put("allowIncoming", allowIncomingProvider())
-            }.toString().toByteArray(StandardCharsets.UTF_8)
-            sock.send(DatagramPacket(payload, payload.size, address, port))
-        } catch (_: Exception) {
+    private fun receivePeer(
+        socket: DatagramSocket,
+        packet: DatagramPacket,
+        peers: LinkedHashMap<String, SeenPeer>
+    ): Boolean {
+        val message = JSONObject(String(packet.data, packet.offset, packet.length, Charsets.UTF_8))
+        if (message.optString("protocol") != BoBoProtocol.PROTOCOL_MAGIC ||
+            message.optString("protocolVersion") != BoBoProtocol.PROTOCOL_VERSION
+        ) return false
+        val kind = message.optString("kind")
+        val nodeId = message.optString("nodeId").trim()
+        if (nodeId.isEmpty() || nodeId.length > 128 || nodeId.equals(identity.nodeId, ignoreCase = true)) return false
+        val key = nodeId.lowercase()
+        val host = packet.address.hostAddress?.removePrefix("::ffff:") ?: return false
+        if (kind == "BOBO6_BYE") {
+            return peers[key]?.peer?.host == host && peers.remove(key) != null
         }
+        if (kind != "BOBO6_HELLO" && kind != "BOBO6_PROBE") return false
+        val port = message.optInt("port", BoBoProtocol.DEFAULT_TCP_PORT)
+        if (port !in 1..65535) return false
+        val previous = peers.remove(key)
+        val peer = BoBoDiscoveredPeer(
+            nodeId = nodeId,
+            deviceCode = message.optString("deviceCode").take(32),
+            deviceName = message.optString("deviceName", host).take(128),
+            host = host,
+            port = port,
+            version = message.optString("version").take(32),
+            platform = message.optString("platform", BoBoProtocol.PLATFORM_WINDOWS).take(32),
+            hostControlMode = message.optString("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL).take(32),
+            allowIncoming = message.optBoolean("allowIncoming", true),
+            lastSeenMs = System.currentTimeMillis()
+        )
+        if (peers.size >= MAX_PEERS) peers.remove(peers.keys.first())
+        val existing = previous?.peer?.takeIf { it.copy(lastSeenMs = peer.lastSeenMs) == peer }
+        peers[key] = SeenPeer(existing ?: peer, SystemClock.elapsedRealtime())
+        if (kind == "BOBO6_PROBE") send(socket, payload("BOBO6_HELLO"), packet.address)
+        return existing == null
+    }
+
+    private fun publish(peers: List<BoBoDiscoveredPeer>) {
+        if (snapshot == peers) return
+        snapshot = peers
+        onPeersUpdated?.invoke(peers)
+    }
+
+    private fun broadcast(socket: DatagramSocket, kind: String) {
+        val destinations = linkedSetOf<InetAddress>()
+        destinations.add(InetAddress.getByAddress(byteArrayOf(-1, -1, -1, -1)))
+        runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching
+            for (network in interfaces) {
+                if (!network.isUp || network.isLoopback) continue
+                for (address in network.interfaceAddresses) {
+                    val directed = address.broadcast as? Inet4Address ?: continue
+                    destinations.add(directed)
+                }
+            }
+        }
+        val data = payload(kind)
+        for (address in destinations) send(socket, data, address)
+    }
+
+    private fun send(socket: DatagramSocket, bytes: ByteArray, address: InetAddress) {
+        runCatching {
+            socket.send(DatagramPacket(bytes, bytes.size, address, BoBoProtocol.DISCOVERY_UDP_PORT))
+        }
+    }
+
+    private fun payload(kind: String): ByteArray = JSONObject().apply {
+        put("kind", kind)
+        put("protocol", BoBoProtocol.PROTOCOL_MAGIC)
+        put("protocolVersion", BoBoProtocol.PROTOCOL_VERSION)
+        put("platform", BoBoProtocol.PLATFORM_ANDROID)
+        put("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL)
+        put("nodeId", identity.nodeId)
+        put("deviceCode", identity.deviceCode)
+        put("deviceName", identity.deviceName)
+        put("port", tcpPortProvider())
+        put("version", BuildConfig.VERSION_NAME)
+        put("allowIncoming", allowIncomingProvider())
+    }.toString().toByteArray(Charsets.UTF_8)
+
+    private companion object {
+        const val TAG = "BoBoLanDiscovery"
+        const val MAX_PEERS = 128
+        const val BEACON_INTERVAL_MS = 3500L
+        const val PEER_TIMEOUT_MS = 18_000L
     }
 }

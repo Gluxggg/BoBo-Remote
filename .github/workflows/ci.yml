@@ -18,7 +18,7 @@ jobs:
 
       - name: Build BoBoCore.dll + BoBoRemote.exe and run --self-test
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1
+        run: .\ci\build.ps1
 
       - name: Upload Windows EXE Artifact
         if: always()
@@ -94,8 +94,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen if needed
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
 
       - name: Build & Package BoBoRemote-iOS-Unsigned.ipa
         run: bash apple/scripts/package-ios-ipa.sh

@@ -6,6 +6,7 @@ public enum BoBoPacketType: UInt8, Sendable {
     case audioAdpcm = 0x03
     case inputEvent = 0x04
     case fileChunk = 0x05
+    case cursorShape = 0x06
 }
 
 public struct BoBoMonitorDescriptor: Codable, Equatable, Identifiable, Sendable {
@@ -138,7 +139,7 @@ public struct BoBoFileChunk: Equatable, Sendable {
 public enum BoBoProtocol {
     public static let protocolMagic = "BOBO6"
     public static let protocolVersion = "6.2"
-    public static let appVersion = "6.2.3"
+    public static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "6.3.0"
     public static let tlsSniHost = "BoBoRemote-V6-Node"
 
     public static let platformWindows = "windows"
@@ -152,8 +153,11 @@ public enum BoBoProtocol {
     public static let defaultTcpPort: Int = 49810
     public static let discoveryUdpPort: Int = 49812
     public static let headerBytes: Int = 9
+    public static let maxPreAuthPayloadBytes: Int = 64 * 1024
+    public static let maxFileChunkPayloadBytes: Int = 512 * 1024
     public static let maxControlPayloadBytes: Int = 2 * 1024 * 1024
     public static let maxVideoPayloadBytes: Int = 16 * 1024 * 1024
+    public static let maxFileTransferBytes: Int64 = 2 * 1024 * 1024 * 1024
 
     public static let inputKindMouseAbs: UInt8 = 1
     public static let inputKindMouseRel: UInt8 = 2
@@ -184,6 +188,29 @@ public enum BoBoProtocol {
         #else
         return platformIOS
         #endif
+    }
+
+    public static func parseAddress(_ input: String, defaultPort: Int = BoBoProtocol.defaultTcpPort) -> (host: String, port: Int)? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil,
+              !value.contains("/"), !value.contains("\\") else { return nil }
+        var host = value
+        var port = defaultPort
+        if value.hasPrefix("[") {
+            guard let closing = value.firstIndex(of: "]") else { return nil }
+            host = String(value[value.index(after: value.startIndex)..<closing])
+            let suffix = value[value.index(after: closing)...]
+            if !suffix.isEmpty {
+                guard suffix.hasPrefix(":"), let parsedPort = Int(suffix.dropFirst()) else { return nil }
+                port = parsedPort
+            }
+        } else if value.filter({ $0 == ":" }).count == 1, let colon = value.firstIndex(of: ":") {
+            host = String(value[..<colon])
+            guard let parsedPort = Int(value[value.index(after: colon)...]) else { return nil }
+            port = parsedPort
+        }
+        guard !host.isEmpty, !host.contains("["), !host.contains("]"), (1...65535).contains(port) else { return nil }
+        return (host, port)
     }
 
     public static func encodeFrame(type: BoBoPacketType, flagsOrTimestamp: UInt32 = 0, payload: Data) -> Data {
@@ -426,5 +453,40 @@ public enum BoBoProtocol {
             idx = next
         }
         return data
+    }
+
+    /// 跨平台文件名安全净化：剥离 Windows `\` 与 POSIX `/` 路径、控制字符与非法字符，防止目录穿越。
+    public static func sanitizeFileName(_ rawName: String) -> String {
+        let normalized = rawName.replacingOccurrences(of: "\\", with: "/")
+        let lastSeg = normalized.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? ""
+        let illegal: Set<Character> = ["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]
+        var cleaned = String()
+        cleaned.reserveCapacity(lastSeg.count)
+        for scalar in lastSeg.unicodeScalars {
+            if CharacterSet.controlCharacters.contains(scalar) { continue }
+            let character = Character(scalar)
+            cleaned.append(illegal.contains(character) ? "_" : character)
+        }
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." {
+            return "received.bin"
+        }
+        if cleaned.utf8.count <= 180 { return cleaned }
+        var result = String()
+        var originalByteCount = 0
+        for character in cleaned {
+            originalByteCount += String(character).utf8.count
+            if originalByteCount > 180 { break }
+            result.append(character)
+        }
+        return result.isEmpty ? "received.bin" : result
+    }
+
+    public static func isValidHexSha256(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 64 else { return false }
+        return trimmed.utf8.allSatisfy {
+            ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102)
+        }
     }
 }

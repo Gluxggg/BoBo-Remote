@@ -17,13 +17,15 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>6.2.3</string>
+    <string>6.3.0</string>
     <key>CFBundleVersion</key>
-    <string>623</string>
+    <string>720</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>BoBo远程需要访问局域网以自动发现同网段的 Windows、macOS、Android 和 iOS 设备。</string>
     <key>NSScreenCaptureUsageDescription</key>

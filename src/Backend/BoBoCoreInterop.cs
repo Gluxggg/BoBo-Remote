@@ -133,6 +133,19 @@ namespace DualRemote
             IntPtr userCtx);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate IntPtr FnHostCreateEx(
+            int monitorIndex,
+            int targetWidth,
+            int targetHeight,
+            int fps,
+            int bitrateKbps,
+            int muteHostSpeakers,
+            int compositeCursor,
+            BoBoVideoFrameNativeCallback onVideo,
+            BoBoAudioFrameNativeCallback onAudio,
+            IntPtr userCtx);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int FnHostReconfigure(
             IntPtr handle,
             int monitorIndex,
@@ -250,6 +263,7 @@ namespace DualRemote
         private delegate void FnClientDestroy(IntPtr handle);
 
         private static readonly object LoadGate = new object();
+        private static readonly object PrivacyGate = new object();
         private static bool loaded;
         private static string loadedDllPath = "";
         private static string lastLoadError = "";
@@ -258,6 +272,7 @@ namespace DualRemote
         private static FnGetMonitorCount fnGetMonitorCount;
         private static FnGetMonitorInfo fnGetMonitorInfo;
         private static FnHostCreate fnHostCreate;
+        private static FnHostCreateEx fnHostCreateEx;
         private static FnHostReconfigure fnHostReconfigure;
         private static FnHostSetBitrate fnHostSetBitrate;
         private static FnHostSetFps fnHostSetFps;
@@ -330,6 +345,7 @@ namespace DualRemote
                     fnGetMonitorCount = Bind<FnGetMonitorCount>(mod, "BoBoCore_GetMonitorCount");
                     fnGetMonitorInfo = Bind<FnGetMonitorInfo>(mod, "BoBoCore_GetMonitorInfo");
                     fnHostCreate = Bind<FnHostCreate>(mod, "BoBoHost_Create");
+                    fnHostCreateEx = TryBind<FnHostCreateEx>(mod, "BoBoHost_CreateEx");
                     fnHostReconfigure = Bind<FnHostReconfigure>(mod, "BoBoHost_Reconfigure");
                     fnHostSetBitrate = TryBind<FnHostSetBitrate>(mod, "BoBoHost_SetBitrate");
                     fnHostSetFps = TryBind<FnHostSetFps>(mod, "BoBoHost_SetFps");
@@ -608,25 +624,28 @@ namespace DualRemote
         {
             string err;
             if (!EnsureLoaded(out err) || fnHostSetPrivacyInputBlock == null) return false;
-            if (!enable)
+            lock (PrivacyGate)
             {
-                int rcOff = fnHostSetPrivacyInputBlock(0, null, IntPtr.Zero);
-                activePrivacyEscapeKeepAlive = null;
-                return rcOff != 0;
-            }
-            BoBoPrivacyEscapeNativeCallback cb = null;
-            if (onLocalEscape != null)
-            {
-                Action captured = onLocalEscape;
-                cb = delegate(IntPtr ctx)
+                if (!enable)
                 {
-                    try { captured(); } catch { }
-                };
+                    int rcOff = fnHostSetPrivacyInputBlock(0, null, IntPtr.Zero);
+                    activePrivacyEscapeKeepAlive = null;
+                    return rcOff != 0;
+                }
+                BoBoPrivacyEscapeNativeCallback cb = null;
+                if (onLocalEscape != null)
+                {
+                    Action captured = onLocalEscape;
+                    cb = delegate(IntPtr ctx)
+                    {
+                        try { captured(); } catch { }
+                    };
+                }
+                activePrivacyEscapeKeepAlive = cb;
+                int rc = fnHostSetPrivacyInputBlock(1, cb, IntPtr.Zero);
+                if (rc == 0) activePrivacyEscapeKeepAlive = null;
+                return rc != 0;
             }
-            activePrivacyEscapeKeepAlive = cb;
-            int rc = fnHostSetPrivacyInputBlock(1, cb, IntPtr.Zero);
-            if (rc == 0) activePrivacyEscapeKeepAlive = null;
-            return rc != 0;
         }
 
         internal static bool IsPrivacyInputBlocked()
@@ -644,34 +663,48 @@ namespace DualRemote
             bool muteHostSpeakers,
             Action<byte[], bool, int, int, uint> onVideo,
             Action<byte[], int, int, int> onAudio,
-            out string error)
+            out string error,
+            bool compositeCursor = true)
         {
             if (!EnsureLoaded(out error)) return null;
 
             BoBoVideoFrameNativeCallback vidCb = delegate(IntPtr data, int len, int isKey, int w, int h, uint ts, IntPtr ctx)
             {
-                if (data == IntPtr.Zero || len <= 0 || onVideo == null) return;
-                byte[] copy = new byte[len];
-                Marshal.Copy(data, copy, 0, len);
-                onVideo(copy, isKey != 0, w, h, ts);
+                try
+                {
+                    if (data == IntPtr.Zero || len <= 0 || onVideo == null) return;
+                    byte[] copy = new byte[len];
+                    Marshal.Copy(data, copy, 0, len);
+                    onVideo(copy, isKey != 0, w, h, ts);
+                }
+                catch { }
             };
 
             BoBoAudioFrameNativeCallback audCb = delegate(IntPtr data, int len, int sr, int ch, int samples, IntPtr ctx)
             {
-                if (data == IntPtr.Zero || len <= 0 || onAudio == null) return;
-                byte[] copy = new byte[len];
-                Marshal.Copy(data, copy, 0, len);
-                onAudio(copy, sr, ch, samples);
+                try
+                {
+                    if (data == IntPtr.Zero || len <= 0 || onAudio == null) return;
+                    byte[] copy = new byte[len];
+                    Marshal.Copy(data, copy, 0, len);
+                    onAudio(copy, sr, ch, samples);
+                }
+                catch { }
             };
 
-            IntPtr ptr = fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero);
+            IntPtr ptr = fnHostCreateEx != null
+                ? fnHostCreateEx(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                    muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                : fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                    muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero);
             if (ptr == IntPtr.Zero)
             {
                 error = "创建进程内主机采编引擎失败。";
                 return null;
             }
-            return new BoBoHostNativeHandle(ptr, vidCb, audCb);
+            var hostHandle = new BoBoHostNativeHandle(ptr, vidCb, audCb);
+            if (fnHostCreateEx == null) hostHandle.SetCompositeCursor(compositeCursor);
+            return hostHandle;
         }
 
         internal static BoBoClientNativeHandle CreateClientSession(
@@ -687,12 +720,20 @@ namespace DualRemote
 
             BoBoClientInputNativeCallback inpCb = delegate(ref BoBoInputPacket pkt, IntPtr ctx)
             {
-                if (onInput != null) onInput(pkt);
+                try
+                {
+                    if (onInput != null) onInput(pkt);
+                }
+                catch { }
             };
 
             BoBoClientHotkeyNativeCallback hkCb = delegate(int code, int param, IntPtr ctx)
             {
-                if (onHotkey != null) onHotkey(code, param);
+                try
+                {
+                    if (onHotkey != null) onHotkey(code, param);
+                }
+                catch { }
             };
 
             IntPtr ptr = fnClientCreate(parentHwnd, videoWidth, videoHeight, freeMouse ? 1 : 0, inpCb, hkCb, IntPtr.Zero);
@@ -970,7 +1011,8 @@ namespace DualRemote
                 {
                     try { fnClientDestroy(toDestroy); } catch { }
                 }
-                try { rwLock.Dispose(); } catch { }
+                // Deliberately do not call rwLock.Dispose() here so concurrent background video/audio threads
+                // observing handle==IntPtr.Zero never hit ObjectDisposedException on EnterReadLock().
                 GC.KeepAlive(keepInp);
                 GC.KeepAlive(keepHk);
             }

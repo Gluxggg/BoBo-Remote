@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace DualRemote
@@ -45,315 +46,6 @@ namespace DualRemote
             Check("主机：拒绝端口写法", Engines.NormalizeHost("100.64.0.12:8080", out error) == null, error);
             Check("主机：拒绝非法 IPv4", Engines.NormalizeHost("999.1.1.1", out error) == null, error);
             Check("主机：拒绝空输入", Engines.NormalizeHost("  ", out error) == null, error);
-
-            string rustDeskArgs = Engines.BuildRustDeskConnectArgs("123456789");
-            Check("RustDesk 参数：--connect + 归一化 ID", rustDeskArgs == "--connect 123456789", rustDeskArgs);
-            string transferArgs = Engines.BuildRustDeskFileTransferArgs("123456789");
-            Check("RustDesk 参数：--file-transfer + 归一化 ID",
-                transferArgs == "--file-transfer 123456789", transferArgs);
-            string badIdMessage;
-            Check("设备码校验：连接与文件传输共用且拒绝非法 ID",
-                !Engines.ConnectRustDesk("abc/def", out badIdMessage)
-                && !Engines.TransferRustDesk("--help", out badIdMessage), badIdMessage);
-            string moonArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 1080, 15000);
-            string expectedMoonArgs = "stream \"100.64.0.12\" \"Desktop\" --1080 --fps 60 --bitrate 15000 --video-codec H.264";
-            Check("Moonlight 参数：1080p60/15Mbps/H.264", moonArgs == expectedMoonArgs, moonArgs);
-            string moon720 = Engines.BuildMoonlightStreamArgs("100.64.0.12", 720, 8000);
-            Check("Moonlight 参数：720 映射 --720 且保留 60fps",
-                moon720 == "stream \"100.64.0.12\" \"Desktop\" --720 --fps 60 --bitrate 8000 --video-codec H.264",
-                moon720);
-            string moon1440 = Engines.BuildMoonlightStreamArgs("desk.ts.net", 1440, 25000);
-            Check("Moonlight 参数：1440 映射 --1440",
-                moon1440 == "stream \"desk.ts.net\" \"Desktop\" --1440 --fps 60 --bitrate 25000 --video-codec H.264",
-                moon1440);
-            Check("Moonlight 参数：默认重载等于 1080p60/15Mbps",
-                Engines.BuildMoonlightStreamArgs("100.64.0.12") == expectedMoonArgs,
-                Engines.BuildMoonlightStreamArgs("100.64.0.12"));
-            string explicitArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 1080, 15000, true, false, true, false);
-            Check("Moonlight 显式参数：浮层开 / 主机静音 / 窗口 / H.264",
-                explicitArgs == "stream \"100.64.0.12\" \"Desktop\" --1080 --fps 60 --bitrate 15000"
-                              + " --video-codec H.264 --performance-overlay --no-audio-on-host --display-mode windowed",
-                explicitArgs);
-            string hevcArgs = Engines.BuildMoonlightStreamArgs("desk.ts.net", 1440, 25000, false, true, false, true);
-            Check("Moonlight 显式参数：HEVC / 主机播放 / 全屏",
-                hevcArgs == "stream \"desk.ts.net\" \"Desktop\" --1440 --fps 60 --bitrate 25000"
-                          + " --video-codec HEVC --no-performance-overlay --audio-on-host --display-mode fullscreen",
-                hevcArgs);
-            string streamMessage;
-            Check("串流参数：拒绝非法分辨率",
-                !Engines.StreamMoonlight("100.64.0.12", 999, 15000, out streamMessage)
-                && streamMessage.IndexOf("720 / 1080 / 1440", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("串流参数：拒绝超范围码率",
-                !Engines.StreamMoonlight("100.64.0.12", 1080, 999999, out streamMessage)
-                && streamMessage.IndexOf("码率", StringComparison.Ordinal) >= 0, streamMessage);
-            string preciseArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 2560, 1440, 90, 25000, true, false, true, true);
-            Check("Moonlight 精确参数：2560x1440@90 / HEVC / 窗口 / 浮层",
-                preciseArgs == "stream \"100.64.0.12\" \"Desktop\" --resolution 2560x1440 --fps 90 --bitrate 25000"
-                            + " --video-codec HEVC --performance-overlay --no-audio-on-host --display-mode windowed",
-                preciseArgs);
-            string tallArgs = Engines.BuildMoonlightStreamArgs("desk.ts.net", 2560, 1600, 90, 20000, false, true, false, false);
-            Check("Moonlight 精确参数：2560x1600@90 / H.264 / 全屏 / 主机播放",
-                tallArgs == "stream \"desk.ts.net\" \"Desktop\" --resolution 2560x1600 --fps 90 --bitrate 20000"
-                          + " --video-codec H.264 --no-performance-overlay --audio-on-host --display-mode fullscreen",
-                tallArgs);
-            string lowBitrateArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 1920, 1200, 60, 3000, true, false, true, false);
-            Check("Moonlight 精确参数：1920x1200@60 / 低码率 3000",
-                lowBitrateArgs == "stream \"100.64.0.12\" \"Desktop\" --resolution 1920x1200 --fps 60 --bitrate 3000"
-                               + " --video-codec H.264 --performance-overlay --no-audio-on-host --display-mode windowed",
-                lowBitrateArgs);
-            Check("精确串流：拒绝奇数宽",
-                !Engines.StreamMoonlight("100.64.0.12", 2561, 1440, 90, 25000, true, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("偶数", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：拒绝奇数高",
-                !Engines.StreamMoonlight("100.64.0.12", 1920, 1201, 60, 8000, false, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("偶数", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：允许 4K60 (3840x2160@60) 通过几何校验",
-                Engines.TryValidateStreamGeometry(3840, 2160, 60, 35000, out streamMessage)
-                && Engines.BuildMoonlightStreamArgs("100.64.0.12", 3840, 2160, 60, 35000, false, false, false, true, true, false)
-                    == "stream \"100.64.0.12\" \"Desktop\" --resolution 3840x2160 --fps 60 --bitrate 35000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
-                streamMessage ?? "4K60 参数拼装");
-            Check("精确串流：允许 2K144 (2560x1440@144) 通过几何校验",
-                Engines.TryValidateStreamGeometry(2560, 1440, 144, 36000, out streamMessage)
-                && Engines.BuildMoonlightStreamArgs("100.64.0.12", 2560, 1440, 144, 36000, false, false, false, true, true, false)
-                    == "stream \"100.64.0.12\" \"Desktop\" --resolution 2560x1440 --fps 144 --bitrate 36000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
-                streamMessage ?? "2K144 参数拼装");
-            Check("精确串流：拒绝边界宽度",
-                !Engines.StreamMoonlight("100.64.0.12", 4096, 2160, 60, 25000, false, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("宽度需大于", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：拒绝边界高度",
-                !Engines.StreamMoonlight("100.64.0.12", 1920, 2560, 60, 25000, false, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("高度需大于", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：拒绝边界帧率",
-                !Engines.StreamMoonlight("100.64.0.12", 1920, 1080, 240, 15000, false, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("帧率", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：拒绝边界码率",
-                !Engines.StreamMoonlight("100.64.0.12", 1920, 1080, 60, 500, true, false, true, false, out streamMessage)
-                && streamMessage.IndexOf("码率", StringComparison.Ordinal) >= 0, streamMessage);
-            Check("精确串流：拒绝主机名注入引号",
-                Engines.NormalizeHost("bad\"host", out streamMessage) == null
-                && !Engines.StreamMoonlight("bad\"host", 1920, 1080, 60, 15000, false, false, true, false, out streamMessage),
-                streamMessage);
-            Check("Moonlight 配对参数：pair + 主机", Engines.BuildMoonlightPairArgs("100.64.0.12") == "pair \"100.64.0.12\"",
-                Engines.BuildMoonlightPairArgs("100.64.0.12"));
-            Check("Moonlight 配对参数：4 位 PIN",
-                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123") == "pair \"100.64.0.12\" --pin 0123",
-                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123"));
-            Check("Moonlight 配对参数：拒绝非 4 位/非数字 PIN",
-                Engines.BuildMoonlightPairArgs("100.64.0.12", "123") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12", "12345") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12", "12a4") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12", "１２３４") == null,
-                "pin validation");
-            Check("Moonlight 配对参数：拒绝主机命令注入",
-                Engines.BuildMoonlightPairArgs("100.64.0.12\" --pin 0000") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12\" --pin 0000", "0123") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12\n--pin 0000", "0123") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12 & calc", "0123") == null,
-                "host validation");
-            Check("Moonlight 配对参数：拒绝 PIN 命令注入",
-                Engines.BuildMoonlightPairArgs("100.64.0.12", "0123;calc") == null
-                && Engines.BuildMoonlightPairArgs("100.64.0.12", "01 23") == null,
-                "pin injection");
-            Process badPairProcess = null;
-            string badPairMessage = null;
-            Check("Moonlight PIN：非法 host/PIN 不启动进程",
-                !FoundationClient.StartPairWithPin("100.64.0.12\" --bad", "0123",
-                    out badPairProcess, out badPairMessage)
-                && badPairProcess == null
-                && !FoundationClient.StartPairWithPin("100.64.0.12", "01 23",
-                    out badPairProcess, out badPairMessage)
-                && badPairProcess == null,
-                badPairMessage);
-            Check("Moonlight 配对参数：保留旧单参版本",
-                Engines.BuildMoonlightPairArgs("desk.ts.net") == "pair \"desk.ts.net\"",
-                Engines.BuildMoonlightPairArgs("desk.ts.net"));
-
-            string certificate = "@ByteArray(-----BEGIN CERTIFICATE-----\\n"
-                + new string('A', 160)
-                + "\\n-----END CERTIFICATE-----)";
-            string iniHosts =
-                "[General]\nkey=value\n\n[hosts]\n"
-                + "3\\hostname=Desk-Unordered\n3\\manualaddress=192.168.1.30\n"
-                + "3\\srvcert=" + certificate + "\n"
-                + "7\\hostname=Desk-A\n7\\manualaddress=192.168.1.20\n7\\remoteaddress=\n"
-                + "7\\ipv6address=fd7a:115c:a1e0::20\n7\\srvcert=" + certificate + "\n"
-                + "2\\hostname=Desk-B\n2\\manualaddress=localhost\n2\\remoteaddress=desk-b.ts.net\n"
-                + "2\\srvcert=" + certificate + "\n";
-            Check("Moonlight.ini：显示名称本身不认定为已配对",
-                !FoundationClient.ContainsPairedHost(iniHosts, "Desk-A"), "hostname");
-            Check("Moonlight.ini：同编号有效 srvcert + 手动地址才已配对",
-                FoundationClient.ContainsPairedHost(iniHosts, "192.168.1.20"), "manualaddress");
-            Check("Moonlight.ini：按远程地址判断已配对",
-                FoundationClient.ContainsPairedHost(iniHosts, "desk-b.ts.net"), "remoteaddress");
-            Check("Moonlight.ini：IPv6 方括号与展开形式等价",
-                FoundationClient.ContainsPairedHost(iniHosts, "[fd7a:115c:a1e0::20]")
-                && FoundationClient.ContainsPairedHost(iniHosts, "fd7a:115c:a1e0:0:0:0:0:20"),
-                "ipv6address");
-            Check("Moonlight.ini：乱序编号仍可读取",
-                FoundationClient.ContainsPairedHost(iniHosts, "192.168.1.30"), "unordered index");
-            Check("Moonlight.ini：只有 hostname/地址、没有 srvcert 不算配对",
-                !FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\hostname=Desk-A\n1\\manualaddress=192.168.1.20\n",
-                    "192.168.1.20"), "missing srvcert");
-            Check("Moonlight.ini：空 srvcert 不算配对",
-                !FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n",
-                    "192.168.1.20"), "empty srvcert");
-            Check("Moonlight.ini：残缺/过短 srvcert 不算有效证书候选",
-                !FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray(-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----)\n",
-                    "192.168.1.20")
-                && !FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=not-a-certificate\n",
-                    "192.168.1.20"), "truncated srvcert");
-            Check("Moonlight.ini：证书必须与地址同编号",
-                !FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n"
-                    + "2\\manualaddress=192.168.1.21\n2\\srvcert=" + certificate + "\n",
-                    "192.168.1.20")
-                && FoundationClient.ContainsPairedHost(
-                    "[hosts]\n1\\manualaddress=192.168.1.20\n1\\srvcert=@ByteArray()\n"
-                    + "2\\manualaddress=192.168.1.21\n2\\srvcert=" + certificate + "\n",
-                    "192.168.1.21"), "same numbered srvcert");
-            Check("Moonlight.ini：不跨节误判",
-                !FoundationClient.ContainsPairedHost("[apps]\n1\\hostname=Desk-A\n1\\manualaddress=192.168.1.20\n",
-                    "Desk-A"), "section boundary");
-            Check("Moonlight.ini：未配对返回 false",
-                !FoundationClient.ContainsPairedHost(iniHosts, "10.0.0.9"), "unknown host");
-            Check("Moonlight.ini：显示名参数不能给未知地址背书",
-                !FoundationClient.ContainsPairedHost(iniHosts, "10.0.0.9", "Desk-A"), "display name");
-            bool pairedState;
-            string pairedMessage;
-            Check("Moonlight.ini：无 INI 是可读的未配对状态",
-                FoundationClient.TryEvaluatePairedSettings(false, null, "100.64.0.12", "",
-                    out pairedState, out pairedMessage) && !pairedState,
-                pairedMessage);
-
-            int parsedPort;
-            string portError;
-            Check("Sunshine 配置：默认 WebUI 端口",
-                SunshinePairing.TryParseWebUiPort("address_family = both\n", out parsedPort, out portError)
-                && parsedPort == 47990, portError);
-            Check("Sunshine 配置：base port + 1",
-                SunshinePairing.TryParseWebUiPort("port = 47989\n", out parsedPort, out portError)
-                && parsedPort == 47990, portError);
-            Check("Sunshine 配置：显式 web_ui_port 优先",
-                SunshinePairing.TryParseWebUiPort("port = 50000\nweb_ui_port = 51234\n", out parsedPort, out portError)
-                && parsedPort == 51234, portError);
-            Check("Sunshine 配置：拒绝无效端口",
-                !SunshinePairing.TryParseWebUiPort("port = abc\n", out parsedPort, out portError),
-                portError);
-
-            string pendingJson =
-                "{\"generation\":7,\"pending\":true,\"requests\":[{\"id\":\"ABC-123\","
-                + "\"device_name\":\"客厅电脑\",\"started_at\":\"2026-11-23T10:00:00Z\","
-                + "\"expires_at\":\"2026-11-23T10:02:00Z\"},{\"device_name\":\"缺编号\"}]}";
-            List<PendingPairRequest> pendingRequests;
-            string pendingError;
-            Check("Sunshine pending：解析请求且跳过缺编号项",
-                SunshinePairing.TryParsePending(pendingJson, out pendingRequests, out pendingError)
-                && pendingRequests.Count == 1
-                && pendingRequests[0].Id == "ABC-123"
-                && pendingRequests[0].DeviceName == "客厅电脑",
-                pendingError);
-            Check("Sunshine pending：空列表也是有效响应",
-                SunshinePairing.TryParsePending("{\"pending\":false,\"requests\":[]}", out pendingRequests, out pendingError)
-                && pendingRequests.Count == 0, pendingError);
-            Check("Sunshine pending：畸形 JSON 拒绝",
-                !SunshinePairing.TryParsePending("{\"requests\":[", out pendingRequests, out pendingError)
-                && pendingRequests.Count == 0, pendingError);
-            Check("Sunshine pending：缺 requests 数组不算有效响应",
-                !SunshinePairing.TryParsePending("{\"pending\":false}", out pendingRequests, out pendingError),
-                pendingError);
-            Check("Sunshine pending：请求编号只允许 1–64 位 [A-Za-z0-9_-]",
-                SunshinePairing.IsSafeRequestId("A")
-                && SunshinePairing.IsSafeRequestId(new string('a', 64))
-                && SunshinePairing.IsSafeRequestId("ABC-123_x")
-                && !SunshinePairing.IsSafeRequestId("")
-                && !SunshinePairing.IsSafeRequestId("ABC/123")
-                && !SunshinePairing.IsSafeRequestId("ABC 123")
-                && !SunshinePairing.IsSafeRequestId(new string('a', 65)),
-                "request id");
-
-            bool confirmed;
-            string statusError;
-            Check("Sunshine pin：status=true 才算成功",
-                SunshinePairing.TryParseStatus("{\"status\":true}", out confirmed, out statusError) && confirmed,
-                statusError);
-            Check("Sunshine pin：status=false 明确失败",
-                SunshinePairing.TryParseStatus("{\"status\":false,\"error\":\"invalid pin\"}", out confirmed, out statusError)
-                && !confirmed, statusError);
-            Check("Sunshine pin：缺少 status 不冒充成功",
-                !SunshinePairing.TryParseStatus("{\"error\":\"bad\"}", out confirmed, out statusError),
-                statusError);
-            Check("Sunshine pin：空响应与畸形 JSON 不冒充成功",
-                !SunshinePairing.TryParseStatus("", out confirmed, out statusError)
-                && !SunshinePairing.TryParseStatus("{\"status\":true", out confirmed, out statusError)
-                && !SunshinePairing.TryParseStatus("{\"status\":1}", out confirmed, out statusError)
-                && !SunshinePairing.TryParseStatus("{\"status\":\"true\"}", out confirmed, out statusError)
-                && !confirmed, statusError);
-            Check("Sunshine pin：status=true 只表示 PIN 已提交，不当作配对完成",
-                SunshinePairing.TryParseStatus("{\"status\":true}", out confirmed, out statusError)
-                && confirmed, "UI 仍需以新 paired UUID 为完成证据");
-
-            string confirmBody = SunshinePairing.BuildConfirmBody("0123", "我的、电脑", "ABC-123");
-            Check("Sunshine confirm：JSON 字段与转义",
-                confirmBody == "{\"pin\":\"0123\",\"name\":\"我的、电脑\",\"id\":\"ABC-123\"}",
-                confirmBody);
-            string confirmError;
-            string unusedConfigDirectory = Path.Combine(Path.GetTempPath(), "DualRemote-selftest-unused-config");
-            Check("Sunshine confirm：拒绝非 4 位 PIN",
-                !SunshinePairing.TryConfirm(unusedConfigDirectory, "123", "ABC-123", "pc", out confirmError)
-                && confirmError.IndexOf("4 位", StringComparison.Ordinal) >= 0,
-                confirmError);
-            Check("Sunshine confirm：非法请求编号不发 POST",
-                !SunshinePairing.TryConfirm(unusedConfigDirectory, "0123", "ABC/123", "pc", out confirmError)
-                && confirmError.IndexOf("编号", StringComparison.Ordinal) >= 0,
-                confirmError);
-            Check("Sunshine reject：非法请求编号不发 DELETE",
-                !SunshinePairing.TryReject(unusedConfigDirectory, "A B/1", out confirmError),
-                confirmError);
-            Check("Sunshine reject：空响应与畸形 JSON 不算拒绝成功（源码纯函数）",
-                !SunshinePairing.TryParseStatus("", out confirmed, out statusError)
-                && !SunshinePairing.TryParseStatus("null", out confirmed, out statusError)
-                && !confirmed, statusError);
-            Check("Sunshine reject：请求编号需转义",
-                SunshinePairing.BuildPendingPath("A B/1") == "/api/pairing/pending/A%20B%2F1",
-                SunshinePairing.BuildPendingPath("A B/1"));
-            List<PairedClientInfo> parsedClients;
-            string clientError;
-            string namedCerts =
-                "{\"named_certs\":[{\"uuid\":\"7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9\","
-                + "\"name\":\"DualRemote-Test\",\"enabled\":true,\"streaming\":false},"
-                + "{\"uuid\":\"bad\",\"name\":\"ignored\"}]}";
-            Check("Sunshine clients：解析 paired UUID 并忽略畸形条目",
-                SunshinePairing.TryParsePairedClients(namedCerts, out parsedClients, out clientError)
-                && parsedClients.Count == 1
-                && parsedClients[0].Id == "7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9"
-                && parsedClients[0].Name == "DualRemote-Test", clientError);
-            string sameNameCerts =
-                "{\"named_certs\":[{\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"同名\"},"
-                + "{\"uuid\":\"22222222-2222-2222-2222-222222222222\",\"name\":\"同名\"}]}";
-            Check("Sunshine clients：同名设备仍按两个 UUID 保留，不靠显示名合并",
-                SunshinePairing.TryParsePairedClients(sameNameCerts, out parsedClients, out clientError)
-                && parsedClients.Count == 2
-                && parsedClients[0].Id != parsedClients[1].Id
-                && parsedClients[0].Name == parsedClients[1].Name, clientError);
-            Check("Sunshine clients：畸形 JSON / 缺 named_certs 拒绝",
-                !SunshinePairing.TryParsePairedClients("{\"named_certs\":[", out parsedClients, out clientError)
-                && !SunshinePairing.TryParsePairedClients("{\"clients\":[]}", out parsedClients, out clientError),
-                clientError);
-            Check("Sunshine clients：UUID 只接受标准 36 位格式",
-                SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A9")
-                && !SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0A")
-                && !SunshinePairing.IsSafeClientUuid("7FC79E4E-E8D9-4533-8D6A-8F31EE2AF0AG"),
-                "uuid");
-
-            // 内部范围校验不启动进程：借 StreamMoonlight 的参数校验路径不现实（需要组件），
-            // 这里只验证公开常量的边界与映射一致性。
-            Check("Moonlight 码率边界在官方支持范围内",
-                Engines.MinimalStreamBitrateKbps >= 500 && Engines.MaximalStreamBitrateKbps <= 500000,
-                Engines.MinimalStreamBitrateKbps + "–" + Engines.MaximalStreamBitrateKbps);
 
             RecentStore store = new RecentStore();
             for (int i = 0; i < 7; i++)
@@ -581,57 +273,6 @@ namespace DualRemote
                 Tailscale.DescribeBackendState("NeedsLogin") == "需要登录"
                 && Tailscale.DescribeBackendState("Running") == "运行中", Tailscale.DescribeBackendState("NeedsLogin"));
 
-            // 引擎选择矩阵：GUI、配对、串流共用同一纯函数，这里只做无副作用断言。
-            Check("引擎选择：标准存在默认 Official",
-                FoundationClient.SelectEngine(true, true, false) == StreamEngine.Official
-                && FoundationClient.SelectEngine(true, false, false) == StreamEngine.Official,
-                FoundationClient.SelectEngine(true, true, false).ToString());
-            Check("引擎选择：明确优先且 V+ 存在时 Enhanced",
-                FoundationClient.SelectEngine(true, true, true) == StreamEngine.Enhanced
-                && FoundationClient.SelectEngine(false, true, true) == StreamEngine.Enhanced,
-                FoundationClient.SelectEngine(true, true, true).ToString());
-            Check("引擎选择：只有 V+ 时直接 Enhanced",
-                FoundationClient.SelectEngine(false, true, false) == StreamEngine.Enhanced,
-                FoundationClient.SelectEngine(false, true, false).ToString());
-            Check("引擎选择：两者皆无时 Unavailable",
-                FoundationClient.SelectEngine(false, false, false) == StreamEngine.Unavailable
-                && FoundationClient.SelectEngine(false, false, true) == StreamEngine.Unavailable,
-                FoundationClient.SelectEngine(false, false, false).ToString());
-            Check("引擎选择：实际文件重载与文件状态一致",
-                FoundationClient.SelectEngine(false)
-                    == FoundationClient.SelectEngine(Engines.MoonlightPresent, FoundationClient.IsAvailable, false)
-                && FoundationClient.SelectEngine(true)
-                    == FoundationClient.SelectEngine(Engines.MoonlightPresent, FoundationClient.IsAvailable, true),
-                FoundationClient.SelectEngine(false).ToString());
-            bool localRuntime = File.Exists(FoundationClient.EngineExe)
-                && File.Exists(Path.Combine(FoundationClient.EngineDir, "portable.dat"));
-            bool bundledRuntime = File.Exists(FoundationClient.BundledEngineExe)
-                && File.Exists(Path.Combine(FoundationClient.BundledEngineDir, "portable.dat"));
-            Check("V+ 可用性 = 稳定 runtime 或随包完整目录（干净解压也可用）",
-                FoundationClient.IsAvailable == (localRuntime || bundledRuntime),
-                "local=" + localRuntime + ", bundled=" + bundledRuntime);
-            Check("V+ 版本指纹变化触发更新，相同指纹不重复复制",
-                FoundationClient.ShouldRefreshRuntime("bundle-v2", "bundle-v1")
-                && !FoundationClient.ShouldRefreshRuntime("bundle-v1", "bundle-v1")
-                && !FoundationClient.ShouldRefreshRuntime(null, "bundle-v1"),
-                "version fingerprint");
-
-            // 低延迟 CLI 参数（VSync / Frame Pacing）
-            string llArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 1920, 1080, 60, 10000,
-                false, false, false, true, true, false);
-            Check("低延迟参数：--no-vsync --no-frame-pacing + HEVC",
-                llArgs.IndexOf("--video-codec HEVC", StringComparison.Ordinal) >= 0
-                && llArgs.IndexOf("--no-vsync", StringComparison.Ordinal) >= 0
-                && llArgs.IndexOf("--no-frame-pacing", StringComparison.Ordinal) >= 0,
-                llArgs);
-            string smoothArgs = Engines.BuildMoonlightStreamArgs("100.64.0.12", 2560, 1600, 90, 24000,
-                true, true, true, true, false, true);
-            Check("平滑参数：--vsync --frame-pacing + 16:10 90fps",
-                smoothArgs.IndexOf("--resolution 2560x1600 --fps 90", StringComparison.Ordinal) >= 0
-                && smoothArgs.IndexOf("--vsync", StringComparison.Ordinal) >= 0
-                && smoothArgs.IndexOf("--frame-pacing", StringComparison.Ordinal) >= 0,
-                smoothArgs);
-
             // 自定义防窥壁纸校验与缩放几何
             Check("防窥壁纸扩展名校验：放行常见图片并拒绝可执行脚本",
                 PrivacyWallpaper.IsSupportedExtension("wall.png")
@@ -763,12 +404,6 @@ namespace DualRemote
             Check("BoBo远程 品牌 Logo 资源：内嵌圆角方框奶牛猫徽章可正常加载",
                 brandLogo != null && brandLogo.Width >= 32 && brandLogo.Height >= 32,
                 brandLogo == null ? "null" : (brandLogo.Width + "x" + brandLogo.Height));
-            Check("内置调优与显示脚本：已编译进主程序资源并可解析落地",
-                EmbeddedTools.HasEmbeddedResource(EmbeddedTools.DisplayResourceName)
-                && EmbeddedTools.HasEmbeddedResource(EmbeddedTools.OptimizeResourceName)
-                && File.Exists(EmbeddedTools.ResolveDisplayTool())
-                && File.Exists(EmbeddedTools.ResolveOptimizeTool()),
-                EmbeddedTools.ResolveOptimizeTool());
             var barExpanded = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), true, 1f);
             var barCollapsed = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), false, 1f);
             var barDraggedLeft = StreamToolbarOverlay.ComputeBarBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), false, 1f, 40);
@@ -817,85 +452,6 @@ namespace DualRemote
                 && MainForm.MaskAddressForDisplay("") == "未获取到网络地址",
                 MainForm.MaskAddressForDisplay("192.0.2.88"));
 
-            bool bundledAvailable = BundledHost.BundledAvailable;
-            if (!string.IsNullOrEmpty(BundledHost.BundledSourceRoot))
-            {
-                string verifyErr;
-                bool verifyOk = BundledHost.TryVerifyBundledExecutable(out verifyErr);
-                Check("内置 Foundation Sunshine 完整性校验：版本、字节数与 SHA-256 一致",
-                    bundledAvailable && verifyOk,
-                    verifyOk ? BundledHost.BundleVersion : (verifyErr ?? "version-mismatch"));
-            }
-            else
-            {
-                Check("内置 Foundation Sunshine 缺失安全处理：无目录时返回不可用且不抛异常",
-                    !bundledAvailable && BundledHost.BundledSourceExecutable == null,
-                    "absent-safe");
-            }
-            int allocBasePort;
-            int allocWebPort;
-            string allocPortErr;
-            bool allocPortOk = BundledHost.TryFindFreePortPair(out allocBasePort, out allocWebPort, out allocPortErr);
-            Check("内置宿主端口分配：优先标准 47989 或回退可用端口组",
-                allocPortOk && allocWebPort == allocBasePort + 1
-                && (allocBasePort == BundledHost.StandardBasePort || (allocBasePort >= 48989 && allocBasePort <= 59989)),
-                allocPortOk ? ("base=" + allocBasePort + " web=" + allocWebPort) : (allocPortErr ?? "fail"));
-
-            var badSnap = new HostSnapshot { SunshineInstalled = true };
-            var badMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            badMap["encoder"] = "amdvce";
-            badMap["amd_rc"] = "vbr_latency";
-            HostNetworkInfo.AnalyzeConfig(badSnap, badMap);
-            Check("抗丢包诊断：检出 AMD vbr_latency 与缺失 HRD/LTR/Auto-FEC",
-                !badSnap.AntiLossTuned && badSnap.Recommendations.Count >= 4,
-                badSnap.TuningSummary);
-            var goodSnap = new HostSnapshot { SunshineInstalled = true };
-            var goodMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            goodMap["encoder"] = "amdvce";
-            goodMap["amd_rc"] = "cbr";
-            goodMap["amd_enforce_hrd"] = "enabled";
-            goodMap["amd_ltr_frames"] = "2";
-            goodMap["fec_auto"] = "enabled";
-            HostNetworkInfo.AnalyzeConfig(goodSnap, goodMap);
-            Check("抗丢包诊断：目标配置只称配置项已就绪，不宣称实测通过",
-                goodSnap.AntiLossTuned && goodSnap.Recommendations.Count == 0
-                && goodSnap.TuningSummary.IndexOf("配置项已就绪", StringComparison.Ordinal) >= 0
-                && goodSnap.TuningSummary.IndexOf("尚未实测", StringComparison.Ordinal) >= 0
-                && goodSnap.TuningSummary.IndexOf("已调优", StringComparison.Ordinal) < 0
-                && goodSnap.TuningSummary.IndexOf("发包平滑", StringComparison.Ordinal) < 0
-                && goodSnap.TuningSummary.IndexOf("1270", StringComparison.Ordinal) < 0,
-                goodSnap.TuningSummary);
-            var autoSnap = new HostSnapshot { SunshineInstalled = true };
-            var autoMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            autoMap["encoder"] = "";
-            autoMap["fec_auto"] = "enabled";
-            HostNetworkInfo.AnalyzeConfig(autoSnap, autoMap);
-            Check("非 AMD/自动编码器只核验 Auto-FEC，不宣称 CBR+HRD+LTR",
-                autoSnap.AntiLossTuned && autoSnap.Recommendations.Count == 0
-                && autoSnap.TuningSummary.IndexOf("Auto-FEC", StringComparison.Ordinal) >= 0
-                && autoSnap.TuningSummary.IndexOf("CBR", StringComparison.Ordinal) < 0
-                && autoSnap.TuningSummary.IndexOf("HRD", StringComparison.Ordinal) < 0
-                && autoSnap.TuningSummary.IndexOf("LTR", StringComparison.Ordinal) < 0,
-                autoSnap.TuningSummary);
-            autoMap["fec_auto"] = "disabled";
-            HostNetworkInfo.AnalyzeConfig(autoSnap, autoMap);
-            Check("非 AMD/自动编码器缺 Auto-FEC 仍报待修",
-                !autoSnap.AntiLossTuned && autoSnap.Recommendations.Count == 1,
-                autoSnap.TuningSummary);
-
-            // Sunshine 配置目录解析空安全（杜绝 Path.Combine(path1=null) 异常）
-            bool resolveNoThrow = true;
-            string explicitCfg = "";
-            try
-            {
-                SunshinePairing.ResolveEffectiveConfigDirectory(null);
-                explicitCfg = SunshinePairing.ResolveEffectiveConfigDirectory(@"C:\Program Files\Sunshine\config");
-            }
-            catch { resolveNoThrow = false; }
-            Check("Sunshine 配对配置目录空安全解析",
-                resolveNoThrow && string.Equals(explicitCfg, @"C:\Program Files\Sunshine\config", StringComparison.OrdinalIgnoreCase),
-                explicitCfg ?? "null");
-
             // 内置自动更新器核心逻辑自检
             Check("自动更新版本比较：语义化数字顺序",
                 AppUpdater.CompareVersions("4.2.0", "4.3.0") < 0
@@ -943,7 +499,7 @@ namespace DualRemote
                 releaseErr ?? (lightPlan.PackageKind + "/" + fullPlan.PackageKind + "/" + roPlan.PackageKind));
             Check("轻量更新包 ZIP 根目录前缀剥离",
                 AppUpdater.NormalizeLightZipEntry("BoBo远程/BoBo远程.exe") == "BoBo远程.exe"
-                && AppUpdater.NormalizeLightZipEntry("BoBo远程/tools/Set-SunshineDisplay.ps1") == @"tools\Set-SunshineDisplay.ps1",
+                && AppUpdater.NormalizeLightZipEntry("BoBo远程/docs/guide.md") == @"docs\guide.md",
                 AppUpdater.NormalizeLightZipEntry("BoBo远程/BoBo远程.exe"));
 
             string parsedRedirectTag = null;
@@ -1053,87 +609,6 @@ namespace DualRemote
                     vpTest.MaxContentWidth >= 1500, "MaxContentWidth=" + vpTest.MaxContentWidth);
             }
 
-            // 验证 Sunshine / Moonlight 远程桌面应用名称自动匹配（修复「找不到应用程序 Desktop」）
-            Check("应用名匹配：中文 Foundation Sunshine 优先命中「桌面」并排除「大屏」/Steam/Xbox",
-                Engines.SelectBestDesktopAppName(new[] { "Steam Big Picture 模式", "Xbox 游戏", "大屏", "桌面" }) == "桌面",
-                "Chinese Foundation Sunshine");
-            Check("应用名匹配：英文随包 Sunshine 命中「Desktop」",
-                Engines.SelectBestDesktopAppName(new[] { "Big Screen", "Desktop", "Steam Big Picture" }) == "Desktop",
-                "English Sunshine");
-            Check("应用名匹配：用户自定义命名兜底跳过启动器选择首个桌面项",
-                Engines.SelectBestDesktopAppName(new[] { "Big Screen", "Steam Big Picture", "远程办公主屏" }) == "远程办公主屏",
-                "Custom desktop name");
-            Check("应用名匹配：空列表安全回退 Desktop",
-                Engines.SelectBestDesktopAppName(new string[0]) == "Desktop",
-                "Empty fallback");
-
-            Check("Qt INI 转义解码：支持 \\x684c\\x9762 与 @String(...) 还原「桌面」",
-                FoundationClient.UnescapeQtIniString("\\x684c\\x9762") == "桌面"
-                && FoundationClient.UnescapeQtIniString("\"@String(\\x684c\\x9762)\"") == "桌面"
-                && FoundationClient.UnescapeQtIniString("Desktop") == "Desktop",
-                "Qt QSettings INI unescape");
-
-            string iniWithApps =
-                "[General]\nsunshineabr=true\n\n[hosts]\n"
-                + "1\\hostname=Office-PC\n1\\manualaddress=198.51.100.25\n"
-                + "1\\srvcert=" + certificate + "\n"
-                + "1\\apps\\1\\name=\\x684c\\x9762\n"
-                + "1\\apps\\2\\name=Steam Big Picture \\x6a21\\x5f0f\n"
-                + "1\\apps\\3\\name=\\x5927\\x5c4f\n"
-                + "1\\apps\\size=3\n"
-                + "2\\hostname=Unpaired-PC\n2\\manualaddress=198.51.100.99\n"
-                + "2\\apps\\1\\name=ShouldIgnore\n";
-            List<string> parsedIniApps = FoundationClient.ReadHostAppsFromIniText(iniWithApps, "198.51.100.25");
-            Check("Moonlight.ini 应用列表解析：读取已配对主机的中文应用并自动选出「桌面」",
-                parsedIniApps.Count == 3
-                && parsedIniApps[0] == "桌面"
-                && Engines.SelectBestDesktopAppName(parsedIniApps) == "桌面"
-                && FoundationClient.ReadHostAppsFromIniText(iniWithApps, "198.51.100.99").Count == 0,
-                "count=" + parsedIniApps.Count);
-
-            byte[] utf8CliBytes = Encoding.UTF8.GetBytes("Loading app list...\r\n桌面\r\n大屏\r\n");
-            List<string> parsedCliApps = Engines.ParseAppListOutput(Engines.DecodeCliOutputBytes(utf8CliBytes));
-            Check("Moonlight list CLI 解析：过滤状态行并准确提取 UTF-8 中文应用名",
-                parsedCliApps.Count == 2 && parsedCliApps[0] == "桌面" && parsedCliApps[1] == "大屏",
-                "cliApps=" + string.Join(",", parsedCliApps.ToArray()));
-
-            string customStreamArgs = Engines.BuildMoonlightStreamArgsWithApp(
-                "198.51.100.25", "桌面\" --evil\n", 1920, 1080, 60, 10000, false, false, false, true, true, false);
-            Check("Moonlight stream 参数：支持中文「桌面」并剥离引号/换行防参数注入",
-                customStreamArgs == "stream \"198.51.100.25\" \"桌面 --evil\" --resolution 1920x1080 --fps 60 --bitrate 10000 --video-codec HEVC --no-performance-overlay --no-audio-on-host --display-mode fullscreen --no-vsync --no-frame-pacing",
-                customStreamArgs);
-
-            string desktopMouseQuitArgs = Engines.BuildMoonlightStreamArgsWithApp(
-                "198.51.100.25", "桌面", 2560, 1440, 90, 22000, false, false, false, true, true, false, true, true);
-            string relativeNoQuitArgs = Engines.BuildMoonlightStreamArgsWithApp(
-                "198.51.100.25", "Desktop", 1920, 1080, 60, 10000, false, false, true, false, true, false, false, false);
-            Check("Moonlight stream 参数：桌面远控默认无边框全屏、不劫持系统键、绝对鼠标与 --quit-after",
-                desktopMouseQuitArgs.IndexOf(" --display-mode borderless", StringComparison.Ordinal) >= 0
-                && desktopMouseQuitArgs.IndexOf(" --capture-system-keys never", StringComparison.Ordinal) >= 0
-                && desktopMouseQuitArgs.EndsWith(" --absolute-mouse --quit-after", StringComparison.Ordinal)
-                && relativeNoQuitArgs.IndexOf(" --display-mode windowed", StringComparison.Ordinal) >= 0
-                && relativeNoQuitArgs.IndexOf(" --capture-system-keys fullscreen", StringComparison.Ordinal) >= 0
-                && relativeNoQuitArgs.EndsWith(" --no-absolute-mouse --no-quit-after", StringComparison.Ordinal),
-                desktopMouseQuitArgs);
-
-            DateTime procStart = new DateTime(2026, 11, 24, 23, 30, 0);
-            string activeLog = "[2026-11-24 23:20:00.000]: Info: CLIENT CONNECTED\r\n"
-                + "[2026-11-24 23:43:48.388]: Info: New streaming session started [active sessions: 1]\r\n"
-                + "[2026-11-24 23:43:48.721]: Info: CLIENT CONNECTED\r\n";
-            string closedLog = activeLog
-                + "[2026-11-24 23:52:06.435]: Info: CLIENT DISCONNECTED\r\n";
-            string staleLog = "[2026-11-24 23:10:00.000]: Info: New streaming session started [active sessions: 1]\r\n"
-                + "[2026-11-24 23:10:01.000]: Info: CLIENT CONNECTED\r\n";
-            string twoThenOneLog = "[2026-11-24 23:43:48.388]: Info: New streaming session started [active sessions: 1]\r\n"
-                + "[2026-11-24 23:44:00.000]: Info: New streaming session started [active sessions: 2]\r\n"
-                + "[2026-11-24 23:45:00.000]: Info: CLIENT DISCONNECTED\r\n";
-            Check("Sunshine 日志兜底被控检测：精准识别活跃、断开、多会话与重启前旧日志",
-                HostNetworkInfo.ParseSunshineLogSessionActive(activeLog, procStart)
-                && !HostNetworkInfo.ParseSunshineLogSessionActive(closedLog, procStart)
-                && !HostNetworkInfo.ParseSunshineLogSessionActive(staleLog, procStart)
-                && HostNetworkInfo.ParseSunshineLogSessionActive(twoThenOneLog, procStart),
-                "log-session-parser");
-
             var defaultPrivacy = new PrivacyWallpaperConfig();
             Check("自动防窥守护默认策略：新安装默认开启被控自动防窥，防窥壁纸透明穿透不挡远控",
                 defaultPrivacy.AutoOnRemote,
@@ -1156,137 +631,9 @@ namespace DualRemote
                 && renderedSceneOk,
                 "count=" + DeviceWallpaperGallery.TotalCount + " wp=" + wp1 + "->" + wp2);
 
-            var primaryVddSnap = new HostSnapshot { SunshineInstalled = true };
-            var primaryVddMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            primaryVddMap["output_name"] = "ZakoHDR";
-            primaryVddMap["display_device_prep"] = "ensure_primary";
-            primaryVddMap["fec_auto"] = "enabled";
-            HostNetworkInfo.AnalyzeConfig(primaryVddSnap, primaryVddMap);
-            Check("显示拓扑诊断：识别 ZakoHDR + ensure_primary 为主屏虚拟屏且无扩展告警",
-                primaryVddSnap.DisplayModeLabel.IndexOf("主屏", StringComparison.Ordinal) >= 0
-                && primaryVddSnap.AntiLossTuned,
-                primaryVddSnap.DisplayModeLabel);
-
-            var secondaryVddSnap = new HostSnapshot { SunshineInstalled = true };
-            var secondaryVddMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            secondaryVddMap["output_name"] = "ZakoHDR";
-            secondaryVddMap["display_device_prep"] = "ensure_secondary";
-            secondaryVddMap["fec_auto"] = "enabled";
-            HostNetworkInfo.AnalyzeConfig(secondaryVddSnap, secondaryVddMap);
-            Check("显示拓扑诊断：检出旧版 ensure_secondary 副屏扩展并给出修复建议",
-                secondaryVddSnap.DisplayModeLabel.IndexOf("副屏扩展", StringComparison.Ordinal) >= 0
-                && !secondaryVddSnap.AntiLossTuned
-                && secondaryVddSnap.Recommendations.Count >= 1,
-                secondaryVddSnap.DisplayModeLabel);
-
-            int parsedSessions;
-            Check("Sunshine 活跃会话解析：支持 total_sessions、sessions 数组并拒绝畸形 JSON",
-                SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[],\"total_sessions\":0}", out parsedSessions) && parsedSessions == 0
-                && SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[{\"id\":1},{\"id\":2}],\"total_sessions\":2}", out parsedSessions) && parsedSessions == 2
-                && SunshinePairing.TryParseActiveSessionCount("{\"sessions\":[{\"id\":1}]}", out parsedSessions) && parsedSessions == 1
-                && !SunshinePairing.TryParseActiveSessionCount("{bad", out parsedSessions),
-                "sessions=" + parsedSessions);
-
-            string sampleBundledSun = Path.Combine(BundledHost.LocalRoot, BundledHost.ExecutableName);
-            string sampleInstalledSun = Path.Combine(BundledHost.DefaultInstalledRoot, BundledHost.ExecutableName);
-            Check("退出清理进程边界：精准命中 BoBo 托管路径，绝不误伤系统安装版",
-                BundledHost.IsManagedProcessPath(sampleBundledSun, BundledHost.LocalRoot)
-                && BundledHost.IsManagedProcessPath(FoundationClient.EngineExe, FoundationClient.EngineExe)
-                && !BundledHost.IsManagedProcessPath(sampleInstalledSun, BundledHost.LocalRoot)
-                && !BundledHost.IsManagedProcessPath(@"C:\Program Files\RustDesk\rustdesk.exe", Engines.RustDeskExe),
-                sampleBundledSun);
-
             Log("");
-            Info("RustDesk 组件：" + (Engines.RustDeskPresent ? "已找到" : "未找到") + " " + Engines.RustDeskExe);
-            Info("Moonlight 组件：" + (Engines.MoonlightPresent ? "已找到" : "未找到") + " " + Engines.MoonlightExe);
             Info("Tailscale CLI：" + (Engines.TailscalePresent ? "已找到" : "未找到") + " " + Tailscale.ExePath);
             Info("最近目标目录：" + RecentStore.DirPath);
-            if (!Engines.RustDeskPresent)
-            {
-                string launchMessage;
-                Check("无 RustDesk 组件时“打开本机远控”返回可操作错误",
-                    !Engines.LaunchRustDesk(out launchMessage)
-                    && launchMessage != null
-                    && launchMessage.IndexOf("RustDesk", StringComparison.Ordinal) >= 0,
-                    launchMessage);
-            }
-
-            // V5 原生一体化 GameStream 协议、X.509 身份生成与 IPC 编解码自检
-            string nativeTempDir = Path.Combine(Path.GetTempPath(), "bobo-native-id-test-" + Guid.NewGuid().ToString("N"));
-            try
-            {
-                System.Security.Cryptography.X509Certificates.X509Certificate2 idCert;
-                string idPem, idUid, idErr;
-                bool idCreated = GameStreamClient.EnsureIdentityInDir(nativeTempDir, false, out idCert, out idPem, out idUid, out idErr);
-                Check("V5 内置客户端生成 RSA-2048 证书与 PFX", idCreated && idCert != null && idCert.HasPrivateKey && !string.IsNullOrEmpty(idPem) && idUid.Length == 16, idErr);
-                if (idCreated && idCert != null)
-                {
-                    byte[] sigBytes = GameStreamClient.ExtractX509SignatureBytes(idCert.RawData);
-                    Check("V5 X.509 DER 证书签名提取（256 字节）", sigBytes != null && sigBytes.Length == 256,
-                        sigBytes == null ? "null" : sigBytes.Length.ToString());
-                    idCert.Dispose();
-
-                    // 二次加载持久化 PFX 验证
-                    System.Security.Cryptography.X509Certificates.X509Certificate2 reloaded;
-                    string rPem, rUid, rErr;
-                    bool reloadOk = GameStreamClient.EnsureIdentityInDir(nativeTempDir, false, out reloaded, out rPem, out rUid, out rErr);
-                    Check("V5 内置客户端重新加载持久化 PFX", reloadOk && reloaded != null && reloaded.HasPrivateKey && rUid == idUid, rErr);
-                    if (reloaded != null) reloaded.Dispose();
-                }
-
-                byte[] testSalt = GameStreamClient.GenerateRandomBytes(16);
-                byte[] testAesKey = GameStreamClient.DerivePairingAesKey(testSalt, "4829", true);
-                byte[] testChallenge = GameStreamClient.GenerateRandomBytes(32);
-                byte[] testEnc = GameStreamClient.AesEcbEncrypt(testAesKey, testChallenge);
-                byte[] testDec = GameStreamClient.AesEcbDecrypt(testAesKey, testEnc);
-                bool aesMatch = testEnc.Length == 32 && testDec.Length == 32;
-                for (int i = 0; aesMatch && i < 32; i++) if (testChallenge[i] != testDec[i]) aesMatch = false;
-                Check("V5 配对 AES-128-ECB + SHA-256 密钥派生回环", aesMatch, "");
-
-                GameStreamServerInfo parsedInfo;
-                string infoErr;
-                string sampleServerXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><root status_code=\"200\">"
-                    + "<hostname>BoBo-Host</hostname><appversion>7.1.431.-1</appversion><GfeVersion>3.23.0.74</GfeVersion>"
-                    + "<HttpsPort>47984</HttpsPort><ExternalPort>47989</ExternalPort><ServerCodecModeSupport>769</ServerCodecModeSupport>"
-                    + "<SupportedDisplayMode><DisplayMode><Width>2880</Width><Height>1800</Height><RefreshRate>120</RefreshRate></DisplayMode></SupportedDisplayMode>"
-                    + "<PairStatus>1</PairStatus><currentgame>0</currentgame></root>";
-                bool infoOk = GameStreamClient.TryParseServerInfoXml(sampleServerXml, "127.0.0.1", 47989, out parsedInfo, out infoErr);
-                Check("V5 解析 Sunshine /serverinfo XML（含主机原生分辨率）", infoOk && parsedInfo != null && parsedInfo.Paired && parsedInfo.HttpsPort == 47984 && parsedInfo.ServerCodecModeSupport == 769 && parsedInfo.NativeWidth == 2880 && parsedInfo.NativeHeight == 1800, infoErr);
-
-                List<GameStreamAppInfo> parsedApps = GameStreamClient.ParseAppListXml(
-                    "<root status_code=\"200\"><App><ID>881448767</ID><AppTitle>桌面</AppTitle></App><App><ID>123</ID><AppTitle>Steam</AppTitle></App></root>");
-                Check("V5 解析 Sunshine /applist 中文桌面应用", parsedApps.Count == 2 && parsedApps[0].Id == 881448767 && parsedApps[0].Title == "桌面", "");
-
-                string keysCmd = NativeStreamCore.BuildSendKeysCommand(new int[] { 17, 16, 27 });
-                string textCmd = NativeStreamCore.BuildSendTextCommand("hello \"bobo\"\n");
-                string volCmd = NativeStreamCore.BuildVolumeCommand(65);
-                string scaleCmd = NativeStreamCore.BuildScaleModeCommand(false);
-                string viewCmd = NativeStreamCore.BuildViewOnlyCommand(true);
-                string sysKeyCmd = NativeStreamCore.BuildSysKeysCommand(true);
-                string hudCmd = NativeStreamCore.BuildHudCommand(true);
-                NativePlayerEvent statsEv = NativeStreamCore.TryParseEventLine(
-                    "{\"event\":\"stats\",\"fps\":89.8,\"decodeMs\":1.4,\"renderMs\":0.6,\"rttMs\":3.0,\"bitrateKbps\":22000,\"width\":2560,\"height\":1440,\"codec\":\"H264\",\"decoder\":\"D3D11VA\"}");
-                NativePlayerEvent stageEv = NativeStreamCore.TryParseEventLine(
-                    "{\"event\":\"stage\",\"stage\":\"RTSP handshake\",\"status\":\"starting\",\"errorCode\":0}");
-                NativePlayerEvent hwndEv = NativeStreamCore.TryParseEventLine("{\"event\":\"viewport_hwnd\",\"hwnd\":123456}");
-                Check("V5 原生播放核 IPC 编解码（含音量/1:1/仅查看/系统键）",
-                    keysCmd == "{\"cmd\":\"send_keys\",\"vks\":[17,16,27]}"
-                    && textCmd.IndexOf("\\\"bobo\\\"\\n", StringComparison.Ordinal) >= 0
-                    && volCmd == "{\"cmd\":\"set_volume\",\"volume\":65}"
-                    && scaleCmd == "{\"cmd\":\"set_scale_mode\",\"fit\":false}"
-                    && viewCmd == "{\"cmd\":\"set_view_only\",\"enabled\":true}"
-                    && sysKeyCmd == "{\"cmd\":\"set_sys_keys\",\"enabled\":true}"
-                    && hudCmd == "{\"cmd\":\"set_hud\",\"enabled\":true}"
-                    && statsEv != null && statsEv.Stats != null && statsEv.Stats.Width == 2560
-                    && stageEv != null && stageEv.Name == "RTSP handshake" && stageEv.State == "starting"
-                    && hwndEv != null && hwndEv.ViewportHwnd == 123456UL,
-                    keysCmd + " | " + volCmd);
-            }
-            finally
-            {
-                try { if (Directory.Exists(nativeTempDir)) Directory.Delete(nativeTempDir, true); } catch { }
-            }
-
             // V6 全内置架构端到端闭环自检：内嵌 BoBoCore.dll + 严格双端必开 TLS 1.2 + 4 位临时配对码 + 视频帧 + 防窥指令 + 文件 SHA-256 互传
             RunV6AllInOneSelfTests();
 
@@ -1359,7 +706,20 @@ namespace DualRemote
                             unauthRes.Item2 + " " + unauthRes.Item3);
                     }
 
-                    // 2b. Instant 4-digit PIN generation + wrong PIN rejected + right PIN succeeds
+                    // 2b. Instant 4-digit PIN generation + wrong PIN rejected + brute-force 5-attempt lockout + right PIN succeeds
+                    BoBoLocalPairSession lockSession = server.BeginPairing(120);
+                    string lockPin = lockSession.Pin;
+                    string badLockPin = lockPin == "0000" ? "1111" : "0000";
+                    for (int attempt = 0; attempt < BoBoLocalPairSession.MaxFailedAttempts; attempt++)
+                    {
+                        var failTry = BoBoStreamClient.PairWithPinAsync("127.0.0.1", port, badLockPin, clientId, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                        if (failTry.Item1) break;
+                    }
+                    var lockedOutTry = BoBoStreamClient.PairWithPinAsync("127.0.0.1", port, lockPin, clientId, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    Check("V6.3 安全加固（P0-4）：4 位配对码连续失败 5 次立即作废，阻止爆破",
+                        !lockedOutTry.Item1 && server.GetActivePairing() == null,
+                        lockedOutTry.Item3);
+
                     BoBoLocalPairSession pinSession = server.BeginPairing(120);
                     string validPin = pinSession.Pin;
                     string wrongPin = validPin == "0000" ? "1111" : "0000";
@@ -1368,19 +728,71 @@ namespace DualRemote
                     Check("V6 临时 4 位配对码：错误配对码必须拒绝", !badPair.Item1, badPair.Item3);
 
                     var goodPair = BoBoStreamClient.PairWithPinAsync("127.0.0.1", port, validPin, clientId, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
-                    Check("V6 临时 4 位配对码：正确 HMAC 校验通过并双向持久化授权",
+                    Check("V6 临时 4 位配对码：正确 HMAC + RSA 密钥证明校验通过并双向持久化授权",
                         goodPair.Item1 && hostId.IsPeerAuthorized(clientId.NodeId, clientId.CertThumbprint),
                         goodPair.Item3);
+
+                    // 2b-2. P0-3 Security: RSA challenge proof-of-possession + impersonation rejection + client TOFU pin mismatch rejection
+                    string sampleNonce = BoBoIdentityStore.GenerateRandomNonceHex(16);
+                    string validSig = clientId.SignAuthChallenge(sampleNonce, hostId.CertThumbprint);
+                    bool rsaOk = BoBoIdentityStore.VerifyAuthChallenge(clientId.CertDerBase64, clientId.CertThumbprint, sampleNonce, hostId.CertThumbprint, validSig);
+                    bool rsaWrongHost = !BoBoIdentityStore.VerifyAuthChallenge(clientId.CertDerBase64, clientId.CertThumbprint, sampleNonce, clientId.CertThumbprint, validSig);
+                    bool rsaWrongCert = !BoBoIdentityStore.VerifyAuthChallenge(hostId.CertDerBase64, clientId.CertThumbprint, sampleNonce, hostId.CertThumbprint, validSig);
+                    Check("V6.3 安全加固（P0-3）：RSA-SHA256 挑战签名防身份冒充与证书替换",
+                        rsaOk && rsaWrongHost && rsaWrongCert,
+                        "ok=" + rsaOk + " wrongHostRej=" + rsaWrongHost + " wrongCertRej=" + rsaWrongCert);
+
+                    // Client TOFU pin mismatch test: tamper pinned thumbprint -> ConnectAndStartStreamAsync must return CERT_MISMATCH!
+                    var tofuClientId = new BoBoIdentityStore(Path.Combine(testRoot, "tofu-client"));
+                    tofuClientId.EnsureLoaded();
+                    hostId.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                    {
+                        NodeId = tofuClientId.NodeId,
+                        DeviceCode = tofuClientId.DeviceCode,
+                        DeviceName = "TofuTest",
+                        CertThumbprint = tofuClientId.CertThumbprint,
+                        LastHost = "127.0.0.1"
+                    });
+                    string fakePinnedThumb = new string('f', 64);
+                    tofuClientId.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                    {
+                        NodeId = hostId.NodeId,
+                        DeviceCode = hostId.DeviceCode,
+                        DeviceName = hostId.DeviceName,
+                        CertThumbprint = fakePinnedThumb,
+                        LastHost = "127.0.0.1"
+                    });
+                    using (var tofuClient = new BoBoStreamClient(tofuClientId))
+                    {
+                        var tofuRes = tofuClient.ConnectAndStartStreamAsync(
+                            new BoBoStreamStartOptions { Host = "127.0.0.1", Port = port, Width = 640, Height = 360, Fps = 30, BitrateKbps = 4000 },
+                            null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                        BoBoAuthorizedPeer stillPinned = tofuClientId.FindPeerByNodeId(hostId.NodeId);
+                        Check("V6.3 安全加固（P0-3）：客户端严格 TOFU 证书钉扎，指纹漂移拒绝连入且绝不静默覆盖",
+                            !tofuRes.Item1 && tofuRes.Item2 == "CERT_MISMATCH" && stillPinned != null && stillPinned.CertThumbprint == fakePinnedThumb,
+                            tofuRes.Item2 + " " + tofuRes.Item3);
+                    }
+
+                    // P0-6 Filename sanitization test
+                    bool fnSafe = BoBoProtocol.SanitizeReceivedFileName(@"..\..\Windows\System32\evil.exe") == "evil.exe"
+                        && BoBoProtocol.SanitizeReceivedFileName("..") == "received.bin"
+                        && BoBoProtocol.SanitizeReceivedFileName("CON.txt") == "_CON.txt"
+                        && BoBoProtocol.SanitizeReceivedFileName("a:b*c?d.pdf") == "abcd.pdf";
+                    Check("V6.3 安全加固（P0-6）：跨平台文件名消毒（拦截目录穿越、保留设备名与非法字符）",
+                        fnSafe,
+                        BoBoProtocol.SanitizeReceivedFileName(@"..\..\Windows\System32\evil.exe"));
 
                     // 2c. Authorized stream receives real H.264 frame + <5ms sync privacy callback + direct privacy toggle
                     bool sessionStarted = false;
                     bool sessionRequestedPrivacy = false;
                     bool privacyCmdToggledOff = false;
                     var frameEvt = new System.Threading.ManualResetEventSlim(false);
+                    var sessionEndedEvt = new System.Threading.ManualResetEventSlim(false);
                     var privOffEvt = new System.Threading.ManualResetEventSlim(false);
                     server.SessionStateChanged += delegate(bool active, string peer, bool reqPriv)
                     {
                         if (active) { sessionStarted = true; sessionRequestedPrivacy = reqPriv; }
+                        else sessionEndedEvt.Set();
                     };
                     server.PrivacyCommandReceived += delegate(bool enable)
                     {
@@ -1459,6 +871,11 @@ namespace DualRemote
                         authClient.Disconnect();
                     }
 
+                    Check("被控端退出动作：主控断开后主机收到会话结束通知",
+                        sessionEndedEvt.Wait(3000) && !server.HasActiveRemoteSession,
+                        "active=" + server.HasActiveRemoteSession);
+                    sessionEndedEvt.Dispose();
+
                     // 2d. Built-in TLS SHA-256 file transfer
                     string sampleFile = Path.Combine(testRoot, "bobo-v6-selftest.txt");
                     string payloadText = "BoBoRemote V6 All-In-One TLS SHA-256 file transfer verification " + Guid.NewGuid().ToString("N");
@@ -1523,6 +940,23 @@ namespace DualRemote
                         defaultPriv.BlockLocalInput && !defaultPriv.HardwareBlackout,
                         "blockInput=" + defaultPriv.BlockLocalInput + " hwBlackout=" + defaultPriv.HardwareBlackout);
 
+                    string privacyPath = Path.Combine(testRoot, "privacy-wallpaper.txt");
+                    File.WriteAllText(privacyPath, "lock=1" + Environment.NewLine, Encoding.UTF8);
+                    var oldPrivacy = PrivacyWallpaperConfig.Load(privacyPath);
+                    bool legacyDefault = oldPrivacy.LockOnLocalExit && !oldPrivacy.LockOnRemoteDisconnect;
+                    oldPrivacy.LockOnRemoteDisconnect = true;
+                    string privacyError;
+                    bool enabledSaved = oldPrivacy.Save(out privacyError, privacyPath);
+                    var savedPrivacy = PrivacyWallpaperConfig.Load(privacyPath);
+                    bool enabledReloaded = savedPrivacy.LockOnLocalExit && savedPrivacy.LockOnRemoteDisconnect;
+                    savedPrivacy.LockOnRemoteDisconnect = false;
+                    bool disabledSaved = savedPrivacy.Save(out privacyError, privacyPath);
+                    var restoredPrivacy = PrivacyWallpaperConfig.Load(privacyPath);
+                    Check("被控端退出设置：旧配置默认回桌面，锁屏选项可独立保存与恢复",
+                        legacyDefault && enabledSaved && enabledReloaded && disabledSaved &&
+                        restoredPrivacy.LockOnLocalExit && !restoredPrivacy.LockOnRemoteDisconnect,
+                        "legacy=" + legacyDefault + " lock=" + enabledReloaded + " error=" + (privacyError ?? ""));
+
                     // 2g. V6.2 Cross-Platform Golden Vectors (must match protocol/golden-vectors.json byte-for-byte)
                     string gvCode = BoBoIdentityStore.DeriveNineDigitCode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
                     string gvProof = BoBoIdentityStore.ComputePinProof(
@@ -1573,32 +1007,48 @@ namespace DualRemote
 
         private static void RunV63LowLatencyUnitSelfTests()
         {
-            // 1. AES-128-CTR + HMAC-SHA256 round-trip, out-of-order acceptance, tamper & replay rejection
+            // 1. Directional AES-128-CTR + HMAC-SHA256: round-trip, out-of-order, tamper, replay & reflection-DoS rejection
             byte[] key = BoBoUdpCrypto.GenerateRandomKey32();
             uint sid = BoBoUdpCrypto.GenerateRandomSessionId();
-            using (var tx = new BoBoUdpCrypto(sid, key))
-            using (var rx = new BoBoUdpCrypto(sid, key))
+            using (var hostCrypto = new BoBoUdpCrypto(sid, key, true))
+            using (var clientCrypto = new BoBoUdpCrypto(sid, key, false))
             {
                 byte[] msg1 = Encoding.UTF8.GetBytes("bobo-v63-udp-packet-1");
                 byte[] msg2 = Encoding.UTF8.GetBytes("bobo-v63-udp-packet-2-reordered");
-                byte[] p1 = tx.Seal(BoBoUdpPacketType.Ping, msg1, 0, msg1.Length);
-                byte[] p2 = tx.Seal(BoBoUdpPacketType.Ping, msg2, 0, msg2.Length);
+                byte[] p1 = hostCrypto.Seal(BoBoUdpPacketType.Ping, msg1, 0, msg1.Length);
+                byte[] p2 = hostCrypto.Seal(BoBoUdpPacketType.Ping, msg2, 0, msg2.Length);
+                byte[] c1 = clientCrypto.Seal(BoBoUdpPacketType.Ping, msg1, 0, msg1.Length);
 
-                BoBoUdpPacketType t2, t1, tReplay, tTamper;
-                uint s2, s1, sReplay, sTamper;
-                byte[] o2, o1, oReplay, oTamper;
+                // Verify distinct directional keystreams even at identical seq/type/plaintext
+                bool distinctKeystream = false;
+                for (int i = BoBoUdpCrypto.HeaderBytes; i < p1.Length - BoBoUdpCrypto.TagBytes; i++)
+                {
+                    if (p1[i] != c1[i]) { distinctKeystream = true; break; }
+                }
+
+                BoBoUdpPacketType tTmp;
+                uint sTmp;
+                byte[] oTmp;
+                // Reflection attack: host packet bounced back to host MUST be rejected without advancing host's recv window!
+                bool reflectRejected = !hostCrypto.TryOpen(p2, p2.Length, out tTmp, out sTmp, out oTmp);
+                bool clientStillAccepted = hostCrypto.TryOpen(c1, c1.Length, out tTmp, out sTmp, out oTmp)
+                    && Encoding.UTF8.GetString(oTmp) == "bobo-v63-udp-packet-1";
+
                 // Deliver p2 BEFORE p1 (Wi-Fi out-of-order), then replay p1, then tamper p2
-                bool ok2 = rx.TryOpen(p2, p2.Length, out t2, out s2, out o2) && Encoding.UTF8.GetString(o2) == "bobo-v63-udp-packet-2-reordered";
-                bool ok1 = rx.TryOpen(p1, p1.Length, out t1, out s1, out o1) && Encoding.UTF8.GetString(o1) == "bobo-v63-udp-packet-1";
-                bool rejectReplay = !rx.TryOpen(p1, p1.Length, out tReplay, out sReplay, out oReplay);
+                bool ok2 = clientCrypto.TryOpen(p2, p2.Length, out tTmp, out sTmp, out oTmp)
+                    && Encoding.UTF8.GetString(oTmp) == "bobo-v63-udp-packet-2-reordered";
+                bool ok1 = clientCrypto.TryOpen(p1, p1.Length, out tTmp, out sTmp, out oTmp)
+                    && Encoding.UTF8.GetString(oTmp) == "bobo-v63-udp-packet-1";
+                bool rejectReplay = !clientCrypto.TryOpen(p1, p1.Length, out tTmp, out sTmp, out oTmp);
                 p2[p2.Length - 1] ^= 0x5A;
-                bool rejectTamper = !rx.TryOpen(p2, p2.Length, out tTamper, out sTamper, out oTamper);
-                Check("V6.3 UDP 加密认证：AES-128-CTR + HMAC-SHA256 乱序通过、防重放与防篡改",
-                    ok2 && ok1 && rejectReplay && rejectTamper,
-                    "ok2=" + ok2 + " ok1=" + ok1 + " replayRej=" + rejectReplay + " tamperRej=" + rejectTamper);
+                bool rejectTamper = !clientCrypto.TryOpen(p2, p2.Length, out tTmp, out sTmp, out oTmp);
+                Check("V6.3 UDP 双向派生加密认证：乱序通过、防重放、防篡改、防反射 DoS 且密钥流方向隔离",
+                    distinctKeystream && reflectRejected && clientStillAccepted && ok2 && ok1 && rejectReplay && rejectTamper,
+                    "distinct=" + distinctKeystream + " reflRej=" + reflectRejected + " cOk=" + clientStillAccepted +
+                    " ok2=" + ok2 + " ok1=" + ok1 + " replayRej=" + rejectReplay + " tamperRej=" + rejectTamper);
             }
 
-            // 2. XOR FEC 0-RTT loss recovery (drop 1 data shard per group, including shorter final shard!)
+            // 2. XOR FEC 0-RTT loss recovery + out-of-order frame jitter grace (F+1 completes before F's last shard)
             byte[] fakeIdr = new byte[5200]; // 5 shards (1140*4 + 640) -> 2 FEC groups on keyframe
             for (int i = 0; i < fakeIdr.Length; i++) fakeIdr[i] = (byte)((i * 37 + 13) & 0xFF);
             List<byte[]> shards = BoBoUdpFec.BuildVideoShards(1u, 100u, 1920, 1080, true, fakeIdr, 2.5);
@@ -1629,32 +1079,105 @@ namespace DualRemote
                     if (done.H264Data[i] != fakeIdr[i]) { fecExact = false; break; }
                 }
             }
-            Check("V6.3 UDP XOR-FEC 零延迟纠错：每组丢 1 包（含末尾短分片）0ms 逐字节精确恢复",
-                fecExact,
-                "completed=" + completed + " recovered=" + asm.FecRecoveredPackets + " len=" + (done.H264Data != null ? done.H264Data.Length : 0));
 
-            // 3. Reliable UDP input piggyback & deduplication
+            // Out-of-order test: deliver P-frame 3 completely BEFORE P-frame 2's last shard -> both [2, 3] delivered cleanly with 0 PLI!
+            byte[] fakeP2 = new byte[2500];
+            byte[] fakeP3 = new byte[1000];
+            for (int i = 0; i < fakeP2.Length; i++) fakeP2[i] = (byte)(i & 0xFF);
+            for (int i = 0; i < fakeP3.Length; i++) fakeP3[i] = (byte)((i + 99) & 0xFF);
+            List<byte[]> s2 = BoBoUdpFec.BuildVideoShards(2u, 116u, 1920, 1080, false, fakeP2, 0.0);
+            List<byte[]> s3 = BoBoUdpFec.BuildVideoShards(3u, 132u, 1920, 1080, false, fakeP3, 0.0);
+            var batch = new List<BoBoReassembledVideoFrame>();
+            bool oooPli = false;
+            bool pTmp;
+            // Feed only first shard of frame 2, then all shards of frame 3, then remaining data shards of frame 2
+            asm.ProcessShardBatch(s2[0], batch, out pTmp); oooPli |= pTmp;
+            for (int i = 0; i < s3.Count; i++) { asm.ProcessShardBatch(s3[i], batch, out pTmp); oooPli |= pTmp; }
+            bool heldBeforeP2 = (batch.Count == 0 && !oooPli);
+            for (int i = 1; i < s2.Count; i++) { asm.ProcessShardBatch(s2[i], batch, out pTmp); oooPli |= pTmp; }
+            bool oooDeliveredInOrder = heldBeforeP2 && !oooPli && batch.Count == 2 && batch[0].FrameId == 2u && batch[1].FrameId == 3u;
+            Check("V6.3 UDP XOR-FEC 零延迟纠错 + 跨帧乱序抖动宽限（不误丢帧/不触发 PLI 风暴）",
+                fecExact && oooDeliveredInOrder,
+                "fec=" + fecExact + " recovered=" + asm.FecRecoveredPackets + " oooOrder=" + oooDeliveredInOrder + " batch=" + batch.Count);
+
+            byte[] burstIdr = new byte[11 * BoBoUdpFec.MaxShardPayloadBytes + 63];
+            for (int i = 0; i < burstIdr.Length; i++) burstIdr[i] = (byte)(i * 37 + i / 256);
+            var burstShards = BoBoUdpFec.BuildVideoShards(1u, 100u, 1280, 720, true, burstIdr, 1.0, true);
+            var burstAssembler = new BoBoUdpVideoAssembler();
+            var burstFrames = new List<BoBoReassembledVideoFrame>();
+            bool burstPli = false;
+            foreach (byte[] shard in burstShards)
+            {
+                int index = BoBoUdpCrypto.ReadUInt16LE(shard, 13);
+                if ((shard[12] & 2) == 0 && index >= 8) continue; // Four consecutive data shards, including the short tail.
+                bool pli;
+                burstAssembler.ProcessShardBatch(shard, 85.0, burstFrames, out pli);
+                burstPli |= pli;
+            }
+            Check("交错 XOR-FEC：连续丢四个数据分片时完整恢复关键帧",
+                !burstPli && burstAssembler.FecRecoveredPackets == 4 && burstFrames.Count == 1 &&
+                burstIdr.SequenceEqual(burstFrames[0].H264Data),
+                "recovered=" + burstAssembler.FecRecoveredPackets + " pli=" + burstPli);
+
+            var lossAssembler = new BoBoUdpVideoAssembler();
+            lossAssembler.RecordReceivedUdpSeq(1);
+            lossAssembler.RecordReceivedUdpSeq(10);
+            long now = Stopwatch.GetTimestamp();
+            lossAssembler.RefreshLossWindow(now + Stopwatch.Frequency * 3);
+            double peakLoss = lossAssembler.LatestLossPct;
+            for (int sec = 5; sec <= 17; sec += 2)
+                lossAssembler.RefreshLossWindow(now + Stopwatch.Frequency * sec);
+            Check("UDP 丢包统计：静止画面时历史丢包率逐步归零",
+                peakLoss > 0.0 && lossAssembler.LatestLossPct == 0.0,
+                "peak=" + peakLoss + " afterIdle=" + lossAssembler.LatestLossPct);
+
+            // 3. Reliable UDP input piggyback, deduplication & non-duplicated relative mouse delta on redundant discrete copy
             var inTx = new BoBoUdpInputCodec();
             var inRx = new BoBoUdpInputCodec();
-            byte[] clickPkt = inTx.BuildPacket(false, new BoBoInputPacket(), false, 0, 0,
+            byte[] relPlusClick = inTx.BuildPacket(false, new BoBoInputPacket(), true, 18, -12,
                 new BoBoInputPacket { Kind = 3, Flags = 1, A = 1, B = 0 });
-            byte[] movePlusPiggy = inTx.BuildPacket(true, new BoBoInputPacket { Kind = 1, Flags = 0, A = 1234, B = 5678 }, false, 0, 0, null);
-            // Simulate clickPkt LOST on Wi-Fi, then movePlusPiggy arrives TWICE -> click must execute ONCE!
-            List<BoBoInputPacket> first = inRx.ParseAndDeduplicate(movePlusPiggy);
-            List<BoBoInputPacket> second = inRx.ParseAndDeduplicate(movePlusPiggy);
-            bool inOk = first.Count == 2 && first[0].Kind == 1 && first[1].Kind == 3 && second.Count == 1 && second[0].Kind == 1;
-            Check("V6.3 UDP 输入冗余去重：丢包时附带恢复点击按键，重复包严格幂等不双触发",
+            byte[] redundantNoRel = inTx.BuildPacket(false, new BoBoInputPacket(), false, 0, 0, null);
+            List<BoBoInputPacket> rFirst = inRx.ParseAndDeduplicate(relPlusClick);
+            List<BoBoInputPacket> rSecond = inRx.ParseAndDeduplicate(redundantNoRel);
+            bool inOk = rFirst.Count == 2 && rFirst[0].Kind == 2 && rFirst[0].A == 18 && rFirst[1].Kind == 3 && rSecond.Count == 0;
+            Check("V6.3 UDP 输入冗余去重：离散按键幂等且冗余包不双倍放大相对鼠标位移",
                 inOk,
-                "first=" + first.Count + " second=" + second.Count);
+                "first=" + rFirst.Count + " second=" + rSecond.Count);
 
             // 4. Adaptive Bitrate Controller (WAN conservative start + congestion backoff + FPS step-down)
-            var abr = new BoBoAdaptiveBitrateController(true, 14000, 60, 45.0);
+            var abr = new BoBoAdaptiveBitrateController(true, 22000, 90, 45.0, false);
+            var highRtt = new BoBoAdaptiveBitrateController(true, 22000, 90, 85.0, false);
+            var lan = new BoBoAdaptiveBitrateController(true, 22000, 90, 4.0, true);
             int startBps = abr.CurrentBitrateKbps;
             int bps1, fps1;
             bool backedOff = abr.OnTelemetry(140.0, 5.5, out bps1, out fps1);
-            Check("V6.3 自研拥塞控制 ABR：跨网高 RTT 保守起流 + 丢包/膨胀毫秒级乘性降码率",
-                startBps <= 6000 && backedOff && bps1 < startBps,
-                "start=" + startBps + " -> afterCongestion=" + bps1 + "kbps/" + fps1 + "fps");
+            abr.UpdateTarget(true, 36000, 144);
+            bool retainedBackoff = abr.CurrentBitrateKbps == bps1 && abr.CurrentFps <= 60;
+            abr.UpdateTarget(false, 22000, 90);
+            bool manualTarget = abr.CurrentBitrateKbps == 22000 && abr.CurrentFps == 90;
+            abr.UpdateTarget(true, 22000, 90);
+            Check("自适应码率：跨网保守起流、拥塞回退与重新选档",
+                startBps == 4500 && backedOff && bps1 < startBps && retainedBackoff && manualTarget &&
+                abr.CurrentBitrateKbps <= 4500 && abr.CurrentFps <= 60 &&
+                highRtt.CurrentBitrateKbps == 2500 && highRtt.CurrentFps == 30 &&
+                lan.CurrentBitrateKbps == 22000 && lan.CurrentFps == 90,
+                "start=" + startBps + " backoff=" + bps1 + "kbps/" + fps1 + "fps");
+
+            Check("本地网段识别：私网与回环地址可用局域网档位，Tailscale 使用跨网档位",
+                BoBoProtocol.IsPrivateLanIp("192.168.1.20") && BoBoProtocol.IsPrivateLanIp("10.0.0.1") &&
+                BoBoProtocol.IsPrivateLanIp("::ffff:172.16.0.1") && BoBoProtocol.IsPrivateLanIp("127.0.0.1") &&
+                !BoBoProtocol.IsPrivateLanIp("100.64.0.12") && !BoBoProtocol.IsPrivateLanIp("203.0.113.1"), "");
+
+            // 5. V6 All-In-One Auto-Updater Light ZIP selection check
+            var fakeRel = AppUpdater.BuildReleaseFromTag("v6.9.0");
+            var fakeHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            fakeHashes[AppUpdater.LightUpdateAssetName] = new string('a', 64);
+            fakeHashes[AppUpdater.FullSetupAssetName] = new string('b', 64);
+            var updRes = new UpdateCheckResult();
+            AppUpdater.SelectBestPlan(fakeRel, AppUpdater.CurrentEnginesStamp, fakeHashes, AppUpdater.IsLocalAllInOneInstallIntact(), true, updRes);
+            Check("V6 自动更新轻量包选择：全内置架构无 engines 目录也能命中 LightZip",
+                updRes.PackageKind == UpdatePackageKind.LightZip,
+                "intact=" + AppUpdater.IsLocalAllInOneInstallIntact() + " kind=" + updRes.PackageKind);
         }
 
         private static byte[] SerializeSingleFrame(BoBoPacketType type, uint flagsOrTs, byte[] payload)

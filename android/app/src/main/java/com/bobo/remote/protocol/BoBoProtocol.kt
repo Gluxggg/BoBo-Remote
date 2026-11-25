@@ -1,5 +1,6 @@
 package com.bobo.remote.protocol
 
+import com.bobo.remote.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.EOFException
@@ -13,7 +14,8 @@ enum class BoBoPacketType(val code: Byte) {
     VIDEO_H264(0x02),
     AUDIO_ADPCM(0x03),
     INPUT_EVENT(0x04),
-    FILE_CHUNK(0x05);
+    FILE_CHUNK(0x05),
+    CURSOR_SHAPE(0x06);
 
     companion object {
         fun fromCode(code: Byte): BoBoPacketType? = values().firstOrNull { it.code == code }
@@ -34,7 +36,7 @@ data class BoBoDiscoveredPeer(
     val deviceName: String,
     val host: String,
     val port: Int = BoBoProtocol.DEFAULT_TCP_PORT,
-    val version: String = "6.2.3",
+    val version: String = BoBoProtocol.APP_VERSION,
     val platform: String = BoBoProtocol.PLATFORM_WINDOWS,
     val hostControlMode: String = BoBoProtocol.CONTROL_MODE_FULL,
     val allowIncoming: Boolean = true,
@@ -81,7 +83,7 @@ data class BoBoFileChunk(
 object BoBoProtocol {
     const val PROTOCOL_MAGIC = "BOBO6"
     const val PROTOCOL_VERSION = "6.2"
-    const val APP_VERSION = "6.2.3"
+    const val APP_VERSION = BuildConfig.VERSION_NAME
     const val TLS_SNI_HOST = "BoBoRemote-V6-Node"
 
     const val PLATFORM_WINDOWS = "windows"
@@ -95,8 +97,42 @@ object BoBoProtocol {
     const val DEFAULT_TCP_PORT = 49810
     const val DISCOVERY_UDP_PORT = 49812
     const val HEADER_BYTES = 9
+    const val MAX_PRE_AUTH_PAYLOAD_BYTES = 64 * 1024
     const val MAX_CONTROL_PAYLOAD_BYTES = 2 * 1024 * 1024
     const val MAX_VIDEO_PAYLOAD_BYTES = 16 * 1024 * 1024
+    const val MAX_FILE_CHUNK_PAYLOAD_BYTES = 512 * 1024
+    const val MAX_FILE_TRANSFER_BYTES = 2L * 1024L * 1024L * 1024L
+
+    private val WINDOWS_RESERVED_NAMES = setOf(
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    )
+
+    fun sanitizeFileName(rawName: String): String {
+        val normalized = rawName.replace('\\', '/')
+        val leaf = normalized.substringAfterLast('/')
+        val sb = StringBuilder(leaf.length)
+        for (c in leaf) {
+            if (c.code < 0x20 || c in ":*?\"<>|") continue
+            sb.append(c)
+        }
+        var cleaned = sb.toString().trim().trimEnd('.')
+        if (cleaned.length > 180) cleaned = cleaned.substring(0, 180).trim().trimEnd('.')
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return "received.bin"
+        val stem = cleaned.substringBeforeLast('.', cleaned).uppercase(java.util.Locale.US)
+        if (stem in WINDOWS_RESERVED_NAMES) cleaned = "_$cleaned"
+        return cleaned
+    }
+
+    fun isValidHexSha256(hex: String): Boolean {
+        if (hex.length != 64) return false
+        for (c in hex) {
+            val ok = (c in '0'..'9') || (c in 'a'..'f') || (c in 'A'..'F')
+            if (!ok) return false
+        }
+        return true
+    }
 
     const val INPUT_KIND_MOUSE_ABS = 1
     const val INPUT_KIND_MOUSE_REL = 2
@@ -134,14 +170,27 @@ object BoBoProtocol {
 
     @Throws(IOException::class)
     fun writeFrame(stream: OutputStream, type: BoBoPacketType, flagsOrTs: Long, payload: ByteArray) {
+        if (payload.isEmpty()) {
+            val header = ByteArray(HEADER_BYTES)
+            header[0] = type.code
+            writeInt32LE(header, 1, 0)
+            writeUInt32LE(header, 5, flagsOrTs)
+            stream.write(header)
+            stream.flush()
+            return
+        }
+        // Coalesce header + payload into a single TLS record write for small/medium frames (input, JSON, ADPCM)
+        if (payload.size <= 4096) {
+            stream.write(encodeFrame(type, flagsOrTs, payload))
+            stream.flush()
+            return
+        }
         val header = ByteArray(HEADER_BYTES)
         header[0] = type.code
         writeInt32LE(header, 1, payload.size)
         writeUInt32LE(header, 5, flagsOrTs)
         stream.write(header)
-        if (payload.isNotEmpty()) {
-            stream.write(payload)
-        }
+        stream.write(payload)
         stream.flush()
     }
 
@@ -152,14 +201,17 @@ object BoBoProtocol {
     }
 
     @Throws(IOException::class)
-    fun readFrame(stream: InputStream): BoBoFrame? {
+    fun readFrame(stream: InputStream, maxPayloadOverride: Int = 0): BoBoFrame? {
         val header = ByteArray(HEADER_BYTES)
         if (!readExact(stream, header, HEADER_BYTES)) return null
         val type = BoBoPacketType.fromCode(header[0])
             ?: throw IOException("Unknown BoBo6 frame type: ${header[0].toInt() and 0xFF}")
         val length = readInt32LE(header, 1)
         val flagsOrTs = readUInt32LE(header, 5)
-        val maxLen = if (type == BoBoPacketType.VIDEO_H264) MAX_VIDEO_PAYLOAD_BYTES else MAX_CONTROL_PAYLOAD_BYTES
+        var maxLen = if (type == BoBoPacketType.VIDEO_H264) MAX_VIDEO_PAYLOAD_BYTES else MAX_CONTROL_PAYLOAD_BYTES
+        if (maxPayloadOverride in 1 until maxLen) {
+            maxLen = maxPayloadOverride
+        }
         if (length < 0 || length > maxLen) {
             throw IOException("BoBo6 frame payload out of bounds: $length")
         }

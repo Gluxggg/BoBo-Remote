@@ -1,74 +1,46 @@
 # Contributing to BoBo Remote
 
-Thanks for taking a look. BoBo Remote (`Gluxggg/BoBo-Remote`) is a personal-scale remote desktop launcher and installer for
-Windows: it wraps four upstream engines (RustDesk, Moonlight V+, Moonlight, and bundled Foundation Sunshine) behind
-one small native launcher + graphical installer, and adds onboarding, privacy curtain protection, and built-in tuning/diagnostics.
+BoBo Remote V6 connects Windows, Android, macOS, and iOS apps over the BoBo6.2 protocol. The Windows WinForms app embeds the C++17 media and input core in `BoBo远程.exe`. The old Windows engine UI, launcher code, and embedded tuning scripts were removed from the V6 build. The Sunshine-specific scripts in `tools/` are historical references. [Protocol specification](protocol/BOBO6-SPEC.md) · [Third-party records](THIRD-PARTY.md)
 
-Issues and pull requests are welcome. Please read the two rules below first — they
-keep this project honest.
+## 1. Report what you measured
 
-## 1. Do not report a setting change as a performance result
+A PR that changes a tuning default must say whether the evidence is a configuration change, a session log, or a before-and-after measurement under the same conditions. Include the two endpoint platforms and app versions, network path, resolution, frame rate, and encoder when relevant.
 
-This project distinguishes three different things and never mixes them:
+## 2. Keep the Windows app small
 
-| 状态 | 含义 |
-| --- | --- |
-| 已写入的配置 | `sunshine.conf` 里确实存在的键值 |
-| 日志中观察到的现象 | 某次会话的日志行，属于历史证据 |
-| 双机同条件对照 | 同一网络、同一会话参数下的前后测量 |
+The Windows app uses C# 5, WinForms, and the in-box `csc.exe` against .NET Framework 4.8. Use the existing dependencies and compiler settings.
 
-A PR that changes a tuning default **must** say which of the three it is. "FEC 打开
-后就不丢帧了" is not acceptable; "已写入 `fec_percentage=20`，尚无同条件对照" is.
-
-## 2. Keep the launcher small
-
-The launcher is C# 5 compiled by the in-box `csc.exe` against .NET Framework 4.8.
-That is deliberate: the target machine should not need an SDK, a runtime download, or
-an installer. Please do not introduce NuGet packages, C# 6+ syntax, or a build system.
-
-- UI: WinForms, hand-drawn controls (`src/RemoteTheme.cs`)
-- Backend: `src/Backend/*.cs`, each file owns one concern
-- Everything the launcher needs from upstream engines goes through a fixed relative
-  path under `engines\`, and every launch is a separate process invocation
+- UI controls and styling live in `src/RemoteTheme.cs`.
+- `src/Backend/` contains the protocol, host, client, updater, and self-tests.
+- `native/bobo-core/` contains the embedded Windows media and input core.
 
 ## Ways to contribute
 
-### 上报引擎或平台差异
+For connection or rendering issues, include the OS and app versions for both endpoints, GPU and driver details where relevant, the Wi-Fi or wired network path, and the relevant logs or Windows `--self-test` output. When testing encrypted UDP+FEC, identify both Windows peers and the transport reported during the session.
 
-最有价值的贡献是把「上游引擎在你机器上的真实行为」写清楚：显卡与驱动版本、编码器
-（`h264_amf` / `hevc_amf` / `nvenc` / `quicksilver`）、被控端与主控端系统版本、是否
-经过 DERP 中继。请在 issue 里贴上 `--self-test` 输出和关键日志行。
-
-### 补充调优脚本的硬件分支
-
-`tools/Optimize-SunshineStream.ps1` 目前只对 AMD AMF 与「自动编码器」给出确定性建议，
-其它编码器只检查自动 FEC。若你能给出某类硬件的可验证依据，欢迎补充分支——但请保持
-「诊断 + 建议 + 可还原」的形态，不要默认静默改机器配置。
-
-### 改进文档
-
-`低延迟调优与防窥指南.md` 与 `UU远程功能核对.md` 里的每条结论都带来源分级。发现链接
-失效、结论过期或官方口径变化，直接提 PR。
+When updating protocol behavior, update the matching C#, Kotlin, and Swift checks and compare results against the shared vectors. [Golden vectors](protocol/golden-vectors.json)
 
 ## Development checks
 
-本地必须先过这两步，否则 PR 不会合并：
+Run the checks for the platforms you changed. Start the following commands at the repository root.
 
 ```powershell
-# 1. 快速编译 + 无 UI 自检（与 GitHub Actions CI 完全一致）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1
-
-# 2. 完整便携包构建（离线复用已校验缓存）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch
-
-# 3. 单独运行无 UI 自检（参数校验、CLI 拼装、壁纸几何、防窥锁屏状态机、新手引导布局、抗丢包诊断）
+.\ci\build.ps1
+.\build.ps1
 .\dist\BoBo远程-Windows-x64\BoBo远程.exe --self-test
 ```
 
-`--self-test` 在禁止 ICMP 的环境（沙箱、部分安全软件）会把两项回环回包校验标记为
-`[跳过]`，这是预期行为，不算失败。
+```bash
+(cd android && gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace)
+(cd apple/BoBoAppleCore && swift test)
+bash apple/scripts/package-macos-dmg.sh
+bash apple/scripts/package-ios-ipa.sh
+```
+
+Windows builds use MSVC Build Tools and the Windows SDK. Android requires JDK 17, Android SDK 34, and Gradle 8.7. Apple tests and packages require macOS with Xcode, and IPA packaging also requires XcodeGen.
+
+Local Windows verification with direct compiler invocations passed 10 native and 118 managed checks. The installer self-test exited with code 0. RemoteSigned blocked normal script execution in that environment. Apple SDK build, packaging, and device checks are pending. [Platform guide](docs/CROSS-PLATFORM-GUIDE.md) · [CI workflow](.github/workflows/ci.yml)
 
 ## Commit messages
 
-一句话说清「改了什么、为什么」，不要写「update」「fix bug」。涉及调优默认值的提交，
-请把测量范围和结论写进正文。
+一句话说清「改了什么、为什么」。涉及调优默认值的提交，请把测量范围和结论写进正文。

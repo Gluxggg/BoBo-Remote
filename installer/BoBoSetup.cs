@@ -388,7 +388,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "6.2.3";
+            return "6.3.0";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -463,7 +463,10 @@ namespace BoBoSetup
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)
             };
             foreach (string f in forbidden)
             {
@@ -535,102 +538,94 @@ namespace BoBoSetup
             StopRunningProcessesInDir(installDir);
 
             // V6 全内置架构升级：彻底移除旧版 V5 遗留的独立外置引擎目录与独立播放核
-            string backupRoot = Path.Combine(Path.GetTempPath(), "BoBoSetup-Preserve-" + Guid.NewGuid().ToString("N"));
             RemoveLegacyExternalEngines(installDir);
 
-            try
+            Directory.CreateDirectory(installDir);
+            Report(report, 20, "正在释放 BoBo V6 全内置核心程序…");
+
+            var installedRelPaths = new List<string>();
+            long totalExtractedBytes = 0;
+            using (var fs = new FileStream(selfExe, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sub = new BoundedSubStream(fs, trailer.PayloadOffset, trailer.PayloadLength))
+            using (var zip = new ZipArchive(sub, ZipArchiveMode.Read, true))
             {
-                Directory.CreateDirectory(installDir);
-                Report(report, 20, "正在释放 BoBo V6 全内置核心程序…");
-
-                long totalExtractedBytes = 0;
-                using (var fs = new FileStream(selfExe, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                using (var sub = new BoundedSubStream(fs, trailer.PayloadOffset, trailer.PayloadLength))
-                using (var zip = new ZipArchive(sub, ZipArchiveMode.Read, true))
+                int totalEntries = Math.Max(1, zip.Entries.Count);
+                int done = 0;
+                foreach (ZipArchiveEntry entry in zip.Entries)
                 {
-                    int totalEntries = Math.Max(1, zip.Entries.Count);
-                    int done = 0;
-                    foreach (ZipArchiveEntry entry in zip.Entries)
+                    done++;
+                    string rel = NormalizeZipEntryRelativePath(entry.FullName);
+                    if (string.IsNullOrEmpty(rel)) continue;
+
+                    bool isDir = entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\");
+                    string destPath;
+                    if (!TryResolveSafeExtractPath(installDir, rel.TrimEnd('\\'), out destPath))
+                        throw new InvalidOperationException("安装包内检测到非法路径：" + entry.FullName);
+
+                    if (isDir)
                     {
-                        done++;
-                        string rel = NormalizeZipEntryRelativePath(entry.FullName);
-                        if (string.IsNullOrEmpty(rel)) continue;
-
-                        bool isDir = entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\");
-                        string destPath;
-                        if (!TryResolveSafeExtractPath(installDir, rel.TrimEnd('\\'), out destPath))
-                            throw new InvalidOperationException("安装包内检测到非法路径：" + entry.FullName);
-
-                        if (isDir)
+                        Directory.CreateDirectory(destPath);
+                    }
+                    else
+                    {
+                        string parent = Path.GetDirectoryName(destPath);
+                        if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                        using (Stream src = entry.Open())
+                        using (var dst = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None))
                         {
-                            Directory.CreateDirectory(destPath);
+                            src.CopyTo(dst);
                         }
-                        else
-                        {
-                            string parent = Path.GetDirectoryName(destPath);
-                            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-                            using (Stream src = entry.Open())
-                            using (var dst = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                            {
-                                src.CopyTo(dst);
-                            }
-                            try { File.SetLastWriteTime(destPath, entry.LastWriteTime.DateTime); }
-                            catch { }
-                            totalExtractedBytes += entry.Length;
-                        }
+                        try { File.SetLastWriteTime(destPath, entry.LastWriteTime.DateTime); }
+                        catch { }
+                        installedRelPaths.Add(rel.TrimEnd('\\'));
+                        totalExtractedBytes += entry.Length;
+                    }
 
-                        if (done == 1 || done == totalEntries || (done % 18 == 0))
-                        {
-                            int pct = 20 + (done * 68) / totalEntries;
-                            string leaf = Path.GetFileName(rel.TrimEnd('\\'));
-                            Report(report, pct, "正在释放文件（" + done + "/" + totalEntries + "）：" + leaf);
-                        }
+                    if (done == 1 || done == totalEntries || (done % 18 == 0))
+                    {
+                        int pct = 20 + (done * 68) / totalEntries;
+                        string leaf = Path.GetFileName(rel.TrimEnd('\\'));
+                        Report(report, pct, "正在释放文件（" + done + "/" + totalEntries + "）：" + leaf);
                     }
                 }
-
-                Report(report, 90, "正在写入卸载程序…");
-                string uninstallExe = Path.Combine(installDir, UninstallExeName);
-                WriteStubExe(selfExe, trailer.PayloadOffset, uninstallExe);
-
-                string mainExe = Path.Combine(installDir, MainExeName);
-                if (!File.Exists(mainExe))
-                    throw new InvalidOperationException("安装目录未找到主程序：" + mainExe);
-
-                Report(report, 93, "正在创建快捷方式…");
-                if (options.CreateDesktopShortcut)
-                {
-                    string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                    CreateShortcut(Path.Combine(desktop, ShortcutFileName), mainExe, "", installDir, mainExe + ",0", "BoBo Remote · 低延迟远程桌面与高清串流");
-                }
-                if (options.CreateStartMenuShortcut)
-                {
-                    string startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppDisplayName);
-                    Directory.CreateDirectory(startMenu);
-                    CreateShortcut(Path.Combine(startMenu, ShortcutFileName), mainExe, "", installDir, mainExe + ",0", "BoBo Remote · 低延迟远程桌面与高清串流");
-                    CreateShortcut(Path.Combine(startMenu, "卸载 BoBo Remote.lnk"), uninstallExe, "--uninstall", installDir, mainExe + ",0", "卸载 BoBo Remote");
-                }
-
-                Report(report, 96, "正在注册 Windows 应用与卸载信息…");
-                RegisterUninstallEntry(installDir, mainExe, uninstallExe, version, totalExtractedBytes);
-                if (options.PreserveAutoStart)
-                {
-                    if (IsAutoStartEnabled()) SetAutoStart(mainExe, true);
-                }
-                else
-                {
-                    SetAutoStart(mainExe, options.AutoStart);
-                }
-
-                Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
             }
-            finally
+
+            Report(report, 90, "正在写入卸载程序…");
+            string uninstallExe = Path.Combine(installDir, UninstallExeName);
+            WriteStubExe(selfExe, trailer.PayloadOffset, uninstallExe);
+            installedRelPaths.Add(UninstallExeName);
+            WriteInstallManifest(installDir, installedRelPaths);
+
+            string mainExe = Path.Combine(installDir, MainExeName);
+            if (!File.Exists(mainExe))
+                throw new InvalidOperationException("安装目录未找到主程序：" + mainExe);
+
+            Report(report, 93, "正在创建快捷方式…");
+            if (options.CreateDesktopShortcut)
             {
-                try
-                {
-                    if (Directory.Exists(backupRoot)) Directory.Delete(backupRoot, true);
-                }
-                catch { }
+                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                CreateShortcut(Path.Combine(desktop, ShortcutFileName), mainExe, "", installDir, mainExe + ",0", "BoBo Remote · 低延迟远程桌面与高清串流");
             }
+            if (options.CreateStartMenuShortcut)
+            {
+                string startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppDisplayName);
+                Directory.CreateDirectory(startMenu);
+                CreateShortcut(Path.Combine(startMenu, ShortcutFileName), mainExe, "", installDir, mainExe + ",0", "BoBo Remote · 低延迟远程桌面与高清串流");
+                CreateShortcut(Path.Combine(startMenu, "卸载 BoBo Remote.lnk"), uninstallExe, "--uninstall", installDir, mainExe + ",0", "卸载 BoBo Remote");
+            }
+
+            Report(report, 96, "正在注册 Windows 应用与卸载信息…");
+            RegisterUninstallEntry(installDir, mainExe, uninstallExe, version, totalExtractedBytes);
+            if (options.PreserveAutoStart)
+            {
+                if (IsAutoStartEnabled()) SetAutoStart(mainExe, true);
+            }
+            else
+            {
+                SetAutoStart(mainExe, options.AutoStart);
+            }
+
+            Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
         }
 
         internal static void RunUninstall(string installDir, bool purgeUserData, bool scheduleSelfDelete, Action<int, string> report)
@@ -663,14 +658,14 @@ namespace BoBoSetup
             string selfExe = Path.GetFullPath(Assembly.GetExecutingAssembly().Location);
             if (Directory.Exists(fullDir))
             {
-                DeleteDirectoryContentsExcept(fullDir, selfExe);
+                DeleteOwnedBoBoFilesExcept(fullDir, selfExe);
                 if (!scheduleSelfDelete)
                 {
-                    TryDeleteDirectory(fullDir);
+                    TryDeleteDirectoryIfEmpty(fullDir);
                 }
                 else
                 {
-                    ScheduleDirectoryRemoval(fullDir);
+                    ScheduleSelfExeAndEmptyDirRemoval(selfExe, fullDir);
                 }
             }
 
@@ -865,31 +860,133 @@ namespace BoBoSetup
             }
         }
 
-        private static void DeleteDirectoryContentsExcept(string dir, string keepFileFullPath)
-        {
-            foreach (string file in Directory.GetFiles(dir))
-            {
-                if (string.Equals(Path.GetFullPath(file), keepFileFullPath, StringComparison.OrdinalIgnoreCase)) continue;
-                TryDeleteFile(file);
-            }
-            foreach (string sub in Directory.GetDirectories(dir))
-            {
-                TryDeleteDirectory(sub);
-            }
-        }
+        private const string InstallManifestFileName = ".bobo-install-manifest.txt";
 
-        private static void ScheduleDirectoryRemoval(string fullDir)
+        internal static void WriteInstallManifest(string installDir, List<string> relativePaths)
         {
             try
             {
-                string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-                var psi = new ProcessStartInfo(cmd, "/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"" + fullDir + "\"")
+                string manifestPath = Path.Combine(installDir, InstallManifestFileName);
+                var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var lines = new List<string>();
+                if (relativePaths != null)
+                {
+                    foreach (string raw in relativePaths)
+                    {
+                        if (string.IsNullOrWhiteSpace(raw)) continue;
+                        string clean = raw.Replace('/', '\\').TrimStart('\\');
+                        if (unique.Add(clean)) lines.Add(clean);
+                    }
+                }
+                File.WriteAllLines(manifestPath, lines.ToArray(), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        internal static void DeleteOwnedBoBoFilesExcept(string dir, string keepFileFullPath)
+        {
+            string normRoot = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+            string manifestPath = Path.Combine(dir, InstallManifestFileName);
+            bool usedManifest = false;
+
+            if (File.Exists(manifestPath))
+            {
+                try
+                {
+                    string[] relLines = File.ReadAllLines(manifestPath, Encoding.UTF8);
+                    usedManifest = true;
+                    foreach (string rel in relLines)
+                    {
+                        string dest;
+                        if (!TryResolveSafeExtractPath(dir, rel.Trim(), out dest)) continue;
+                        if (string.Equals(Path.GetFullPath(dest), keepFileFullPath, StringComparison.OrdinalIgnoreCase)) continue;
+                        TryDeleteFile(dest);
+                    }
+                    TryDeleteFile(manifestPath);
+                }
+                catch { usedManifest = false; }
+            }
+
+            if (!usedManifest)
+            {
+                // Legacy fallback (pre-manifest installs): remove ONLY known BoBo-owned files & subdirs, never user data!
+                string[] knownFiles = new[]
+                {
+                    MainExeName, UninstallExeName, "BoBoStreamPlayer.exe", "opus.dll",
+                    "README.md", "README.en.md", "LICENSE", "NOTICE", "NOTICE.md",
+                    "THIRD-PARTY.md", "低延迟调优与防窥指南.md"
+                };
+                foreach (string name in knownFiles)
+                {
+                    string p = Path.Combine(dir, name);
+                    if (string.Equals(Path.GetFullPath(p), keepFileFullPath, StringComparison.OrdinalIgnoreCase)) continue;
+                    TryDeleteFile(p);
+                }
+                string enginesSub = Path.Combine(dir, "engines");
+                if (Directory.Exists(enginesSub)) TryDeleteDirectory(enginesSub);
+            }
+
+            // Clean up any empty subdirectories created under installDir
+            try
+            {
+                string[] subDirs = Directory.GetDirectories(dir, "*", SearchOption.AllDirectories);
+                Array.Sort(subDirs, delegate(string a, string b) { return b.Length.CompareTo(a.Length); });
+                foreach (string sub in subDirs)
+                {
+                    if (!Path.GetFullPath(sub).StartsWith(normRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                    TryDeleteDirectoryIfEmpty(sub);
+                }
+            }
+            catch { }
+        }
+
+        internal static string BuildSafeSelfCleanupEncodedCommand(string selfExe, string fullDir)
+        {
+            // Base64 UTF-16LE PowerShell -EncodedCommand eliminates ALL cmd.exe metacharacter (&, %, ^, ") injection risks
+            // and removes ONLY selfExe + empty installDir (never recursively wiping unrelated sibling user files).
+            string escExe = (selfExe ?? "").Replace("'", "''");
+            string escDir = (fullDir ?? "").Replace("'", "''");
+            string script =
+                "Start-Sleep -Seconds 2; " +
+                "$e = '" + escExe + "'; " +
+                "$d = '" + escDir + "'; " +
+                "for ($i=0; $i -lt 10; $i++) { " +
+                "  if (Test-Path -LiteralPath $e) { try { Remove-Item -LiteralPath $e -Force -ErrorAction Stop } catch { Start-Sleep -Milliseconds 300; continue } } " +
+                "  break " +
+                "}; " +
+                "if (Test-Path -LiteralPath $d) { " +
+                "  $rem = @(Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue); " +
+                "  if ($rem.Count -eq 0) { try { [System.IO.Directory]::Delete($d, $false) } catch {} } " +
+                "}";
+            return Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        }
+
+        private static void ScheduleSelfExeAndEmptyDirRemoval(string selfExe, string fullDir)
+        {
+            try
+            {
+                string ps = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
+                string encoded = BuildSafeSelfCleanupEncodedCommand(selfExe, fullDir);
+                var psi = new ProcessStartInfo(ps, "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + encoded)
                 {
                     WindowStyle = ProcessWindowStyle.Hidden,
                     CreateNoWindow = true,
                     UseShellExecute = false
                 };
                 Process.Start(psi);
+            }
+            catch { }
+        }
+
+        private static void TryDeleteDirectoryIfEmpty(string path)
+        {
+            try
+            {
+                if (!Directory.Exists(path)) return;
+                if (Directory.GetFileSystemEntries(path).Length == 0)
+                {
+                    Directory.Delete(path, false);
+                }
             }
             catch { }
         }
@@ -1346,7 +1443,7 @@ namespace BoBoSetup
 
             var foot = new Label
             {
-                Text = "MIT 开源许可 · 内置 RustDesk 1.5.3 / Moonlight V+ 6.5.6 / Foundation Sunshine · 随时可在系统应用列表卸载",
+                Text = "MIT 开源许可 · V6 全内置零外挂原生内核（DXGI + D3D11VA + TLS 1.2 + UDP+FEC）· 随时可在系统应用列表卸载",
                 Font = new Font("Microsoft YaHei UI", 7.8f),
                 ForeColor = SetupPalette.Muted,
                 Bounds = new Rectangle(24, 348, 510, 22),
@@ -1761,6 +1858,27 @@ namespace BoBoSetup
                 Check("安装向导内嵌圆角方框奶牛猫 Logo 可加载",
                     logo != null && logo.Width >= 32 && logo.Height >= 32,
                     logo == null ? "null" : (logo.Width + "x" + logo.Height));
+            }
+
+            // 5. Manifest-based uninstall safety (preserves non-BoBo sibling user files & safe encoded self-delete)
+            string testDir = Path.Combine(Path.GetTempPath(), "BoBoSetup-SafeUninstall-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(testDir);
+                string boboFile = Path.Combine(testDir, InstallerEngine.MainExeName);
+                string userFile = Path.Combine(testDir, "user-important-notes.txt");
+                File.WriteAllText(boboFile, "bobo");
+                File.WriteAllText(userFile, "keep-me");
+                InstallerEngine.WriteInstallManifest(testDir, new List<string> { InstallerEngine.MainExeName });
+                InstallerEngine.DeleteOwnedBoBoFilesExcept(testDir, Path.Combine(testDir, InstallerEngine.UninstallExeName));
+                string encoded = InstallerEngine.BuildSafeSelfCleanupEncodedCommand(Path.Combine(testDir, "a & b.exe"), testDir);
+                Check("卸载清单安全校验（仅删 BoBo 自身文件、绝不误删同目录用户文件）",
+                    !File.Exists(boboFile) && File.Exists(userFile) && !string.IsNullOrEmpty(encoded),
+                    "boboDeleted=" + (!File.Exists(boboFile)) + " userKept=" + File.Exists(userFile));
+            }
+            finally
+            {
+                try { if (Directory.Exists(testDir)) Directory.Delete(testDir, true); } catch { }
             }
 
             Console.WriteLine("BoBoSetup self-test: 通过 " + passed + "，失败 " + failed);

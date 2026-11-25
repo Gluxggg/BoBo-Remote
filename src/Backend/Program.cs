@@ -118,6 +118,21 @@ namespace DualRemote
             AppUpdater.CleanupOldUpdateCacheAsync();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                EmergencyRestoreHardwareState();
+                try
+                {
+                    MessageBox.Show("程序发生未处理界面异常，已自动解除防窥锁与分辨率保护：\r\n" + (e.Exception != null ? e.Exception.Message : "未知错误"),
+                        "BoBo远程", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate
+            {
+                EmergencyRestoreHardwareState();
+            };
             try
             {
                 Application.Run(new MainForm(forceTour, updatedVersion));
@@ -125,17 +140,26 @@ namespace DualRemote
             }
             catch (Exception ex)
             {
+                EmergencyRestoreHardwareState();
                 MessageBox.Show("程序异常：" + ex.Message, "BoBo远程", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
             finally
             {
+                EmergencyRestoreHardwareState();
                 if (instanceMutex != null)
                 {
                     try { instanceMutex.ReleaseMutex(); } catch { }
                     try { instanceMutex.Dispose(); } catch { }
                 }
             }
+        }
+
+        private static void EmergencyRestoreHardwareState()
+        {
+            try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
+            try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
+            try { PrivacyDisplayDimmer.RestoreAllSync(); } catch { }
         }
     }
 }

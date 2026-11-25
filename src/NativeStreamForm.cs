@@ -1075,6 +1075,7 @@ namespace DualRemote
             closingIntentionally = true;
 
             // 若开启「远程结束后被控端自动锁屏」，在断开前直接通过 BoBo 协议通知被控端锁屏
+            // SendLockWorkstation() 与后续 Disconnect() 中的 DISCONNECT 严格按 FIFO 发送队列顺序刷出，无需在 UI 线程 Thread.Sleep 阻塞
             bool shouldLockRemote = cancelRemoteHost && lockHostOnDisconnect && remoteSessionConnected;
             if (shouldLockRemote)
             {
@@ -1084,7 +1085,6 @@ namespace DualRemote
                     if (sc != null && sc.IsConnected)
                     {
                         sc.SendLockWorkstation();
-                        Thread.Sleep(120);
                     }
                 }
                 catch { }

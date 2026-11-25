@@ -5,33 +5,35 @@ import SwiftUI
 @main
 struct BoBoRemoteMacApp: App {
     @StateObject private var runtime = MacAppRuntime()
-    @State private var activeStream: MacStreamSessionModel?
 
     var body: some Scene {
-        WindowGroup("BoBo远程 · macOS") {
-            if let streamModel = activeStream {
-                MacStreamView(model: streamModel) {
-                    activeStream = nil
-                }
-            } else {
-                MacMainView(runtime: runtime) { host, port, name, autoPrivacy in
-                    activeStream = MacStreamSessionModel(
-                        identity: runtime.identity,
-                        host: host,
-                        port: port,
-                        hostName: name,
-                        autoPrivacy: autoPrivacy
-                    )
-                }
-            }
-        }
-        .windowStyle(.titleBar)
+        WindowGroup("BoBo远程 · macOS") { MacRootView(runtime: runtime) }
+            .windowStyle(.titleBar)
     }
 }
 
+@MainActor
+private struct MacRootView: View {
+    @ObservedObject var runtime: MacAppRuntime
+    @State private var activeStream: MacStreamSessionModel?
+
+    var body: some View {
+        if let stream = activeStream {
+            MacStreamView(model: stream) { activeStream = nil }
+        } else {
+            MacMainView(runtime: runtime) { host, port, name, autoPrivacy, thumbprint in
+                activeStream = MacStreamSessionModel(identity: runtime.identity, host: host, port: port,
+                                                     hostName: name, autoPrivacy: autoPrivacy,
+                                                     expectedHostThumbprint: thumbprint)
+            }
+        }
+    }
+}
+
+@MainActor
 struct MacMainView: View {
     @ObservedObject var runtime: MacAppRuntime
-    let onLaunchStream: (String, Int, String, Bool) -> Void
+    let onLaunchStream: (String, Int, String, Bool, String) -> Void
 
     @State private var targetInput = ""
     @State private var autoPrivacy = true
@@ -42,8 +44,10 @@ struct MacMainView: View {
     @State private var pairTargetHost = ""
     @State private var pairTargetPort = BoBoProtocol.defaultTcpPort
     @State private var pairTargetName = ""
+    @State private var pairTargetThumbprint = ""
     @State private var pairPinInput = ""
     @State private var pairError = ""
+    @State private var pairing = false
 
     var body: some View {
         NavigationSplitView {
@@ -55,7 +59,7 @@ struct MacMainView: View {
                         .overlay(Text("B").font(.title3.bold()).foregroundColor(.white))
                     VStack(alignment: .leading, spacing: 2) {
                         Text("BoBo远程").font(.headline)
-                        Text("V6.2 · 四端互通").font(.caption).foregroundColor(.secondary)
+                        Text("V\(BoBoProtocol.appVersion) · 四端互通").font(.caption).foregroundColor(.secondary)
                     }
                 }
                 .padding(.bottom, 6)
@@ -132,7 +136,7 @@ struct MacMainView: View {
                     HStack {
                         Text("正在被「\(activePeer)」控制").font(.caption.bold()).foregroundColor(.red)
                         Spacer()
-                        Button("断开") { runtime.hostServer.disconnectAllStreams(reason: "Mac 主动断开") }
+                        Button("断开") { runtime.disconnectIncoming() }
                             .font(.caption).tint(.red)
                     }
                     .padding(10)
@@ -151,7 +155,7 @@ struct MacMainView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("连接远端设备（Windows / macOS / Android / iOS）").font(.headline)
                         HStack {
-                            TextField("输入局域网 IP、Tailscale IP 或 9 位 BoBo 设备码", text: $targetInput)
+                            TextField("输入 IP、主机名、地址:端口或 9 位设备码", text: $targetInput)
                                 .textFieldStyle(.roundedBorder)
                             Button(busy ? "探测中..." : "进入远程桌面") {
                                 connectTarget(targetInput, port: BoBoProtocol.defaultTcpPort, name: targetInput)
@@ -224,9 +228,10 @@ struct MacMainView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 Button("直连") {
-                                    connectTarget(peer.lastHost, port: BoBoProtocol.defaultTcpPort, name: peer.deviceName)
+                                    connectTarget(peer.lastHost, port: BoBoProtocol.defaultTcpPort, name: peer.deviceName, expectedPeer: peer)
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .disabled(busy)
                             }
                             .padding(12)
                             .background(Color(NSColor.controlBackgroundColor))
@@ -250,57 +255,81 @@ struct MacMainView: View {
                 }
                 HStack {
                     Button("取消") { showPairSheet = false }
-                    Button("配对并连接") { submitPair() }
+                        .disabled(pairing)
+                    Button(pairing ? "正在配对…" : "配对并连接") { submitPair() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(pairPinInput.count != 4)
+                        .disabled(pairing || !validPairPin)
                 }
             }
             .padding(24)
             .frame(width: 340)
+            .interactiveDismissDisabled(pairing)
         }
     }
 
-    private func connectTarget(_ raw: String, port: Int, name: String) {
-        let host = runtime.discovery.resolveHostByDeviceCode(raw)
-        guard !host.isEmpty else { return }
+    private func connectTarget(_ raw: String, port: Int, name: String, expectedPeer: BoBoAuthorizedPeer? = nil) {
+        guard !busy else { return }
+        let input = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code = BoBoIdentityStore.normalizeDeviceCode(input)
+        let isDeviceCode = code.count == 9 && input.utf8.allSatisfy { (48...57).contains($0) || $0 == 32 || $0 == 45 }
+        let savedPeer = expectedPeer ?? (isDeviceCode ? runtime.identity.findPeerByCodeOrHost(code) : nil)
+        let livePeer = runtime.discovery.getPeers().first { peer in
+            if let savedPeer { return peer.nodeId == savedPeer.nodeId }
+            return isDeviceCode && BoBoIdentityStore.normalizeDeviceCode(peer.deviceCode) == code
+        }
+        let endpoint = livePeer.map { (host: $0.host, port: $0.port) }
+            ?? BoBoProtocol.parseAddress(savedPeer?.lastHost ?? input, defaultPort: port)
+        guard let endpoint, !isDeviceCode || livePeer != nil || savedPeer != nil else {
+            statusNotice = isDeviceCode ? "未找到该设备码对应的在线设备或已保存地址" : "请输入有效的地址或地址:端口"
+            return
+        }
+
         busy = true
-        statusNotice = "正在探测 \(host)..."
+        statusNotice = "正在探测 \(endpoint.host)…"
         Task {
-            let probe = await BoBoStreamClient.probeHost(host: host, port: port, identity: runtime.identity)
+            let probe = await BoBoStreamClient.probeHost(host: endpoint.host, port: endpoint.port, identity: runtime.identity)
             busy = false
             if !probe.reachable || !probe.isBoBoHost {
                 statusNotice = probe.error.isEmpty ? "未检测到对方开启 BoBo远程" : probe.error
+            } else if let savedPeer, probe.hostThumbprint.caseInsensitiveCompare(savedPeer.certThumbprint) != .orderedSame {
+                statusNotice = "远端证书与保存的设备不匹配"
             } else if !probe.allowIncoming {
                 statusNotice = "对方已关闭「允许本机被控」"
             } else if !probe.authorized {
-                pairTargetHost = host
-                pairTargetPort = port
+                pairTargetHost = endpoint.host
+                pairTargetPort = endpoint.port
                 pairTargetName = probe.hostName.isEmpty ? name : probe.hostName
+                pairTargetThumbprint = probe.hostThumbprint
                 pairPinInput = ""
                 pairError = ""
                 statusNotice = ""
                 showPairSheet = true
             } else {
                 statusNotice = ""
-                onLaunchStream(host, port, probe.hostName.isEmpty ? name : probe.hostName, autoPrivacy)
+                onLaunchStream(endpoint.host, endpoint.port, probe.hostName.isEmpty ? name : probe.hostName,
+                               autoPrivacy, probe.hostThumbprint)
             }
         }
     }
 
+    private var validPairPin: Bool {
+        pairPinInput.utf8.count == 4 && pairPinInput.utf8.allSatisfy { (48...57).contains($0) }
+    }
+
     private func submitPair() {
+        guard validPairPin, !pairing else { return }
+        pairing = true
         pairError = ""
         Task {
-            let res = await BoBoStreamClient.pairWithPin(
-                host: pairTargetHost,
-                port: pairTargetPort,
-                pin: pairPinInput,
-                identity: runtime.identity
-            )
-            if res.ok {
+            let result = await BoBoStreamClient.pairWithPin(host: pairTargetHost, port: pairTargetPort, pin: pairPinInput,
+                                                           identity: runtime.identity, expectedHostThumbprint: pairTargetThumbprint)
+            pairing = false
+            if result.ok {
                 showPairSheet = false
-                onLaunchStream(pairTargetHost, pairTargetPort, res.hostName.isEmpty ? pairTargetName : res.hostName, autoPrivacy)
+                onLaunchStream(pairTargetHost, pairTargetPort, result.hostName.isEmpty ? pairTargetName : result.hostName,
+                               autoPrivacy, pairTargetThumbprint)
             } else {
-                pairError = res.error.isEmpty ? "配对失败" : res.error
+                pairError = result.error.isEmpty ? "配对失败" : result.error
             }
         }
     }

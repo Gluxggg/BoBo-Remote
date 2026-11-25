@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
@@ -32,18 +33,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.LaptopMac
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.PhoneIphone
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.ScreenShare
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -77,15 +66,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.bobo.remote.BuildConfig
+import com.bobo.remote.R
 import com.bobo.remote.input.BoBoAccessibilityService
 import com.bobo.remote.media.BoBoAppRuntime
 import com.bobo.remote.media.ScreenCaptureService
 import com.bobo.remote.network.BoBoStreamClient
+import com.bobo.remote.protocol.BoBoAuthorizedPeer
 import com.bobo.remote.protocol.BoBoDiscoveredPeer
 import com.bobo.remote.protocol.BoBoIdentityStore
 import com.bobo.remote.protocol.BoBoLocalPairSession
@@ -94,6 +86,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.URI
 
 class MainActivity : ComponentActivity() {
 
@@ -106,8 +99,9 @@ class MainActivity : ComponentActivity() {
                 putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
             }
-            ContextCompat.startForegroundService(this, svc)
-            Toast.makeText(this, "已开启 Android 屏幕被控就绪", Toast.LENGTH_SHORT).show()
+            runCatching { ContextCompat.startForegroundService(this, svc) }.onFailure {
+                Toast.makeText(this, "无法开启 Android 屏幕共享", Toast.LENGTH_SHORT).show()
+            }
         } else {
             Toast.makeText(this, "未授予录屏权限，暂无法被远控查看屏幕", Toast.LENGTH_SHORT).show()
         }
@@ -116,6 +110,10 @@ class MainActivity : ComponentActivity() {
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
+
+    private val playbackPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { launchProjectionConsent() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -140,10 +138,12 @@ class MainActivity : ComponentActivity() {
                         cm.setPrimaryClip(ClipData.newPlainText(label, value))
                         Toast.makeText(this, "已复制 $label", Toast.LENGTH_SHORT).show()
                     },
-                    onLaunchStream = { host, port, name, privacy ->
+                    onLaunchStream = { target, name, privacy ->
                         val intent = Intent(this, StreamActivity::class.java).apply {
-                            putExtra(StreamActivity.EXTRA_HOST, host)
-                            putExtra(StreamActivity.EXTRA_PORT, port)
+                            putExtra(StreamActivity.EXTRA_HOST, target.host)
+                            putExtra(StreamActivity.EXTRA_PORT, target.port)
+                            putExtra(StreamActivity.EXTRA_NODE_ID, target.nodeId)
+                            putExtra(StreamActivity.EXTRA_THUMBPRINT, target.thumbprint)
                             putExtra(StreamActivity.EXTRA_NAME, name)
                             putExtra(StreamActivity.EXTRA_PRIVACY, privacy)
                         }
@@ -154,17 +154,81 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        BoBoAppRuntime.refreshAuthorizedPeers()
+        BoBoAppRuntime.discovery.sendProbeNow()
+    }
+
     private fun requestScreenProjection() {
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projectionLauncher.launch(mpm.createScreenCaptureIntent())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            playbackPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            launchProjectionConsent()
+        }
+    }
+
+    private fun launchProjectionConsent() {
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val consent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            manager.createScreenCaptureIntent()
+        }
+        projectionLauncher.launch(consent)
     }
 
     private fun stopScreenProjection() {
-        startService(Intent(this, ScreenCaptureService::class.java).apply {
-            action = ScreenCaptureService.ACTION_STOP
-        })
-        BoBoAppRuntime.hostServer.disconnectAllStreams("手机已主动停止被控")
+        stopService(Intent(this, ScreenCaptureService::class.java))
     }
+}
+
+private data class RemoteTarget(
+    val host: String,
+    val port: Int = BoBoProtocol.DEFAULT_TCP_PORT,
+    val name: String = "",
+    val nodeId: String = "",
+    val thumbprint: String = ""
+) {
+    val address: String get() = if (':' in host) "[$host]:$port" else "$host:$port"
+}
+
+private fun BoBoDiscoveredPeer.toTarget() = RemoteTarget(host, port, deviceName, nodeId)
+
+private val deviceCodePattern = Regex("[0-9]{3}[- ]?[0-9]{3}[- ]?[0-9]{3}")
+private val hostnamePattern = Regex("[a-zA-Z0-9_.-]+")
+private val bracketedAddress = Regex("\\[([^\\]]+)](?::([0-9]+))?")
+
+private fun parseAddress(input: String): RemoteTarget? {
+    if (input.isEmpty() || input.any { it.isWhitespace() }) return null
+    val bracketed = bracketedAddress.matchEntire(input)
+    val colons = input.count { it == ':' }
+    val host = when {
+        bracketed != null -> bracketed.groupValues[1]
+        colons == 1 -> input.substringBefore(':')
+        else -> input
+    }
+    val portText = when {
+        bracketed != null -> bracketed.groups[2]?.value
+        colons == 1 -> input.substringAfter(':')
+        else -> null
+    }
+    val port = if (portText == null) BoBoProtocol.DEFAULT_TCP_PORT else portText.toIntOrNull() ?: return null
+    val validHost = if (':' in host) {
+        runCatching { URI("tcp://[$host]").host != null }.getOrDefault(false)
+    } else {
+        bracketed == null && hostnamePattern.matches(host)
+    }
+    return RemoteTarget(host, port).takeIf { validHost && port in 1..65535 }
+}
+
+private fun BoBoAuthorizedPeer.toTarget(discovered: List<BoBoDiscoveredPeer>): RemoteTarget? {
+    discovered.firstOrNull { it.nodeId.equals(nodeId, ignoreCase = true) }?.let {
+        return it.toTarget().copy(thumbprint = certThumbprint)
+    }
+    return parseAddress(lastHost)?.copy(name = deviceName, nodeId = nodeId, thumbprint = certThumbprint)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -174,10 +238,11 @@ private fun BoBoHomeScreen(
     onStopProjection: () -> Unit,
     onOpenAccessibility: () -> Unit,
     onCopyText: (String, String) -> Unit,
-    onLaunchStream: (host: String, port: Int, name: String, autoPrivacy: Boolean) -> Unit
+    onLaunchStream: (target: RemoteTarget, name: String, autoPrivacy: Boolean) -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val lanPeers by BoBoAppRuntime.lanPeers.collectAsState()
+    val authorizedPeers by BoBoAppRuntime.authorizedPeers.collectAsState()
     val activePeer by BoBoAppRuntime.activeSessionPeer.collectAsState()
     val projectionGranted by BoBoAppRuntime.projectionGranted.collectAsState()
     val scope = rememberCoroutineScope()
@@ -188,7 +253,7 @@ private fun BoBoHomeScreen(
     var statusNotice by remember { mutableStateOf("") }
 
     // Pairing dialog state
-    var pendingPairHost by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var pendingPairHost by remember { mutableStateOf<RemoteTarget?>(null) }
     var pendingPairName by remember { mutableStateOf("") }
     var pinInput by remember { mutableStateOf("") }
     var pairError by remember { mutableStateOf("") }
@@ -208,39 +273,57 @@ private fun BoBoHomeScreen(
         }
     }
 
-    fun startConnectFlow(rawTarget: String, port: Int = BoBoProtocol.DEFAULT_TCP_PORT, displayName: String = "") {
-        val resolved = BoBoAppRuntime.discovery.resolveHostByDeviceCode(rawTarget)
-        if (resolved.isBlank()) {
-            statusNotice = "请输入对方 IP（局域网/Tailscale）或 9 位 BoBo 设备码"
+    fun startConnectFlow(target: RemoteTarget?) {
+        if (connecting || pairingBusy || pendingPairHost != null) return
+        if (target == null) {
+            statusNotice = "请输入有效的主机地址、端口或在线设备码"
             return
         }
         connecting = true
-        statusNotice = "正在探测 $resolved ..."
+        statusNotice = "正在探测 ${target.address} ..."
         scope.launch {
             val probe = withContext(Dispatchers.IO) {
-                BoBoStreamClient.probeHost(resolved, port, BoBoAppRuntime.identity, 5000)
+                BoBoStreamClient.probeHost(target.host, target.port, BoBoAppRuntime.identity, 5000)
             }
             connecting = false
+            val name = probe.hostName.ifBlank { target.name.ifBlank { target.host } }
+            val resolved = target.copy(nodeId = probe.hostNodeId, thumbprint = probe.hostThumbprint)
             when {
                 !probe.reachable || !probe.isBoBoHost -> {
                     statusNotice = probe.error.ifBlank { "未检测到对方开启 BoBo远程" }
                 }
+                (target.nodeId.isNotBlank() && !target.nodeId.equals(probe.hostNodeId, ignoreCase = true)) ||
+                    (target.thumbprint.isNotBlank() && !target.thumbprint.equals(probe.hostThumbprint, ignoreCase = true)) -> {
+                    statusNotice = "此地址返回的设备身份与所选设备不符"
+                }
                 !probe.allowIncoming -> {
-                    statusNotice = "对方已关闭「允许本机被控」"
+                    statusNotice = "对方暂未开启屏幕共享或被控权限"
                 }
                 !probe.authorized -> {
-                    pendingPairHost = Pair(resolved, port)
-                    pendingPairName = probe.hostName.ifBlank { displayName.ifBlank { resolved } }
+                    pendingPairHost = resolved
+                    pendingPairName = name
                     pinInput = ""
                     pairError = ""
-                    statusNotice = "首次连接 ${pendingPairName}，请输入对方 4 位临时配对码"
+                    statusNotice = "首次连接 $name，请输入对方 4 位临时配对码"
                 }
                 else -> {
                     statusNotice = ""
-                    onLaunchStream(resolved, port, probe.hostName.ifBlank { displayName.ifBlank { resolved } }, autoPrivacy)
+                    onLaunchStream(resolved, name, autoPrivacy)
                 }
             }
         }
+    }
+
+    fun connectManual() {
+        val input = targetInput.trim()
+        if (!deviceCodePattern.matches(input)) {
+            startConnectFlow(parseAddress(input))
+            return
+        }
+        val code = BoBoIdentityStore.normalizeDeviceCode(input)
+        val saved = authorizedPeers.firstOrNull { BoBoIdentityStore.normalizeDeviceCode(it.deviceCode) == code }
+        val live = lanPeers.firstOrNull { BoBoIdentityStore.normalizeDeviceCode(it.deviceCode) == code }
+        startConnectFlow(if (saved != null) saved.toTarget(lanPeers) else live?.toTarget())
     }
 
     Scaffold(
@@ -260,13 +343,13 @@ private fun BoBoHomeScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text("BoBo远程", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = BoBoInkDark)
-                            Text("V6.2 四端互通 · Win / Mac / Android / iOS", fontSize = 11.sp, color = BoBoInkMuted)
+                            Text("v${BuildConfig.VERSION_NAME} · Win / Mac / Android / iOS", fontSize = 11.sp, color = BoBoInkMuted)
                         }
                     }
                 },
                 actions = {
                     IconButton(onClick = { BoBoAppRuntime.discovery.sendProbeNow() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新局域网设备", tint = BoBoBlue)
+                        Icon(painterResource(R.drawable.ic_bobo_refresh), contentDescription = "刷新局域网设备", tint = BoBoBlue)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BoBoSurfaceBg)
@@ -277,19 +360,19 @@ private fun BoBoHomeScreen(
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.Devices, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_bobo_devices), contentDescription = null) },
                     label = { Text("远程控制") }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.ScreenShare, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_bobo_share_screen), contentDescription = null) },
                     label = { Text("本机被控") }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_bobo_settings), contentDescription = null) },
                     label = { Text("设置") }
                 )
             }
@@ -311,8 +394,9 @@ private fun BoBoHomeScreen(
                     connecting = connecting,
                     statusNotice = statusNotice,
                     lanPeers = lanPeers,
-                    authorizedPeers = BoBoAppRuntime.identity.listAuthorizedPeers(),
-                    onConnect = { h, p, n -> startConnectFlow(h, p, n) }
+                    authorizedPeers = authorizedPeers,
+                    onConnect = ::startConnectFlow,
+                    onConnectManual = ::connectManual
                 )
                 1 -> LocalHostTab(
                     deviceCode = BoBoAppRuntime.identity.formattedDeviceCode,
@@ -333,8 +417,9 @@ private fun BoBoHomeScreen(
                 )
                 2 -> SettingsTab(
                     identity = BoBoAppRuntime.identity,
+                    peers = authorizedPeers,
                     allowIncoming = BoBoAppRuntime.hostServer.allowIncomingControl,
-                    onAllowIncomingChange = { BoBoAppRuntime.hostServer.allowIncomingControl = it }
+                    onAllowIncomingChange = { allowed -> scope.launch(Dispatchers.IO) { BoBoAppRuntime.setAllowIncoming(allowed) } }
                 )
             }
         }
@@ -376,16 +461,20 @@ private fun BoBoHomeScreen(
                         scope.launch {
                             val (ok, hostName, err) = withContext(Dispatchers.IO) {
                                 BoBoStreamClient.pairWithPin(
-                                    pairTarget.first,
-                                    pairTarget.second,
+                                    pairTarget.host,
+                                    pairTarget.port,
                                     pinInput,
-                                    BoBoAppRuntime.identity
+                                    BoBoAppRuntime.identity,
+                                    expectedHostThumbprint = pairTarget.thumbprint,
+                                    expectedHostNodeId = pairTarget.nodeId
                                 )
                             }
                             pairingBusy = false
                             if (ok) {
                                 pendingPairHost = null
-                                onLaunchStream(pairTarget.first, pairTarget.second, hostName.ifBlank { pendingPairName }, autoPrivacy)
+                                BoBoAppRuntime.refreshAuthorizedPeers()
+                                statusNotice = ""
+                                onLaunchStream(pairTarget, hostName.ifBlank { pendingPairName }, autoPrivacy)
                             } else {
                                 pairError = err.ifBlank { "配对码校验失败" }
                             }
@@ -413,8 +502,9 @@ private fun RemoteControlTab(
     connecting: Boolean,
     statusNotice: String,
     lanPeers: List<BoBoDiscoveredPeer>,
-    authorizedPeers: List<com.bobo.remote.protocol.BoBoAuthorizedPeer>,
-    onConnect: (host: String, port: Int, name: String) -> Unit
+    authorizedPeers: List<BoBoAuthorizedPeer>,
+    onConnect: (RemoteTarget?) -> Unit,
+    onConnectManual: () -> Unit
 ) {
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -429,12 +519,12 @@ private fun RemoteControlTab(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("快速连接远端设备", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = BoBoInkDark)
                     Spacer(Modifier.height(4.dp))
-                    Text("支持局域网 IP、Tailscale 虚拟 IP（100.x）或 9 位 BoBo 设备码", fontSize = 12.sp, color = BoBoInkMuted)
+                    Text("支持 IP、主机名、IP:端口或 9 位 BoBo 设备码", fontSize = 12.sp, color = BoBoInkMuted)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = targetInput,
                         onValueChange = onTargetChange,
-                        placeholder = { Text("例如 192.168.1.10 / 100.x.y.z / 9位设备码") },
+                        placeholder = { Text("例如 192.168.1.10:49810") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -445,7 +535,7 @@ private fun RemoteControlTab(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Shield, contentDescription = null, tint = BoBoBlue, modifier = Modifier.size(18.dp))
+                            Icon(painterResource(R.drawable.ic_bobo_shield), contentDescription = null, tint = BoBoBlue, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("连接瞬间开启电脑防窥屏", fontSize = 13.sp, color = BoBoInkDark)
                         }
@@ -453,7 +543,7 @@ private fun RemoteControlTab(
                     }
                     Spacer(Modifier.height(10.dp))
                     Button(
-                        onClick = { onConnect(targetInput, BoBoProtocol.DEFAULT_TCP_PORT, targetInput) },
+                        onClick = onConnectManual,
                         enabled = !connecting && targetInput.isNotBlank(),
                         modifier = Modifier.fillMaxWidth().height(46.dp),
                         shape = RoundedCornerShape(12.dp)
@@ -462,7 +552,7 @@ private fun RemoteControlTab(
                             CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                         }
-                        Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(painterResource(R.drawable.ic_bobo_link), contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (connecting) "正在握手探测..." else "进入远程桌面", fontWeight = FontWeight.Bold)
                     }
@@ -506,7 +596,7 @@ private fun RemoteControlTab(
                     platform = peer.platform,
                     badge = if (!peer.allowIncoming) "已关被控" else if (peer.hostControlMode == BoBoProtocol.CONTROL_MODE_VIEW_ONLY) "仅观看" else "在线直连",
                     badgeColor = if (!peer.allowIncoming) BoBoInkMuted else BoBoSuccess,
-                    onClick = { onConnect(peer.host, peer.port, peer.deviceName) }
+                    onClick = { onConnect(peer.toTarget()) }
                 )
             }
         }
@@ -528,7 +618,7 @@ private fun RemoteControlTab(
                     platform = BoBoProtocol.PLATFORM_WINDOWS,
                     badge = "免码直连",
                     badgeColor = BoBoBlue,
-                    onClick = { onConnect(peer.lastHost, BoBoProtocol.DEFAULT_TCP_PORT, peer.deviceName) }
+                    onClick = { onConnect(peer.toTarget(lanPeers)) }
                 )
             }
         }
@@ -576,7 +666,7 @@ private fun LocalHostTab(
                             letterSpacing = 1.sp
                         )
                         IconButton(onClick = onCopyCode) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = Color.White)
+                            Icon(painterResource(R.drawable.ic_bobo_copy), contentDescription = "复制", tint = Color.White)
                         }
                     }
                     Spacer(Modifier.height(10.dp))
@@ -648,7 +738,7 @@ private fun LocalHostTab(
                             Text("1. 屏幕画面授权（MediaProjection）", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             Text(
                                 if (projectionGranted) "已就绪 · 远端连接后自动开始低延迟 H.264 推流"
-                                else "授权后允许已配对电脑/手机查看本机屏幕",
+                                else "授权后可共享屏幕。录音权限用于共享支持的应用声音。",
                                 fontSize = 12.sp,
                                 color = if (projectionGranted) BoBoSuccess else BoBoInkMuted
                             )
@@ -687,11 +777,11 @@ private fun LocalHostTab(
 @Composable
 private fun SettingsTab(
     identity: BoBoIdentityStore,
+    peers: List<BoBoAuthorizedPeer>,
     allowIncoming: Boolean,
     onAllowIncomingChange: (Boolean) -> Unit
 ) {
     var allowState by remember { mutableStateOf(allowIncoming) }
-    var peers by remember { mutableStateOf(identity.listAuthorizedPeers()) }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
@@ -733,7 +823,7 @@ private fun SettingsTab(
                     }
                     TextButton(onClick = {
                         identity.removeAuthorizedPeer(p.certThumbprint)
-                        peers = identity.listAuthorizedPeers()
+                        BoBoAppRuntime.refreshAuthorizedPeers()
                     }) {
                         Text("移除", color = BoBoDanger)
                     }
@@ -768,7 +858,7 @@ private fun PeerCard(
                     .background(Color(0xFFEFF6FF)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(platformIcon(platform), contentDescription = null, tint = BoBoBlue)
+                Icon(painterResource(platformIcon(platform)), contentDescription = null, tint = BoBoBlue)
             }
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -787,11 +877,11 @@ private fun PeerCard(
     }
 }
 
-private fun platformIcon(platform: String): ImageVector = when (platform.lowercase()) {
-    BoBoProtocol.PLATFORM_MACOS -> Icons.Default.LaptopMac
-    BoBoProtocol.PLATFORM_ANDROID -> Icons.Default.PhoneAndroid
-    BoBoProtocol.PLATFORM_IOS -> Icons.Default.PhoneIphone
-    else -> Icons.Default.Computer
+private fun platformIcon(platform: String): Int = when (platform.lowercase()) {
+    BoBoProtocol.PLATFORM_MACOS -> R.drawable.ic_bobo_computer
+    BoBoProtocol.PLATFORM_ANDROID -> R.drawable.ic_bobo_phone
+    BoBoProtocol.PLATFORM_IOS -> R.drawable.ic_bobo_phone
+    else -> R.drawable.ic_bobo_computer
 }
 
 private fun platformLabel(platform: String): String = when (platform.lowercase()) {

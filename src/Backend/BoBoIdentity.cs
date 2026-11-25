@@ -30,6 +30,8 @@ namespace DualRemote
     internal sealed class BoBoIdentityStore
     {
         private const string PfxPassword = "bobo-v6-identity-key";
+        private static readonly byte[] DpapiMagic = Encoding.ASCII.GetBytes("BDP1");
+        private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("BoBoRemote-V6-NodePfx-v1");
         private static readonly object DefaultGate = new object();
         private static BoBoIdentityStore defaultInstance;
 
@@ -96,6 +98,76 @@ namespace DualRemote
             get { EnsureLoaded(); return certThumbprint; }
         }
 
+        internal string CertDerBase64
+        {
+            get
+            {
+                EnsureLoaded();
+                return nodeCert != null ? Convert.ToBase64String(nodeCert.RawData) : "";
+            }
+        }
+
+        internal string SignAuthChallenge(string nonceHex, string hostThumbprint)
+        {
+            EnsureLoaded();
+            if (nodeCert == null) return "";
+            byte[] msg = BuildAuthChallengeBytes(nonceHex, certThumbprint, hostThumbprint);
+            using (RSA rsa = nodeCert.GetRSAPrivateKey())
+            {
+                if (rsa == null) return "";
+                byte[] sig = rsa.SignData(msg, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                return Convert.ToBase64String(sig);
+            }
+        }
+
+        internal static bool VerifyAuthChallenge(
+            string clientCertDerBase64,
+            string expectedClientThumbprint,
+            string nonceHex,
+            string hostThumbprint,
+            string signatureBase64)
+        {
+            if (string.IsNullOrWhiteSpace(clientCertDerBase64) ||
+                string.IsNullOrWhiteSpace(expectedClientThumbprint) ||
+                string.IsNullOrWhiteSpace(nonceHex) ||
+                string.IsNullOrWhiteSpace(hostThumbprint) ||
+                string.IsNullOrWhiteSpace(signatureBase64))
+            {
+                return false;
+            }
+            try
+            {
+                byte[] der = Convert.FromBase64String(clientCertDerBase64.Trim());
+                if (der.Length < 128 || der.Length > 16384) return false;
+                string actualThumb = ComputeCertSha256Hex(der);
+                if (!FixedTimeEqualsHex(actualThumb, expectedClientThumbprint.Trim())) return false;
+
+                byte[] sig = Convert.FromBase64String(signatureBase64.Trim());
+                if (sig.Length < 64 || sig.Length > 1024) return false;
+
+                byte[] msg = BuildAuthChallengeBytes(nonceHex, actualThumb, hostThumbprint);
+                using (var cert = new X509Certificate2(der))
+                using (RSA rsa = cert.GetRSAPublicKey())
+                {
+                    if (rsa == null) return false;
+                    return rsa.VerifyData(msg, sig, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static byte[] BuildAuthChallengeBytes(string nonceHex, string clientThumbprint, string hostThumbprint)
+        {
+            string canonical = "BOBO6-AUTH:" +
+                (nonceHex ?? "").Trim().ToLowerInvariant() + "|" +
+                (clientThumbprint ?? "").Trim().ToLowerInvariant() + "|" +
+                (hostThumbprint ?? "").Trim().ToLowerInvariant();
+            return Encoding.UTF8.GetBytes(canonical);
+        }
+
         internal static string FormatDeviceCode(string code)
         {
             string digits = NormalizeDeviceCode(code);
@@ -135,18 +207,25 @@ namespace DualRemote
                 X509Certificate2 cert = null;
                 if (File.Exists(pfxPath))
                 {
-                    try
+                    byte[] raw = File.ReadAllBytes(pfxPath);
+                    bool wasDpapi;
+                    byte[] pfxBytes = UnprotectPfxBytes(raw, out wasDpapi);
+                    cert = LoadPfxForSchannel(pfxBytes);
+                    if (!cert.HasPrivateKey)
                     {
-                        byte[] raw = File.ReadAllBytes(pfxPath);
-                        cert = LoadPfxForSchannel(raw);
+                        cert.Dispose();
+                        throw new CryptographicException("BoBo 本机证书缺少私钥。");
                     }
-                    catch
+                    if (!wasDpapi)
                     {
-                        cert = null;
+                        // Retain the existing identity if storage is temporarily unavailable.
+                        try { WriteProtectedPfxFile(pfxPath, pfxBytes); }
+                        catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                        catch (CryptographicException) { }
                     }
                 }
-
-                if (cert == null || !cert.HasPrivateKey)
+                else
                 {
                     cert = CreateAndSaveSelfSignedCert(pfxPath);
                 }
@@ -211,10 +290,44 @@ namespace DualRemote
                 using (X509Certificate2 created = req.CreateSelfSigned(now.AddDays(-1), now.AddYears(20)))
                 {
                     byte[] pfxBytes = created.Export(X509ContentType.Pfx, PfxPassword);
-                    File.WriteAllBytes(pfxPath, pfxBytes);
+                    WriteProtectedPfxFile(pfxPath, pfxBytes);
                     return LoadPfxForSchannel(pfxBytes);
                 }
             }
+        }
+
+        private static void WriteProtectedPfxFile(string pfxPath, byte[] pfxBytes)
+        {
+            byte[] encrypted = ProtectedData.Protect(pfxBytes, DpapiEntropy, DataProtectionScope.CurrentUser);
+            byte[] payload = new byte[DpapiMagic.Length + encrypted.Length];
+            Buffer.BlockCopy(DpapiMagic, 0, payload, 0, DpapiMagic.Length);
+            Buffer.BlockCopy(encrypted, 0, payload, DpapiMagic.Length, encrypted.Length);
+            string tmp = pfxPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(tmp, payload);
+                if (File.Exists(pfxPath)) File.Replace(tmp, pfxPath, null);
+                else File.Move(tmp, pfxPath);
+            }
+            finally
+            {
+                try { File.Delete(tmp); } catch { }
+            }
+        }
+
+        private static byte[] UnprotectPfxBytes(byte[] raw, out bool wasDpapi)
+        {
+            wasDpapi = false;
+            if (raw != null && raw.Length > DpapiMagic.Length &&
+                raw[0] == DpapiMagic[0] && raw[1] == DpapiMagic[1] &&
+                raw[2] == DpapiMagic[2] && raw[3] == DpapiMagic[3])
+            {
+                wasDpapi = true;
+                byte[] cipher = new byte[raw.Length - DpapiMagic.Length];
+                Buffer.BlockCopy(raw, DpapiMagic.Length, cipher, 0, cipher.Length);
+                return ProtectedData.Unprotect(cipher, DpapiEntropy, DataProtectionScope.CurrentUser);
+            }
+            return raw;
         }
 
         private static X509Certificate2 LoadPfxForSchannel(byte[] pfxBytes)
@@ -319,6 +432,21 @@ namespace DualRemote
             catch { }
         }
 
+        internal BoBoAuthorizedPeer FindPeerByNodeId(string peerNodeId)
+        {
+            if (string.IsNullOrWhiteSpace(peerNodeId)) return null;
+            EnsureLoaded();
+            lock (gate)
+            {
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    if (string.Equals(peers[i].NodeId, peerNodeId, StringComparison.OrdinalIgnoreCase))
+                        return peers[i];
+                }
+                return null;
+            }
+        }
+
         internal bool IsPeerAuthorized(string peerNodeId, string peerCertThumbprint)
         {
             if (string.IsNullOrWhiteSpace(peerNodeId) || string.IsNullOrWhiteSpace(peerCertThumbprint)) return false;
@@ -337,9 +465,9 @@ namespace DualRemote
             }
         }
 
-        internal void AuthorizeOrUpdatePeer(BoBoAuthorizedPeer peer)
+        internal bool AuthorizeOrUpdatePeer(BoBoAuthorizedPeer peer)
         {
-            if (peer == null || string.IsNullOrWhiteSpace(peer.NodeId) || string.IsNullOrWhiteSpace(peer.CertThumbprint)) return;
+            if (peer == null || string.IsNullOrWhiteSpace(peer.NodeId) || !BoBoProtocol.IsValidHexSha256(peer.CertThumbprint)) return false;
             EnsureLoaded();
             lock (gate)
             {
@@ -350,12 +478,13 @@ namespace DualRemote
                     if (string.Equals(peers[i].NodeId, peer.NodeId, StringComparison.OrdinalIgnoreCase))
                     {
                         existing = peers[i];
+                        if (!FixedTimeEqualsHex(existing.CertThumbprint, peer.CertThumbprint)) return false;
                         break;
                     }
+                    if (FixedTimeEqualsHex(peers[i].CertThumbprint, peer.CertThumbprint)) return false;
                 }
                 if (existing != null)
                 {
-                    existing.CertThumbprint = peer.CertThumbprint;
                     if (!string.IsNullOrWhiteSpace(peer.DeviceCode)) existing.DeviceCode = peer.DeviceCode;
                     if (!string.IsNullOrWhiteSpace(peer.DeviceName)) existing.DeviceName = peer.DeviceName;
                     if (!string.IsNullOrWhiteSpace(peer.LastHost)) existing.LastHost = peer.LastHost;
@@ -375,6 +504,7 @@ namespace DualRemote
                     });
                 }
                 SavePeersUnlocked();
+                return true;
             }
         }
 

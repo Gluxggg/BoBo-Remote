@@ -132,12 +132,41 @@ final class BoBoGoldenVectorsTests: XCTestCase {
 
         let hostId = BoBoIdentityStore(storageDir: tmpRoot.appendingPathComponent("host"), defaultDeviceName: "TestMacHost")
         let clientId = BoBoIdentityStore(storageDir: tmpRoot.appendingPathComponent("client"), defaultDeviceName: "TestAppleClient")
+        defer {
+            hostId.removeKeychainIdentity()
+            clientId.removeKeychainIdentity()
+        }
         hostId.ensureLoaded()
         clientId.ensureLoaded()
 
         XCTAssertEqual(hostId.certThumbprint.count, 64)
         XCTAssertEqual(hostId.deviceCode.count, 9)
         XCTAssertNotNil(SecCertificateCreateWithData(nil, hostId.certificateDer as CFData))
+
+        // Verify P0-3 RSA challenge proof-of-possession
+        let testNonce = BoBoIdentityStore.generateNonceHex(byteCount: 16)
+        let goodSig = clientId.signAuthChallenge(nonceHex: testNonce, hostThumbprint: hostId.certThumbprint)
+        XCTAssertFalse(goodSig.isEmpty)
+        XCTAssertTrue(BoBoIdentityStore.verifyAuthChallenge(
+            clientCertDerBase64: clientId.certificateDerBase64,
+            expectedClientThumbprint: clientId.certThumbprint,
+            nonceHex: testNonce,
+            hostThumbprint: hostId.certThumbprint,
+            signatureBase64: goodSig
+        ))
+        XCTAssertFalse(BoBoIdentityStore.verifyAuthChallenge(
+            clientCertDerBase64: clientId.certificateDerBase64,
+            expectedClientThumbprint: clientId.certThumbprint,
+            nonceHex: "00000000000000000000000000000000",
+            hostThumbprint: hostId.certThumbprint,
+            signatureBase64: goodSig
+        ))
+
+        // Verify P0-6 cross-OS filename sanitization
+        XCTAssertEqual(BoBoProtocol.sanitizeFileName("..\\..\\evil.exe"), "evil.exe")
+        XCTAssertEqual(BoBoProtocol.sanitizeFileName("../a/b/report.pdf"), "report.pdf")
+        XCTAssertEqual(BoBoProtocol.sanitizeFileName(".."), "received.bin")
+        XCTAssertEqual(BoBoProtocol.sanitizeFileName("a:b*c?.txt"), "a_b_c_.txt")
 
         // Verify PKCS#12 -> SecIdentity + real NWListener TLS 1.2 <-> NWConnection loopback!
         let server = BoBoHostServer(
@@ -155,6 +184,18 @@ final class BoBoGoldenVectorsTests: XCTestCase {
         XCTAssertFalse(probe1.authorized)
         XCTAssertEqual(probe1.platform, BoBoProtocol.currentPlatform)
 
+        // Verify P0-4 5-attempt PIN brute-force lockout
+        let lockSess = server.beginPairing(ttlSeconds: 120)
+        let wrongPin = lockSess.pin == "0000" ? "9999" : "0000"
+        for _ in 0..<BoBoLocalPairSession.maxFailedAttempts {
+            let badRes = await BoBoStreamClient.pairWithPin(host: "127.0.0.1", port: boundPort, pin: wrongPin, identity: clientId)
+            XCTAssertFalse(badRes.ok)
+        }
+        // Session must be invalidated after 5 failures even if the real PIN is supplied next
+        let postLockRes = await BoBoStreamClient.pairWithPin(host: "127.0.0.1", port: boundPort, pin: lockSess.pin, identity: clientId)
+        XCTAssertFalse(postLockRes.ok)
+
+        // Fresh pairing session should succeed with RSA proof + PIN HMAC
         let pairSess = server.beginPairing(ttlSeconds: 120)
         let pairRes = await BoBoStreamClient.pairWithPin(host: "127.0.0.1", port: boundPort, pin: pairSess.pin, identity: clientId)
         XCTAssertTrue(pairRes.ok, "Pair failed: \(pairRes.error)")

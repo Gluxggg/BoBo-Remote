@@ -66,7 +66,7 @@ private:
     bool ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t width, uint32_t height,
                             uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice,
                             bool& outD3D11Bound, std::string& outError);
-    void ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps, bool allowVbr);
+    void ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps);
     bool EncodeSampleInternal(IMFSample* inSample, bool forceKeyframe,
                               std::vector<uint8_t>& outAnnexB, bool& outIsKeyframe, std::string& outError);
     void StartAsyncEventPump();

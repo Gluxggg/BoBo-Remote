@@ -23,11 +23,11 @@
 
 ---
 
-**一套自研原生协议，全平台全内置单文件，四端开箱即用。**
+**四端原生应用使用统一协议，Windows 主程序采用单文件封装。**
 
 **BoBo Remote V6.2** 已全面重构为**零外置第三方内核**的全内置原生远控系统：不再依赖或打包外部 Sunshine / Moonlight / RustDesk 独立程序，由统一的 [**BoBo6.2 权威二进制协议**](protocol/BOBO6-SPEC.md)（`TCP+TLS 1.2 :49810` / 局域网 `UDP :49812`）贯通 **Windows、Android、macOS 与 iOS / iPadOS** 四大平台。
 
-Windows 安装包仅 **~930 KB**（单文件主程序内嵌压缩 C++17 原生媒体内核 `BoBoCore.dll`），无需注册厂商账号、无需自建中转服务器——局域网自动发现直连，跨外网搭配 Tailscale 等组网工具即可端到端 TLS 1.2 加密直连。
+Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll`。设备可在局域网内自动发现并建立 TLS 连接，也可通过 Tailscale 等组网工具跨网连接。
 
 ---
 
@@ -41,10 +41,10 @@ Windows 安装包仅 **~930 KB**（单文件主程序内嵌压缩 C++17 原生�
 
 | 平台 | 系统要求 | Release 安装包 | 主控（控制他人） | 被控（被他人控制） | 平台核心能力 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~933 KB)<br>`BoBoRemote-Portable-x64.zip` (~646 KB) | ✅ **全功能**<br>含 Android 手机导航栏、iOS 投屏观看 | ✅ **全功能**<br>DXGI/GDI + Media Foundation H.264 硬编 + WASAPI 音频 | 进程内单文件、超级屏无黑边自适应、框内原生小指针、物理键鼠锁真防窥、客户端内一键自动更新 |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~10.2 MB) | ✅ **全功能**<br>MediaCodec 零拷贝硬解 + 48kHz 立体声 | ✅ **免 Root 全功能**<br>MediaProjection 录屏 + 无障碍服务触控 | 触控板鼠标 / 直点触控双模式、贴边悬浮球、控制中心、快捷 PC 键盘栏、蓝牙键盘映射 Windows VK、系统导航键控制 |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~830 KB) | ✅ **全功能**<br>`AVSampleBufferDisplayLayer` 零拷贝渲染 | ✅ **全功能**<br>`ScreenCaptureKit` 含免驱动系统音频 + VideoToolbox 硬编 | 超级屏自适应、`⌘ → Ctrl` 智能键位映射、防窥窗口自动从录屏排除 + `CGEventTap` 物理键鼠锁 |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~655 KB) | ✅ **全功能**<br>60/120Hz VideoToolbox 硬解 + 触控板/直点 | 👁️ **ReplayKit 投屏被看协助**<br>（Apple 沙盒限制禁止全局触控注入） | 内嵌 ReplayKit 广播扩展、免付费 App Group 回环桥接，支持 Sideloadly / AltStore / SideStore / Xcode 免费自签 |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`<br>`BoBoRemote-Portable-x64.zip` | ✅ **全功能**<br>含 Android 手机导航栏、iOS 投屏观看 | ✅ **全功能**<br>DXGI/GDI + Media Foundation H.264 硬编 + WASAPI 音频 | 进程内单文件、超级屏无黑边自适应、框内原生小指针、物理键鼠锁真防窥、客户端内一键自动更新 |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` | ✅ **全功能**<br>MediaCodec 零拷贝硬解 + 48kHz 立体声 | ✅ **免 Root 全功能**<br>MediaProjection 录屏 + 无障碍服务触控 | 触控板鼠标 / 直点触控双模式、贴边悬浮球、控制中心、快捷 PC 键盘栏、蓝牙键盘映射 Windows VK、系统导航键控制 |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg`（Universal 2） | ✅ **全功能**<br>`AVSampleBufferDisplayLayer` 零拷贝渲染 | ✅ **全功能**<br>`ScreenCaptureKit` 含免驱动系统音频 + VideoToolbox 硬编 | 超级屏自适应、`⌘ → Ctrl` 智能键位映射、防窥窗口自动从录屏排除 + `CGEventTap` 物理键鼠锁 |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` | **前台主控**<br>VideoToolbox 硬解 + 触控板/直点 | 👁️ **ReplayKit 仅观看投屏** | 内嵌 ReplayKit 广播扩展与本机回环桥接，支持 Sideloadly / AltStore / SideStore / Xcode 签装 |
 
 > 完整四端安装、权限配置与跨网联调步骤请参阅 [**四端互通安装与联调指南 (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md)。
 
@@ -54,8 +54,7 @@ Windows 安装包仅 **~930 KB**（单文件主程序内嵌压缩 C++17 原生�
 | --- | --- |
 | 强制注册云端账号，设备列表与信令托管第三方服务器 | **零账号、零中转、零遥测** — 局域网自动发现直连，跨网通过 Tailscale (`100.x.y.z`) / IPv6 端到端直连 |
 | 高帧率、高清画质、防窥模式、跨端控制常设会员档位 | **MIT 全量开源、全功能无限制** — 原生硬编硬解、超级屏、真防窥、文件传输、四端互通开箱全解锁 |
-| 常驻后台系统服务、虚拟驱动，关闭界面后仍可能被唤醒 | **严格双端在线显式授权** — 仅当两端均运行 BoBo Remote 且经 4 位临时配对码双向认证后可连，退出软件端口立停 |
-| 多套开源工具（RustDesk + Moonlight + Sunshine）分散臃肿 | **全内置单文件架构** — Windows 端从过去 100+ MB 外置引擎合集精简为 ~930 KB 单文件安装包，四端共用同一协议 |
+| 常驻后台系统服务、虚拟驱动，关闭界面后仍可能被唤醒 | **显式配对与设备认证**。首次连接使用 4 位临时配对码，重连时验证已信任的证书与 RSA 签名 |
 | 被控防窥仅做表面遮罩，机前仍可误点任务栏或键盘打字 | **物理级防窥保护** — `WDA_EXCLUDEFROMCAPTURE` 录屏排除幕布 + 原生低级钩子物理键鼠锁 + 可选安全背光降亮 |
 
 ## 系统架构与统一协议（BoBo6.2）
@@ -70,11 +69,11 @@ flowchart LR
     IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
   end
 
-  subgraph PROTO["BoBo6.2 权威二进制协议（三语言 Golden Vectors 字节级验证）"]
+  subgraph PROTO["BoBo6.2 二进制协议（C# / Kotlin / Swift 共享测试向量）"]
     direction TB
     DISC["UDP 49812 · 局域网自动发现（PROBE / HELLO / BYE）"]
     TLS["TCP 49810 · 强制 TLS 1.2+（RSA-2048 证书指纹绑定）"]
-    AUTH["4 位临时配对码（120s 单次 · HMAC-SHA256 双向认证）"]
+    AUTH["RSA 挑战签名与 4 位临时配对码"]
     FRAMES["5 类二进制帧：ControlJson · H.264 · 48kHz IMA-ADPCM · Input(含触控/导航) · FileChunk"]
     DISC --> TLS --> AUTH --> FRAMES
   end
@@ -89,12 +88,13 @@ flowchart LR
 ```
 
 - **统一线协议规范**：[`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) 定义帧封装（9 字节 Little-Endian 帧头）、9 位设备码派生算法、4 位临时配对码 `HMAC-SHA256` 校验、H.264 Annex-B 视频帧、48kHz 立体声 IMA-ADPCM 音频帧、键鼠/多指触控/移动导航输入事件与分块文件传输。
-- **三语言字节级一致性**：[`protocol/golden-vectors.json`](protocol/golden-vectors.json) 作为唯一基准向量，C#（Windows）、Kotlin（Android）与 Swift（Apple）三端在 GitHub Actions CI 中强制执行一致性测试与 TLS 1.2 回环测试。
+- C#、Kotlin 和 Swift 使用同一份 Golden Vectors，CI 配置了协议一致性与 TLS 回环测试。 [共享测试向量](protocol/golden-vectors.json)
+- 两台 Windows 设备可协商加密 UDP+FEC。跨平台会话使用 TCP+TLS，局域网发现使用 UDP 49812。
 
 ## 核心亮点
 
-### 1. 进程内全一体化内核，极致轻量（Windows 安装包 ~930 KB）
-- **自研 C++17 `BoBoCore.dll` 直接 GZip 压缩内嵌**于 `BoBo远程.exe` 资源段，运行时在进程内透明加载，不再弹出任何第三方 Moonlight / RustDesk 窗口，不再释放独立可运行的 Sunshine 服务。
+### 1. Windows 进程内媒体与输入内核
+- 自研 C++17 `BoBoCore.dll` 以 GZip 压缩形式内嵌于 `BoBo远程.exe`，运行时在进程内加载。
 - 采集与渲染全链路硬加速：**DXGI Desktop Duplication**（含无头/异常自动 GDI 回退）→ **Media Foundation 硬件 H.264 编码** → **D3D11 + DXGI 1.2 Flip-Model 零拷贝渲染** → **WASAPI Loopback 48kHz 音频采集**。
 
 ### 2. 超级屏无黑边自适应 & 框内原生光标体验
@@ -112,12 +112,13 @@ flowchart LR
 ### 4. 真·物理级被控防窥保护（Windows & macOS）
 - **连入瞬间自动防窥**：开启后被控瞬间即拉起全屏防窥幕布（Windows 基于 `WDA_EXCLUDEFROMCAPTURE`，macOS 基于 ScreenCaptureKit 窗口排除），远端控制画面清晰无干扰，机前物理屏仅显示自定义防窥壁纸或纯黑/深空/极简霜白主题。
 - **物理键鼠彻底锁定（默认开启）**：Windows 通过 `BoBoCore.dll` 原生 `WH_MOUSE_LL` + `WH_KEYBOARD_LL` 钩子、macOS 通过 `CGEventTap` 彻底拦截机前实体键鼠操作（防止他人点击任务栏、开始菜单或干扰打字），仅放行远控签名注入事件与紧急退出组合键。
-- **可选 DDC/CI 安全背光降亮（默认关闭）**：基于 `dxva2.dll`，严格仅调节非 HDR 物理显示器背光亮度（VCP `0x10`），**绝不修改对比度、色温或 RGB 增益**；原始亮度持久化落盘，退出/锁屏/重启时经写回+回读校验 100% 精准还原。
+- **可选 DDC/CI 安全背光降亮（默认关闭）**：基于 `dxva2.dll`，严格仅调节非 HDR 物理显示器背光亮度（VCP `0x10`），**绝不修改对比度、色温或 RGB 增益**；原始亮度持久化保存，恢复时写回并回读校验。
 - **锁屏状态机守护**：支持退出防窥自动锁屏，Windows 解锁返回桌面后具备防抖抑制窗口，避免误重拉起。
 
 ### 5. 严格双端显式认证 & 内置文件传输
-- 每台设备开机自动生成本地 RSA-2048 密钥与 9 位设备码；首次连接必须在被控端点击生成 **4 位临时配对码**（120 秒有效、单次消费），通过 `HMAC-SHA256` 完成双向证书指纹绑定后才加入本机信任列表。
-- 内置端到端 `FileChunk` 文件传输通道（带 SHA-256 完整性校验），无需额外工具即可跨端互传文件。
+- 四端的新版配对要求主控和被控均已升级。主控从 TLS 握手读取并固定被控端 RSA-2048 证书的 SHA-256 指纹，被控端验证主控端的 RSA 签名。证书指纹变更会拒绝重连。
+- 首次配对还需校验 4 位临时配对码。配对码有效 120 秒，成功后即失效，累计失败 5 次也会失效。
+- 内置分块文件传输支持单文件最大 2 GiB，接收方校验 SHA-256 后确认文件。
 
 ## 界面预览
 
@@ -148,22 +149,20 @@ flowchart LR
 3. **免 Root 被控**：切至「本机被控」页，依次授予 **屏幕录制** 权限并在系统设置开启 **BoBo远程 免Root触控辅助服务**。
 
 ### macOS（13.0+）
-1. 下载 **`BoBoRemote-macOS.dmg`**，将 `BoBoRemote.app` 拖入 `Applications`。
-2. 首次打开若提示未验证开发者，可在 **系统设置 → 隐私与安全性** 点击「仍要打开」，或终端执行 `xattr -cr /Applications/BoBoRemote.app`。
-3. 如需作为被控端，在应用内按引导开启 **屏幕录制与系统音频录制** 与 **辅助功能** 权限。
+1. 打开 **`BoBoRemote-macOS.dmg`**（Universal 2，支持 Apple 芯片和 Intel），将 `BoBoRemote.app` 拖入 `Applications`。
+2. 如需作为被控端，按系统提示开启 **屏幕录制与系统音频录制** 与 **辅助功能** 权限。
 
 ### iOS / iPadOS（16.0+）
 1. 下载 **`BoBoRemote-iOS-Unsigned.ipa`**（已内嵌主 App 与 ReplayKit 投屏扩展）。
 2. 使用 [Sideloadly](https://sideloadly.io/)、[AltStore](https://altstore.io/)、[SideStore](https://sidestore.io/) 或 Xcode 免费自签安装至 iPhone / iPad，并在 **设置 → 通用 → VPN 与设备管理** 信任开发者证书、允许「本地网络」权限。
-3. 若需将 iOS 屏幕共享给电脑查看，切至「投屏被看」页启动系统录屏广播 **BoBo投屏扩展** 即可。
+3. 主控与观看需要 BoBo远程 处于前台。若需共享本机画面，在「投屏被看」启动 **BoBo投屏扩展**，由另一端配对观看。
 
 ### 首次连接（四端通用 3 步）
 1. **建立网络连通**：两端处于同一局域网（自动发现），或在跨外网场景下两端登录同一 [Tailscale](https://tailscale.com/) 账号获取 `100.x.y.z` 直连地址。
 2. **生成临时配对码**：在**被控端**打开 BoBo Remote，点击生成 **4 位临时配对码**（120 秒有效）。
-3. **输入配对直连**：在**主控端**选择已发现设备（或输入对方 IP / 9 位设备码），输入 4 位配对码完成首次认证，后续免码一键直连。
+3. **输入配对码。** 在主控端选择已发现设备或输入对方 IP。首次配对后可使用已保存的证书信任重连。
 
-> [!TIP]
-> - **Windows SmartScreen / 防火墙**：个人开源发行包未购买商业 EV 代码签名，首次运行如提示 SmartScreen 点击「更多信息 → 仍要运行」（可先对照 Release 页 `SHA256SUMS.txt` 核验）；首次作为被控端开启局域网监听时，请在 Windows 防火墙弹窗点击「允许访问」。
+下载后可使用发布页的 `SHA256SUMS.txt` 核对安装包。作为 Windows 被控端，按防火墙提示授权所用网络上的入站连接。
 
 ## 常用快捷键
 
@@ -182,28 +181,30 @@ flowchart LR
 
 ## 从源码构建与四端自检
 
-所有平台的 CI 构建命令与本地完全一致（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：
+从仓库根目录运行对应平台的命令。 [CI 工作流](.github/workflows/ci.yml)
 
 ```powershell
-# 1. Windows x64（需 MSVC Build Tools + Win10/11 SDK + 系统自带 .NET 4.8 csc.exe，无需 .NET SDK / NuGet）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # 编译 BoBoCore.dll + BoBoRemote.exe 并运行全量自检（含 V6.2 Golden Vectors）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1          # 产出 Setup EXE、便携 ZIP 与轻量更新包到 dist\
+# Windows x64（MSVC Build Tools、Windows SDK 与 .NET Framework csc.exe）
+.\ci\build.ps1
+.\build.ps1
 ```
 
 ```bash
-# 2. Android APK（需 JDK 17 + Android SDK + Gradle 8.7）
-cd android
-gradle :app:testDebugUnitTest --stacktrace   # 运行 BoBo6.2 Golden Vectors + TLS 1.2 配对与文件传输回环单测
-gradle :app:assembleRelease --stacktrace     # 产出 Release APK
+# Android APK（JDK 17、Android SDK 34、Gradle 8.7）
+(cd android && gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace)
 
-# 3. Apple 共享核 + macOS DMG（需 macOS 13+ 与 Xcode 命令行工具）
-cd apple/BoBoAppleCore && swift test -v      # 运行 Golden Vectors + 纯 Swift RSA-2048/PKCS#12 + NWListener TLS 1.2 回环测试
-bash apple/scripts/package-macos-dmg.sh      # 产出 dist-apple/BoBoRemote-macOS.dmg
+# Apple 共享核与 macOS Universal 2 DMG（macOS、Xcode）
+(cd apple/BoBoAppleCore && swift test -v)
+bash apple/scripts/package-macos-dmg.sh
 
-# 4. iOS / iPadOS Unsigned IPA（需 macOS + Xcode + XcodeGen）
-brew install xcodegen
-bash apple/scripts/package-ios-ipa.sh        # 产出 dist-apple/BoBoRemote-iOS-Unsigned.ipa
+# iOS / iPadOS 未签 IPA（macOS、Xcode、XcodeGen）
+if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
+bash apple/scripts/package-ios-ipa.sh
 ```
+
+Windows 本次本地验证直接调用了编译器，原生自检 10/10、托管自检 118 项通过，安装器自检退出码为 0。该环境的 RemoteSigned 阻止了正常脚本执行。Apple SDK 测试、Universal 2 打包与真机联调待验证。
+
+发版工作流从同一个已存在的 `vMAJOR.MINOR.PATCH` 标签构建四端。四端完成后，工作流核验草稿中的六个安装产物和 `SHA256SUMS.txt`，随后发布。 [Release 工作流](.github/workflows/release.yml)
 
 ## 项目结构
 
@@ -254,7 +255,7 @@ BoBo-Remote/
 │   └── CROSS-PLATFORM-GUIDE.md            # 四端安装、权限与跨网联调指南
 ├── ci/
 │   ├── build.ps1                          # Windows CI 编译 + Native/Managed/Setup 三重自检
-│   └── release-package.ps1                # GitHub Release 打包与 SHA256SUMS 生成
+│   └── release-package.ps1                # Windows 发布包构建与自检
 ├── build.ps1                              # Windows 单文件全内置一键打包脚本
 └── .github/workflows/                     # ci.yml & release.yml（四端并行构建与自动发版）
 ```
@@ -267,7 +268,7 @@ BoBo-Remote/
 - **双端均须主动运行与显式配对**：被控端关闭软件即立刻停止 `49810` 端口监听并释放所有系统钩子；无任何隐藏后台常驻服务。
 - **DDC/CI 显示器安全边界**：硬件调暗功能默认关闭，开启后严格只读写非 HDR 显示器的背光亮度（VCP `0x10`），严禁写入对比度与 RGB 增益，并通过持久化恢复文件在异常退出后自动还原。
 - **平台系统限制说明**：
-  - **iOS / iPadOS 被控端**：受 Apple 系统沙盒限制，仅支持 ReplayKit 画面投屏被看协助（`view_only`），无法向系统注入全局触控事件；但作为主控端控制 Windows / macOS / Android 为全功能体验。
+  - **iOS / iPadOS** 主控与观看依赖前台运行。被控端通过 ReplayKit 提供仅观看投屏（`view_only`）。扩展等待主 App 确认上一帧再继续发送，主 App 进入后台时桥接暂停，返回前台后恢复。
   - **Windows / macOS 防窥效果**：Windows 依赖 `WDA_EXCLUDEFROMCAPTURE`，macOS 依赖 ScreenCaptureKit 窗口排除，高帧率（90/144 fps）需被控端刷新率、硬件编码器与客户端解码能力同时满足。
   - **未购买商业代码签名**：开源个人发行包在 Windows（SmartScreen）、macOS（Gatekeeper）与 iOS（未签 IPA）首次安装时需按系统指引信任或自签。
 
@@ -303,7 +304,7 @@ BoBo-Remote/
 
 本项目 V6.x 四端全量源码（`src/`、`native/bobo-core/`、`installer/`、`android/`、`apple/`、`protocol/`、`tools/`、`ci/`、`build.ps1` 与文档）均基于 [**MIT License**](LICENSE) 开源，V6.x 官方 Release 构建产物**不包含任何外置第三方二进制引擎**。
 
-仓库内保留的历史 V5 参考代码（`native/bobo-stream-player/` 及其依赖 `native/third_party/moonlight-common-c/`，GPL-3.0）与早期版本第三方组件记录（[THIRD-PARTY.md](THIRD-PARTY.md)、[NOTICE.md](NOTICE.md)、`LICENSES/`）不参与 V6.x 发布构建，仅供历史归档与参考。本项目与网易 UU 远程等商业产品无任何官方关联。
+历史档案保留 V5 播放器与 GPL-3.0 的 `moonlight-common-c`，以及早期 Windows 发行包的第三方许可、校验值和 Sunshine 工具脚本。当前 Windows 应用已移除旧引擎界面、调用代码和相关脚本资源。 [第三方记录](THIRD-PARTY.md) · [NOTICE](NOTICE.md) · [V5 计划归档](docs/V5-NATIVE-STREAM-PLAN.md)
 
 ---
 

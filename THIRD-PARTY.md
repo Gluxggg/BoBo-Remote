@@ -1,6 +1,12 @@
 # 第三方组件、版本、许可与源码获取
 
-本包实际分发的第三方二进制有四套：RustDesk（AGPL-3.0）、官方 Moonlight（GPL-3.0）、可选的 Moonlight V+（GPL-3.0）和内置 Foundation Sunshine 宿主（GPL-3.0）。本项目没有修改它们的源码；启动器以独立进程方式调用它们。
+## 当前 V6 构建
+
+V6 Windows 包由项目的 WinForms 主程序、内嵌 `BoBoCore.dll` 和安装器组成，使用 Windows 系统 API 与 .NET Framework 4.8。旧引擎界面、调用代码和工具脚本资源已从 V6 Windows 应用中移除。仓库仍保存历史 Sunshine 工具、V5 播放器参考源码和 `moonlight-common-c` 许可。Android 的构建依赖列在 Gradle 配置中，Apple 应用使用系统 SDK 和本仓库 Swift 包。 [NOTICE](NOTICE.md) · [Android 依赖](android/app/build.gradle.kts) · [V5 计划归档](docs/V5-NATIVE-STREAM-PLAN.md) · [moonlight-common-c 许可](native/third_party/moonlight-common-c/LICENSE.txt)
+
+## 历史 Windows 引擎归档
+
+以下 §§1–9 的成包布局、构建步骤、签名状态、来源和校验值均记录早期 Windows 发行包。其中曾以独立进程方式分发 RustDesk（AGPL-3.0）、官方 Moonlight（GPL-3.0）、可选 Moonlight V+（GPL-3.0）和 Foundation Sunshine 宿主（GPL-3.0）。源码、许可和校验记录供核对这些历史发行包时使用。
 
 - RustDesk：AGPL-3.0。用官方 MSI **仅提取文件**得到原版布局，放在 `engines\RustDesk\`（不安装产品、不注册服务）
 - Moonlight：GPL-3.0，官方 Windows 便携 zip 原样展开到 `engines\Moonlight\`（含 Qt、FFmpeg 等第三方库；Windows 二进制保留官方签名）
@@ -9,7 +15,7 @@
 - 启动器 `双端远程.exe`：本项目自写代码，源码在本仓库 `src\`，不属于上游组件
 - .NET Framework 4.8：Windows 系统组件，不随包分发；构建时使用系统自带 `csc.exe`
 
-## 1. 固定版本与校验值
+### 1. 固定版本与校验值
 
 | 组件 | 版本 | 分发介质 | 字节数 | SHA256 |
 | --- | --- | --- | --- | --- |
@@ -31,7 +37,7 @@
 
 RustDesk MSI 和官方 Moonlight 安装介质在本机核验 Authenticode 为 `Valid`（RustDesk 由 PURSLANE 签发，Moonlight 由 Cameron Gutman 签发），构建脚本要求官方 Moonlight 必须保持 `Valid`。Moonlight V+ 与 Foundation Sunshine 的 Windows 二进制为 `NotSigned`（无 Authenticode 签名），构建脚本明确校验这一状态，不会把它们当作已签名软件。
 
-## 2. RustDesk 的 MSI“仅提取”布局
+### 2. RustDesk 的 MSI“仅提取”布局
 
 - 不使用单文件 `rustdesk-1.5.3-x86_64.exe`（自解压 wrapper，在受限子进程里解包失败、无窗口）。
 - 构建时执行 `msiexec /a "<msi>" /qn TARGETDIR="<构建目录>"`：这是 Windows Installer 的管理安装，只把文件展开到目标目录，**不安装产品、不注册服务、不写卸载项**；随后把 `PFiles64\RustDesk\*` 原样复制到 `engines\RustDesk\`。
@@ -48,7 +54,7 @@ RustDesk MSI 和官方 Moonlight 安装介质在本机核验 Authenticode 为 `V
 
 MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依赖署名）和 `usbmmidd_v2\License.txt`；没有 AGPL 全文，因此包内 `LICENSES\AGPL-3.0.txt` 来自官方仓库 tag。
 
-## 3. Moonlight V+ 6.5.6（opt-in 引擎）
+### 3. Moonlight V+ 6.5.6（opt-in 引擎）
 
 - 上游：`qiin2333/moonlight-qt` 的 **Moonlight V+ for PC**，基于官方 Moonlight Qt 维护的增强分支；源码 tag `v6.5.6`，许可证 GPL-3.0（源码包内 `LICENSE` 为 GPLv3 全文，SHA256 `589ed823e9a84c56feb95ac58e7cf384626b9cbf4fda2a907bc36e103de1bad2`，与本包 `LICENSES\GPL-3.0.txt` 相同）。
 - 二进制资产：`Moonlight-VPlus-Portable-x64-6.5.6.zip`，48,208,826 字节，SHA256 `e02447be08eca5ddd2555fd7669a114f6c896fda3b70866401881026c27314e5`；Windows Authenticode `NotSigned`（Product `Moonlight V+ for PC`）。
@@ -64,7 +70,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 
 - V+ 是独立进程；官方 Moonlight 6.2.0 仍完整保留在 `engines\Moonlight\`，两者不互相覆盖。启动器是否使用 V+ 由用户/设置 opt-in，默认不改变官方 Moonlight 的配对与设置。
 
-## 4. Foundation Sunshine v2026.1123.185102（内置宿主，正式版）
+### 4. Foundation Sunshine v2026.1123.185102（内置宿主，正式版）
 
 - 上游：`AlkaidLab/foundation-sunshine`，许可证 GPL-3.0。选择该版本的原因是它的官方 portable 二进制包含 Foundation 的本机配对能力：二进制字符串可确认 `local-auth.token`、`/api/pairing/pending`、`config-directory`、`apps.json` 与 `credentials/cacert.pem`；隔离运行还确认配置、令牌、证书和日志均落在启动工作目录，而不是 `C:\Program Files\Sunshine\config`。
 - 资产：`Sunshine.v2026.1123.Portable-x64.zip`，51,644,454 字节，SHA256 `610788d951fe9ba0ba74f370c4bb83d535a61531f17937cd0a4644f00eabba49`。GitHub Release API 记录 `prerelease=false`、`published_at=2026-11-23T19:13:06Z`，资产摘要与缓存逐字节一致；本包如实标注“预发布”，不把它写成 latest/stable。
@@ -83,7 +89,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 - 构建只从上述固定 zip 展开，不读取本机 `C:\Program Files\Sunshine\config`，也不会把 `local-auth.token`、`cacert.pem`、`cakey.pem`、`sunshine.conf`、`sunshine_state.json`、日志或配对记录带进发行包。构建脚本在展开目录和最终 `engines\Sunshine` 各校验一次。
 - 上游 `NOTICE` 和 `licenses\manifest.json` 列出了 ViGEmBus、usbip-win2、nefcon、ZakoVDD、Zako Virtual Mouse、zlib 等随 Windows 包分发的组件及其许可。它们原样保留在 `engines\Sunshine\licenses\`、`scripts\` 与 `tools\`，本包不自动安装驱动、不注册服务，也不改防火墙。
 
-## 5. 许可证全文（随包）
+### 5. 许可证全文（随包）
 
 | 文件 | 对应组件 | 来源（固定 tag） | 字节数 | SHA256 |
 | --- | --- | --- | --- | --- |
@@ -95,7 +101,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 
 官方 Moonlight 便携 zip **没有附带**许可证文本，V+ 便携 zip **也没有**附带许可证文本；两者的 GPL-3.0 全文由本包从官方 tag 的 `LICENSE` 获取，并按上表校验后放入 `LICENSES\`，内容未改。V+ 源码包内的 `LICENSE` 与上表 GPL-3.0 哈希完全一致。
 
-## 6. Moonlight 与 V+ 便携包内的第三方库（原样保留）
+### 6. Moonlight 与 V+ 便携包内的第三方库（原样保留）
 
 包内 `engines\Moonlight\` 和 `engines\MoonlightVPlus\` 都保留各自全部 DLL 与插件目录（`platforms`、`imageformats`、`iconengines`、`tls`、`networkinformation`、`qml`、`translations`、`multimedia`、`portable.dat` 等），没有删减、替换或重新打包。版本取自包内二进制版本资源，仅作清点（以官方 Moonlight 6.2.0 为样本；V+ 同族但版本/文件集合略多）：
 
@@ -112,7 +118,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 
 以上许可证归属为通用信息，具体以上游实际构建与发布说明为准。本包未修改这些二进制；公开分发时请按各项目要求核对署名与源码提供方式。
 
-## 7. 许可义务：私用与公开分发
+### 7. 许可义务：私用与公开分发
 
 **私用（自己两台电脑之间）**：保留上游版权声明与许可证全文（本包已放 `LICENSES\`，并在 `BUILD-INFO.txt` 记录版本与校验值），不需要对外提供源码。
 
@@ -127,7 +133,7 @@ MSI 展开物里保留了官方 `data\flutter_assets\NOTICES.Z`（Flutter 及依
 7. **Foundation Sunshine 的第三方组件**：其 `NOTICE` 明确提到 foundation-ui（MPL-2.0）、Zako Virtual Mouse 专有许可及驱动类二进制；公开分发前要按 `engines\Sunshine\licenses\manifest.json` 与 `NOTICE` 逐项复核，不要因为主项目是 GPL 就把这些组件一概当作 GPL。
 8. 本包不是 RustDesk、Moonlight、Moonlight V+ 或 Foundation Sunshine 的官方发行版；相关名称与商标归各自所有者，不要暗示官方背书。
 
-## 8. 源码获取路径
+### 8. 源码获取路径
 
 ```powershell
 # RustDesk 1.5.3
@@ -154,7 +160,7 @@ git submodule update --init --recursive
 
 启动器源码在本仓库 `src\`（`src\*.cs` 与 `src\app.manifest`），不来自上述上游项目。
 
-## 9. 在成包里复核完整性
+### 9. 在成包里复核完整性
 
 ```powershell
 Get-FileHash .\engines\RustDesk\RustDesk.exe -Algorithm SHA256

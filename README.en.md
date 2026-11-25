@@ -23,11 +23,11 @@
 
 ---
 
-**One unified native protocol, single-file all-in-one architecture, seamless remote control across all four platforms.**
+**Four native apps share one protocol. Windows ships a single executable.**
 
 **BoBo Remote V6.2** has been completely rebuilt as a **self-contained, zero-external-engine** remote desktop suite. It no longer bundles or launches external Sunshine, Moonlight, or RustDesk executables — instead, **Windows, Android, macOS, and iOS / iPadOS** communicate directly over the authoritative [**BoBo6.2 binary wire protocol**](protocol/BOBO6-SPEC.md) (`TCP+TLS 1.2 :49810` / LAN `UDP :49812`).
 
-The Windows installer is only **~930 KB** (with the custom C++17 `BoBoCore.dll` native media & input engine GZip-embedded directly inside `BoBo远程.exe`). Zero vendor accounts, zero relay server costs — auto-discovery on LAN, or end-to-end TLS 1.2 direct connections over Tailscale (`100.x.y.z`) / IPv6 across networks.
+The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices discover each other on the LAN and connect over TLS. They can also connect across networks using Tailscale or a reachable IPv6 address.
 
 ---
 
@@ -41,10 +41,10 @@ The Windows installer is only **~930 KB** (with the custom C++17 `BoBoCore.dll` 
 
 | Platform | OS Requirement | Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~933 KB)<br>`BoBoRemote-Portable-x64.zip` (~646 KB) | ✅ **Full**<br>Includes Android nav bar &amp; iOS screen viewing | ✅ **Full**<br>DXGI/GDI + Media Foundation H.264 HW encode + WASAPI audio | Single-file all-in-one EXE, Super Display zero-black-bar scaling, native host cursor compositing, physical input-locking privacy shield, in-app SHA-256 auto-updater |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~10.2 MB) | ✅ **Full**<br>MediaCodec zero-copy HW decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection H.264 stream + AccessibilityService touch | Trackpad &amp; direct-touch modes, edge-dockable floating ball, Control Center, PC shortcut keyboard bar, Bluetooth keyboard → Windows VK mapping, mobile nav controls |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~830 KB) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy render | ✅ **Full**<br>`ScreenCaptureKit` (driverless system audio) + VideoToolbox HW encode | Super Display scaling, smart `⌘ → Ctrl` mapping, privacy curtain excluded from capture + `CGEventTap` physical input lock |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~655 KB) | ✅ **Full**<br>60/120Hz VideoToolbox HW decode + trackpad/direct-touch | 👁️ **ReplayKit View-Only Assist**<br>(Apple sandbox forbids global touch injection) | Embedded ReplayKit Broadcast Extension with paid-App-Group-free loopback bridge — sideload freely via Sideloadly / AltStore / SideStore / Xcode |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`<br>`BoBoRemote-Portable-x64.zip` | ✅ **Full**<br>Includes Android nav bar &amp; iOS screen viewing | ✅ **Full**<br>DXGI/GDI + Media Foundation H.264 HW encode + WASAPI audio | Single-file all-in-one EXE, Super Display zero-black-bar scaling, native host cursor compositing, physical input-locking privacy shield, in-app SHA-256 auto-updater |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` | ✅ **Full**<br>MediaCodec zero-copy HW decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection H.264 stream + AccessibilityService touch | Trackpad &amp; direct-touch modes, edge-dockable floating ball, Control Center, PC shortcut keyboard bar, Bluetooth keyboard → Windows VK mapping, mobile nav controls |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (Universal 2) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy render | ✅ **Full**<br>`ScreenCaptureKit` (driverless system audio) + VideoToolbox HW encode | Super Display scaling, smart `⌘ → Ctrl` mapping, privacy curtain excluded from capture + `CGEventTap` physical input lock |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` | **Foreground controller**<br>VideoToolbox HW decode + trackpad/direct touch | 👁️ **ReplayKit view-only sharing** | ReplayKit Broadcast Extension and local loopback bridge. Sign and install via Sideloadly, AltStore, SideStore, or Xcode |
 
 > See [**Cross-Platform Installation &amp; Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md) for step-by-step setup and permission instructions.
 
@@ -53,9 +53,8 @@ The Windows installer is only **~930 KB** (with the custom C++17 `BoBoCore.dll` 
 | Commercial Remote Desktop Suites | BoBo Remote V6.2 |
 | --- | --- |
 | Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No accounts, no relays, no telemetry** — LAN auto-discovery or direct Tailscale (`100.x.y.z`) / IPv6 TLS 1.2 connections |
-| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **100% MIT open source, all features unlocked** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
-| Background system services &amp; kernel drivers keep running after closing the app | **Strict dual-end online authorization** — requires BoBo Remote open on both ends + 4-digit HMAC pairing; closing the host stops listening immediately |
-| Juggling RustDesk + Moonlight + Sunshine separately is heavy (100+ MB) | **Single-file in-process architecture** — Windows installer shrunk to ~930 KB; all four platforms share one lean wire protocol |
+| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **MIT-licensed V6 source** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
+| Background system services &amp; kernel drivers keep running after closing the app | **Explicit pairing and device authentication**. Use a 4-digit PIN to pair. Reconnect with certificate pinning and an RSA proof |
 | Superficial privacy overlays still let bystanders click the taskbar or type | **Physical-grade host privacy shield** — `WDA_EXCLUDEFROMCAPTURE` curtain + native `WH_MOUSE_LL`/`WH_KEYBOARD_LL` (or `CGEventTap`) input blocker + optional safe DDC/CI backlight dimming |
 
 ## Architecture &amp; Unified Protocol (`BoBo6.2`)
@@ -70,11 +69,11 @@ flowchart LR
     IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
   end
 
-  subgraph PROTO["BoBo6.2 Authoritative Wire Protocol (Byte-Verified Across C# / Kotlin / Swift)"]
+  subgraph PROTO["BoBo6.2 Wire Protocol (Shared C# / Kotlin / Swift Vectors)"]
     direction TB
     DISC["UDP 49812 · LAN Discovery (PROBE / HELLO / BYE)"]
     TLS["TCP 49810 · Mandatory TLS 1.2+ (RSA-2048 Cert Fingerprint Pinning)"]
-    AUTH["4-Digit Temporary PIN (120s One-Time · HMAC-SHA256 Mutual Auth)"]
+    AUTH["RSA Challenge Proof and 4-Digit Temporary PIN"]
     FRAMES["5 Binary Frames: ControlJson · H.264 · 48kHz IMA-ADPCM · Input (Touch/Nav) · FileChunk"]
     DISC --> TLS --> AUTH --> FRAMES
   end
@@ -89,12 +88,13 @@ flowchart LR
 ```
 
 - **Single Authoritative Spec**: [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines the 9-byte little-endian frame header, deterministic 9-digit device code derivation, 4-digit `HMAC-SHA256` pairing proof, H.264 Annex-B video frames, 48kHz stereo IMA-ADPCM audio, mouse/keyboard/multi-touch/mobile-nav input packets, and chunked file transfers.
-- **Cross-Language Golden Vectors**: [`protocol/golden-vectors.json`](protocol/golden-vectors.json) is enforced in CI across C# (Windows), Kotlin (Android), and Swift (Apple) alongside live TLS 1.2 loopback tests.
+- The CI workflow runs the shared C#, Kotlin, and Swift golden vectors and TLS loopback checks. [Shared test vectors](protocol/golden-vectors.json)
+- Two Windows peers can negotiate encrypted UDP+FEC. Cross-platform sessions use TCP+TLS, and LAN discovery uses UDP 49812.
 
 ## Key Features
 
-### 1. Ultra-Lean In-Process Native Core (~930 KB Windows Installer)
-- Custom C++17 **`BoBoCore.dll`** is GZip-compressed directly inside `BoBo远程.exe` and loaded in-process — zero external Moonlight/RustDesk windows and zero standalone Sunshine daemons.
+### 1. In-Process Windows Media and Input Core
+- `BoBo远程.exe` embeds the GZip-compressed C++17 `BoBoCore.dll` and loads it in process.
 - Full hardware-accelerated pipeline: **DXGI Desktop Duplication** (with automatic GDI fallback) → **Media Foundation H.264 HW encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48kHz audio**.
 
 ### 2. Super Display (Zero Black Bars) &amp; Seamless Dual-Cursor UX
@@ -116,8 +116,9 @@ flowchart LR
 - **Lock-Screen Guard State Machine**: Optional auto-lock when dismissing privacy, with post-unlock debounce to prevent unintended re-triggering.
 
 ### 5. Mandatory Dual-End Auth &amp; Built-In File Transfer
-- Every node generates a local RSA-2048 identity and 9-digit device code. First-time pairing requires a host-generated **4-digit temporary PIN** (valid 120s, single-use) verified via `HMAC-SHA256` over both certificate fingerprints before adding the peer to the trust store.
-- Built-in end-to-end `FileChunk` file transfer with SHA-256 integrity verification across platforms.
+- Pairing on all four platforms requires updated apps on both ends. The controller pins the SHA-256 fingerprint of the host’s RSA-2048 certificate from the TLS handshake. The host verifies the controller’s RSA challenge signature. A changed host fingerprint stops reconnection.
+- First-time pairing also validates the four-digit PIN. The PIN lasts 120 seconds and expires after successful use or five failed attempts.
+- Chunked transfers support files up to 2 GiB each. The receiving endpoint verifies the SHA-256 digest before confirming delivery.
 
 ## UI Preview
 
@@ -148,22 +149,20 @@ Download the package for your platform from [**GitHub Releases (latest)**](https
 3. **As Rootless Host**: Open the Host tab, grant **Screen Capture**, and enable the **BoBo Remote Accessibility Service** in Android Settings.
 
 ### macOS (13.0+)
-1. Open **`BoBoRemote-macOS.dmg`** and drag `BoBoRemote.app` into `Applications`.
-2. On first launch, approve under **System Settings → Privacy &amp; Security** ("Open Anyway") or run `xattr -cr /Applications/BoBoRemote.app`.
-3. To allow incoming control, grant **Screen &amp; System Audio Recording** and **Accessibility** permissions from the in-app permission guide.
+1. Open **`BoBoRemote-macOS.dmg`** (Universal 2 for Apple silicon and Intel) and drag `BoBoRemote.app` into `Applications`.
+2. To allow incoming control, grant **Screen &amp; System Audio Recording** and **Accessibility** through the system permission prompts.
 
 ### iOS / iPadOS (16.0+)
 1. Download **`BoBoRemote-iOS-Unsigned.ipa`** (includes the main app + ReplayKit Broadcast Extension).
 2. Sideload for free using [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode; trust your certificate under **Settings → General → VPN &amp; Device Management** and allow **Local Network** access.
-3. To share your iPhone/iPad screen for remote viewing, open the Screen Share tab and start the **BoBo Broadcast Extension**.
+3. Keep BoBo Remote in the foreground while controlling or viewing a session. To share the device’s screen, start the **BoBo Broadcast Extension** in the Screen Share tab and pair from the viewing device.
 
 ### Connecting in 3 Steps (Any Platform Pair)
 1. **Network**: Place both devices on the same LAN (auto-discovered via `UDP 49812`), or sign both into the same [Tailscale](https://tailscale.com/) tailnet and use the `100.x.y.z` IP.
 2. **Generate PIN**: Open BoBo Remote on the **host** and generate a **4-digit temporary pairing code** (valid 120s).
-3. **Pair &amp; Connect**: Select the host (or enter its IP / 9-digit device code) on the **controller** and enter the 4-digit PIN once — subsequent connections are one-click.
+3. **Pair and connect.** Select the discovered host or enter its IP, then enter the PIN. Subsequent connections use the saved certificate trust.
 
-> [!TIP]
-> - **SmartScreen / Firewall**: Open-source personal releases are not commercially EV code-signed. Click **More info → Run anyway** on Windows SmartScreen (you may verify against `SHA256SUMS.txt` first), and allow LAN access if Windows Firewall prompts when hosting.
+Use the release’s `SHA256SUMS.txt` to check downloaded packages. When hosting on Windows, follow the firewall prompts to allow incoming connections on the network you use.
 
 ## Keyboard Shortcuts
 
@@ -182,28 +181,30 @@ Download the package for your platform from [**GitHub Releases (latest)**](https
 
 ## Build From Source &amp; Self-Tests
 
-All local commands mirror [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+Run the checks for your target platform from the repository root. [CI workflow](.github/workflows/ci.yml)
 
 ```powershell
-# 1. Windows x64 (requires MSVC Build Tools + Win10/11 SDK + in-box .NET 4.8 csc.exe; no .NET SDK or NuGet)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # Build BoBoCore.dll + BoBoRemote.exe & run full self-tests (incl. V6.2 Golden Vectors)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1          # Package Setup EXE, Portable ZIP & Light Update ZIP into dist\
+# Windows x64 (MSVC Build Tools, Windows SDK, and the .NET Framework compiler)
+.\ci\build.ps1
+.\build.ps1
 ```
 
 ```bash
-# 2. Android APK (requires JDK 17 + Android SDK + Gradle 8.7)
-cd android
-gradle :app:testDebugUnitTest --stacktrace   # BoBo6.2 Golden Vectors + TLS 1.2 pairing & file transfer loopback tests
-gradle :app:assembleRelease --stacktrace     # Assemble Release APK
+# Android APK (JDK 17, Android SDK 34, Gradle 8.7)
+(cd android && gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace)
 
-# 3. Apple Shared Core + macOS DMG (requires macOS 13+ & Xcode Command Line Tools)
-cd apple/BoBoAppleCore && swift test -v      # Golden Vectors + pure Swift RSA-2048/PKCS#12 + NWListener TLS 1.2 loopback tests
-bash apple/scripts/package-macos-dmg.sh      # Build dist-apple/BoBoRemote-macOS.dmg
+# Apple shared core and macOS Universal 2 DMG (macOS and Xcode)
+(cd apple/BoBoAppleCore && swift test -v)
+bash apple/scripts/package-macos-dmg.sh
 
-# 4. iOS / iPadOS Unsigned IPA (requires macOS + Xcode + XcodeGen)
-brew install xcodegen
-bash apple/scripts/package-ios-ipa.sh        # Build dist-apple/BoBoRemote-iOS-Unsigned.ipa
+# iOS / iPadOS unsigned IPA (macOS, Xcode, and XcodeGen)
+if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
+bash apple/scripts/package-ios-ipa.sh
 ```
+
+Local Windows checks used direct compiler invocations. All 10 native and 118 managed checks passed, and the installer self-test exited with code 0. RemoteSigned blocked normal script execution in that environment. Apple SDK tests, Universal 2 packaging, and iOS device checks are pending.
+
+The release workflow builds all four packages from the same existing `vMAJOR.MINOR.PATCH` tag. After all four builds succeed, it verifies the six packages and `SHA256SUMS.txt` on a draft before publishing. [Release workflow](.github/workflows/release.yml)
 
 ## Project Structure
 
@@ -226,7 +227,7 @@ bash apple/scripts/package-ios-ipa.sh        # Build dist-apple/BoBoRemote-iOS-U
 - **Explicit dual-end runtime consent**: Closing BoBo Remote on the host immediately stops port `49810` and unhooks all input filters — no hidden background services.
 - **Safe DDC/CI dimming boundary**: Disabled by default; when enabled, strictly adjusts backlight brightness (`VCP 0x10`) on non-HDR monitors only — never contrast or RGB gains — with persistent crash-safe restoration.
 - **Platform boundaries**:
-  - **iOS / iPadOS Host**: Restricted by Apple's sandbox to ReplayKit view-only screen sharing (`view_only`); controlling Windows / macOS / Android from iOS is full-featured.
+  - **iOS / iPadOS** viewing and control require the app in the foreground. Screen sharing uses ReplayKit in `view_only` mode. The extension waits for the app to acknowledge each frame before sending the next. The bridge pauses when the app goes into the background and resumes when it returns to the foreground.
   - **Display &amp; FPS limits**: Privacy screen exclusion relies on `WDA_EXCLUDEFROMCAPTURE` (Windows) and ScreenCaptureKit window exclusion (macOS); 90/144 fps requires matching display refresh rate, encoder, and client decode capabilities.
   - **Unsigned personal builds**: First-time installs may trigger Windows SmartScreen, macOS Gatekeeper, or require free iOS sideloading.
 
@@ -262,7 +263,7 @@ Issues and pull requests are welcome! Please review [CONTRIBUTING.md](CONTRIBUTI
 
 All V6.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is licensed under the [**MIT License**](LICENSE). Official V6.x release binaries **do not bundle any external third-party remote desktop engines**.
 
-Legacy V5 reference sources (`native/bobo-stream-player/` with vendored `native/third_party/moonlight-common-c/`, GPL-3.0) and historical third-party component records ([THIRD-PARTY.md](THIRD-PARTY.md), [NOTICE.md](NOTICE.md), `LICENSES/`) remain in the repository strictly for archive/reference and are excluded from V6.x builds. This project is not affiliated with or endorsed by any commercial remote desktop vendor.
+The archive preserves V5 player sources and GPL-3.0 `moonlight-common-c`, the original third-party notices and checksums, and the historical Sunshine scripts. The current Windows app has removed the legacy engine UI, launch code, and embedded script resources. [Third-party records](THIRD-PARTY.md) · [NOTICE](NOTICE.md) · [V5 plan archive](docs/V5-NATIVE-STREAM-PLAN.md)
 
 ---
 

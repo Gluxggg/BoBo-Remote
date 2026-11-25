@@ -198,7 +198,22 @@ namespace DualRemote
                 }
             }
             catch { }
-            try { run(); } catch { }
+            // Never manipulate WinForms UI controls directly on the native escape thread!
+            // First release hardware input lock & display dimming immediately (thread-safe), then try marshaling UI teardown.
+            try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
+            try { PrivacyDisplayDimmer.RestoreAllAsync(); } catch { }
+            try
+            {
+                foreach (Form f in Application.OpenForms)
+                {
+                    if (f != null && !f.IsDisposed && f.IsHandleCreated)
+                    {
+                        f.BeginInvoke(run);
+                        return;
+                    }
+                }
+            }
+            catch { }
         }
 
         private void InstallWinEventHooks()

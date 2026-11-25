@@ -3,6 +3,8 @@ import Foundation
 
 /// 局域网 UDP 49812 自动发现服务（基于 BSD Socket，macOS 与 iOS 通用）。
 public final class BoBoLanDiscovery: @unchecked Sendable {
+    private static let maxDiscoveredPeers = 128
+
     private let identity: BoBoIdentityStore
     private let tcpPortProvider: @Sendable () -> Int
     private let allowIncomingProvider: @Sendable () -> Bool
@@ -10,9 +12,11 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
     private let onPeersUpdated: (@Sendable ([BoBoDiscoveredPeer]) -> Void)?
 
     private let lock = NSLock()
+    private let fdLock = NSLock()
     private var peers: [String: BoBoDiscoveredPeer] = [:]
     private var sockFd: Int32 = -1
     private var running = false
+    private var beaconTimer: DispatchSourceTimer?
     private let rxQueue = DispatchQueue(label: "com.bobo.remote.udp.rx", qos: .utility)
     private let txQueue = DispatchQueue(label: "com.bobo.remote.udp.tx", qos: .utility)
 
@@ -63,36 +67,49 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
             return
         }
 
+        fdLock.lock()
         sockFd = fd
+        fdLock.unlock()
         running = true
+        let timer = DispatchSource.makeTimerSource(queue: txQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(3500))
+        timer.setEventHandler { [weak self] in
+            guard let self, self.isRunning(fd: fd) else { return }
+            self.broadcastPacket(kind: "BOBO6_HELLO", fd: fd)
+        }
+        beaconTimer = timer
+        timer.resume()
+        rxQueue.async { [weak self] in
+            guard let self else { Darwin.close(fd); return }
+            self.receiveLoop(fd: fd)
+        }
         lock.unlock()
-
-        rxQueue.async { [weak self] in self?.receiveLoop(fd: fd) }
-        txQueue.async { [weak self] in self?.beaconLoop() }
+        sendProbeNow()
     }
 
     public func stop() {
         lock.lock()
         if !running { lock.unlock(); return }
+        let fd = fdLock.withLock { sockFd }
+        let timer = beaconTimer
+        beaconTimer = nil
         running = false
-        let fd = sockFd
-        sockFd = -1
         lock.unlock()
 
-        if fd >= 0 {
-            sendPacket(fd: fd, kind: "BOBO6_BYE", ip: "255.255.255.255", port: BoBoProtocol.discoveryUdpPort)
-            Darwin.close(fd)
+        timer?.cancel()
+        broadcastPacket(kind: "BOBO6_BYE", fd: fd)
+        // The receive loop closes its own descriptor after recvfrom wakes.
+        fdLock.withLock {
+            if fd >= 0 && sockFd == fd { _ = Darwin.shutdown(fd, SHUT_RDWR) }
         }
     }
 
     public func sendProbeNow() {
-        lock.lock()
-        let fd = sockFd
-        let isRun = running
-        lock.unlock()
-        guard isRun, fd >= 0 else { return }
+        let fd = fdLock.withLock { sockFd }
+        guard fd >= 0 else { return }
         txQueue.async { [weak self] in
-            self?.sendPacket(fd: fd, kind: "BOBO6_PROBE", ip: "255.255.255.255", port: BoBoProtocol.discoveryUdpPort)
+            guard let self, self.isRunning(fd: fd) else { return }
+            self.broadcastPacket(kind: "BOBO6_PROBE", fd: fd)
         }
     }
 
@@ -118,26 +135,18 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
         return input.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func beaconLoop() {
-        lock.lock()
-        let fd = sockFd
-        lock.unlock()
-        guard fd >= 0 else { return }
-        sendPacket(fd: fd, kind: "BOBO6_PROBE", ip: "255.255.255.255", port: BoBoProtocol.discoveryUdpPort)
-        while isRunning() {
-            lock.lock()
-            let curFd = sockFd
-            lock.unlock()
-            if curFd >= 0 {
-                sendPacket(fd: curFd, kind: "BOBO6_HELLO", ip: "255.255.255.255", port: BoBoProtocol.discoveryUdpPort)
-            }
-            Thread.sleep(forTimeInterval: 3.5)
-        }
-    }
-
     private func receiveLoop(fd: Int32) {
+        defer {
+            fdLock.lock()
+            if sockFd == fd {
+                sockFd = -1
+            }
+            Darwin.close(fd)
+            fdLock.unlock()
+        }
+
         var buf = [UInt8](repeating: 0, count: 4096)
-        while isRunning() {
+        while isRunning(fd: fd) {
             var srcAddr = sockaddr_in()
             var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
             let n = withUnsafeMutablePointer(to: &srcAddr) {
@@ -145,7 +154,7 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
                     Darwin.recvfrom(fd, &buf, buf.count, 0, $0, &addrLen)
                 }
             }
-            if n <= 0 { continue }
+            if n <= 0 || !isRunning(fd: fd) { continue }
             let data = Data(bytes: buf, count: n)
             guard let map = BoBoProtocol.parseJson(data),
                   let kind = map["kind"] as? String,
@@ -161,10 +170,16 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
             let senderIp = String(cString: ipBuf)
 
             if kind == "BOBO6_BYE" {
+                var removed = false
                 lock.lock()
-                peers.removeValue(forKey: peerNodeId)
+                if let existing = peers[peerNodeId], existing.host == senderIp {
+                    peers.removeValue(forKey: peerNodeId)
+                    removed = true
+                }
                 lock.unlock()
-                onPeersUpdated?(getPeers())
+                if removed {
+                    onPeersUpdated?(getPeers())
+                }
                 continue
             }
 
@@ -182,17 +197,30 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
                     lastSeen: Date()
                 )
                 lock.lock()
-                peers[peerNodeId] = peer
+                if peers.count >= Self.maxDiscoveredPeers {
+                    let cutoff = Date().addingTimeInterval(-18)
+                    peers = peers.filter { $0.value.lastSeen >= cutoff }
+                }
+                if peers[peerNodeId] != nil || peers.count < Self.maxDiscoveredPeers {
+                    peers[peerNodeId] = peer
+                }
                 lock.unlock()
                 if kind == "BOBO6_PROBE" {
-                    sendPacket(fd: fd, kind: "BOBO6_HELLO", ip: senderIp, port: BoBoProtocol.discoveryUdpPort)
+                    sendPacketSafe(kind: "BOBO6_HELLO", ip: senderIp, port: BoBoProtocol.discoveryUdpPort, fd: fd)
                 }
                 onPeersUpdated?(getPeers())
             }
         }
     }
 
-    private func sendPacket(fd: Int32, kind: String, ip: String, port: Int) {
+    private func broadcastPacket(kind: String, fd: Int32) {
+        let targets = Self.enumerateBroadcastAddresses()
+        for ip in targets {
+            sendPacketSafe(kind: kind, ip: ip, port: BoBoProtocol.discoveryUdpPort, fd: fd)
+        }
+    }
+
+    private func sendPacketSafe(kind: String, ip: String, port: Int, fd: Int32) {
         let obj: [String: Any] = [
             "kind": kind,
             "protocol": BoBoProtocol.protocolMagic,
@@ -213,19 +241,56 @@ public final class BoBoLanDiscovery: @unchecked Sendable {
         dst.sin_port = UInt16(port).bigEndian
         inet_pton(AF_INET, ip, &dst.sin_addr)
 
-        payload.withUnsafeBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
-            withUnsafePointer(to: &dst) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    _ = Darwin.sendto(fd, base, payload.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        fdLock.lock()
+        if fd >= 0 && sockFd == fd {
+            payload.withUnsafeBytes { rawBuf in
+                guard let base = rawBuf.baseAddress else { return }
+                withUnsafePointer(to: &dst) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        _ = Darwin.sendto(fd, base, payload.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
                 }
             }
         }
+        fdLock.unlock()
     }
 
-    private func isRunning() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return running
+    private static func enumerateBroadcastAddresses() -> [String] {
+        var results: [String] = []
+        var seen = Set<String>()
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&ifaddr) == 0, let first = ifaddr {
+            defer { freeifaddrs(first) }
+            var ptr: UnsafeMutablePointer<ifaddrs>? = first
+            while let cur = ptr {
+                let flags = Int32(cur.pointee.ifa_flags)
+                let isUp = (flags & IFF_UP) != 0
+                let isLoopback = (flags & IFF_LOOPBACK) != 0
+                let hasBroadcast = (flags & IFF_BROADCAST) != 0
+                if isUp && !isLoopback && hasBroadcast,
+                   let addr = cur.pointee.ifa_addr,
+                   addr.pointee.sa_family == sa_family_t(AF_INET),
+                   let dst = cur.pointee.ifa_dstaddr,
+                   dst.pointee.sa_family == sa_family_t(AF_INET) {
+                    var sinAddr = dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    if inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                        let ip = String(cString: buf)
+                        if !ip.isEmpty && ip != "0.0.0.0" && seen.insert(ip).inserted {
+                            results.append(ip)
+                        }
+                    }
+                }
+                ptr = cur.pointee.ifa_next
+            }
+        }
+        if seen.insert("255.255.255.255").inserted {
+            results.append("255.255.255.255")
+        }
+        return results
+    }
+
+    private func isRunning(fd: Int32) -> Bool {
+        lock.withLock { running && fdLock.withLock { sockFd == fd } }
     }
 }

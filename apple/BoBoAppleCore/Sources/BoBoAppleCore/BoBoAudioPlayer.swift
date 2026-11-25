@@ -8,6 +8,7 @@ public final class BoBoAudioPlayer: @unchecked Sendable {
     private var playerNode: AVAudioPlayerNode?
     private var pcmFormat: AVAudioFormat?
     private var configuredRate: Int = 0
+    private var scheduled = ScheduledAudioBuffers()
     private var _muted: Bool = false
     private var _volume: Float = 1.0
 
@@ -42,28 +43,27 @@ public final class BoBoAudioPlayer: @unchecked Sendable {
         let pcm = ImaAdpcmCodec.decodeStereo(adpcmData, sampleFrames: sampleCount)
         guard !pcm.isEmpty else { return }
         let frames = pcm.count / 2
-        let sr = sampleRate > 0 ? sampleRate : 48000
+        let sr = sampleRate == 0 ? 48000 : sampleRate
+        guard (8000...192000).contains(sr) else { return }
 
         lock.lock()
+        defer { lock.unlock() }
+        guard !_muted else { return }
         ensureEngineLocked(sampleRate: sr)
+        let buffers = scheduled
         guard let fmt = pcmFormat, let node = playerNode,
-              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)) else {
-            lock.unlock()
-            return
-        }
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)),
+              let chData = buf.floatChannelData, buffers.reserve() else { return }
         buf.frameLength = AVAudioFrameCount(frames)
-        if let chData = buf.floatChannelData {
-            let left = chData[0]
-            let right = chData[1]
-            let inv: Float = 1.0 / 32768.0
-            for i in 0..<frames {
-                left[i] = Float(pcm[i * 2]) * inv
-                right[i] = Float(pcm[i * 2 + 1]) * inv
-            }
-            node.scheduleBuffer(buf, completionHandler: nil)
-            if !node.isPlaying { node.play() }
+        let left = chData[0]
+        let right = chData[1]
+        let inv: Float = 1.0 / 32768.0
+        for i in 0..<frames {
+            left[i] = Float(pcm[i * 2]) * inv
+            right[i] = Float(pcm[i * 2 + 1]) * inv
         }
-        lock.unlock()
+        node.scheduleBuffer(buf, completionCallbackType: .dataConsumed) { _ in buffers.release() }
+        if !node.isPlaying { node.play() }
     }
 
     public func stop() {
@@ -74,6 +74,7 @@ public final class BoBoAudioPlayer: @unchecked Sendable {
         engine = nil
         pcmFormat = nil
         configuredRate = 0
+        scheduled = ScheduledAudioBuffers()
         lock.unlock()
     }
 
@@ -81,6 +82,11 @@ public final class BoBoAudioPlayer: @unchecked Sendable {
         if engine != nil && configuredRate == sampleRate { return }
         playerNode?.stop()
         engine?.stop()
+        engine = nil
+        playerNode = nil
+        pcmFormat = nil
+        configuredRate = 0
+        scheduled = ScheduledAudioBuffers()
 
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
@@ -104,5 +110,22 @@ public final class BoBoAudioPlayer: @unchecked Sendable {
             engine = nil
             playerNode = nil
         }
+    }
+}
+
+private final class ScheduledAudioBuffers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func reserve() -> Bool {
+        lock.withLock {
+            guard count < 8 else { return false }
+            count += 1
+            return true
+        }
+    }
+
+    func release() {
+        lock.withLock { count = max(0, count - 1) }
     }
 }
