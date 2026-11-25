@@ -18,6 +18,15 @@ namespace DualRemote
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint SetThreadExecutionState(uint esFlags);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool LockWorkStation();
+
+        internal static bool TryLockWorkstation()
+        {
+            try { return LockWorkStation(); }
+            catch { return false; }
+        }
+
         // 只读：当前用户启动项里是否已有指向本程序的有效项。
         internal static bool StartsAtSignIn()
         {

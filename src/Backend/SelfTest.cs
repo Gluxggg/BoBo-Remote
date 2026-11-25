@@ -779,6 +779,37 @@ namespace DualRemote
                 && barDraggedLeft.Left >= 10,
                 "exp=" + barExpanded + " col=" + barCollapsed + " drag=" + barDraggedLeft);
 
+            var sqRight = StreamToolbarOverlay.ComputeDockedSquareBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), FloatDockEdge.Right, 0.3f, false, 1f);
+            var sqRightHid = StreamToolbarOverlay.ComputeDockedSquareBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), FloatDockEdge.Right, 0.3f, true, 1f);
+            var sqLeftHid = StreamToolbarOverlay.ComputeDockedSquareBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), FloatDockEdge.Left, 0.5f, true, 1f);
+            var sqTopHid = StreamToolbarOverlay.ComputeDockedSquareBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), FloatDockEdge.Top, 0.5f, true, 1f);
+            var sqBotHid = StreamToolbarOverlay.ComputeDockedSquareBounds(new System.Drawing.Rectangle(0, 0, 1920, 1080), FloatDockEdge.Bottom, 0.5f, true, 1f);
+            Check("V5.1 可移动四边贴边隐藏方形悬浮球几何：全四边吸附与贴边隐藏把手尺寸正确",
+                sqRight.Width == 46 && sqRight.Height == 46 && sqRight.Right <= 1914
+                && sqRightHid.Right == 1920 && sqRightHid.Width == 12 && sqRightHid.Height == 46
+                && sqLeftHid.Left == 0 && sqLeftHid.Width == 12
+                && sqTopHid.Top == 0 && sqTopHid.Height == 12 && sqTopHid.Width == 46
+                && sqBotHid.Bottom == 1080 && sqBotHid.Height == 12,
+                "sqR=" + sqRight + " hidR=" + sqRightHid + " hidL=" + sqLeftHid + " hidT=" + sqTopHid + " hidB=" + sqBotHid);
+
+            var ccModel = new StreamControlCenterModel { HostDisplayName = "测试主机", HostNativeWidth = 2880, HostNativeHeight = 1800, LocalDisplayWidth = 2560, LocalDisplayHeight = 1440 };
+            var ccItems = UuControlCenterSession.BuildRootMenuItems(ccModel, null);
+            bool hasDisplay = false, hasQuality = false, hasWindow = false, hasSound = false, hasSec = false, hasPeriph = false, hasMore = false, hasExit = false;
+            foreach (var ci in ccItems)
+            {
+                if (ci.Text.StartsWith("显示屏 1") && ci.SubmenuBuilder != null) hasDisplay = ci.SubmenuBuilder().Count >= 8;
+                if (ci.Text == "画质" && ci.SubmenuBuilder != null) hasQuality = ci.SubmenuBuilder().Count >= 12;
+                if (ci.Text == "窗口" && ci.SubmenuBuilder != null) hasWindow = ci.SubmenuBuilder().Count >= 4;
+                if (ci.Text == "声音" && ci.IsVolumeSliderSubmenu) hasSound = true;
+                if (ci.Text == "安全" && ci.SubmenuBuilder != null) hasSec = ci.SubmenuBuilder().Count >= 4;
+                if (ci.Text == "外设" && ci.SubmenuBuilder != null) hasPeriph = ci.SubmenuBuilder().Count >= 6;
+                if (ci.Text == "更多" && ci.SubmenuBuilder != null) hasMore = ci.SubmenuBuilder().Count >= 2;
+                if (ci.Text == "退出远控" && ci.IsDanger) hasExit = true;
+            }
+            Check("V5.1 UU 风格控制中心级联菜单：显示屏/画质/窗口/音量滑块/安全/外设/更多/红色退出完整齐备",
+                hasDisplay && hasQuality && hasWindow && hasSound && hasSec && hasPeriph && hasMore && hasExit,
+                "count=" + ccItems.Count);
+
             Check("本机地址隐私脱敏：默认隐藏 IPv4 后两段与完整 IPv6 前缀",
                 MainForm.MaskAddressForDisplay("192.0.2.88") == "192.0.•••.•••"
                 && MainForm.MaskAddressForDisplay("100.64.12.34") == "100.64.•••.•••"
@@ -1217,9 +1248,10 @@ namespace DualRemote
                 string sampleServerXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><root status_code=\"200\">"
                     + "<hostname>BoBo-Host</hostname><appversion>7.1.431.-1</appversion><GfeVersion>3.23.0.74</GfeVersion>"
                     + "<HttpsPort>47984</HttpsPort><ExternalPort>47989</ExternalPort><ServerCodecModeSupport>769</ServerCodecModeSupport>"
+                    + "<SupportedDisplayMode><DisplayMode><Width>2880</Width><Height>1800</Height><RefreshRate>120</RefreshRate></DisplayMode></SupportedDisplayMode>"
                     + "<PairStatus>1</PairStatus><currentgame>0</currentgame></root>";
                 bool infoOk = GameStreamClient.TryParseServerInfoXml(sampleServerXml, "127.0.0.1", 47989, out parsedInfo, out infoErr);
-                Check("V5 解析 Sunshine /serverinfo XML", infoOk && parsedInfo != null && parsedInfo.Paired && parsedInfo.HttpsPort == 47984 && parsedInfo.ServerCodecModeSupport == 769, infoErr);
+                Check("V5 解析 Sunshine /serverinfo XML（含主机原生分辨率）", infoOk && parsedInfo != null && parsedInfo.Paired && parsedInfo.HttpsPort == 47984 && parsedInfo.ServerCodecModeSupport == 769 && parsedInfo.NativeWidth == 2880 && parsedInfo.NativeHeight == 1800, infoErr);
 
                 List<GameStreamAppInfo> parsedApps = GameStreamClient.ParseAppListXml(
                     "<root status_code=\"200\"><App><ID>881448767</ID><AppTitle>桌面</AppTitle></App><App><ID>123</ID><AppTitle>Steam</AppTitle></App></root>");
@@ -1227,18 +1259,28 @@ namespace DualRemote
 
                 string keysCmd = NativeStreamCore.BuildSendKeysCommand(new int[] { 17, 16, 27 });
                 string textCmd = NativeStreamCore.BuildSendTextCommand("hello \"bobo\"\n");
+                string volCmd = NativeStreamCore.BuildVolumeCommand(65);
+                string scaleCmd = NativeStreamCore.BuildScaleModeCommand(false);
+                string viewCmd = NativeStreamCore.BuildViewOnlyCommand(true);
+                string sysKeyCmd = NativeStreamCore.BuildSysKeysCommand(true);
+                string hudCmd = NativeStreamCore.BuildHudCommand(true);
                 NativePlayerEvent statsEv = NativeStreamCore.TryParseEventLine(
                     "{\"event\":\"stats\",\"fps\":89.8,\"decodeMs\":1.4,\"renderMs\":0.6,\"rttMs\":3.0,\"bitrateKbps\":22000,\"width\":2560,\"height\":1440,\"codec\":\"H264\",\"decoder\":\"D3D11VA\"}");
                 NativePlayerEvent stageEv = NativeStreamCore.TryParseEventLine(
                     "{\"event\":\"stage\",\"stage\":\"RTSP handshake\",\"status\":\"starting\",\"errorCode\":0}");
                 NativePlayerEvent hwndEv = NativeStreamCore.TryParseEventLine("{\"event\":\"viewport_hwnd\",\"hwnd\":123456}");
-                Check("V5 原生播放核 IPC 编解码",
+                Check("V5 原生播放核 IPC 编解码（含音量/1:1/仅查看/系统键）",
                     keysCmd == "{\"cmd\":\"send_keys\",\"vks\":[17,16,27]}"
                     && textCmd.IndexOf("\\\"bobo\\\"\\n", StringComparison.Ordinal) >= 0
+                    && volCmd == "{\"cmd\":\"set_volume\",\"volume\":65}"
+                    && scaleCmd == "{\"cmd\":\"set_scale_mode\",\"fit\":false}"
+                    && viewCmd == "{\"cmd\":\"set_view_only\",\"enabled\":true}"
+                    && sysKeyCmd == "{\"cmd\":\"set_sys_keys\",\"enabled\":true}"
+                    && hudCmd == "{\"cmd\":\"set_hud\",\"enabled\":true}"
                     && statsEv != null && statsEv.Stats != null && statsEv.Stats.Width == 2560
                     && stageEv != null && stageEv.Name == "RTSP handshake" && stageEv.State == "starting"
                     && hwndEv != null && hwndEv.ViewportHwnd == 123456UL,
-                    keysCmd);
+                    keysCmd + " | " + volCmd);
             }
             finally
             {

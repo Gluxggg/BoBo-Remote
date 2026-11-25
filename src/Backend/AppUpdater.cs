@@ -67,7 +67,7 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "5.0.1";
+        internal const string FallbackVersion = "5.0.2";
 
         /// <summary>当前随包封装的 4 个固定上游引擎指纹；与 ci/release-package.ps1 写入 SHA256SUMS.txt 的 # engines= 对齐。</summary>
         internal const string CurrentEnginesStamp = "rd1.5.3-ml6.2.0-vp6.5.6-fs2026.1123.185102";

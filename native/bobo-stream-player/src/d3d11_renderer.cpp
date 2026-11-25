@@ -60,9 +60,25 @@ void D3D11Renderer::SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH) {
     }
 }
 
+void D3D11Renderer::SetAspectFit(bool fit) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    aspectFit_ = fit;
+}
+
+bool D3D11Renderer::IsAspectFit() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return aspectFit_;
+}
+
 RECT D3D11Renderer::GetVideoViewportRect() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
+    if (aspectFit_) {
+        return ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
+    }
+    LONG left = (static_cast<LONG>(swapW_) - static_cast<LONG>(videoW_)) / 2;
+    LONG top = (static_cast<LONG>(swapH_) - static_cast<LONG>(videoH_)) / 2;
+    RECT r = { left, top, left + static_cast<LONG>(videoW_), top + static_cast<LONG>(videoH_) };
+    return r;
 }
 
 bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outError) {
@@ -308,7 +324,20 @@ bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t 
     }
 
     RECT srcRect = { 0, 0, static_cast<LONG>(visW), static_cast<LONG>(visH) };
-    RECT dstRect = ComputeAspectFitRect(visW, visH, swapW_, swapH_);
+    RECT dstRect = {};
+    if (aspectFit_) {
+        dstRect = ComputeAspectFitRect(visW, visH, swapW_, swapH_);
+    } else {
+        // 1:1 pixel mapping centered in swapchain (crop symmetrically if window is smaller than stream)
+        LONG drawW = static_cast<LONG>(visW < swapW_ ? visW : swapW_);
+        LONG drawH = static_cast<LONG>(visH < swapH_ ? visH : swapH_);
+        LONG srcX = (static_cast<LONG>(visW) - drawW) / 2;
+        LONG srcY = (static_cast<LONG>(visH) - drawH) / 2;
+        LONG dstX = (static_cast<LONG>(swapW_) - drawW) / 2;
+        LONG dstY = (static_cast<LONG>(swapH_) - drawH) / 2;
+        srcRect = { srcX, srcY, srcX + drawW, srcY + drawH };
+        dstRect = { dstX, dstY, dstX + drawW, dstY + drawH };
+    }
     RECT targetRect = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
     videoContext_->VideoProcessorSetStreamSourceRect(videoProcessor_.Get(), 0, TRUE, &srcRect);
     videoContext_->VideoProcessorSetStreamDestRect(videoProcessor_.Get(), 0, TRUE, &dstRect);

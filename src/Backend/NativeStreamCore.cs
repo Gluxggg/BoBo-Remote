@@ -215,7 +215,28 @@ namespace DualRemote
 
         internal static string BuildHudCommand(bool enabled)
         {
-            return "{\"cmd\":\"toggle_hud\",\"enabled\":" + (enabled ? "true" : "false") + "}";
+            return "{\"cmd\":\"set_hud\",\"enabled\":" + (enabled ? "true" : "false") + "}";
+        }
+
+        internal static string BuildVolumeCommand(int volumePercent)
+        {
+            int v = Math.Max(0, Math.Min(100, volumePercent));
+            return "{\"cmd\":\"set_volume\",\"volume\":" + v.ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        internal static string BuildScaleModeCommand(bool aspectFit)
+        {
+            return "{\"cmd\":\"set_scale_mode\",\"fit\":" + (aspectFit ? "true" : "false") + "}";
+        }
+
+        internal static string BuildViewOnlyCommand(bool viewOnly)
+        {
+            return "{\"cmd\":\"set_view_only\",\"enabled\":" + (viewOnly ? "true" : "false") + "}";
+        }
+
+        internal static string BuildSysKeysCommand(bool sendSysKeys)
+        {
+            return "{\"cmd\":\"set_sys_keys\",\"enabled\":" + (sendSysKeys ? "true" : "false") + "}";
         }
 
         internal static string BuildSendKeysCommand(int[] vks)

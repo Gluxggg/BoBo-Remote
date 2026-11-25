@@ -54,11 +54,19 @@ namespace DualRemote
         private const int Lan2K90TallProfile = 5;
 
         private const int HotkeyPrivacyId = 0x51A0;
+        private const int HotkeyPrivacyEnableId = 0x51A1;
+        private const int HotkeyPrivacyDisableId = 0x51A2;
+        private const int HotkeyRemoteLockId = 0x51A3;
+        private const int HotkeySuperDisplayId = 0x51A4;
         private const uint ModAlt = 0x0001;
         private const uint ModControl = 0x0002;
         private const uint ModShift = 0x0004;
         private const uint ModNoRepeat = 0x4000;
         private const uint VkP = 0x50;
+        private const uint VkF8 = 0x77;
+        private const uint VkF9 = 0x78;
+        private const uint VkF11 = 0x7A;
+        private const uint VkF12 = 0x7B;
         private const int WmHotkey = 0x0312;
         private const int WmWtsSessionChange = 0x02B1;
         private const int WtsSessionLock = 0x7;
@@ -106,8 +114,12 @@ namespace DualRemote
         private bool remoteSessionsTornDown;
         private bool guardPollBusy;
         private bool hotkeyRegistered;
+        private bool remoteHotkeysRegistered;
         private bool wtsRegistered;
         private bool sessionEventsHooked;
+        private FileSystemWatcher sunshineLogWatcher;
+        private string sunshineLogWatchDir = "";
+        private DateTime lastLogWatchTriggerUtc = DateTime.MinValue;
         private DateTime lastSessionUnlockUtc = DateTime.MinValue;
         private DateTime lastPrivacyPointerDownUtc = DateTime.MinValue;
         private Control lastPrivacyPointerControl;
@@ -184,7 +196,7 @@ namespace DualRemote
             privacyCurtain.StateChanged += OnPrivacyCurtainStateChanged;
             SystemEvents.SessionSwitch += OnSessionSwitch;
             sessionEventsHooked = true;
-            remoteGuardTimer.Interval = 1500;
+            remoteGuardTimer.Interval = 350;
             remoteGuardTimer.Tick += async delegate { await PollRemoteGuardTick(); };
             localPairTimer.Interval = 1200;
             localPairTimer.Tick += async delegate { await PollLocalPairingAsync(); };
@@ -271,6 +283,17 @@ namespace DualRemote
 
             try
             {
+                uint mods = ModControl | ModAlt | ModShift | ModNoRepeat;
+                bool ok1 = RegisterHotKey(Handle, HotkeyPrivacyEnableId, mods, VkF11);
+                bool ok2 = RegisterHotKey(Handle, HotkeyPrivacyDisableId, mods, VkF12);
+                bool ok3 = RegisterHotKey(Handle, HotkeyRemoteLockId, mods, VkF9);
+                bool ok4 = RegisterHotKey(Handle, HotkeySuperDisplayId, mods, VkF8);
+                remoteHotkeysRegistered = ok1 || ok2 || ok3 || ok4;
+            }
+            catch { remoteHotkeysRegistered = false; }
+
+            try
+            {
                 wtsRegistered = WTSRegisterSessionNotification(Handle, NotifyForThisSession);
             }
             catch { wtsRegistered = false; }
@@ -296,6 +319,14 @@ namespace DualRemote
                 try { UnregisterHotKey(Handle, HotkeyPrivacyId); } catch { }
                 hotkeyRegistered = false;
             }
+            if (remoteHotkeysRegistered && IsHandleCreated)
+            {
+                try { UnregisterHotKey(Handle, HotkeyPrivacyEnableId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeyPrivacyDisableId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeyRemoteLockId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeySuperDisplayId); } catch { }
+                remoteHotkeysRegistered = false;
+            }
             base.OnHandleDestroyed(e);
         }
 
@@ -313,10 +344,34 @@ namespace DualRemote
                 if (reason == WtsSessionLock) HandleSessionLocked();
                 else if (reason == WtsSessionUnlock) HandleSessionUnlocked();
             }
-            if (m.Msg == WmHotkey && m.WParam.ToInt32() == HotkeyPrivacyId)
+            if (m.Msg == WmHotkey)
             {
-                TogglePrivacyCurtain(true, false);
-                return;
+                int hkId = m.WParam.ToInt32();
+                if (hkId == HotkeyPrivacyId)
+                {
+                    TogglePrivacyCurtain(true, false);
+                    return;
+                }
+                if (hkId == HotkeyPrivacyEnableId)
+                {
+                    ActivatePrivacyFromRemoteCommand();
+                    return;
+                }
+                if (hkId == HotkeyPrivacyDisableId)
+                {
+                    DeactivatePrivacyFromRemoteCommand();
+                    return;
+                }
+                if (hkId == HotkeyRemoteLockId)
+                {
+                    WindowsSession.TryLockWorkstation();
+                    return;
+                }
+                if (hkId == HotkeySuperDisplayId)
+                {
+                    OpenDisplayTool("Enable", "Virtual");
+                    return;
+                }
             }
             if (m.Msg == WmGetMinMaxInfo)
             {
@@ -538,6 +593,7 @@ namespace DualRemote
             }
             remoteGuardTimer.Stop();
             remoteGuardTimer.Dispose();
+            DisposeSunshineLogWatcher();
             localPairTimer.Stop();
             localPairTimer.Dispose();
             if (onboardingDelayTimer != null)
@@ -580,6 +636,14 @@ namespace DualRemote
             {
                 try { UnregisterHotKey(Handle, HotkeyPrivacyId); } catch { }
                 hotkeyRegistered = false;
+            }
+            if (remoteHotkeysRegistered && IsHandleCreated)
+            {
+                try { UnregisterHotKey(Handle, HotkeyPrivacyEnableId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeyPrivacyDisableId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeyRemoteLockId); } catch { }
+                try { UnregisterHotKey(Handle, HotkeySuperDisplayId); } catch { }
+                remoteHotkeysRegistered = false;
             }
             privacyCurtain.Dispose();
             DisposePreviewImage();
@@ -1616,7 +1680,15 @@ namespace DualRemote
                 showStreamStats,
                 playAudioOnHost,
                 UsesHevc(profile),
-                appIcon ?? Icon);
+                appIcon ?? Icon,
+                autoRemotePrivacyOnConnect,
+                lockHostOnDisconnect,
+                hideFloatBallInFullscreen,
+                showFloatBallInWindowed,
+                sendSystemShortcuts,
+                miniWindowOpacity);
+
+            nativeForm.LocalPrivacyActiveProvider = delegate { return privacyCurtain.IsActive; };
 
             nativeForm.PlayerProcessStarted += delegate(int pid)
             {
@@ -1627,8 +1699,7 @@ namespace DualRemote
                     activeStreamPid = pid;
                     if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
                     {
-                        var p = quality.SelectedItem as QualityOption ?? profile;
-                        activeStreamToolbar.UpdateSession(pid, p.Height + "p" + p.Fps + " · D3D11VA", Math.Max(0, quality.SelectedIndex));
+                        activeStreamToolbar.UpdateSession(pid);
                     }
                     SyncActiveControlIndicators();
                 }));
@@ -1660,7 +1731,10 @@ namespace DualRemote
             {
                 if (IsDisposed || activeNativeStreamForm != nativeForm) return;
                 if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                {
+                    activeStreamToolbar.SetVisibleByMode(nativeForm.ShouldShowFloatingSquare);
                     activeStreamToolbar.RepositionToOwnerScreen();
+                }
             };
 
             nativeForm.RestoreMainRequested += delegate
@@ -1675,7 +1749,10 @@ namespace DualRemote
                 SavePreferences();
                 nativeForm.SetWindowedMode(windowedStream);
                 if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                {
+                    activeStreamToolbar.SetVisibleByMode(nativeForm.ShouldShowFloatingSquare);
                     activeStreamToolbar.RefreshVisualState();
+                }
             };
 
             nativeForm.ToggleHudRequested += delegate
@@ -1688,14 +1765,55 @@ namespace DualRemote
                     activeStreamToolbar.RefreshVisualState();
             };
 
-            nativeForm.ToggleMouseRequested += delegate
+            nativeForm.ToggleLocalPrivacyRequested += delegate
             {
-                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
-                useAbsoluteMouse = !useAbsoluteMouse;
+                if (!IsDisposed) TogglePrivacyCurtain(false);
+            };
+
+            nativeForm.HostAudioPreferenceChanged += delegate(bool onHost)
+            {
+                playAudioOnHost = onHost;
                 SavePreferences();
-                nativeForm.SetFreeMouse(useAbsoluteMouse);
+            };
+
+            nativeForm.AutoRemotePrivacyPreferenceChanged += delegate(bool on)
+            {
+                autoRemotePrivacyOnConnect = on;
+                SavePreferences();
+            };
+
+            nativeForm.LockHostOnDisconnectPreferenceChanged += delegate(bool on)
+            {
+                lockHostOnDisconnect = on;
+                SavePreferences();
+            };
+
+            nativeForm.HideFloatBallPreferenceChanged += delegate(bool hide)
+            {
+                hideFloatBallInFullscreen = hide;
+                SavePreferences();
                 if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
-                    activeStreamToolbar.RefreshVisualState();
+                    activeStreamToolbar.SetVisibleByMode(nativeForm.ShouldShowFloatingSquare);
+            };
+
+            nativeForm.ShowFloatBallWindowedPreferenceChanged += delegate(bool show)
+            {
+                showFloatBallInWindowed = show;
+                SavePreferences();
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.SetVisibleByMode(nativeForm.ShouldShowFloatingSquare);
+            };
+
+            nativeForm.SendSysKeysPreferenceChanged += delegate(bool on)
+            {
+                sendSystemShortcuts = on;
+                SavePreferences();
+            };
+
+            nativeForm.MiniOpacityPreferenceChanged += delegate(int pct)
+            {
+                miniWindowOpacity = pct;
+                SavePreferences();
             };
 
             nativeForm.StatusUpdated += delegate(string statusText)
@@ -1754,73 +1872,110 @@ namespace DualRemote
             ShowOrUpdateStreamToolbar(host, profile, 0, nativeForm);
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
             {
-                activeStreamToolbar.SetNativeCallbacks(
-                    delegate { return activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed; },
-                    delegate(int[] vks)
-                    {
-                        if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
-                            activeNativeStreamForm.SendRemoteKeys(vks);
-                    },
-                    delegate(string text)
-                    {
-                        if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
-                            activeNativeStreamForm.SendRemoteText(text);
-                    });
+                activeStreamToolbar.SetNativeSessionAliveCallback(
+                    delegate { return activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed; });
+                activeStreamToolbar.SetVisibleByMode(nativeForm.ShouldShowFloatingSquare);
             }
             SyncActiveControlIndicators();
+        }
+
+        private StreamControlCenterModel BuildActiveControlCenterModel()
+        {
+            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                return activeNativeStreamForm.BuildControlCenterModel();
+
+            QualityOption p = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+            Screen scr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
+            return new StreamControlCenterModel
+            {
+                HostDisplayName = string.IsNullOrEmpty(clientPairHostName) ? activeStreamHost : clientPairHostName,
+                DisplayDeviceName = "显示屏 1 (" + (string.IsNullOrEmpty(clientPairHostName) ? activeStreamHost : clientPairHostName) + ")",
+                LocalDisplayWidth = scr.Bounds.Width,
+                LocalDisplayHeight = scr.Bounds.Height,
+                HostNativeWidth = p.Width,
+                HostNativeHeight = p.Height,
+                CurrentWidth = p.Width,
+                CurrentHeight = p.Height,
+                BitrateKbps = p.BitrateKbps,
+                Fps = p.Fps,
+                IsFullscreen = !windowedStream,
+                MuteHostAudio = !playAudioOnHost,
+                LocalPrivacyActive = privacyCurtain.IsActive,
+                AutoRemotePrivacyOnConnect = autoRemotePrivacyOnConnect,
+                LockHostOnDisconnect = lockHostOnDisconnect,
+                MouseMode = useAbsoluteMouse ? ControlMouseMode.Free : ControlMouseMode.Locked,
+                ShowNetworkStats = showStreamStats,
+                HideFloatBallInFullscreen = hideFloatBallInFullscreen,
+                ShowFloatBallInWindowed = showFloatBallInWindowed,
+                OnSelectResolution = delegate(int w, int h, ControlResolutionMode mode) { RestartActiveStreamSession(); },
+                OnSelectBitrate = delegate(int kbps, bool isAuto)
+                {
+                    int idx = kbps >= 28000 ? 6 : (kbps >= 20000 ? 4 : (kbps >= 14000 ? 2 : (kbps <= 6000 ? 3 : 0)));
+                    SwitchActiveStreamQuality(idx);
+                },
+                OnSelectFps = delegate(int fps)
+                {
+                    int idx = fps >= 144 ? 7 : (fps >= 90 ? 4 : 0);
+                    SwitchActiveStreamQuality(idx);
+                },
+                OnToggleMuteHostAudio = delegate(bool mute)
+                {
+                    playAudioOnHost = !mute;
+                    SavePreferences();
+                    RestartActiveStreamSession();
+                },
+                OnToggleLocalPrivacy = delegate { TogglePrivacyCurtain(false); },
+                OnSelectMouseMode = delegate(ControlMouseMode m)
+                {
+                    useAbsoluteMouse = m != ControlMouseMode.Locked;
+                    SavePreferences();
+                    if (useAbsoluteMouse) Engines.ReleaseCursorClip();
+                    RestartActiveStreamSession();
+                },
+                OnRestoreMainWindow = delegate { RestoreFromTray(); },
+                OnToggleNetworkStats = delegate(bool on)
+                {
+                    showStreamStats = on;
+                    SavePreferences();
+                    RestartActiveStreamSession();
+                },
+                OnToggleHideFloatBallInFullscreen = delegate(bool hide)
+                {
+                    hideFloatBallInFullscreen = hide;
+                    SavePreferences();
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                        activeStreamToolbar.SetVisibleByMode(!hide || windowedStream);
+                },
+                OnToggleFullscreen = delegate
+                {
+                    windowedStream = !windowedStream;
+                    SavePreferences();
+                    RestartActiveStreamSession();
+                },
+                OnDisconnect = delegate { DisconnectActiveStreamSession(); }
+            };
         }
 
         private void ShowOrUpdateStreamToolbar(string host, QualityOption profile, int pid, Form ownerForm = null)
         {
             activeStreamHost = host ?? "";
             activeStreamPid = pid;
-            bool isNative = activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed;
-            string modeTag = isNative
-                ? (profile.Height + "p" + profile.Fps + " · D3D11VA")
-                : (profile.Height + "p" + profile.Fps + " · " + (UsesHevc(profile) ? "HEVC" : "H.264"));
-            int selectedIdx = Math.Max(0, quality.SelectedIndex);
             SyncActiveControlIndicators();
 
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
             {
                 if (ownerForm != null) activeStreamToolbar.SetOwnerForm(ownerForm);
-                activeStreamToolbar.UpdateSession(pid, modeTag, selectedIdx);
+                activeStreamToolbar.UpdateSession(pid);
+                if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                    activeStreamToolbar.SetVisibleByMode(activeNativeStreamForm.ShouldShowFloatingSquare);
                 return;
             }
-
-            string[] labels = new string[QualityOptions.Length];
-            for (int i = 0; i < QualityOptions.Length; i++) labels[i] = QualityOptions[i].ToString();
 
             activeStreamToolbar = new StreamToolbarOverlay(
                 pid,
                 string.IsNullOrEmpty(clientPairHostName) ? host : clientPairHostName,
-                modeTag,
-                labels,
-                selectedIdx,
-                delegate { return showStreamStats; },
-                delegate { return privacyCurtain.IsActive; },
-                delegate { return windowedStream; },
                 delegate { return useAbsoluteMouse; },
-                delegate(int newIdx) { SwitchActiveStreamQuality(newIdx); },
-                delegate
-                {
-                    showStreamStats = !showStreamStats;
-                    SavePreferences();
-                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
-                        activeNativeStreamForm.SetHudVisible(showStreamStats);
-                    else
-                        RestartActiveStreamSession();
-                },
-                delegate { TogglePrivacyCurtain(false); },
-                delegate
-                {
-                    windowedStream = !windowedStream;
-                    SavePreferences();
-                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
-                        activeNativeStreamForm.SetWindowedMode(windowedStream);
-                    else
-                        RestartActiveStreamSession();
-                },
+                delegate { return BuildActiveControlCenterModel(); },
                 delegate
                 {
                     useAbsoluteMouse = !useAbsoluteMouse;
@@ -1831,7 +1986,33 @@ namespace DualRemote
                     else
                         RestartActiveStreamSession();
                 },
-                delegate { RestoreFromTray(); },
+                delegate
+                {
+                    windowedStream = !windowedStream;
+                    SavePreferences();
+                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                    {
+                        activeNativeStreamForm.SetWindowedMode(windowedStream);
+                        if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                            activeStreamToolbar.SetVisibleByMode(activeNativeStreamForm.ShouldShowFloatingSquare);
+                    }
+                    else
+                    {
+                        RestartActiveStreamSession();
+                    }
+                },
+                delegate(bool hide)
+                {
+                    hideFloatBallInFullscreen = hide;
+                    SavePreferences();
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    {
+                        bool show = activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed
+                            ? activeNativeStreamForm.ShouldShowFloatingSquare
+                            : (!hide || windowedStream);
+                        activeStreamToolbar.SetVisibleByMode(show);
+                    }
+                },
                 delegate { DisconnectActiveStreamSession(); },
                 delegate
                 {
@@ -1844,6 +2025,8 @@ namespace DualRemote
                     SyncActiveControlIndicators();
                 });
             if (ownerForm != null) activeStreamToolbar.SetOwnerForm(ownerForm);
+            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                activeStreamToolbar.SetVisibleByMode(activeNativeStreamForm.ShouldShowFloatingSquare);
             activeStreamToolbar.StartWatching();
         }
 
@@ -1894,7 +2077,7 @@ namespace DualRemote
                 QualityOption p = QualityOptions[newIndex];
                 string modeTag = p.Height + "p" + p.Fps + " · D3D11VA";
                 if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
-                    activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid, modeTag, newIndex);
+                    activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid);
                 await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, modeTag);
                 return;
             }
@@ -2392,8 +2575,9 @@ namespace DualRemote
 
         private void SyncRemoteGuardTimer()
         {
-            // 始终保持轻量轮询以实时同步主控/被控状态与顶部「退出控制」按钮；自动防窥仅在 AutoOnRemote 开启时触发
+            // 始终保持 350ms 极速守护 + sunshine.log 实时文件监听，确保被控一瞬间即刻拉起防窥壁纸
             if (!remoteGuardTimer.Enabled) remoteGuardTimer.Start();
+            EnsureSunshineLogWatcher();
             if (!privacyConfig.AutoOnRemote)
             {
                 bool wasAuto = privacyGuard.AutoActivated;
@@ -2405,6 +2589,86 @@ namespace DualRemote
             }
             UpdatePrivacyIndicators();
             SyncActiveControlIndicators();
+        }
+
+        private void EnsureSunshineLogWatcher()
+        {
+            if (IsDisposed) return;
+            try
+            {
+                string cfgDir, err;
+                if (!BundledHost.TryGetActiveConfigDirectory(out cfgDir, out err) || string.IsNullOrEmpty(cfgDir) || !Directory.Exists(cfgDir))
+                    return;
+                if (sunshineLogWatcher != null && string.Equals(sunshineLogWatchDir, cfgDir, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                DisposeSunshineLogWatcher();
+                var watcher = new FileSystemWatcher(cfgDir, "sunshine.log");
+                watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime;
+                watcher.Changed += OnSunshineLogFileChanged;
+                watcher.Created += OnSunshineLogFileChanged;
+                watcher.EnableRaisingEvents = true;
+                sunshineLogWatcher = watcher;
+                sunshineLogWatchDir = cfgDir;
+            }
+            catch { }
+        }
+
+        private void DisposeSunshineLogWatcher()
+        {
+            if (sunshineLogWatcher != null)
+            {
+                try
+                {
+                    sunshineLogWatcher.EnableRaisingEvents = false;
+                    sunshineLogWatcher.Changed -= OnSunshineLogFileChanged;
+                    sunshineLogWatcher.Created -= OnSunshineLogFileChanged;
+                    sunshineLogWatcher.Dispose();
+                }
+                catch { }
+                sunshineLogWatcher = null;
+                sunshineLogWatchDir = "";
+            }
+        }
+
+        private void OnSunshineLogFileChanged(object sender, FileSystemEventArgs e)
+        {
+            if (IsDisposed) return;
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastLogWatchTriggerUtc).TotalMilliseconds < 120.0) return;
+            lastLogWatchTriggerUtc = now;
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new Action(async delegate { await PollRemoteGuardTick(); }));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>主控端发起的幂等「立即开启被控端防窥」指令（Ctrl+Alt+Shift+F11）：已开启时保持不闪烁。</summary>
+        private void ActivatePrivacyFromRemoteCommand()
+        {
+            if (IsDisposed || privacyGuard.SessionLocked) return;
+            if (privacyCurtain.IsActive && !privacyCurtain.IsPreview) return;
+            privacyGuard.OnManualActivate();
+            ClearPrivacyButtonFocus();
+            string msg;
+            bool ok = privacyCurtain.Activate(privacyConfig, false, out msg);
+            if (!ok) privacyGuard.OnManualExit(DateTime.UtcNow);
+            ShowDisplayBanner(ok ? "主控端已触发防窥模式，本机物理屏已瞬间遮挡。" : (msg ?? "开启防窥壁纸失败。"),
+                ok ? Theme.PillTone.Success : Theme.PillTone.Alert);
+        }
+
+        /// <summary>主控端发起的幂等「立即关闭被控端防窥」指令（Ctrl+Alt+Shift+F12）：不触发本机锁屏。</summary>
+        private void DeactivatePrivacyFromRemoteCommand()
+        {
+            if (IsDisposed || !privacyCurtain.IsActive) return;
+            privacyGuard.OnManualExit(DateTime.UtcNow);
+            ClearPrivacyButtonFocus();
+            privacyCurtain.Deactivate(false);
+            ShowDisplayBanner("主控端已关闭防窥模式。", Theme.PillTone.Info);
         }
 
         private async Task PollRemoteGuardTick()

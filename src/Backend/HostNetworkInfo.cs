@@ -353,10 +353,11 @@ namespace DualRemote
         private static readonly Regex LogActiveSessionsRegex = new Regex(@"New streaming session started\s*\[active sessions:\s*(\d+)\]", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
         /// <summary>
-        /// 检测本机当前是否正处于远控被控会话中（只读，供防窥壁纸自动守护与顶部「断开被控」指示使用）：
-        /// 1. 优先通过 CA 证书固定 + local-auth.token 查询本机 Sunshine /api/runtime/sessions（内置宿主与可读令牌的系统宿主）；
-        /// 2. 若因系统安装版 local-auth.token 权限受限（非管理员常见）无法调接口，则联合本机无鉴权 /serverinfo 与只读 sunshine.log 尾部精准判定；
-        /// 3. 检查动态端口 RTSP 握手连接（含 48010 与内置宿主回退端口）；
+        /// 检测本机当前是否正处于远控被控会话中（毫秒级快速判定，供防窥壁纸瞬时拉起与顶部「断开被控」指示使用）：
+        /// 1. 极速检查动态端口 RTSP 活跃 TCP 连接（0.5ms，零网络阻塞）；
+        /// 2. 极速检查本机无鉴权 HTTP /serverinfo 状态（~2ms）：主控发起 /launch 的瞬间 Sunshine 即切换为 SUNSHINE_SERVER_BUSY，
+        ///    在首帧编码前即可瞬间拉起防窥壁纸；若明确返回 SUNSHINE_SERVER_FREE 则跳过重型 HTTPS 查询；
+        /// 3. 回退使用 CA 证书固定 + local-auth.token 查询 /api/runtime/sessions 与 sunshine.log 尾部事件流；
         /// 4. 检查 RustDesk 入站连接管理器进程（--cm）。
         /// </summary>
         internal static bool IsHostBeingControlled()
@@ -368,21 +369,32 @@ namespace DualRemote
 
             int basePort = ResolveSunshineBasePort(configDirectory);
 
-            if (BundledHost.AnySunshineProcessRunning)
-            {
-                int sessions;
-                if (!string.IsNullOrEmpty(configDirectory) && TryQuerySunshineSessionCount(configDirectory, basePort + 1, out sessions))
-                {
-                    if (sessions > 0) return true;
-                }
-                else if (IsSunshineLogShowingActiveSession(configDirectory, basePort))
-                {
-                    return true;
-                }
-            }
-
+            // 1. 毫秒级 RTSP 活跃连接判定（无需任何 HTTP 往返）
             if (HasActiveRemoteTcpConnection(basePort))
                 return true;
+
+            if (BundledHost.AnySunshineProcessRunning)
+            {
+                // 2. /serverinfo 的 SUNSHINE_SERVER_BUSY 在主控端 /launch 到达的瞬间立即置位（早于首帧视频与 RTSP 建立）
+                bool serverBusy;
+                if (TryQuerySunshineServerBusy(basePort, out serverBusy))
+                {
+                    if (serverBusy) return true;
+                }
+                else
+                {
+                    // /serverinfo 不可达时回退到 HTTPS runtime/sessions 与日志尾部判定
+                    int sessions;
+                    if (!string.IsNullOrEmpty(configDirectory) && TryQuerySunshineSessionCount(configDirectory, basePort + 1, out sessions))
+                    {
+                        if (sessions > 0) return true;
+                    }
+                    else if (IsSunshineLogShowingActiveSession(configDirectory, basePort))
+                    {
+                        return true;
+                    }
+                }
+            }
 
             if (HasActiveRustDeskIncomingSession())
                 return true;

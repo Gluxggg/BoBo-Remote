@@ -75,6 +75,12 @@ namespace DualRemote
         private bool minimizeToTray = false;
         private bool keepThisComputerAwake = false;
         private bool autoCheckUpdates = true;
+        private bool autoRemotePrivacyOnConnect = false;
+        private bool lockHostOnDisconnect = false;
+        private bool hideFloatBallInFullscreen = false;
+        private bool showFloatBallInWindowed = false;
+        private bool sendSystemShortcuts = false;
+        private int miniWindowOpacity = 100;
 
         private Control BuildChrome()
         {
@@ -661,8 +667,16 @@ namespace DualRemote
                 PreferenceToggle("在被控端同时播放声音", playAudioOnHost, value => playAudioOnHost = value));
 
             AddStandaloneSettingCard(page, Theme.Glyph.Maximize, "使用窗口模式打开串流",
-                "开启后以可自由拖拽拉伸的窗口显示远程桌面；关闭时默认无边框全屏（不遮挡悬浮条、切屏不黑屏）",
+                "开启后以可自由拖拽拉伸的窗口显示远程桌面并配备 UU 风格顶栏控制中心；关闭时默认无边框全屏并显示可移动贴边悬浮球",
                 PreferenceToggle("使用窗口模式", windowedStream, value => windowedStream = value));
+
+            AddStandaloneSettingCard(page, Theme.Glyph.Shield, "连接成功瞬间自动开启被控端防窥模式",
+                "开启后，本机作为主控端接通远控的瞬间会立即通知被控端进入防窥屏保护；也可以在远控控制中心「安全」菜单随时开关",
+                PreferenceToggle("自动开启被控端防窥", autoRemotePrivacyOnConnect, value => autoRemotePrivacyOnConnect = value));
+
+            AddStandaloneSettingCard(page, Theme.Glyph.Eye, "全屏状态隐藏悬浮球（Ctrl+Alt+G）",
+                "全屏远控时隐藏可移动四边贴边方形悬浮球，仍可随时按 Ctrl+Alt+G 恢复或按 Ctrl+Alt+Shift+B 唤出控制中心",
+                PreferenceToggle("全屏隐藏悬浮球", hideFloatBallInFullscreen, value => hideFloatBallInFullscreen = value));
 
             return page;
         }
@@ -1601,6 +1615,14 @@ namespace DualRemote
                     autoCheckUpdates = ReadFlag(lines, 11, true);
                     useAbsoluteMouse = ReadFlag(lines, 12, true);
                     useNativeStream = NativeStreamCore.IsAvailable && ReadFlag(lines, 13, true);
+                    autoRemotePrivacyOnConnect = ReadFlag(lines, 14, false);
+                    lockHostOnDisconnect = ReadFlag(lines, 15, false);
+                    hideFloatBallInFullscreen = ReadFlag(lines, 16, false);
+                    showFloatBallInWindowed = ReadFlag(lines, 17, false);
+                    sendSystemShortcuts = ReadFlag(lines, 18, false);
+                    int op;
+                    if (lines.Length > 19 && int.TryParse(lines[19], out op) && op >= 50 && op <= 100)
+                        miniWindowOpacity = op;
                 }
                 else
                 {
@@ -1642,7 +1664,13 @@ namespace DualRemote
                     WriteFlag(minimizeToTray),
                     WriteFlag(autoCheckUpdates),
                     WriteFlag(useAbsoluteMouse),
-                    WriteFlag(useNativeStream)
+                    WriteFlag(useNativeStream),
+                    WriteFlag(autoRemotePrivacyOnConnect),
+                    WriteFlag(lockHostOnDisconnect),
+                    WriteFlag(hideFloatBallInFullscreen),
+                    WriteFlag(showFloatBallInWindowed),
+                    WriteFlag(sendSystemShortcuts),
+                    miniWindowOpacity.ToString()
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

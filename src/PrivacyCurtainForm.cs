@@ -207,8 +207,8 @@ namespace DualRemote
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOACTIVATE = 0x0010;
-        private const double EntryToastHoldMs = 3200.0;
-        private const double EntryToastTotalMs = 4000.0;
+        private const double EntryToastHoldMs = 3600.0;
+        private const double EntryToastTotalMs = 4400.0;
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
 
         private readonly PrivacyWallpaperConfig config;

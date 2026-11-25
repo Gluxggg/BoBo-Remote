@@ -198,6 +198,12 @@ bool WasapiAudioPlayer::Initialize(int sampleRate, int channels, int streams, in
     return true;
 }
 
+void WasapiAudioPlayer::SetVolume(float gain) {
+    if (gain < 0.0f) gain = 0.0f;
+    if (gain > 1.0f) gain = 1.0f;
+    volumeGain_.store(gain);
+}
+
 void WasapiAudioPlayer::DecodeAndPlay(const unsigned char* opusData, int opusLen) {
     if (!active_ || !opusDecoder_ || !fnDecode_ || !audioClient_ || !renderClient_) return;
     if (!opusData || opusLen <= 0) return;
@@ -218,20 +224,24 @@ void WasapiAudioPlayer::DecodeAndPlay(const unsigned char* opusData, int opusLen
     HRESULT hr = renderClient_->GetBuffer(static_cast<UINT32>(decodedSamples), &dst);
     if (FAILED(hr) || !dst) return;
 
-    if (outputFloat_) {
+    float gain = volumeGain_.load();
+    if (gain <= 0.001f) {
+        size_t bytesPerSample = outputFloat_ ? sizeof(float) : sizeof(int16_t);
+        std::memset(dst, 0, static_cast<size_t>(decodedSamples) * static_cast<size_t>(outputChannels_) * bytesPerSample);
+    } else if (outputFloat_) {
         float* fdst = reinterpret_cast<float*>(dst);
         for (int s = 0; s < decodedSamples; ++s) {
             const int16_t* frame = &pcmBuf_[static_cast<size_t>(s) * static_cast<size_t>(inputChannels_)];
             if (outputChannels_ == 2) {
-                float left = static_cast<float>(frame[0]) / 32768.0f;
-                float right = (inputChannels_ >= 2) ? (static_cast<float>(frame[1]) / 32768.0f) : left;
+                float left = (static_cast<float>(frame[0]) / 32768.0f) * gain;
+                float right = ((inputChannels_ >= 2) ? (static_cast<float>(frame[1]) / 32768.0f) : (static_cast<float>(frame[0]) / 32768.0f)) * gain;
                 fdst[s * 2] = left;
                 fdst[s * 2 + 1] = right;
             } else {
                 float mono = (inputChannels_ >= 2)
                     ? (static_cast<float>(frame[0]) + static_cast<float>(frame[1])) / 65536.0f
                     : (static_cast<float>(frame[0]) / 32768.0f);
-                fdst[s] = mono;
+                fdst[s] = mono * gain;
             }
         }
     } else {
@@ -239,10 +249,11 @@ void WasapiAudioPlayer::DecodeAndPlay(const unsigned char* opusData, int opusLen
         for (int s = 0; s < decodedSamples; ++s) {
             const int16_t* frame = &pcmBuf_[static_cast<size_t>(s) * static_cast<size_t>(inputChannels_)];
             if (outputChannels_ == 2) {
-                sdst[s * 2] = frame[0];
-                sdst[s * 2 + 1] = (inputChannels_ >= 2) ? frame[1] : frame[0];
+                sdst[s * 2] = static_cast<int16_t>(static_cast<float>(frame[0]) * gain);
+                int16_t r = (inputChannels_ >= 2) ? frame[1] : frame[0];
+                sdst[s * 2 + 1] = static_cast<int16_t>(static_cast<float>(r) * gain);
             } else {
-                sdst[s] = frame[0];
+                sdst[s] = static_cast<int16_t>(static_cast<float>(frame[0]) * gain);
             }
         }
     }

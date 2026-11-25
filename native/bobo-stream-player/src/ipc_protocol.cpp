@@ -179,12 +179,28 @@ IpcCommand ParseIpcCommand(const std::string& line) {
         cmd.type = IpcCommandType::Disconnect;
     } else if (line.find("\"cmd\":\"toggle_privacy\"") != std::string::npos) {
         cmd.type = IpcCommandType::TogglePrivacy;
-    } else if (line.find("\"cmd\":\"set_hud\"") != std::string::npos) {
+    } else if (line.find("\"cmd\":\"set_hud\"") != std::string::npos || line.find("\"cmd\":\"toggle_hud\"") != std::string::npos) {
         cmd.type = IpcCommandType::SetHud;
         ExtractBoolField(line, "enabled", cmd.flag);
     } else if (line.find("\"cmd\":\"set_mouse_mode\"") != std::string::npos) {
         cmd.type = IpcCommandType::SetMouseMode;
         ExtractBoolField(line, "free", cmd.flag);
+    } else if (line.find("\"cmd\":\"set_volume\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SetVolume;
+        uint32_t v = 100;
+        if (ExtractUintField(line, "volume", v)) {
+            cmd.volume = (v > 100u) ? 100u : v;
+        }
+    } else if (line.find("\"cmd\":\"set_scale_mode\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SetScaleMode;
+        cmd.flag = true;
+        ExtractBoolField(line, "fit", cmd.flag);
+    } else if (line.find("\"cmd\":\"set_view_only\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SetViewOnly;
+        ExtractBoolField(line, "enabled", cmd.flag);
+    } else if (line.find("\"cmd\":\"set_sys_keys\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SetSysKeys;
+        ExtractBoolField(line, "enabled", cmd.flag);
     } else if (line.find("\"cmd\":\"send_keys\"") != std::string::npos) {
         cmd.type = IpcCommandType::SendKeys;
         ExtractUintArrayField(line, "vks", cmd.vks);

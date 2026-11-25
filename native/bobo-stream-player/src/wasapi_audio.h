@@ -8,6 +8,7 @@
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@ public:
     bool Initialize(int sampleRate, int channels, int streams, int coupledStreams,
                     const unsigned char* mapping, int samplesPerFrame, std::string& outError);
     void DecodeAndPlay(const unsigned char* opusData, int opusLen);
+    void SetVolume(float gain);
+    float GetVolume() const { return volumeGain_.load(); }
     void Shutdown();
 
     bool IsActive() const { return active_; }
@@ -54,6 +57,7 @@ private:
     bool comInitByUs_ = false;
     bool active_ = false;
 
+    std::atomic<float> volumeGain_{ 1.0f };
     std::vector<int16_t> pcmBuf_;
 };
 

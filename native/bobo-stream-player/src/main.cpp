@@ -154,6 +154,18 @@ static int RunSelfTest() {
     IpcCommand c4 = ParseIpcCommand("{\"cmd\":\"disconnect\"}");
     check("IPC disconnect parse", c4.type == IpcCommandType::Disconnect, "disconnect");
 
+    IpcCommand c5 = ParseIpcCommand("{\"cmd\":\"set_volume\",\"volume\":65}");
+    check("IPC set_volume parse", c5.type == IpcCommandType::SetVolume && c5.volume == 65, "volume=65");
+
+    IpcCommand c6 = ParseIpcCommand("{\"cmd\":\"set_scale_mode\",\"fit\":false}");
+    check("IPC set_scale_mode parse", c6.type == IpcCommandType::SetScaleMode && !c6.flag, "fit=false");
+
+    IpcCommand c7 = ParseIpcCommand("{\"cmd\":\"set_view_only\",\"enabled\":true}");
+    check("IPC set_view_only parse", c7.type == IpcCommandType::SetViewOnly && c7.flag, "viewOnly=true");
+
+    IpcCommand c8 = ParseIpcCommand("{\"cmd\":\"set_sys_keys\",\"enabled\":true}");
+    check("IPC set_sys_keys parse", c8.type == IpcCommandType::SetSysKeys && c8.flag, "sysKeys=true");
+
     StreamStats st;
     st.fps = 89.8;
     st.decodeMs = 1.42;
@@ -248,9 +260,61 @@ struct StreamViewportState {
     bool rawMouseRegistered = false;
     bool hudEnabled = false;
     bool cursorHidden = false;
+    bool viewOnly = false;
+    bool sendSysKeys = false;
+    bool ctrlAltSoloActive = false;
+    HHOOK llKeyHook = nullptr;
     DWORD lastTopEdgeTick = 0;
     std::atomic<bool> quitRequested{ false };
 };
+
+static StreamViewportState* g_activeViewportState = nullptr;
+
+static bool IsViewportFocused(const StreamViewportState* st) {
+    if (!st || !st->hwnd) return false;
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    if (fg == st->hwnd) return true;
+    if (st->parentHwnd && (fg == st->parentHwnd || fg == GetAncestor(st->parentHwnd, GA_ROOT))) {
+        return true;
+    }
+    return false;
+}
+
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && g_activeViewportState) {
+        StreamViewportState* st = g_activeViewportState;
+        if (st->sendSysKeys && !st->viewOnly && st->bridge && IsViewportFocused(st)) {
+            const auto* kb = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+            if (kb && (kb->flags & LLKHF_INJECTED) == 0) {
+                uint16_t vk = static_cast<uint16_t>(kb->vkCode);
+                bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+                bool isUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+                bool altDown = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 || (kb->flags & LLKHF_ALTDOWN) != 0;
+                bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                bool extended = (kb->flags & LLKHF_EXTENDED) != 0;
+                // Forward Alt+Tab and Windows keys directly to remote host while keeping Ctrl+Alt escape shortcuts local
+                bool forwardWin = (vk == VK_LWIN || vk == VK_RWIN) && !ctrlDown;
+                bool forwardAltTab = (vk == VK_TAB && altDown && !ctrlDown);
+                if ((forwardWin || forwardAltTab) && (isDown || isUp)) {
+                    st->bridge->SendKey(vk, isDown, extended);
+                    return 1;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+static void SyncSysKeysHook(StreamViewportState* st) {
+    if (!st) return;
+    if (st->sendSysKeys && !st->llKeyHook) {
+        st->llKeyHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+    } else if (!st->sendSysKeys && st->llKeyHook) {
+        UnhookWindowsHookEx(st->llKeyHook);
+        st->llKeyHook = nullptr;
+    }
+}
 
 static void ApplyMouseMode(StreamViewportState* st, bool freeMouse) {
     if (!st || !st->hwnd) return;
@@ -320,7 +384,7 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
 
         case WM_MOUSEMOVE: {
-            if (st->freeMouse && st->bridge && st->renderer) {
+            if (st->freeMouse && !st->viewOnly && st->bridge && st->renderer) {
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
                 if (y <= 6) {
@@ -349,7 +413,7 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
 
         case WM_INPUT: {
-            if (!st->freeMouse && st->bridge) {
+            if (!st->freeMouse && !st->viewOnly && st->bridge) {
                 UINT sz = 0;
                 GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &sz, sizeof(RAWINPUTHEADER));
                 if (sz > 0 && sz <= 512) {
@@ -373,54 +437,66 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         case WM_LBUTTONDOWN:
             SetFocus(hwnd);
-            if (st->bridge) st->bridge->SendMouseButton(true, 0x01);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(true, 0x01);
             return 0;
         case WM_LBUTTONUP:
-            if (st->bridge) st->bridge->SendMouseButton(false, 0x01);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(false, 0x01);
             return 0;
         case WM_RBUTTONDOWN:
             SetFocus(hwnd);
-            if (st->bridge) st->bridge->SendMouseButton(true, 0x03);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(true, 0x03);
             return 0;
         case WM_RBUTTONUP:
-            if (st->bridge) st->bridge->SendMouseButton(false, 0x03);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(false, 0x03);
             return 0;
         case WM_MBUTTONDOWN:
             SetFocus(hwnd);
-            if (st->bridge) st->bridge->SendMouseButton(true, 0x02);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(true, 0x02);
             return 0;
         case WM_MBUTTONUP:
-            if (st->bridge) st->bridge->SendMouseButton(false, 0x02);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(false, 0x02);
             return 0;
         case WM_XBUTTONDOWN:
             SetFocus(hwnd);
-            if (st->bridge) st->bridge->SendMouseButton(true, GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 0x04 : 0x05);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(true, GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 0x04 : 0x05);
             return TRUE;
         case WM_XBUTTONUP:
-            if (st->bridge) st->bridge->SendMouseButton(false, GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 0x04 : 0x05);
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseButton(false, GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 0x04 : 0x05);
             return TRUE;
         case WM_MOUSEWHEEL:
-            if (st->bridge) st->bridge->SendMouseScroll(static_cast<short>(GET_WHEEL_DELTA_WPARAM(wParam)));
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseScroll(static_cast<short>(GET_WHEEL_DELTA_WPARAM(wParam)));
             return 0;
         case WM_MOUSEHWHEEL:
-            if (st->bridge) st->bridge->SendMouseHScroll(static_cast<short>(GET_WHEEL_DELTA_WPARAM(wParam)));
+            if (!st->viewOnly && st->bridge) st->bridge->SendMouseHScroll(static_cast<short>(GET_WHEEL_DELTA_WPARAM(wParam)));
             return 0;
 
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
             uint16_t vk = static_cast<uint16_t>(wParam);
-            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 || vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
+            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            // Built-in emergency shortcuts: Ctrl+Alt+Shift+Q disconnects; Ctrl+Alt+Shift+Z unlocks mouse
+            bool isCtrlOrAltKey = (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU);
+
+            if (isCtrlOrAltKey) {
+                if (ctrl && alt && !shift) {
+                    st->ctrlAltSoloActive = true;
+                }
+            } else {
+                st->ctrlAltSoloActive = false;
+            }
+
+            // Built-in emergency & UU-aligned local shortcuts (always intercepted even in locked mouse / view-only mode)
             if (ctrl && alt && shift && vk == 'Q') {
                 ApplyMouseMode(st, true);
+                if (st->bridge) st->bridge->ReleaseAllModifiers();
                 st->quitRequested.store(true);
                 PostQuitMessage(0);
                 return 0;
             }
             if (ctrl && alt && shift && vk == 'Z') {
                 ApplyMouseMode(st, true);
+                EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"release_mouse\"}");
                 return 0;
             }
             if (ctrl && alt && shift && vk == 'B') {
@@ -428,16 +504,52 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"toolbar\"}");
                 return 0;
             }
+            if (ctrl && alt && !shift && vk == 'M') {
+                ApplyMouseMode(st, !st->freeMouse);
+                if (st->freeMouse) {
+                    EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"release_mouse\"}");
+                }
+                return 0;
+            }
+            if (ctrl && alt && !shift && vk == 'F') {
+                if (!st->freeMouse) ApplyMouseMode(st, true);
+                EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"toggle_fullscreen\"}");
+                return 0;
+            }
+            if (ctrl && alt && !shift && vk == 'G') {
+                EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"toggle_float_ball\"}");
+                return 0;
+            }
+            if (ctrl && alt && !shift && vk == 'U') {
+                if (!st->freeMouse) ApplyMouseMode(st, true);
+                EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"toggle_mini_window\"}");
+                return 0;
+            }
+            if (ctrl && alt && !shift && vk == VK_RIGHT) {
+                EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"next_display\"}");
+                return 0;
+            }
+
             bool extended = ((lParam & (1L << 24)) != 0);
-            if (st->bridge) st->bridge->SendKey(vk, true, extended);
+            if (!st->viewOnly && st->bridge) st->bridge->SendKey(vk, true, extended);
             return 0;
         }
 
         case WM_KEYUP:
         case WM_SYSKEYUP: {
             uint16_t vk = static_cast<uint16_t>(wParam);
+            bool isCtrlOrAltKey = (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU);
+            // Solo tap Ctrl+Alt while in locked mouse mode -> immediately unlock cursor & reveal floating square!
+            if (isCtrlOrAltKey && st->ctrlAltSoloActive) {
+                st->ctrlAltSoloActive = false;
+                if (!st->freeMouse) {
+                    ApplyMouseMode(st, true);
+                    if (st->bridge) st->bridge->ReleaseAllModifiers();
+                    EmitJsonLine("{\"event\":\"hotkey\",\"name\":\"release_mouse\"}");
+                }
+            }
             bool extended = ((lParam & (1L << 24)) != 0);
-            if (st->bridge) st->bridge->SendKey(vk, false, extended);
+            if (!st->viewOnly && st->bridge) st->bridge->SendKey(vk, false, extended);
             return 0;
         }
 
@@ -478,6 +590,26 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     break;
                 case IpcCommandType::SetHud:
                     st->hudEnabled = cmd->flag;
+                    break;
+                case IpcCommandType::SetVolume:
+                    if (st->bridge) {
+                        st->bridge->SetAudioVolume(static_cast<float>(cmd->volume) / 100.0f);
+                    }
+                    break;
+                case IpcCommandType::SetScaleMode:
+                    if (st->renderer) {
+                        st->renderer->SetAspectFit(cmd->flag);
+                    }
+                    break;
+                case IpcCommandType::SetViewOnly:
+                    st->viewOnly = cmd->flag;
+                    if (st->viewOnly && !st->freeMouse) {
+                        ApplyMouseMode(st, true);
+                    }
+                    break;
+                case IpcCommandType::SetSysKeys:
+                    st->sendSysKeys = cmd->flag;
+                    SyncSysKeysHook(st);
                     break;
                 case IpcCommandType::SendKeys:
                     if (st->bridge) st->bridge->SendKeyCombo(cmd->vks);
@@ -570,6 +702,7 @@ static int RunStreamSession(HWND parentHwnd, const StreamSessionConfig& cfg, boo
         return 1;
     }
     state.hwnd = viewportHwnd;
+    g_activeViewportState = &state;
 
     if (!renderer.AttachToHwnd(viewportHwnd, static_cast<uint32_t>(initW), static_cast<uint32_t>(initH), err)) {
         EmitJsonLine("{\"event\":\"error\",\"message\":\"" + EscapeJson(err) + "\"}");
@@ -633,6 +766,9 @@ static int RunStreamSession(HWND parentHwnd, const StreamSessionConfig& cfg, boo
     }
 
     state.quitRequested.store(true);
+    state.sendSysKeys = false;
+    SyncSysKeysHook(&state);
+    g_activeViewportState = nullptr;
     ApplyMouseMode(&state, true);
     bridge.InterruptSession();
     if (streamThread.joinable()) streamThread.join();

@@ -57,6 +57,7 @@ public:
     void SendKeyCombo(const std::vector<uint32_t>& vks);
     void SendUtf8Text(const std::string& utf8);
     void ReleaseAllModifiers();
+    void SetAudioVolume(float gain) { audio_.SetVolume(gain); }
 
 private:
     static int OnVideoSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags);

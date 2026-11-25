@@ -24,6 +24,10 @@ enum class IpcCommandType {
     Resize,
     SetHud,
     SetMouseMode,
+    SetVolume,
+    SetScaleMode,
+    SetViewOnly,
+    SetSysKeys,
     SendKeys,
     SendText,
     SwitchQuality,
@@ -37,6 +41,7 @@ struct IpcCommand {
     uint32_t height = 0;
     uint32_t fps = 0;
     uint32_t bitrateKbps = 0;
+    uint32_t volume = 100;
     bool flag = false;
     std::vector<uint32_t> vks;
     std::string text;

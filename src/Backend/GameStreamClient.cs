@@ -27,6 +27,8 @@ namespace DualRemote
         internal bool Paired;
         internal int CurrentGame;
         internal string State = "";
+        internal int NativeWidth;
+        internal int NativeHeight;
     }
 
     internal sealed class GameStreamAppInfo
@@ -50,6 +52,8 @@ namespace DualRemote
         internal int ServerCodecModeSupport = 1;
         internal string RiKeyHex = "";
         internal uint RiKeyId;
+        internal int HostNativeWidth;
+        internal int HostNativeHeight;
         internal string Error = "";
     }
 
@@ -669,8 +673,46 @@ namespace DualRemote
             parsed.Paired = string.Equals(ReadXmlTag(xml, "PairStatus"), "1", StringComparison.Ordinal);
             parsed.CurrentGame = ParseIntOrDefault(ReadXmlTag(xml, "currentgame"), 0);
             parsed.State = ReadXmlTag(xml, "state");
+            // 解析主机原生显示模式（<SupportedDisplayMode> 首个或最高分辨率）
+            int nw, nh;
+            if (TryParseNativeResolution(xml, out nw, out nh))
+            {
+                parsed.NativeWidth = nw;
+                parsed.NativeHeight = nh;
+            }
             info = parsed;
             return true;
+        }
+
+        private static bool TryParseNativeResolution(string xml, out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+            if (string.IsNullOrEmpty(xml)) return false;
+            int pos = 0;
+            long bestPixels = 0;
+            while (pos < xml.Length)
+            {
+                int start = xml.IndexOf("<DisplayMode>", pos, StringComparison.OrdinalIgnoreCase);
+                if (start < 0) break;
+                int end = xml.IndexOf("</DisplayMode>", start + 13, StringComparison.OrdinalIgnoreCase);
+                if (end < 0) break;
+                string block = xml.Substring(start + 13, end - (start + 13));
+                int w = ParseIntOrDefault(ReadXmlTag(block, "Width"), 0);
+                int h = ParseIntOrDefault(ReadXmlTag(block, "Height"), 0);
+                if (w >= 640 && h >= 480)
+                {
+                    long px = (long)w * h;
+                    if (px > bestPixels)
+                    {
+                        bestPixels = px;
+                        width = w;
+                        height = h;
+                    }
+                }
+                pos = end + 14;
+            }
+            return width > 0 && height > 0;
         }
 
         internal static List<GameStreamAppInfo> ParseAppListXml(string xml)
@@ -996,6 +1038,8 @@ namespace DualRemote
             res.AppVersion = serverInfo.AppVersion;
             res.GfeVersion = serverInfo.GfeVersion;
             res.ServerCodecModeSupport = serverInfo.ServerCodecModeSupport;
+            res.HostNativeWidth = serverInfo.NativeWidth;
+            res.HostNativeHeight = serverInfo.NativeHeight;
 
             // 拉取应用列表并自动匹配桌面应用（Desktop / 桌面）
             string appListUrl = BuildUrl("https", cleanHost, httpsPort,

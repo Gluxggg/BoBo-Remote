@@ -484,11 +484,11 @@ namespace DualRemote
         }
 
         /// <summary>
-        /// 进入防窥屏瞬间的顶部悬浮快捷键提醒（展示约 3.2s 后平滑淡出，随后壁纸保持纯净不暴露退出方式）。
+        /// 进入防窥屏瞬间的顶部悬浮快捷键提醒卡片（宽敞留白、独立按键胶囊与清晰的视觉层级，展示约 3.5s 后平滑淡出）。
         /// </summary>
         internal static void RenderEntryToast(Graphics g, Rectangle bounds, float opacity, bool lockOnLocalExit)
         {
-            if (opacity <= 0.01f || bounds.Width < 260 || bounds.Height < 160) return;
+            if (opacity <= 0.01f || bounds.Width < 300 || bounds.Height < 180) return;
             float clamped = Math.Max(0f, Math.Min(1f, opacity));
             var save = g.Save();
             try
@@ -498,50 +498,167 @@ namespace DualRemote
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-                float unit = Math.Max(0.75f, Math.Min(1.25f, bounds.Height / 1080f));
-                string title = "已进入防窥模式  ·  按 Ctrl + Alt + Shift + P 退出";
-                string sub = lockOnLocalExit ? "退出防窥后将自动锁定 Windows 桌面" : "";
+                float unit = Math.Max(0.82f, Math.Min(1.28f, bounds.Height / 1080f));
+                string title = "已进入防窥保护模式";
+                string statusTag = "远控画面透明";
+                string hintPrefix = "本地退出";
+                string[] keys = new[] { "Ctrl", "Alt", "Shift", "P" };
+                string sub = lockOnLocalExit ? "按下退出快捷键后将自动锁定 Windows 桌面" : "";
                 bool hasSub = sub.Length > 0;
 
-                using (var titleFont = new Font("Microsoft YaHei UI", 12f * unit, FontStyle.Bold))
-                using (var subFont = new Font("Microsoft YaHei UI", 9.5f * unit))
-                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                using (var titleFont = new Font("Microsoft YaHei UI", 12.5f * unit, FontStyle.Bold))
+                using (var tagFont = new Font("Microsoft YaHei UI", 8.5f * unit, FontStyle.Bold))
+                using (var keyFont = new Font("Consolas", 9.5f * unit, FontStyle.Bold))
+                using (var labelFont = new Font("Microsoft YaHei UI", 9.5f * unit, FontStyle.Regular))
+                using (var subFont = new Font("Microsoft YaHei UI", 9f * unit, FontStyle.Regular))
+                using (var leftFmt = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+                using (var centerFmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
                 {
                     SizeF titleSz = g.MeasureString(title, titleFont);
+                    SizeF tagSz = g.MeasureString(statusTag, tagFont);
+                    SizeF prefixSz = g.MeasureString(hintPrefix, labelFont);
+                    SizeF plusSz = g.MeasureString("+", labelFont);
+                    float keyPadX = 9f * unit;
+                    float keyGap = 5f * unit;
+                    float keyH = 24f * unit;
+                    float[] keyWidths = new float[keys.Length];
+                    float keysTotalW = prefixSz.Width + 10f * unit;
+                    for (int i = 0; i < keys.Length; i++)
+                    {
+                        keyWidths[i] = Math.Max(26f * unit, g.MeasureString(keys[i], keyFont).Width + keyPadX * 2f);
+                        keysTotalW += keyWidths[i];
+                        if (i < keys.Length - 1) keysTotalW += plusSz.Width + keyGap * 2f;
+                    }
                     SizeF subSz = hasSub ? g.MeasureString(sub, subFont) : SizeF.Empty;
-                    float padX = 26f * unit;
-                    float pillW = Math.Min(bounds.Width * 0.86f, Math.Max(titleSz.Width, subSz.Width) + padX * 2f);
-                    float pillH = (hasSub ? 64f : 44f) * unit;
-                    float px = bounds.X + (bounds.Width - pillW) * 0.5f;
-                    float py = bounds.Y + Math.Max(28f, 44f * unit);
-                    var pill = new RectangleF(px, py, pillW, pillH);
 
-                    int bgAlpha = (int)Math.Round(218 * clamped);
-                    int borderAlpha = (int)Math.Round(96 * clamped);
-                    int titleAlpha = (int)Math.Round(250 * clamped);
-                    int subAlpha = (int)Math.Round(198 * clamped);
+                    float iconSize = 42f * unit;
+                    float padLeft = 24f * unit;
+                    float padRight = 26f * unit;
+                    float padTop = 18f * unit;
+                    float padBottom = 18f * unit;
+                    float iconGap = 18f * unit;
+                    float row1W = titleSz.Width + 12f * unit + tagSz.Width + 18f * unit;
+                    float textColW = Math.Max(row1W, Math.Max(keysTotalW, subSz.Width));
 
-                    using (var path = CreateRoundedRect(pill, 12f * unit))
+                    float cardW = Math.Min(bounds.Width * 0.88f, padLeft + iconSize + iconGap + textColW + padRight);
+                    float row1H = 26f * unit;
+                    float rowGap1 = 10f * unit;
+                    float row2H = keyH + 2f * unit;
+                    float rowGap2 = hasSub ? 10f * unit : 0f;
+                    float row3H = hasSub ? 20f * unit : 0f;
+                    float cardH = padTop + row1H + rowGap1 + row2H + rowGap2 + row3H + padBottom;
+
+                    float cx = bounds.X + (bounds.Width - cardW) * 0.5f;
+                    float cy = bounds.Y + Math.Max(34f, 52f * unit);
+                    var card = new RectangleF(cx, cy, cardW, cardH);
+
+                    int shadowAlpha = (int)Math.Round(72 * clamped);
+                    int bgAlpha = (int)Math.Round(236 * clamped);
+                    int borderAlpha = (int)Math.Round(115 * clamped);
+                    int accentAlpha = (int)Math.Round(225 * clamped);
+                    int titleAlpha = (int)Math.Round(252 * clamped);
+                    int labelAlpha = (int)Math.Round(200 * clamped);
+                    int subAlpha = (int)Math.Round(190 * clamped);
+
+                    // Soft elevated shadow behind card
+                    var shadowRect = new RectangleF(card.X - 2f, card.Y + 5f * unit, card.Width + 4f, card.Height + 3f);
+                    using (var sp = CreateRoundedRect(shadowRect, 16f * unit))
+                    using (var sb = new SolidBrush(Color.FromArgb(shadowAlpha, 2, 6, 23)))
+                    {
+                        g.FillPath(sb, sp);
+                    }
+
+                    // Main frosted dark slate card
+                    using (var path = CreateRoundedRect(card, 14f * unit))
                     using (var bg = new SolidBrush(Color.FromArgb(bgAlpha, 15, 23, 42)))
-                    using (var border = new Pen(Color.FromArgb(borderAlpha, 148, 197, 255), 1.2f))
+                    using (var border = new Pen(Color.FromArgb(borderAlpha, 148, 184, 226), 1.15f))
                     {
                         g.FillPath(bg, path);
                         g.DrawPath(border, path);
                     }
 
-                    using (var titleBrush = new SolidBrush(Color.FromArgb(titleAlpha, 248, 250, 252)))
-                    using (var subBrush = new SolidBrush(Color.FromArgb(subAlpha, 191, 219, 254)))
+                    // Subtle top cyan accent bar
+                    var accentBar = new RectangleF(card.X + 22f * unit, card.Y, card.Width - 44f * unit, 2.5f * unit);
+                    using (var accentBrush = new SolidBrush(Color.FromArgb(accentAlpha, 56, 189, 248)))
                     {
+                        g.FillRectangle(accentBrush, accentBar);
+                    }
+
+                    // Left shield icon badge
+                    float iconX = card.X + padLeft;
+                    float iconY = card.Y + (card.Height - iconSize) * 0.5f;
+                    using (var badgeBg = new SolidBrush(Color.FromArgb((int)Math.Round(215 * clamped), 24, 52, 86)))
+                    using (var badgeBorder = new Pen(Color.FromArgb((int)Math.Round(135 * clamped), 56, 189, 248), 1.2f))
+                    {
+                        g.FillEllipse(badgeBg, iconX, iconY, iconSize, iconSize);
+                        g.DrawEllipse(badgeBorder, iconX, iconY, iconSize, iconSize);
+                    }
+                    DrawShieldMark(g, iconX + iconSize * 0.5f, iconY + iconSize * 0.5f, iconSize * 0.34f,
+                        Color.FromArgb(titleAlpha, 96, 198, 255));
+
+                    // Right text & keycap column
+                    float tx = iconX + iconSize + iconGap;
+                    float y1 = card.Y + padTop;
+
+                    using (var titleBrush = new SolidBrush(Color.FromArgb(titleAlpha, 248, 250, 252)))
+                    using (var labelBrush = new SolidBrush(Color.FromArgb(labelAlpha, 168, 186, 212)))
+                    using (var subBrush = new SolidBrush(Color.FromArgb(subAlpha, 147, 197, 253)))
+                    {
+                        // Row 1: Title + green status pill
+                        g.DrawString(title, titleFont, titleBrush, new RectangleF(tx, y1, titleSz.Width + 6f, row1H), leftFmt);
+
+                        float tagX = tx + titleSz.Width + 12f * unit;
+                        float tagW = tagSz.Width + 16f * unit;
+                        float tagH = 20f * unit;
+                        float tagY = y1 + (row1H - tagH) * 0.5f;
+                        if (tagX + tagW < card.Right - 14f * unit)
+                        {
+                            var tagRect = new RectangleF(tagX, tagY, tagW, tagH);
+                            using (var tp = CreateRoundedRect(tagRect, tagH * 0.5f))
+                            using (var tbg = new SolidBrush(Color.FromArgb((int)Math.Round(190 * clamped), 16, 72, 54)))
+                            using (var tbd = new Pen(Color.FromArgb((int)Math.Round(150 * clamped), 52, 211, 153), 1f))
+                            using (var tbr = new SolidBrush(Color.FromArgb(titleAlpha, 110, 231, 183)))
+                            {
+                                g.FillPath(tbg, tp);
+                                g.DrawPath(tbd, tp);
+                                g.DrawString(statusTag, tagFont, tbr, tagRect, centerFmt);
+                            }
+                        }
+
+                        // Row 2: "本地退出" + separated rounded keycaps
+                        float y2 = y1 + row1H + rowGap1;
+                        g.DrawString(hintPrefix, labelFont, labelBrush, new RectangleF(tx, y2, prefixSz.Width + 4f, row2H), leftFmt);
+                        float kx = tx + prefixSz.Width + 10f * unit;
+                        float ky = y2 + (row2H - keyH) * 0.5f;
+                        using (var keyBg = new SolidBrush(Color.FromArgb((int)Math.Round(220 * clamped), 30, 41, 59)))
+                        using (var keyBorder = new Pen(Color.FromArgb((int)Math.Round(155 * clamped), 100, 116, 139), 1f))
+                        using (var keyBrush = new SolidBrush(Color.FromArgb(titleAlpha, 241, 245, 249)))
+                        {
+                            for (int i = 0; i < keys.Length; i++)
+                            {
+                                var kr = new RectangleF(kx, ky, keyWidths[i], keyH);
+                                using (var kp = CreateRoundedRect(kr, 6f * unit))
+                                {
+                                    g.FillPath(keyBg, kp);
+                                    g.DrawPath(keyBorder, kp);
+                                }
+                                g.DrawString(keys[i], keyFont, keyBrush, kr, centerFmt);
+                                kx += keyWidths[i];
+                                if (i < keys.Length - 1)
+                                {
+                                    g.DrawString("+", labelFont, labelBrush,
+                                        new RectangleF(kx, y2, plusSz.Width + keyGap * 2f, row2H), centerFmt);
+                                    kx += plusSz.Width + keyGap * 2f;
+                                }
+                            }
+                        }
+
+                        // Row 3: Optional lock-on-exit footer note
                         if (hasSub)
                         {
-                            g.DrawString(title, titleFont, titleBrush,
-                                new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.11f, pill.Width - 24f, pill.Height * 0.44f), fmt);
+                            float y3 = y2 + row2H + rowGap2;
                             g.DrawString(sub, subFont, subBrush,
-                                new RectangleF(pill.X + 12f, pill.Y + pill.Height * 0.54f, pill.Width - 24f, pill.Height * 0.36f), fmt);
-                        }
-                        else
-                        {
-                            g.DrawString(title, titleFont, titleBrush, pill, fmt);
+                                new RectangleF(tx, y3, card.Right - padRight - tx, row3H), leftFmt);
                         }
                     }
                 }

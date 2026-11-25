@@ -40,6 +40,8 @@ public:
     bool PresentClearFrame(float r, float g, float b, std::string& outError);
 
     void SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH);
+    void SetAspectFit(bool fit);
+    bool IsAspectFit() const;
     RECT GetVideoViewportRect() const;
 
     ID3D11Device* Device() const { return device_.Get(); }
@@ -72,6 +74,7 @@ private:
     uint32_t swapH_ = 0;
     uint32_t videoW_ = 1920;
     uint32_t videoH_ = 1080;
+    bool aspectFit_ = true;
     GpuCapabilities caps_;
 };
 
