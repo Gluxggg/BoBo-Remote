@@ -11,8 +11,8 @@ android {
         applicationId = "com.bobo.remote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 621
-        versionName = "6.2.1"
+        versionCode = 622
+        versionName = "6.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

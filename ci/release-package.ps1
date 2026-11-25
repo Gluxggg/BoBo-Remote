@@ -64,6 +64,7 @@ $notesTemplate = @'
   - 锁定鼠标模式下兼容笔记本 Precision Touchpad / 笔设备的绝对 Raw Input，并提供 `RegisterRawInputDevices` 失败时的相对位移回退。
 - **2. 主机光标合成协商与无头/超级屏光标兜底**：
   - 被控端在 `STREAM_STARTED` 中显式声明 `hostCursorComposited`，控制端仅在确认远端已合成主机光标且首帧画面到达后再隐藏本机指针，避免双光标或光标消失；
+  - 切换「仅查看模式」(`BoBoClient_SetViewOnly`) 时立即向渲染视口派发 `kMsgRefreshCursor` 刷新本机指针显隐状态，无需移动鼠标即可即时生效；
   - 修复无头桌面、虚拟显示器或超级屏切换分辨率后系统清除 `CURSOR_SHOWING` 导致远端看不到鼠标的问题，自动保持主机指针可见并内置清晰箭头光标回退。
 - **3. 防窥低级输入钩子与 UIPI 兼容性加固**：
   - 防窥模式下的 `WH_MOUSE_LL` / `WH_KEYBOARD_LL` 改用 `BoBoCore.dll` 自身模块句柄挂载，使用 32 位安全注入魔数并兼容第三方钩子剥离 `dwExtraInfo` 时的短窗口放行；

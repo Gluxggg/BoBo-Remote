@@ -1863,6 +1863,9 @@ BOBO_API void __stdcall BoBoClient_SetViewOnly(void* handle, int32_t viewOnly) {
     if (!st) return;
     st->viewOnly = (viewOnly != 0);
     if (st->viewOnly && !st->freeMouse) ApplyClientMouseMode(st, true);
+    if (st->viewportHwnd && IsWindow(st->viewportHwnd)) {
+        PostMessageW(st->viewportHwnd, kMsgRefreshCursor, 0, 0);
+    }
 }
 
 BOBO_API void __stdcall BoBoClient_SetSysKeys(void* handle, int32_t sendSysKeys) {

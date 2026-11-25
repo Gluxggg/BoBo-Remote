@@ -33,7 +33,7 @@ namespace DualRemote
         internal string DeviceName = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
-        internal string Version = "6.2.1";
+        internal string Version = "6.2.2";
         internal string Platform = BoBoProtocol.PlatformWindows;
         internal string HostControlMode = BoBoProtocol.ControlModeFull;
         internal bool AllowIncoming = true;
