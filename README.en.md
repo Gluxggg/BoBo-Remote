@@ -5,7 +5,7 @@
 <h1 align="center">BoBo Remote</h1>
 
 <p align="center">
-  <strong>One-Click Windows x64 Installer & Low-Latency Remote Desktop Launcher for Your Own PCs</strong>
+  <strong>Open-Source, Zero-Account, Relay-Free Low-Latency Remote Desktop Across Windows, Android, macOS &amp; iOS</strong>
 </p>
 
 <p align="center">
@@ -15,216 +15,232 @@
 
 <p align="center">
   <a href="https://github.com/Gluxggg/BoBo-Remote/actions/workflows/ci.yml"><img src="https://github.com/Gluxggg/BoBo-Remote/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Gluxggg/BoBo-Remote/releases"><img src="https://img.shields.io/github/v/release/Gluxggg/BoBo-Remote?label=release&color=337aff" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078d6" alt="Platform">
-  <img src="https://img.shields.io/badge/.NET%20Framework-4.8-512bd4" alt=".NET Framework 4.8">
-  <img src="https://img.shields.io/badge/engines-RustDesk%20%7C%20Moonlight%20V%2B%20%7C%20Sunshine-2e4ecb" alt="Engines">
+  <a href="https://github.com/Gluxggg/BoBo-Remote/releases/latest"><img src="https://img.shields.io/github/v/release/Gluxggg/BoBo-Remote?label=release&color=337aff" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20Android%20%7C%20macOS%20%7C%20iOS-0ea5e9" alt="Platforms">
+  <a href="protocol/BOBO6-SPEC.md"><img src="https://img.shields.io/badge/protocol-BoBo6.2%20%C2%B7%20TLS%201.2-2e4ecb" alt="BoBo6.2 Protocol"></a>
 </p>
 
 ---
 
-**One standard installer, ready on both ends.** Ships a sleek **single-file Windows x64 GUI installer (`BoBoRemote-Setup-x64.exe`)** — one-click install with automatic Desktop & Start Menu shortcuts, Windows Apps & Features uninstaller registration, and compiled-in tuning scripts — zero accounts, zero SDKs.
+**One unified native protocol, single-file all-in-one architecture, seamless remote control across all four platforms.**
 
-Built for **everyday dual-PC work**, **2K 90 fps streaming over LAN/Tailscale/IPv6**, and **physical screen privacy** — featuring a clean glacier ice-blue UI, a 7-step ClearType spotlight onboarding tour, custom privacy wallpaper with lock-screen guarding, and reversible anti-loss tuning.
+**BoBo Remote V6.2** has been completely rebuilt as a **self-contained, zero-external-engine** remote desktop suite. It no longer bundles or launches external Sunshine, Moonlight, or RustDesk executables — instead, **Windows, Android, macOS, and iOS / iPadOS** communicate directly over the authoritative [**BoBo6.2 binary wire protocol**](protocol/BOBO6-SPEC.md) (`TCP+TLS 1.2 :49810` / LAN `UDP :49812`).
+
+The Windows installer is only **~930 KB** (with the custom C++17 `BoBoCore.dll` native media & input engine GZip-embedded directly inside `BoBo远程.exe`). Zero vendor accounts, zero relay server costs — auto-discovery on LAN, or end-to-end TLS 1.2 direct connections over Tailscale (`100.x.y.z`) / IPv6 across networks.
 
 ---
 
 <p align="center">
-  <img src="assets/screenshot-devices.png" alt="BoBo Remote main dashboard: glacier ice-blue UI with one-click connect, allow this PC, privacy wallpaper toggle, and LAN/Tailscale/IPv6 copy" width="920" />
+  <img src="assets/screenshot-devices.png" alt="BoBo Remote Windows glacier ice-blue dashboard preview" width="900" />
 </p>
 
 ---
+
+## Four-Platform Capability Matrix
+
+| Platform | OS Requirement | Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| --- | --- | --- | --- | --- | --- |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~933 KB)<br>`BoBoRemote-Portable-x64.zip` (~646 KB) | ✅ **Full**<br>Includes Android nav bar &amp; iOS screen viewing | ✅ **Full**<br>DXGI/GDI + Media Foundation H.264 HW encode + WASAPI audio | Single-file all-in-one EXE, Super Display zero-black-bar scaling, native host cursor compositing, physical input-locking privacy shield, in-app SHA-256 auto-updater |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~10.2 MB) | ✅ **Full**<br>MediaCodec zero-copy HW decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection H.264 stream + AccessibilityService touch | Trackpad &amp; direct-touch modes, edge-dockable floating ball, Control Center, PC shortcut keyboard bar, Bluetooth keyboard → Windows VK mapping, mobile nav controls |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~830 KB) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy render | ✅ **Full**<br>`ScreenCaptureKit` (driverless system audio) + VideoToolbox HW encode | Super Display scaling, smart `⌘ → Ctrl` mapping, privacy curtain excluded from capture + `CGEventTap` physical input lock |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~655 KB) | ✅ **Full**<br>60/120Hz VideoToolbox HW decode + trackpad/direct-touch | 👁️ **ReplayKit View-Only Assist**<br>(Apple sandbox forbids global touch injection) | Embedded ReplayKit Broadcast Extension with paid-App-Group-free loopback bridge — sideload freely via Sideloadly / AltStore / SideStore / Xcode |
+
+> See [**Cross-Platform Installation &amp; Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md) for step-by-step setup and permission instructions.
 
 ## Why BoBo Remote?
 
-| Commercial Remote Desktop Tools | BoBo Remote |
+| Commercial Remote Desktop Suites | BoBo Remote V6.2 |
 | --- | --- |
-| Mandatory cloud account; device metadata routed through vendor servers | **No account, no custom relay** — runs over your LAN, Tailscale tailnet, or public IPv6 |
-| Opaque quality presets; bitrate and frame-rate tiers often paywalled | **Open-source engines + transparent tuning** — Moonlight V+ / Foundation Sunshine + built-in reversible tuning |
-| Installs background system services, drivers, and firewall exceptions | **Standard GUI installer + explicit consent** — creates Desktop/Start Menu shortcuts without silent services or firewall edits |
-| Juggling RustDesk + Moonlight + Sunshine separately is tedious | **One unified installer & launcher** — single `BoBoRemote-Setup-x64.exe` for both PCs with a 7-step onboarding tour |
-| Limited host screen privacy or fragile lock-screen recovery | **Custom privacy wallpaper + virtual display** — auto-enable on attach, lock-on-exit guard state machine |
+| Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No accounts, no relays, no telemetry** — LAN auto-discovery or direct Tailscale (`100.x.y.z`) / IPv6 TLS 1.2 connections |
+| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **100% MIT open source, all features unlocked** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
+| Background system services &amp; kernel drivers keep running after closing the app | **Strict dual-end online authorization** — requires BoBo Remote open on both ends + 4-digit HMAC pairing; closing the host stops listening immediately |
+| Juggling RustDesk + Moonlight + Sunshine separately is heavy (100+ MB) | **Single-file in-process architecture** — Windows installer shrunk to ~930 KB; all four platforms share one lean wire protocol |
+| Superficial privacy overlays still let bystanders click the taskbar or type | **Physical-grade host privacy shield** — `WDA_EXCLUDEFROMCAPTURE` curtain + native `WH_MOUSE_LL`/`WH_KEYBOARD_LL` (or `CGEventTap`) input blocker + optional safe DDC/CI backlight dimming |
 
-## Architecture
+## Architecture &amp; Unified Protocol (`BoBo6.2`)
 
 ```mermaid
 flowchart LR
-  subgraph L["BoBo远程.exe (Native WinForms · C# 5 · Embedded Tuning Scripts)"]
+  subgraph CLIENTS["Four Native Clients (Controller + Host Built In)"]
     direction TB
-    G["7-Step Spotlight Onboarding"] -.-> A["Devices · Host Dashboard"]
-    A --> B["Remote Assist · 4-Digit / 9-Digit"]
-    A --> C["Privacy & Display · Curtain / VDD"]
-    A --> D["Settings · Stream & Anti-Loss Tuning"]
+    WIN["Windows x64 · C# WinForms + Embedded C++17 BoBoCore.dll"]
+    AND["Android · Kotlin + Jetpack Compose + MediaCodec"]
+    MAC["macOS · SwiftUI + BoBoAppleCore + ScreenCaptureKit"]
+    IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
   end
 
-  B -->|"Authorized PC: Direct stream"| V["Moonlight V+ 6.5.6<br/>HEVC · Foundation ABR"]
-  B -->|"First use: 4-digit code"| P["Local Host Approval"]
-  P --> V
-  B -.->|"Fallback client"| M["Moonlight 6.2.0"]
-  B -->|"Temp code / File transfer"| R["RustDesk 1.5.3"]
+  subgraph PROTO["BoBo6.2 Authoritative Wire Protocol (Byte-Verified Across C# / Kotlin / Swift)"]
+    direction TB
+    DISC["UDP 49812 · LAN Discovery (PROBE / HELLO / BYE)"]
+    TLS["TCP 49810 · Mandatory TLS 1.2+ (RSA-2048 Cert Fingerprint Pinning)"]
+    AUTH["4-Digit Temporary PIN (120s One-Time · HMAC-SHA256 Mutual Auth)"]
+    FRAMES["5 Binary Frames: ControlJson · H.264 · 48kHz IMA-ADPCM · Input (Touch/Nav) · FileChunk"]
+    DISC --> TLS --> AUTH --> FRAMES
+  end
 
-  C -->|"Privacy curtain (WDA_EXCLUDEFROMCAPTURE)"| W["Local Wallpaper + Lock Guard"]
-  C -->|"Zako VDD / Display-off"| S[("Foundation Sunshine<br/>Bundled or Running Host")]
-  D -->|"Read-only diag & reversible tuning"| S
+  NET["Direct LAN / Tailscale Mesh / IPv6 End-to-End (Zero Relay)"]
 
-  V --> S
-  R -.->|"Host native consent window"| H[("Remote Windows PC")]
-  S --- H
+  WIN <--> PROTO
+  AND <--> PROTO
+  MAC <--> PROTO
+  IOS <--> PROTO
+  PROTO <--> NET
 ```
 
-The UI, 7-step onboarding engine, privacy curtain state machine, and core display/anti-loss scripts are compiled directly into `BoBo远程.exe`. The four native C++/Rust engines — RustDesk (AGPL-3.0), Moonlight / Moonlight V+, and Foundation Sunshine (GPL-3.0) — run as isolated child processes from fixed relative paths under `engines\` so the launcher stays cleanly MIT-licensed while packaged inside a single installer executable.
+- **Single Authoritative Spec**: [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines the 9-byte little-endian frame header, deterministic 9-digit device code derivation, 4-digit `HMAC-SHA256` pairing proof, H.264 Annex-B video frames, 48kHz stereo IMA-ADPCM audio, mouse/keyboard/multi-touch/mobile-nav input packets, and chunked file transfers.
+- **Cross-Language Golden Vectors**: [`protocol/golden-vectors.json`](protocol/golden-vectors.json) is enforced in CI across C# (Windows), Kotlin (Android), and Swift (Apple) alongside live TLS 1.2 loopback tests.
 
-## Connection & Feature Matrix
+## Key Features
 
-| Capability | Status | Notes |
-| --- | --- | --- |
-| **One-click GUI installer** | ✅ Native | `BoBoRemote-Setup-x64.exe`: SHA-256 self-check, Desktop & Start Menu shortcuts, upgrade-safe pairing preservation, Windows Apps uninstall |
-| **Low-latency 2K/90 fps streaming** | ✅ Native | Moonlight V+ 6.5.6 + Foundation Sunshine with HEVC, Foundation ABR, and dynamic Auto-FEC |
-| **In-flow 4-digit local pairing** | ✅ Native | Controlled PC generates a 120 s 4-digit pairing code; once paired, subsequent sessions launch directly |
-| **Temporary assist & file transfer** | ✅ Native | RustDesk 1.5.3 extracted from official MSI (`msiexec /a`, no install/service) for 9-digit remote assist |
-| **Host privacy wallpaper curtain** | ✅ Native | Uses `WDA_EXCLUDEFROMCAPTURE` with custom images or 3 themes, auto-enable on attach, and lock-on-exit |
-| **Virtual display & display-off privacy** | 🔧 Optional Advanced | Requires installing the Zako virtual display driver and system-installed Foundation Sunshine to turn off the physical monitor signal (auto-restores on exit) |
-| **7-step spotlight onboarding tour** | ✅ Native | Auto-opens on first launch with 2-layer native ClearType rendering; replay anytime via top-right `?` |
-| **In-app automatic updates** | ✅ Native | Silently checks GitHub Releases on launch, verifies SHA-256 via `SHA256SUMS.txt`, and applies light delta or full upgrades in place automatically |
+### 1. Ultra-Lean In-Process Native Core (~930 KB Windows Installer)
+- Custom C++17 **`BoBoCore.dll`** is GZip-compressed directly inside `BoBo远程.exe` and loaded in-process — zero external Moonlight/RustDesk windows and zero standalone Sunshine daemons.
+- Full hardware-accelerated pipeline: **DXGI Desktop Duplication** (with automatic GDI fallback) → **Media Foundation H.264 HW encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48kHz audio**.
 
-## Interface Preview
+### 2. Super Display (Zero Black Bars) &amp; Seamless Dual-Cursor UX
+- **Super Display Mode (On by Default)**: Automatically eliminates top/bottom black bars on 16:10 laptops and mismatched monitors, with 3 selectable viewport scale modes (**Full-Screen Adaptive / Aspect-Fit / 1:1 Native**) and automatic host resolution restoration on disconnect.
+- **Native Host Cursor Compositing**: Displays the host's native pointer inside the remote viewport and switches cleanly back to the local pointer outside the frame. Supports **Free Mouse / Locked Game Mouse / View-Only** modes — tap `Ctrl + Alt` anytime while locked to instantly release the cursor.
 
-### 7-Step ClearType Spotlight Onboarding & Remote Assist
+### 3. Unified Control Center &amp; Edge-Dockable Floating Ball
+- Shared real-time menu accessible from both the window header and a draggable, edge-snapping square floating ball:
+  - **Display &amp; Super Display**: Multi-monitor switching, resolution follow local/host, DPI scale, Super Display toggle;
+  - **Quality &amp; Frame Rate**: Auto / 30M / 14M / 8M presets and 30 / 60 / 90 / 144 fps targets;
+  - **Window &amp; Mini-Mode**: Fullscreen toggle, always-on-top mini window with adjustable opacity;
+  - **Audio &amp; Security**: Volume slider, host mute-while-connected (auto-restored), lock host on disconnect, one-click remote privacy shield;
+  - **Peripherals &amp; Tools**: System shortcut passthrough, mouse mode switch, `Ctrl+Alt+Del` injection, clipboard text send, screenshot capture, live network HUD, and instant disconnect.
+
+### 4. Physical-Grade Host Privacy Shield (Windows &amp; macOS)
+- **Instant Auto-Shield on Connect**: Raises a fullscreen privacy curtain excluded from screen capture (`WDA_EXCLUDEFROMCAPTURE` on Windows; ScreenCaptureKit window exclusion on macOS) so the remote viewer sees a clean desktop while the physical display shows a custom wallpaper or dark theme.
+- **Physical Keyboard &amp; Mouse Lock (On by Default)**: Native `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks on Windows and `CGEventTap` on macOS block local bystanders from clicking the taskbar or typing, allowing only signed BoBo remote input and the emergency exit hotkey.
+- **Optional Safe DDC/CI Backlight Dimming (Off by Default)**: Uses `dxva2.dll` to adjust **only** backlight brightness (`VCP 0x10`) on non-HDR displays — never touching contrast, color temperature, or RGB gains — with crash-safe persistent restoration and read-back verification.
+- **Lock-Screen Guard State Machine**: Optional auto-lock when dismissing privacy, with post-unlock debounce to prevent unintended re-triggering.
+
+### 5. Mandatory Dual-End Auth &amp; Built-In File Transfer
+- Every node generates a local RSA-2048 identity and 9-digit device code. First-time pairing requires a host-generated **4-digit temporary PIN** (valid 120s, single-use) verified via `HMAC-SHA256` over both certificate fingerprints before adding the peer to the trust store.
+- Built-in end-to-end `FileChunk` file transfer with SHA-256 integrity verification across platforms.
+
+## UI Preview
 
 <p align="center">
-  <img src="assets/screenshot-onboarding.png" alt="7-step ClearType spotlight onboarding overlay" width="450" />
-  <img src="assets/screenshot-assist.png" alt="Remote assist page with 4-digit streaming pairing and RustDesk 9-digit mode" width="450" />
-</p>
-
-### Privacy Wallpaper, Virtual Display & Anti-Loss Tuning
-
-<p align="center">
-  <img src="assets/screenshot-privacy-display.png" alt="Privacy wallpaper and virtual display configuration page" width="450" />
-  <img src="assets/screenshot-performance.png" alt="Low-latency and anti-loss diagnostics settings page" width="450" />
+  <img src="assets/screenshot-onboarding.png" alt="7-step ClearType spotlight onboarding tour" width="450" />
+  <img src="assets/screenshot-privacy-display.png" alt="Privacy shield and display settings page" width="450" />
 </p>
 
 <details>
-<summary>View full-screen host privacy wallpaper render preview</summary>
+<summary>View fullscreen host privacy wallpaper curtain preview</summary>
 <p align="center">
-  <img src="assets/screenshot-privacy-wallpaper.png" alt="Rendered host privacy wallpaper" width="760" />
+  <img src="assets/screenshot-privacy-wallpaper.png" alt="Fullscreen host privacy wallpaper preview" width="760" />
 </p>
 </details>
 
 ## Quick Start
 
-### Out-of-the-Box vs. Optional Advanced Capabilities
+Download the package for your platform from [**GitHub Releases (latest)**](https://github.com/Gluxggg/BoBo-Remote/releases/latest):
 
-All core remote control, LAN streaming, and software privacy features are bundled — **just download, double-click, and run with zero extra installs or cloud accounts**. Only two optional advanced scenarios require extra components:
+### Windows (x64)
+1. Download **`BoBoRemote-Setup-x64.exe`** (or portable **`BoBoRemote-Portable-x64.zip`**).
+2. Double-click to install to `%LOCALAPPDATA%\BoBoRemote` (no admin required; creates Desktop/Start Menu shortcuts and Apps &amp; Features uninstaller; upgrades preserve trusted pairings).
+3. Future updates can be installed in one click directly inside the app with `SHA256SUMS.txt` verification.
 
-| Tier | Capability | Requirement |
-| --- | --- | --- |
-| **✅ Out of the Box** | **LAN 2K High-FPS Streaming** | Zero extra installs: bundled Foundation Sunshine + Moonlight V+ (ABR/Auto-FEC) with 4-digit local pairing |
-| **✅ Out of the Box** | **Cross-Network Temporary Assist & File Transfer** | Zero extra installs: bundled RustDesk 1.5.3 with 9-digit device codes across WAN |
-| **✅ Out of the Box** | **Software Physical-Screen Privacy Wallpaper & Lock Guard** | Zero extra installs: custom image or 3 themes, auto-enable on attach, lock-on-exit, `Ctrl+Alt+Shift+P` emergency exit |
-| **✅ Out of the Box** | **Floating In-Stream Toolbar & 7-Step Onboarding Tour** | Zero extra installs: live quality switching, stats/privacy toggle, and guided first-launch tour |
-| **🔧 Optional Advanced** | **Cross-Network (WAN) 2K High-FPS Streaming** | Install the same mesh VPN tool on both PCs (e.g., [Tailscale](https://tailscale.com/) or [EasyTier](https://easytier.cn/)), or have direct public IPv6 connectivity |
-| **🔧 Optional Advanced** | **Hardware-Level Full Display-Off Privacy & Virtual Display** | Additionally install the **Zako virtual display driver** and **system-installed Foundation Sunshine** (`C:\Program Files\Sunshine`) on the host PC |
+### Android (8.0+)
+1. Download and install **`BoBoRemote-Android.apk`**.
+2. **As Controller**: Ready out of the box with zero special permissions.
+3. **As Rootless Host**: Open the Host tab, grant **Screen Capture**, and enable the **BoBo Remote Accessibility Service** in Android Settings.
 
-### Option 1: Download the Standard Windows Installer (Recommended)
+### macOS (13.0+)
+1. Open **`BoBoRemote-macOS.dmg`** and drag `BoBoRemote.app` into `Applications`.
+2. On first launch, approve under **System Settings → Privacy &amp; Security** ("Open Anyway") or run `xattr -cr /Applications/BoBoRemote.app`.
+3. To allow incoming control, grant **Screen &amp; System Audio Recording** and **Accessibility** permissions from the in-app permission guide.
 
-1. Download **`BoBoRemote-Setup-x64.exe`** (or the portable ZIP `BoBoRemote-Portable-x64.zip`) from [**GitHub Releases**](https://github.com/Gluxggg/BoBo-Remote/releases/latest).
-2. Double-click **`BoBoRemote-Setup-x64.exe`** on both Windows 10/11 x64 machines and click **Install**:
-   - Installs cleanly into `%LOCALAPPDATA%\BoBoRemote` (no UAC admin prompt required; custom path supported);
-   - Automatically creates the **BoBo Remote** Desktop shortcut, Start Menu folder, and standard Windows Apps & Features uninstaller;
-   - Preserves existing Moonlight pairing configs when upgrading in place.
+### iOS / iPadOS (16.0+)
+1. Download **`BoBoRemote-iOS-Unsigned.ipa`** (includes the main app + ReplayKit Broadcast Extension).
+2. Sideload for free using [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode; trust your certificate under **Settings → General → VPN &amp; Device Management** and allow **Local Network** access.
+3. To share your iPhone/iPad screen for remote viewing, open the Screen Share tab and start the **BoBo Broadcast Extension**.
+
+### Connecting in 3 Steps (Any Platform Pair)
+1. **Network**: Place both devices on the same LAN (auto-discovered via `UDP 49812`), or sign both into the same [Tailscale](https://tailscale.com/) tailnet and use the `100.x.y.z` IP.
+2. **Generate PIN**: Open BoBo Remote on the **host** and generate a **4-digit temporary pairing code** (valid 120s).
+3. **Pair &amp; Connect**: Select the host (or enter its IP / 9-digit device code) on the **controller** and enter the 4-digit PIN once — subsequent connections are one-click.
 
 > [!TIP]
-> - **SmartScreen prompt**: This open-source release is not signed with a commercial EV certificate; on first launch click **More info → Run anyway** (you can verify integrity against `SHA256SUMS.txt` on the Release page).
-> - **Windows Firewall**: When hosting LAN streaming for the first time, click **Allow access** if Windows Firewall prompts.
+> - **SmartScreen / Firewall**: Open-source personal releases are not commercially EV code-signed. Click **More info → Run anyway** on Windows SmartScreen (you may verify against `SHA256SUMS.txt` first), and allow LAN access if Windows Firewall prompts when hosting.
 
-### Option 2: Build Installer & Portable Package from Source (Zero SDK)
+## Keyboard Shortcuts
+
+| Shortcut | Platform | Action |
+| --- | --- | --- |
+| `Ctrl + Alt` (tap) | Windows | Instantly release locked mouse &amp; reveal floating controls |
+| `Ctrl + Alt + F` | Windows | Toggle fullscreen / windowed mode |
+| `Ctrl + Alt + U` | Windows | Toggle always-on-top mini window |
+| `Ctrl + Alt + G` | Windows | Hide / restore floating ball in fullscreen |
+| `Ctrl + Alt + M` | Windows | Toggle mouse mode (Free / Locked) |
+| `Ctrl + Alt + →` | Windows | Switch to next remote monitor |
+| `Ctrl + Alt + Shift + B` | Windows | Open / toggle Control Center |
+| `Ctrl + Alt + Shift + Q` | Windows | Disconnect remote session immediately |
+| `Ctrl + Alt + Shift + P` | Windows | Host emergency exit from privacy shield |
+| `⌘ + ⌥ + ⇧ + P` | macOS | Host emergency exit from privacy shield |
+
+## Build From Source &amp; Self-Tests
+
+All local commands mirror [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 ```powershell
-# 1. Clone the repository
-git clone https://github.com/Gluxggg/BoBo-Remote.git
-cd BoBo-Remote
-
-# 2. Build both BoBoRemote-Setup-x64.exe and the portable ZIP (verifies every upstream SHA-256)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
-
-# 3. Run the graphical installer
-.\dist\BoBoRemote-Setup-x64.exe
+# 1. Windows x64 (requires MSVC Build Tools + Win10/11 SDK + in-box .NET 4.8 csc.exe; no .NET SDK or NuGet)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # Build BoBoCore.dll + BoBoRemote.exe & run full self-tests (incl. V6.2 Golden Vectors)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1          # Package Setup EXE, Portable ZIP & Light Update ZIP into dist\
 ```
 
-Useful build and CLI flags:
+```bash
+# 2. Android APK (requires JDK 17 + Android SDK + Gradle 8.7)
+cd android
+gradle :app:testDebugUnitTest --stacktrace   # BoBo6.2 Golden Vectors + TLS 1.2 pairing & file transfer loopback tests
+gradle :app:assembleRelease --stacktrace     # Assemble Release APK
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch            # offline build from verified .cache
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -FetchOnly            # prepare & verify engine cache only
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch -NoPublish # clean stage only; no dist write
-.\BoBoRemote-Setup-x64.exe --silent --dir="D:\BoBoRemote"                             # silent unattended install
-.\BoBo远程.exe --self-test                                                            # headless self-test suite
-.\BoBo远程.exe --tour                                                                 # replay the 7-step onboarding guide
+# 3. Apple Shared Core + macOS DMG (requires macOS 13+ & Xcode Command Line Tools)
+cd apple/BoBoAppleCore && swift test -v      # Golden Vectors + pure Swift RSA-2048/PKCS#12 + NWListener TLS 1.2 loopback tests
+bash apple/scripts/package-macos-dmg.sh      # Build dist-apple/BoBoRemote-macOS.dmg
+
+# 4. iOS / iPadOS Unsigned IPA (requires macOS + Xcode + XcodeGen)
+brew install xcodegen
+bash apple/scripts/package-ios-ipa.sh        # Build dist-apple/BoBoRemote-iOS-Unsigned.ipa
 ```
 
-## Pinned Upstream Engines
+## Project Structure
 
-Every download URL, file size, and SHA-256 hash is pinned in [`build.ps1`](build.ps1); any mismatch aborts the build. Full digests and licence obligations live in [THIRD-PARTY.md](THIRD-PARTY.md) and [NOTICE.md](NOTICE.md).
-
-| Component | Version | Media | Role |
-| --- | --- | --- | --- |
-| **RustDesk** | `1.5.3` | Official MSI extracted via `msiexec /a` (no install, no service) | 9-digit temporary assist & file transfer |
-| **Moonlight** | `6.2.0` | Official Windows portable zip (keeps Authenticode signature) | Fallback streaming client |
-| **Moonlight V+** | `6.5.6` | Official Windows portable zip (GPL-3.0 fork, unsigned) | Primary client with Foundation ABR |
-| **Foundation Sunshine** | `v2026.1123.185102` | Official Windows x64 portable zip (GPL-3.0, unsigned) | Bundled host with Desktop app & local pairing API |
-
-## Core Modules & Layout
-
-| Module / Path | Responsibility |
+| Path | Responsibility |
 | --- | --- |
-| `installer/BoBoSetup.cs` | Zero-dependency native GUI installer/uninstaller: SHA-256 check, streaming extract, shortcuts, Windows Apps registry |
-| `native/bobo-stream-player/` | **V5 Native C++17 Streaming Core** (`BoBoStreamPlayer.exe`, ~300 KB): Direct3D 11 Flip-Model + `ID3D11VideoProcessor` + Media Foundation D3D11VA + `moonlight-common-c` bridge & IPC (see [`docs/V5-NATIVE-STREAM-PLAN.md`](docs/V5-NATIVE-STREAM-PLAN.md)) |
-| `src/StreamToolbarOverlay.cs` | **V5 Floating In-Stream Toolbar**: auto-collapsing top-center pill for live quality switch, stats HUD, privacy curtain, fullscreen & disconnect |
-| `src/MainForm*.cs` | Glacier ice-blue native shell & four pages: Devices, Remote Assist, Privacy & Display, Settings |
-| `src/RemoteTheme.cs` | Hand-drawn WinForms theme: ice-blue/porcelain palette, elevated cards, two-tone icons, slim scrollbar |
-| `src/OnboardingTour.cs` | 7-step spotlight onboarding with 2-layer ClearType rendering, overlap avoidance, and state persistence |
-| `src/PrivacyCurtainForm.cs` | Host privacy curtain window, `Ctrl+Alt+Shift+P` global hotkey, and lock-screen guard state machine |
-| `src/Backend/*.cs` | Engine launcher, bundled host manager, compiled-in scripts, Foundation local pairing, network discovery, self-test |
-| `tools/*.ps1` | Read-only host diagnostics, reversible anti-loss tuning, virtual display control (also compiled into `BoBo远程.exe`) |
-| `build.ps1` / `ci/build.ps1` | Zero-SDK installer & portable bundler + GitHub Actions CI compile & dual `--self-test` verification |
+| `protocol/` | Authoritative wire spec [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) &amp; cross-language test suite [`golden-vectors.json`](protocol/golden-vectors.json) |
+| `native/bobo-core/` | Windows C++17 native engine (`BoBoCore.dll`): DXGI/GDI capture, cursor compositing, MF H.264 encode/decode, D3D11 Flip-Model render, WASAPI audio, Super Display &amp; input blocker |
+| `src/` | Windows C# 5 / WinForms app: glacier-blue UI, native stream window, Control Center, floating ball, 7-step onboarding, privacy curtain &amp; `Backend/` |
+| `installer/` | Zero-dependency Windows GUI installer / silent updater / uninstaller (`BoBoSetup.cs`) |
+| `android/` | Native Android app (Kotlin + Jetpack Compose): zero third-party crypto deps, MediaCodec HW codecs, rootless MediaProjection + Accessibility host &amp; unit tests |
+| `apple/BoBoAppleCore/` | Pure Swift shared core (zero third-party deps): protocol, pure Swift DER RSA-2048 X.509/PKCS#12, TLS 1.2, VideoToolbox decode, audio player &amp; XCTest |
+| `apple/BoBoRemoteMac/` | Native macOS SwiftUI app (ScreenCaptureKit + CGEventTap + privacy shield) |
+| `apple/BoBoRemoteiOS/` | Native iOS / iPadOS app + `BoBoBroadcastExtension` ReplayKit extension (XcodeGen) |
+| `docs/` | Cross-platform setup &amp; troubleshooting guide [`CROSS-PLATFORM-GUIDE.md`](docs/CROSS-PLATFORM-GUIDE.md) |
+| `ci/` &amp; `.github/workflows/` | Parallel four-platform CI (`ci.yml`) and automated Release pipeline (`release.yml`) |
 
-## Highlights
+## Security, Privacy &amp; Honest Boundaries
 
-- ✅ **Standard Single-File Windows Installer (`BoBoRemote-Setup-x64.exe`)** — SHA-256 verification, Desktop & Start Menu shortcuts, Windows Apps uninstaller, upgrade-safe pairing retention
-- ✅ **Glacier Ice-Blue UI & Tuxedo Cat Brand Identity** — Calibrated light cool palette, borderless custom resize grip, and clean rounded-square `bobo-logo.png` / Win32 multi-size `bobo-remote.ico`
-- ✅ **7-Step Spotlight Onboarding Tour** — Layered translucent gray scrim + native opaque ClearType card; keyboard navigation (`← / → / Enter / Esc`) and one-click replay from `?`
-- ✅ **Compiled-in Core Tuning & Display Scripts** — `Set-SunshineDisplay.ps1` and `Optimize-SunshineStream.ps1` embedded directly inside `BoBo远程.exe`
-- ✅ **Dual-Channel Streaming & Remote Assist** — Moonlight V+ / Moonlight for high-FPS streaming plus RustDesk 1.5.3 for ad-hoc 9-digit support and file transfer
-- ✅ **Privacy Wallpaper + Lock-Screen Guard** — Custom local images or 3 themes, auto-enable on remote attach, lock on local exit, and state-machine protection against false re-triggers after unlock
-- ✅ **Virtual Display & Display-Off Privacy** — Zako virtual display aspect matching and physical monitor blackout during remote sessions
-- ✅ **Dual Headless Self-Tests (`--self-test`)** — Automated checks covering launcher logic, onboarding, privacy state machine, installer trailer integrity, and Zip-Slip defense
-
-## Tech Stack
-
-- **C# 5 / .NET Framework 4.8** — Built directly with Windows' in-box `csc.exe` (no SDK, no NuGet)
-- **WinForms + GDI+ / ClearType 2-Layer Compositing** — `UpdateLayeredWindow` scrim paired with native opaque ClearType text
-- **PowerShell 5.1** — Hash-pinned bundler and reversible host tuning scripts
-- **RustDesk 1.5.3 / Moonlight V+ 6.5.6 / Moonlight 6.2.0 / Foundation Sunshine** — Orchestrated as isolated child processes
-
-## Honest Reporting, Privacy & Limitations
-
-Every performance claim in this project is strictly graded as **configuration written**, **phenomenon observed in logs**, or **same-condition A/B measurement** (see [`低延迟调优与防窥指南.md`](低延迟调优与防窥指南.md)).
-
-- **No accounts, relays, or telemetry**: Preferences stay in `%LOCALAPPDATA%\双端远程\` (no passwords, PINs, or tokens). Bundled host credentials (`local-auth.token`, certs, pairing state) are generated locally under `%LOCALAPPDATA%\双端远程\host\config` on first preparation and never ship in the installer.
-- **Explicit local authorization**: RustDesk asks in its native window; Sunshine pairs via a local 4-digit code. Windows Firewall prompts must be approved manually by the user.
-- **Unsigned pre-release binaries**: Moonlight V+ and Foundation Sunshine portable zips are upstream `NotSigned` builds; Windows SmartScreen may warn — verify pinned SHA-256 hashes in [THIRD-PARTY.md](THIRD-PARTY.md).
-- **Real-world boundaries**: Privacy wallpaper relies on `WDA_EXCLUDEFROMCAPTURE` and must be verified per capture backend; 90 fps presets require matching host display mode, refresh rate, and client decode support.
+- **Zero accounts &amp; minimal local state**: No sign-in, no cloud device directory, no relays or telemetry. Local config and trusted peer fingerprints stay strictly on device (`%LOCALAPPDATA%\双端远程\` on Windows) and never ship in release packages.
+- **Explicit dual-end runtime consent**: Closing BoBo Remote on the host immediately stops port `49810` and unhooks all input filters — no hidden background services.
+- **Safe DDC/CI dimming boundary**: Disabled by default; when enabled, strictly adjusts backlight brightness (`VCP 0x10`) on non-HDR monitors only — never contrast or RGB gains — with persistent crash-safe restoration.
+- **Platform boundaries**:
+  - **iOS / iPadOS Host**: Restricted by Apple's sandbox to ReplayKit view-only screen sharing (`view_only`); controlling Windows / macOS / Android from iOS is full-featured.
+  - **Display &amp; FPS limits**: Privacy screen exclusion relies on `WDA_EXCLUDEFROMCAPTURE` (Windows) and ScreenCaptureKit window exclusion (macOS); 90/144 fps requires matching display refresh rate, encoder, and client decode capabilities.
+  - **Unsigned personal builds**: First-time installs may trigger Windows SmartScreen, macOS Gatekeeper, or require free iOS sideloading.
 
 ## Roadmap
 
-| Phase | Goal | Status |
+| Version | Milestone | Status |
 | --- | --- | --- |
-| **V1** | Zero-SDK native WinForms launcher & RustDesk / Moonlight / Moonlight V+ orchestration | ✅ Done |
-| **V2** | Bundled Foundation Sunshine host, 4-digit local pairing flow & existing-host reuse | ✅ Done |
-| **V3** | Host privacy wallpaper, lock-screen guard state machine, virtual display & reversible anti-loss tuning | ✅ Done |
-| **V4** | Glacier ice-blue UI, tuxedo cat icon, 7-step ClearType onboarding, GUI installer & compiled-in scripts | ✅ Done |
-| **V5** | Native embedded streaming engine (Phase 5.1 floating toolbar ✅ + Phase 5.2 C++17 D3D11VA core ✅ + Phase 5.3/5.4 RTP/HEVC/Audio) | 🚧 In progress ([`V5 Milestone Spec`](docs/V5-NATIVE-STREAM-PLAN.md)) |
+| **V1 – V3** | Zero-SDK WinForms launcher, LAN/Tailscale workflow, privacy wallpaper &amp; lock-screen guard | ✅ Done |
+| **V4** | Glacier ice-blue UI, tuxedo cat icon, 7-step ClearType onboarding, GUI installer &amp; in-app auto-updater | ✅ Done |
+| **V5** | Embedded native stream window, Control Center, edge-dockable floating ball &amp; `Ctrl+Alt` instant mouse release | ✅ Done |
+| **V6.0** | Full in-process kernel unification (embedded C++17 `BoBoCore.dll` + `BOBO6` TLS 1.2 + mandatory dual-end 4-digit pairing), zero external engines | ✅ Done |
+| **V6.1** | Host native cursor compositing, Super Display zero-black-bar mode, native physical input lock (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) &amp; hardened privacy shield | ✅ Done |
+| **V6.2** | `BoBo6.2` cross-platform protocol + 3-language Golden Vectors + **Windows / Android / macOS / iOS four-platform release** &amp; parallel CI/Release | ✅ Done |
+| **V6.3+** | Cross-platform HEVC/H.265 negotiation, enhanced bidirectional clipboard &amp; microphone passthrough, Linux client exploration | 📋 Planned |
 
 ## Star History
 
@@ -232,34 +248,22 @@ Every performance claim in this project is strictly graded as **configuration wr
   <a href="https://www.star-history.com/#Gluxggg/BoBo-Remote&Date">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date" width="700" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date&theme=light" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Gluxggg/BoBo-Remote&type=Date&theme=light" width="700" />
     </picture>
   </a>
 </p>
 
 ## Contributing
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
-
-## Development Checks
-
-Run both checks on Windows 10/11 x64 before submitting a pull request:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1       # compile + launcher & setup self-tests (matches CI)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -SkipFetch # full installer + portable build from verified cache
-```
+Issues and pull requests are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and ensure the build and Golden Vectors test suites pass for the platforms you touch.
 
 ## License
 
-Launcher code (`src\`), installer (`installer\`), scripts (`tools\`, `ci\`, `build.ps1`), and docs are released under [MIT](LICENSE). The four bundled upstream components retain their original licences:
+All V6.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is licensed under the [**MIT License**](LICENSE). Official V6.x release binaries **do not bundle any external third-party remote desktop engines**.
 
-- **RustDesk 1.5.3**: AGPL-3.0 (`LICENSES\AGPL-3.0.txt`)
-- **Moonlight 6.2.0 / Moonlight V+ 6.5.6 / Foundation Sunshine v2026.1123.185102**: GPL-3.0 (`LICENSES\GPL-3.0.txt`, `engines\Sunshine\LICENSE`)
-
-See [THIRD-PARTY.md](THIRD-PARTY.md) and [NOTICE.md](NOTICE.md) for full digests, source links, and attribution notices. This project is not an official distribution of any upstream or commercial product.
+Legacy V5 reference sources (`native/bobo-stream-player/` with vendored `native/third_party/moonlight-common-c/`, GPL-3.0) and historical third-party component records ([THIRD-PARTY.md](THIRD-PARTY.md), [NOTICE.md](NOTICE.md), `LICENSES/`) remain in the repository strictly for archive/reference and are excluded from V6.x builds. This project is not affiliated with or endorsed by any commercial remote desktop vendor.
 
 ---
 
-<p align="center"><sub>Built for your own two Windows PCs · BoBo Remote</sub></p>
+<p align="center"><sub>Built for private, low-latency remote control across all your devices · BoBo Remote</sub></p>
