@@ -1412,6 +1412,9 @@ namespace DualRemote
                         Check("V6 授权建流：TLS 1.2 实收 H.264 编码帧并同步触发防窥",
                             connRes.Item1 && gotFrame && sessionStarted && sessionRequestedPrivacy,
                             "conn=" + connRes.Item2 + " frames=" + authClient.VideoFramesReceived + " priv=" + sessionRequestedPrivacy);
+                        Check("V6.2 光标协商：被控端 STREAM_STARTED 明确声明已合成远端光标",
+                            authClient.HostCursorComposited,
+                            "hostCursorComposited=" + authClient.HostCursorComposited);
 
                         authClient.SendSetPrivacy(false);
                         bool gotPrivOff = privOffEvt.Wait(3000) && privacyCmdToggledOff;
@@ -1428,7 +1431,15 @@ namespace DualRemote
                         bool gotSd = sdEvt.Wait(3000) && sdReceived;
                         Check("V6.1 超级屏协议：SET_SUPER_DISPLAY / SUPER_DISPLAY_STATE 闭环回执", gotSd, "sdReceived=" + sdReceived);
 
-                        // Burst ordered input + clean disconnect through FIFO writer (no SslStream write race)
+                        // Burst coalesced mouse moves + ordered click/release + clean disconnect through FIFO writer
+                        for (int m = 0; m < 20; m++)
+                        {
+                            authClient.SendInputPacket(new BoBoInputPacket { Kind = 1, Flags = 0, A = unchecked((short)(m * 2000)), B = unchecked((short)(m * 1500)) });
+                        }
+                        for (int r = 0; r < 10; r++)
+                        {
+                            authClient.SendInputPacket(new BoBoInputPacket { Kind = 2, Flags = 0, A = 3, B = -2 });
+                        }
                         authClient.SendInputPacket(new BoBoInputPacket { Kind = 6, Flags = 0, A = 0, B = 0 });
                         authClient.SendSetPrivacy(false);
                         authClient.Disconnect();

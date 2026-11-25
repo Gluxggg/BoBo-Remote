@@ -225,6 +225,9 @@ namespace DualRemote
         private delegate void FnClientSetSysKeys(IntPtr handle, int sendSysKeys);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnClientSetHostCursorComposited(IntPtr handle, int composited);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientGetStats(IntPtr handle, ref BoBoNativeClientStats outStats);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -260,6 +263,7 @@ namespace DualRemote
         private static FnClientSetScaleMode fnClientSetScaleMode;
         private static FnClientSetViewOnly fnClientSetViewOnly;
         private static FnClientSetSysKeys fnClientSetSysKeys;
+        private static FnClientSetHostCursorComposited fnClientSetHostCursorComposited;
         private static FnClientGetStats fnClientGetStats;
         private static FnClientDestroy fnClientDestroy;
 
@@ -325,6 +329,7 @@ namespace DualRemote
                     fnClientSetScaleMode = Bind<FnClientSetScaleMode>(mod, "BoBoClient_SetScaleMode");
                     fnClientSetViewOnly = Bind<FnClientSetViewOnly>(mod, "BoBoClient_SetViewOnly");
                     fnClientSetSysKeys = Bind<FnClientSetSysKeys>(mod, "BoBoClient_SetSysKeys");
+                    fnClientSetHostCursorComposited = TryBind<FnClientSetHostCursorComposited>(mod, "BoBoClient_SetHostCursorComposited");
                     fnClientGetStats = Bind<FnClientGetStats>(mod, "BoBoClient_GetStats");
                     fnClientDestroy = Bind<FnClientDestroy>(mod, "BoBoClient_Destroy");
 
@@ -349,6 +354,13 @@ namespace DualRemote
             {
                 throw new EntryPointNotFoundException("BoBoCore 缺少导出函数：" + exportName);
             }
+            return (T)(object)Marshal.GetDelegateForFunctionPointer(proc, typeof(T));
+        }
+
+        private static T TryBind<T>(IntPtr module, string exportName) where T : class
+        {
+            IntPtr proc = GetProcAddress(module, exportName);
+            if (proc == IntPtr.Zero) return null;
             return (T)(object)Marshal.GetDelegateForFunctionPointer(proc, typeof(T));
         }
 
@@ -808,6 +820,17 @@ namespace DualRemote
                 lock (gate)
                 {
                     if (handle != IntPtr.Zero) fnClientSetSysKeys(handle, sendSysKeys ? 1 : 0);
+                }
+            }
+
+            internal void SetHostCursorComposited(bool composited)
+            {
+                lock (gate)
+                {
+                    if (handle != IntPtr.Zero && fnClientSetHostCursorComposited != null)
+                    {
+                        fnClientSetHostCursorComposited(handle, composited ? 1 : 0);
+                    }
                 }
             }
 

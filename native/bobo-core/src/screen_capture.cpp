@@ -348,12 +348,29 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
                 CURSORINFO ci = {};
                 ci.cbSize = sizeof(ci);
                 bool curMoved = false;
+                bool hasCursorState = false;
+                bool vis = false;
+                POINT curPos = { -99999, -99999 };
+                HCURSOR curHandle = nullptr;
                 if (GetCursorInfo(&ci)) {
-                    bool vis = (ci.flags & CURSOR_SHOWING) != 0;
+                    vis = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+                    curPos = ci.ptScreenPos;
+                    curHandle = ci.hCursor;
+                    hasCursorState = true;
+                }
+                if (!vis) {
+                    uint64_t lastRemote = GetLastRemoteMouseInjectMs();
+                    if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&curPos)) {
+                        vis = true;
+                        curHandle = LoadCursorW(nullptr, IDC_ARROW);
+                        hasCursorState = true;
+                    }
+                }
+                if (hasCursorState) {
                     if (vis != lastCursorVisible_ ||
-                        ci.hCursor != lastCursorHandle_ ||
-                        ci.ptScreenPos.x != lastCursorPos_.x ||
-                        ci.ptScreenPos.y != lastCursorPos_.y) {
+                        curHandle != lastCursorHandle_ ||
+                        curPos.x != lastCursorPos_.x ||
+                        curPos.y != lastCursorPos_.y) {
                         curMoved = true;
                     }
                 }
@@ -670,23 +687,94 @@ void ScreenCapturer::BlendRgbaCursorToNv12(
     }
 }
 
+void ScreenCapturer::BuildFallbackArrowCursor() {
+    // Crisp 18x22 white-fill + black-outline pointer sprite used only if DrawIconEx fails or host has no mouse cursor
+    static const char* kArrowRows[22] = {
+        "X.................",
+        "XX................",
+        "XWX...............",
+        "XWWX..............",
+        "XWWWX.............",
+        "XWWWWX............",
+        "XWWWWWX...........",
+        "XWWWWWWX..........",
+        "XWWWWWWWX.........",
+        "XWWWWWWWWX........",
+        "XWWWWWWWWWX.......",
+        "XWWWWWWWWWWX......",
+        "XWWWWWWWWWWWX.....",
+        "XWWWWWWWXXXXX.....",
+        "XWWWXWWX..........",
+        "XWWX.XWWX.........",
+        "XWX..XWWX.........",
+        "XX....XWWX........",
+        "X.....XWWX........",
+        ".......XWWX.......",
+        ".......XWWX.......",
+        "........XX........"
+    };
+    const int cw = 18;
+    const int ch = 22;
+    cursorW_ = cw;
+    cursorH_ = ch;
+    cursorHotX_ = 0;
+    cursorHotY_ = 0;
+    cursorRgba_.assign(static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4u, 0u);
+    cursorXor_.assign(static_cast<size_t>(cw) * static_cast<size_t>(ch), 0u);
+    for (int y = 0; y < ch; ++y) {
+        for (int x = 0; x < cw; ++x) {
+            char c = kArrowRows[y][x];
+            size_t i = static_cast<size_t>(y) * static_cast<size_t>(cw) + static_cast<size_t>(x);
+            if (c == 'X') {
+                cursorRgba_[i * 4 + 0] = 16;
+                cursorRgba_[i * 4 + 1] = 16;
+                cursorRgba_[i * 4 + 2] = 16;
+                cursorRgba_[i * 4 + 3] = 255;
+            } else if (c == 'W') {
+                cursorRgba_[i * 4 + 0] = 255;
+                cursorRgba_[i * 4 + 1] = 255;
+                cursorRgba_[i * 4 + 2] = 255;
+                cursorRgba_[i * 4 + 3] = 255;
+            }
+        }
+    }
+}
+
 void ScreenCapturer::CompositeHostCursorIntoNv12(std::vector<uint8_t>& nv12) {
     CURSORINFO ci = {};
     ci.cbSize = sizeof(ci);
-    if (!GetCursorInfo(&ci)) return;
-    bool vis = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+    bool gotInfo = (GetCursorInfo(&ci) != FALSE);
+    bool vis = gotInfo && ((ci.flags & CURSOR_SHOWING) != 0) && (ci.hCursor != nullptr);
+    POINT pt = gotInfo ? ci.ptScreenPos : POINT{ -99999, -99999 };
+    HCURSOR hCur = gotInfo ? ci.hCursor : nullptr;
+
+    if (!vis) {
+        // Headless desktop / virtual display / post-SuperDisplay mode switch: Windows may clear CURSOR_SHOWING
+        // even while remote mouse input is actively moving the cursor. Keep host cursor visible!
+        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
+        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&pt)) {
+            vis = true;
+            hCur = LoadCursorW(nullptr, IDC_ARROW);
+        }
+    }
+
     lastCursorVisible_ = vis;
-    lastCursorPos_ = ci.ptScreenPos;
-    lastCursorHandle_ = ci.hCursor;
+    lastCursorPos_ = pt;
+    lastCursorHandle_ = hCur;
     if (!vis) return;
 
     int monW = activeMonitor_.width > 0 ? activeMonitor_.width : 1920;
     int monH = activeMonitor_.height > 0 ? activeMonitor_.height : 1080;
-    int relX = ci.ptScreenPos.x - activeMonitor_.left;
-    int relY = ci.ptScreenPos.y - activeMonitor_.top;
+    int relX = pt.x - activeMonitor_.left;
+    int relY = pt.y - activeMonitor_.top;
     if (relX < -64 || relY < -64 || relX >= monW + 64 || relY >= monH + 64) return;
 
-    UpdateCursorShapeCache(ci.hCursor);
+    if (hCur) {
+        UpdateCursorShapeCache(hCur);
+    }
+    if (cursorW_ <= 0 || cursorH_ <= 0 || cursorRgba_.empty()) {
+        BuildFallbackArrowCursor();
+    }
     if (cursorW_ <= 0 || cursorH_ <= 0 || cursorRgba_.empty()) return;
 
     double sx = static_cast<double>(outW_) / static_cast<double>(monW);

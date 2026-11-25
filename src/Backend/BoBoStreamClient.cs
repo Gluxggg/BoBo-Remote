@@ -61,6 +61,10 @@ namespace DualRemote
         private readonly ConcurrentQueue<PendingSend> sendQueue = new ConcurrentQueue<PendingSend>();
         private readonly object sendLoopGate = new object();
         private bool sendLoopRunning;
+        private int pendingMoveKind; // 0=none, 1=MouseAbs, 2=MouseRel
+        private BoBoInputPacket pendingMoveAbs;
+        private int pendingMoveDx;
+        private int pendingMoveDy;
 
         private sealed class PendingSend
         {
@@ -89,6 +93,7 @@ namespace DualRemote
 
         internal bool SuperDisplayActive { get; private set; }
         internal bool SuperDisplayNativeMatch { get; private set; }
+        internal bool HostCursorComposited { get; private set; }
         internal string RemotePlatform { get; private set; }
         internal string RemoteHostControlMode { get; private set; }
 
@@ -546,6 +551,9 @@ namespace DualRemote
                             if (!string.IsNullOrEmpty(startedMode)) RemoteHostControlMode = startedMode;
                             SuperDisplayActive = sdActive;
                             SuperDisplayNativeMatch = sdNative;
+                            HostCursorComposited = BoBoProtocol.GetBool(msg, "hostCursorComposited", false);
+                            BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
+                            if (curNc != null) curNc.SetHostCursorComposited(HostCursorComposited);
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
                             if (ev != null) { try { ev(remoteMonitors, w, h, fps); } catch { } }
                             Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
@@ -632,6 +640,67 @@ namespace DualRemote
         internal void SendInputPacket(BoBoInputPacket pkt)
         {
             if (!connected || ssl == null) return;
+            // Coalesce high-frequency mouse moves while an earlier TLS write is in flight so 1000Hz mice
+            // never accumulate multi-second lag over WAN/Tailscale, while preserving strict ordering before
+            // clicks, keys, wheel events, or control commands.
+            if (pkt.Kind == 1)
+            {
+                bool startLoop = false;
+                lock (sendLoopGate)
+                {
+                    if (ssl == null) return;
+                    if (pendingMoveKind == 2)
+                    {
+                        FlushPendingMoveLocked();
+                    }
+                    pendingMoveKind = 1;
+                    pendingMoveAbs = pkt;
+                    if (!sendLoopRunning)
+                    {
+                        sendLoopRunning = true;
+                        startLoop = true;
+                    }
+                }
+                if (startLoop)
+                {
+                    Task.Run(delegate { return DrainSendQueueAsync(); });
+                }
+                return;
+            }
+            if (pkt.Kind == 2)
+            {
+                if (pkt.A == 0 && pkt.B == 0) return;
+                bool startLoop = false;
+                lock (sendLoopGate)
+                {
+                    if (ssl == null) return;
+                    if (pendingMoveKind == 1)
+                    {
+                        FlushPendingMoveLocked();
+                    }
+                    if (pendingMoveKind == 2)
+                    {
+                        pendingMoveDx += pkt.A;
+                        pendingMoveDy += pkt.B;
+                    }
+                    else
+                    {
+                        pendingMoveKind = 2;
+                        pendingMoveDx = pkt.A;
+                        pendingMoveDy = pkt.B;
+                    }
+                    if (!sendLoopRunning)
+                    {
+                        sendLoopRunning = true;
+                        startLoop = true;
+                    }
+                }
+                if (startLoop)
+                {
+                    Task.Run(delegate { return DrainSendQueueAsync(); });
+                }
+                return;
+            }
             byte[] payload = BoBoProtocol.BuildInputPayload(pkt);
             SendFrameFireAndForget(BoBoPacketType.InputEvent, 0, payload);
         }
@@ -752,28 +821,92 @@ namespace DualRemote
             return Encoding.UTF8.GetBytes(ser.Serialize(obj));
         }
 
+        private void FlushPendingMoveLocked()
+        {
+            while (pendingMoveKind != 0)
+            {
+                PendingSend moveItem = TakePendingMoveLocked();
+                if (moveItem != null)
+                {
+                    sendQueue.Enqueue(moveItem);
+                }
+            }
+        }
+
+        private PendingSend TakePendingMoveLocked()
+        {
+            if (pendingMoveKind == 1)
+            {
+                BoBoInputPacket absPkt = pendingMoveAbs;
+                pendingMoveKind = 0;
+                return new PendingSend
+                {
+                    Type = BoBoPacketType.InputEvent,
+                    Flags = 0,
+                    Payload = BoBoProtocol.BuildInputPayload(absPkt),
+                    Completion = null
+                };
+            }
+            if (pendingMoveKind == 2)
+            {
+                int dx = pendingMoveDx;
+                int dy = pendingMoveDy;
+                if (dx == 0 && dy == 0)
+                {
+                    pendingMoveKind = 0;
+                    return null;
+                }
+                int emitX = dx > 32767 ? 32767 : (dx < -32767 ? -32767 : dx);
+                int emitY = dy > 32767 ? 32767 : (dy < -32767 ? -32767 : dy);
+                pendingMoveDx -= emitX;
+                pendingMoveDy -= emitY;
+                if (pendingMoveDx == 0 && pendingMoveDy == 0)
+                {
+                    pendingMoveKind = 0;
+                }
+                var relPkt = new BoBoInputPacket { Kind = 2, Flags = 0, A = (short)emitX, B = (short)emitY };
+                return new PendingSend
+                {
+                    Type = BoBoPacketType.InputEvent,
+                    Flags = 0,
+                    Payload = BoBoProtocol.BuildInputPayload(relPkt),
+                    Completion = null
+                };
+            }
+            return null;
+        }
+
         private void EnqueueSend(BoBoPacketType type, uint flags, byte[] payload, TaskCompletionSource<bool> tcs)
         {
-            if (ssl == null)
-            {
-                if (tcs != null) tcs.TrySetResult(false);
-                return;
-            }
-            sendQueue.Enqueue(new PendingSend
-            {
-                Type = type,
-                Flags = flags,
-                Payload = payload ?? new byte[0],
-                Completion = tcs
-            });
+            bool rejected = false;
             bool startLoop = false;
             lock (sendLoopGate)
             {
-                if (!sendLoopRunning)
+                if (ssl == null)
                 {
-                    sendLoopRunning = true;
-                    startLoop = true;
+                    rejected = true;
                 }
+                else
+                {
+                    FlushPendingMoveLocked();
+                    sendQueue.Enqueue(new PendingSend
+                    {
+                        Type = type,
+                        Flags = flags,
+                        Payload = payload ?? new byte[0],
+                        Completion = tcs
+                    });
+                    if (!sendLoopRunning)
+                    {
+                        sendLoopRunning = true;
+                        startLoop = true;
+                    }
+                }
+            }
+            if (rejected)
+            {
+                if (tcs != null) tcs.TrySetResult(false);
+                return;
             }
             if (startLoop)
             {
@@ -785,18 +918,21 @@ namespace DualRemote
         {
             while (true)
             {
-                PendingSend item;
-                if (!sendQueue.TryDequeue(out item))
+                PendingSend item = null;
+                lock (sendLoopGate)
                 {
-                    lock (sendLoopGate)
+                    if (!sendQueue.TryDequeue(out item))
                     {
-                        if (sendQueue.IsEmpty)
+                        while (item == null && pendingMoveKind != 0)
+                        {
+                            item = TakePendingMoveLocked();
+                        }
+                        if (item == null)
                         {
                             sendLoopRunning = false;
                             return;
                         }
                     }
-                    continue;
                 }
 
                 SslStream s = ssl;
@@ -822,6 +958,12 @@ namespace DualRemote
 
         private void DrainPendingSendQueueOnClose()
         {
+            lock (sendLoopGate)
+            {
+                pendingMoveKind = 0;
+                pendingMoveDx = 0;
+                pendingMoveDy = 0;
+            }
             PendingSend dropped;
             while (sendQueue.TryDequeue(out dropped))
             {
@@ -847,6 +989,7 @@ namespace DualRemote
         {
             bool wasConnected = connected;
             connected = false;
+            HostCursorComposited = false;
             try
             {
                 if (wasConnected && ssl != null)

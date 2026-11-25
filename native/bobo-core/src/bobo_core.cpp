@@ -165,6 +165,7 @@ struct BoBoClientSession {
 
     std::atomic<bool> alive{ true };
     std::atomic<bool> videoReceived{ false };
+    std::atomic<bool> hostCursorComposited{ false };
     bool freeMouse = true;
     bool rawMouseRegistered = false;
     bool cursorHidden = false;
@@ -173,6 +174,12 @@ struct BoBoClientSession {
     bool viewOnly = false;
     bool sendSysKeys = false;
     bool ctrlAltSoloActive = false;
+    bool hasLastRawAbs = false;
+    LONG lastRawAbsX = 0;
+    LONG lastRawAbsY = 0;
+    bool hasLastFallbackClientPt = false;
+    int lastFallbackClientX = 0;
+    int lastFallbackClientY = 0;
     DWORD lastTopEdgeTick = 0;
 
     uint32_t videoW = 1920;
@@ -196,7 +203,15 @@ struct BoBoClientSession {
 static BoBoClientSession* g_activeClient = nullptr;
 
 // ==================== Host Hardware Privacy Input Blocker & Super Display ====================
-static constexpr ULONG_PTR kBoBoInjectedMagic = 0x424F424F56360001ULL;
+#ifndef LLMHF_LOWER_IL_INJECTED
+#define LLMHF_LOWER_IL_INJECTED 0x00000002
+#endif
+#ifndef LLKHF_LOWER_IL_INJECTED
+#define LLKHF_LOWER_IL_INJECTED 0x00000002
+#endif
+
+// 32-bit-safe non-zero tag so it survives any 32-bit/64-bit hook chain without upper-bit truncation
+static constexpr ULONG_PTR kBoBoInjectedMagic = 0x424F5636UL;
 
 static std::mutex g_privHookMutex;
 static std::atomic<bool> g_privBlockActive{ false };
@@ -211,13 +226,121 @@ static std::atomic<bool> g_physCtrl{ false };
 static std::atomic<bool> g_physAlt{ false };
 static std::atomic<bool> g_physShift{ false };
 static std::atomic<uint32_t> g_injectedMouseMask{ 0 };
+static std::atomic<uint64_t> g_lastRemoteMouseInjectMs{ 0 };
+static std::atomic<uint64_t> g_lastRemoteKeyInjectMs{ 0 };
+
+static std::mutex g_monCacheMutex;
+static std::vector<BoBoMonitorInfo> g_monCache;
+static uint64_t g_monCacheMs = 0;
+
+static void InvalidateHostMonitorCache() {
+    std::lock_guard<std::mutex> lk(g_monCacheMutex);
+    g_monCacheMs = 0;
+}
+
+static std::vector<BoBoMonitorInfo> GetCachedHostMonitors() {
+    uint64_t nowMs = GetTickCount64();
+    {
+        std::lock_guard<std::mutex> lk(g_monCacheMutex);
+        if (!g_monCache.empty() && (nowMs - g_monCacheMs) < 250ULL) {
+            return g_monCache;
+        }
+    }
+    auto fresh = ScreenCapturer::EnumerateMonitors();
+    {
+        std::lock_guard<std::mutex> lk(g_monCacheMutex);
+        g_monCache = fresh;
+        g_monCacheMs = nowMs;
+    }
+    return fresh;
+}
+
+static bool IsCurrentProcessElevated() {
+    static std::atomic<int> cached{ -1 };
+    int v = cached.load(std::memory_order_acquire);
+    if (v >= 0) return v != 0;
+    bool elevated = false;
+    HANDLE hTok = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hTok)) {
+        TOKEN_ELEVATION te = {};
+        DWORD retLen = 0;
+        if (GetTokenInformation(hTok, TokenElevation, &te, sizeof(te), &retLen)) {
+            elevated = (te.TokenIsElevated != 0);
+        }
+        CloseHandle(hTok);
+    }
+    cached.store(elevated ? 1 : 0, std::memory_order_release);
+    return elevated;
+}
+
+static bool IsForegroundBlockedByUipi() {
+    if (IsCurrentProcessElevated()) return false;
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    static std::atomic<uintptr_t> lastFgHwnd{ 0 };
+    static std::atomic<uint64_t> lastCheckMs{ 0 };
+    static std::atomic<bool> lastBlocked{ false };
+    uint64_t nowMs = GetTickCount64();
+    uintptr_t fgVal = reinterpret_cast<uintptr_t>(fg);
+    if (lastFgHwnd.load(std::memory_order_acquire) == fgVal &&
+        (nowMs - lastCheckMs.load(std::memory_order_acquire)) < 250ULL) {
+        return lastBlocked.load(std::memory_order_acquire);
+    }
+    bool blocked = false;
+    DWORD fgPid = 0;
+    GetWindowThreadProcessId(fg, &fgPid);
+    if (fgPid != 0 && fgPid != GetCurrentProcessId()) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, fgPid);
+        if (!hProc) {
+            if (GetLastError() == ERROR_ACCESS_DENIED) blocked = true;
+        } else {
+            HANDLE hTok = nullptr;
+            if (!OpenProcessToken(hProc, TOKEN_QUERY, &hTok)) {
+                if (GetLastError() == ERROR_ACCESS_DENIED) blocked = true;
+            } else {
+                TOKEN_ELEVATION te = {};
+                DWORD retLen = 0;
+                if (GetTokenInformation(hTok, TokenElevation, &te, sizeof(te), &retLen) && te.TokenIsElevated != 0) {
+                    blocked = true;
+                }
+                CloseHandle(hTok);
+            }
+            CloseHandle(hProc);
+        }
+    }
+    lastFgHwnd.store(fgVal, std::memory_order_release);
+    lastCheckMs.store(nowMs, std::memory_order_release);
+    lastBlocked.store(blocked, std::memory_order_release);
+    return blocked;
+}
+
+static bool IsPrivacyMouseEventAllowed(DWORD flags, ULONG_PTR extraInfo, uint64_t nowMs) {
+    // Physical HID mice NEVER set LLMHF_INJECTED / LLMHF_LOWER_IL_INJECTED
+    bool injected = (flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED)) != 0;
+    if (!injected) return false;
+    bool tagMatch = (extraInfo == kBoBoInjectedMagic) ||
+                    ((extraInfo & 0xFFFFFFFFULL) == (kBoBoInjectedMagic & 0xFFFFFFFFULL));
+    if (tagMatch) return true;
+    // Fallback if a 3rd-party mouse hook/filter strips dwExtraInfo during an active remote injection
+    uint64_t lastInject = g_lastRemoteMouseInjectMs.load(std::memory_order_acquire);
+    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 500ULL);
+}
+
+static bool IsPrivacyKeyEventAllowed(DWORD flags, ULONG_PTR extraInfo, uint64_t nowMs) {
+    bool injected = (flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0;
+    if (!injected) return false;
+    bool tagMatch = (extraInfo == kBoBoInjectedMagic) ||
+                    ((extraInfo & 0xFFFFFFFFULL) == (kBoBoInjectedMagic & 0xFFFFFFFFULL));
+    if (tagMatch) return true;
+    uint64_t lastInject = g_lastRemoteKeyInjectMs.load(std::memory_order_acquire);
+    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 500ULL);
+}
 
 static LRESULT CALLBACK PrivacyLowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && g_privBlockActive.load()) {
         const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
         if (ms) {
-            bool isBoBoRemote = ((ms->flags & LLMHF_INJECTED) != 0) && (ms->dwExtraInfo == kBoBoInjectedMagic);
-            if (!isBoBoRemote) {
+            if (!IsPrivacyMouseEventAllowed(ms->flags, ms->dwExtraInfo, GetTickCount64())) {
                 // Swallow 100% of local physical mouse moves, clicks, right-clicks, taskbar hovers and wheel scrolls
                 return 1;
             }
@@ -230,8 +353,7 @@ static LRESULT CALLBACK PrivacyLowLevelKeyProc(int nCode, WPARAM wParam, LPARAM 
     if (nCode == HC_ACTION && g_privBlockActive.load()) {
         const auto* kb = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
         if (kb) {
-            bool isBoBoRemote = ((kb->flags & LLKHF_INJECTED) != 0) && (kb->dwExtraInfo == kBoBoInjectedMagic);
-            if (!isBoBoRemote) {
+            if (!IsPrivacyKeyEventAllowed(kb->flags, kb->dwExtraInfo, GetTickCount64())) {
                 bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
                 bool isUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
                 DWORD vk = kb->vkCode;
@@ -354,9 +476,13 @@ static void SyncClientSysKeyHook(BoBoClientSession* st) {
     }
 }
 
+static constexpr UINT kMsgRefreshCursor = WM_APP + 1;
+
 static void ApplyClientMouseMode(BoBoClientSession* st, bool freeMouse) {
     if (!st || !st->viewportHwnd) return;
     st->freeMouse = freeMouse;
+    st->hasLastRawAbs = false;
+    st->hasLastFallbackClientPt = false;
     if (freeMouse) {
         ClipCursor(nullptr);
         if (st->cursorHidden) {
@@ -372,15 +498,14 @@ static void ApplyClientMouseMode(BoBoClientSession* st, bool freeMouse) {
             RegisterRawInputDevices(&rid, 1, sizeof(rid));
             st->rawMouseRegistered = false;
         }
+        PostMessageW(st->viewportHwnd, kMsgRefreshCursor, 0, 0);
     } else {
         RAWINPUTDEVICE rid = {};
         rid.usUsagePage = 0x01;
         rid.usUsage = 0x02;
         rid.dwFlags = 0;
         rid.hwndTarget = st->viewportHwnd;
-        if (RegisterRawInputDevices(&rid, 1, sizeof(rid))) {
-            st->rawMouseRegistered = true;
-        }
+        st->rawMouseRegistered = (RegisterRawInputDevices(&rid, 1, sizeof(rid)) != FALSE);
         RECT rc = {};
         if (GetClientRect(st->viewportHwnd, &rc)) {
             POINT tl = { rc.left, rc.top };
@@ -409,13 +534,33 @@ static void EmitHotkey(BoBoClientSession* st, int32_t code, int32_t param = 0) {
     }
 }
 
-static constexpr UINT kMsgRefreshCursor = WM_APP + 1;
+static RECT GetEffectiveVideoViewportRect(const BoBoClientSession* st) {
+    RECT vp = st->renderer.GetVideoViewportRect();
+    int vpW = vp.right - vp.left;
+    int vpH = vp.bottom - vp.top;
+    RECT cli = {};
+    if (st->viewportHwnd && GetClientRect(st->viewportHwnd, &cli)) {
+        int cliW = cli.right - cli.left;
+        int cliH = cli.bottom - cli.top;
+        if (cliW > 0 && cliH > 0 && (vpW <= 0 || vpH <= 0 || st->renderer.ScaleMode() == 2)) {
+            return cli;
+        }
+    }
+    return vp;
+}
 
 static bool IsPointInVideoRect(const BoBoClientSession* st, int x, int y, RECT& outVp) {
-    outVp = st->renderer.GetVideoViewportRect();
+    outVp = GetEffectiveVideoViewportRect(st);
     int vpW = outVp.right - outVp.left;
     int vpH = outVp.bottom - outVp.top;
     return (vpW > 0 && vpH > 0 && x >= outVp.left && x < outVp.right && y >= outVp.top && y < outVp.bottom);
+}
+
+static bool ShouldHideLocalCursor(const BoBoClientSession* st, bool insideVideo) {
+    if (!st) return false;
+    if (!st->freeMouse) return true;
+    // Only hide the laptop's local cursor once the host confirms host-cursor compositing AND video is live
+    return !st->viewOnly && st->videoReceived.load() && st->hostCursorComposited.load() && insideVideo;
 }
 
 static bool ComputeCursorInVideoRect(BoBoClientSession* st, HWND hwnd) {
@@ -429,13 +574,19 @@ static bool ComputeCursorInVideoRect(BoBoClientSession* st, HWND hwnd) {
     return inside;
 }
 
-static bool EmitAbsMouseAtClientPoint(BoBoClientSession* st, int x, int y) {
+static bool EmitAbsMouseAtClientPoint(BoBoClientSession* st, int x, int y, bool clampToViewport = false) {
     RECT vp = {};
-    if (!IsPointInVideoRect(st, x, y, vp)) {
-        return false;
-    }
+    bool inside = IsPointInVideoRect(st, x, y, vp);
     int vpW = vp.right - vp.left;
     int vpH = vp.bottom - vp.top;
+    if (vpW <= 0 || vpH <= 0) return false;
+    if (!inside) {
+        if (!clampToViewport) return false;
+        if (x < vp.left) x = vp.left;
+        else if (x >= vp.right) x = vp.right - 1;
+        if (y < vp.top) y = vp.top;
+        else if (y >= vp.bottom) y = vp.bottom - 1;
+    }
     int relX = x - vp.left;
     int relY = y - vp.top;
     uint64_t denomX = static_cast<uint64_t>(vpW > 1 ? (vpW - 1) : 1);
@@ -480,7 +631,7 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 POINT pt = {};
                 if (GetCursorPos(&pt) && WindowFromPoint(pt) == hwnd) {
                     bool inside = ComputeCursorInVideoRect(st, hwnd);
-                    bool hideLocal = !st->viewOnly && st->videoReceived.load() && inside;
+                    bool hideLocal = ShouldHideLocalCursor(st, inside);
                     SetCursor(hideLocal ? nullptr : LoadCursorW(nullptr, IDC_ARROW));
                 }
             }
@@ -490,8 +641,7 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_SETCURSOR: {
             if (LOWORD(lParam) == HTCLIENT) {
                 bool inside = ComputeCursorInVideoRect(st, hwnd);
-                bool hideLocal = (!st->freeMouse) ||
-                                 (!st->viewOnly && st->videoReceived.load() && inside);
+                bool hideLocal = ShouldHideLocalCursor(st, inside);
                 SetCursor(hideLocal ? nullptr : LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
             }
@@ -508,6 +658,8 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
         }
 
         case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             if (st->freeMouse) {
                 if (!st->mouseTracking) {
                     TRACKMOUSEEVENT tme = {};
@@ -518,8 +670,6 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                         st->mouseTracking = true;
                     }
                 }
-                int x = GET_X_LPARAM(lParam);
-                int y = GET_Y_LPARAM(lParam);
                 if (y <= 6) {
                     DWORD nowTick = GetTickCount();
                     if (nowTick - st->lastTopEdgeTick >= 600) {
@@ -530,11 +680,28 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 RECT vp = {};
                 bool insideVideo = IsPointInVideoRect(st, x, y, vp);
                 st->pointerInVideoRect = insideVideo;
-                bool hideLocal = !st->viewOnly && st->videoReceived.load() && insideVideo;
+                bool hideLocal = ShouldHideLocalCursor(st, insideVideo);
                 SetCursor(hideLocal ? nullptr : LoadCursorW(nullptr, IDC_ARROW));
-                if (insideVideo) {
-                    EmitAbsMouseAtClientPoint(st, x, y);
+                bool dragging = (wParam & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2)) != 0;
+                if (insideVideo || dragging) {
+                    EmitAbsMouseAtClientPoint(st, x, y, dragging);
                 }
+            } else if (!st->viewOnly && !st->rawMouseRegistered) {
+                // Fallback when RegisterRawInputDevices fails in locked mode
+                if (st->hasLastFallbackClientPt) {
+                    int dx = x - st->lastFallbackClientX;
+                    int dy = y - st->lastFallbackClientY;
+                    if (dx != 0 || dy != 0) {
+                        BoBoInputPacket pkt = {};
+                        pkt.kind = 2;
+                        pkt.a = static_cast<int16_t>(std::max(-32767, std::min(32767, dx)));
+                        pkt.b = static_cast<int16_t>(std::max(-32767, std::min(32767, dy)));
+                        EmitInput(st, pkt);
+                    }
+                }
+                st->hasLastFallbackClientPt = true;
+                st->lastFallbackClientX = x;
+                st->lastFallbackClientY = y;
             }
             return 0;
         }
@@ -547,13 +714,37 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     uint8_t buf[512];
                     if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, buf, &sz, sizeof(RAWINPUTHEADER)) == sz) {
                         const RAWINPUT* ri = reinterpret_cast<const RAWINPUT*>(buf);
-                        if (ri->header.dwType == RIM_TYPEMOUSE && (ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
-                            if (ri->data.mouse.lLastX != 0 || ri->data.mouse.lLastY != 0) {
-                                BoBoInputPacket pkt = {};
-                                pkt.kind = 2;
-                                pkt.a = static_cast<int16_t>(ri->data.mouse.lLastX);
-                                pkt.b = static_cast<int16_t>(ri->data.mouse.lLastY);
-                                EmitInput(st, pkt);
+                        if (ri->header.dwType == RIM_TYPEMOUSE) {
+                            if ((ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
+                                if (ri->data.mouse.lLastX != 0 || ri->data.mouse.lLastY != 0) {
+                                    BoBoInputPacket pkt = {};
+                                    pkt.kind = 2;
+                                    pkt.a = static_cast<int16_t>(std::max<LONG>(-32767, std::min<LONG>(32767, ri->data.mouse.lLastX)));
+                                    pkt.b = static_cast<int16_t>(std::max<LONG>(-32767, std::min<LONG>(32767, ri->data.mouse.lLastY)));
+                                    EmitInput(st, pkt);
+                                }
+                            } else {
+                                // Absolute Raw Input (laptop Precision Touchpad / pen / VM mouse): convert to relative delta
+                                LONG ax = ri->data.mouse.lLastX;
+                                LONG ay = ri->data.mouse.lLastY;
+                                if (st->hasLastRawAbs) {
+                                    int vW = GetSystemMetrics((ri->data.mouse.usFlags & MOUSE_VIRTUAL_DESKTOP) ? SM_CXVIRTUALSCREEN : SM_CXSCREEN);
+                                    int vH = GetSystemMetrics((ri->data.mouse.usFlags & MOUSE_VIRTUAL_DESKTOP) ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
+                                    if (vW <= 1) vW = 1920;
+                                    if (vH <= 1) vH = 1080;
+                                    int dx = static_cast<int>(std::lround(static_cast<double>(ax - st->lastRawAbsX) * static_cast<double>(vW) / 65535.0));
+                                    int dy = static_cast<int>(std::lround(static_cast<double>(ay - st->lastRawAbsY) * static_cast<double>(vH) / 65535.0));
+                                    if (dx != 0 || dy != 0) {
+                                        BoBoInputPacket pkt = {};
+                                        pkt.kind = 2;
+                                        pkt.a = static_cast<int16_t>(std::max(-32767, std::min(32767, dx)));
+                                        pkt.b = static_cast<int16_t>(std::max(-32767, std::min(32767, dy)));
+                                        EmitInput(st, pkt);
+                                    }
+                                }
+                                st->hasLastRawAbs = true;
+                                st->lastRawAbsX = ax;
+                                st->lastRawAbsY = ay;
                             }
                         }
                     }
@@ -728,6 +919,12 @@ static bool RegisterClientViewportClass() {
 
 } // anonymous namespace
 
+namespace bobo {
+uint64_t GetLastRemoteMouseInjectMs() {
+    return g_lastRemoteMouseInjectMs.load(std::memory_order_acquire);
+}
+} // namespace bobo
+
 extern "C" {
 
 BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufLen) {
@@ -849,15 +1046,24 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
         check("SuperFill zero-black-bar scale mode", modeOk && renderer.ScaleMode() == 1, "modes=0/1/2");
     }
 
-    // 5. Privacy Hardware Input Blocker hook lifecycle verification
+    // 5. Privacy Hardware Input Blocker hook lifecycle & filter verification
     {
         int32_t en = BoBoHost_SetPrivacyInputBlock(1, nullptr, nullptr);
         int32_t active = BoBoHost_IsPrivacyInputBlocked();
         BoBoHost_SetPrivacyInputBlock(0, nullptr, nullptr);
         int32_t after = BoBoHost_IsPrivacyInputBlocked();
+        uint64_t nowMs = GetTickCount64();
+        g_lastRemoteMouseInjectMs.store(nowMs, std::memory_order_release);
+        bool blockPhys = !IsPrivacyMouseEventAllowed(0, 0, nowMs);
+        bool allowMagic = IsPrivacyMouseEventAllowed(LLMHF_INJECTED, kBoBoInjectedMagic, nowMs + 1000ULL);
+        bool allowStrippedRecent = IsPrivacyMouseEventAllowed(LLMHF_INJECTED, 0, nowMs + 50ULL);
+        bool blockOldStripped = !IsPrivacyMouseEventAllowed(LLMHF_INJECTED, 0, nowMs + 2000ULL);
+        g_lastRemoteMouseInjectMs.store(0, std::memory_order_release);
+        bool filterOk = blockPhys && allowMagic && allowStrippedRecent && blockOldStripped;
         check("Privacy hardware input blocker (WH_MOUSE_LL + WH_KEYBOARD_LL)",
-              en == 1 && active == 1 && after == 0,
-              "en=" + std::to_string(en) + " active=" + std::to_string(active) + " after=" + std::to_string(after));
+              en == 1 && active == 1 && after == 0 && filterOk,
+              "en=" + std::to_string(en) + " active=" + std::to_string(active) +
+                  " after=" + std::to_string(after) + " filter=" + (filterOk ? "ok" : "fail"));
     }
 
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
@@ -928,6 +1134,7 @@ BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
         if (fps > 0) session->fps = fps;
         if (bitrateKbps > 0) session->bitrateKbps = bitrateKbps;
     }
+    InvalidateHostMonitorCache();
     session->reconfigPending.store(true);
     session->keyframePending.store(true);
     return 1;
@@ -955,12 +1162,18 @@ BOBO_API void __stdcall BoBoHost_Destroy(void* handle) {
     BoBoHost_RestoreSuperDisplay();
 }
 
+static std::atomic<int> g_prevCursorX{ -2147483647 };
+static std::atomic<int> g_prevCursorY{ -2147483647 };
+static std::atomic<int> g_stuckMoveCount{ 0 };
+static std::atomic<uint64_t> g_stuckSinceMs{ 0 };
+static std::atomic<uint64_t> g_setCursorFallbackUntilMs{ 0 };
+
 BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInputPacket* pkt) {
     if (!pkt) return;
     INPUT inp = {};
     switch (pkt->kind) {
         case 1: { // Absolute mouse position on target monitor
-            auto monitors = ScreenCapturer::EnumerateMonitors();
+            auto monitors = GetCachedHostMonitors();
             int monLeft = 0, monTop = 0, monW = GetSystemMetrics(SM_CXSCREEN), monH = GetSystemMetrics(SM_CYSCREEN);
             if (!monitors.empty()) {
                 int idx = (monitorIndex >= 0 && monitorIndex < static_cast<int>(monitors.size())) ? monitorIndex : 0;
@@ -969,33 +1182,109 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
                 monW = monitors[static_cast<size_t>(idx)].width;
                 monH = monitors[static_cast<size_t>(idx)].height;
             }
+            if (monW <= 1) monW = 1920;
+            if (monH <= 1) monH = 1080;
             int vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
             int vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
             int vW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
             int vH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (vW <= 1) vW = 1920;
-            if (vH <= 1) vH = 1080;
+            if (vW <= 1) vW = monW;
+            if (vH <= 1) vH = monH;
 
             uint16_t nx = static_cast<uint16_t>(pkt->a);
             uint16_t ny = static_cast<uint16_t>(pkt->b);
             double px = static_cast<double>(monLeft) + (static_cast<double>(nx) / 65535.0) * static_cast<double>(monW - 1);
             double py = static_cast<double>(monTop) + (static_cast<double>(ny) / 65535.0) * static_cast<double>(monH - 1);
+            int targetX = static_cast<int>(px + 0.5);
+            int targetY = static_cast<int>(py + 0.5);
+
+            LONG dx = static_cast<LONG>(((px - vLeft) * 65535.0) / static_cast<double>(vW - 1) + 0.5);
+            LONG dy = static_cast<LONG>(((py - vTop) * 65535.0) / static_cast<double>(vH - 1) + 0.5);
+            if (dx < 0) dx = 0; else if (dx > 65535) dx = 65535;
+            if (dy < 0) dy = 0; else if (dy > 65535) dy = 65535;
+
+            uint64_t nowMs = GetTickCount64();
+            g_lastRemoteMouseInjectMs.store(nowMs, std::memory_order_release);
+
+            POINT beforePt = {};
+            bool haveBefore = (GetCursorPos(&beforePt) != FALSE);
+            bool uipiBlocked = IsForegroundBlockedByUipi();
+            bool fallbackLatched = (nowMs < g_setCursorFallbackUntilMs.load(std::memory_order_acquire));
+
+            if (haveBefore && !uipiBlocked && !fallbackLatched) {
+                int prevX = g_prevCursorX.load(std::memory_order_relaxed);
+                int prevY = g_prevCursorY.load(std::memory_order_relaxed);
+                int wantDx = targetX - beforePt.x;
+                int wantDy = targetY - beforePt.y;
+                bool wantsMove = (wantDx < -8 || wantDx > 8 || wantDy < -8 || wantDy > 8);
+                if (wantsMove && beforePt.x == prevX && beforePt.y == prevY) {
+                    int cnt = g_stuckMoveCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                    uint64_t since = g_stuckSinceMs.load(std::memory_order_relaxed);
+                    if (since == 0) {
+                        g_stuckSinceMs.store(nowMs, std::memory_order_relaxed);
+                    } else if (cnt >= 3 && (nowMs - since) >= 45ULL) {
+                        fallbackLatched = true;
+                        g_setCursorFallbackUntilMs.store(nowMs + 1500ULL, std::memory_order_release);
+                        g_stuckMoveCount.store(0, std::memory_order_relaxed);
+                        g_stuckSinceMs.store(0, std::memory_order_relaxed);
+                    }
+                } else if (beforePt.x != prevX || beforePt.y != prevY) {
+                    g_stuckMoveCount.store(0, std::memory_order_relaxed);
+                    g_stuckSinceMs.store(0, std::memory_order_relaxed);
+                }
+                g_prevCursorX.store(beforePt.x, std::memory_order_relaxed);
+                g_prevCursorY.store(beforePt.y, std::memory_order_relaxed);
+            }
 
             inp.type = INPUT_MOUSE;
             inp.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-            inp.mi.dx = static_cast<LONG>(((px - vLeft) * 65535.0) / static_cast<double>(vW - 1) + 0.5);
-            inp.mi.dy = static_cast<LONG>(((py - vTop) * 65535.0) / static_cast<double>(vH - 1) + 0.5);
+            inp.mi.dx = dx;
+            inp.mi.dy = dy;
             inp.mi.dwExtraInfo = kBoBoInjectedMagic;
-            SendInput(1, &inp, sizeof(INPUT));
+            UINT sent = SendInput(1, &inp, sizeof(INPUT));
+            if (sent == 0 || uipiBlocked || fallbackLatched) {
+                SetCursorPos(targetX, targetY);
+            }
             break;
         }
         case 2: { // Relative mouse move (FPS locked mode)
+            uint64_t nowMs = GetTickCount64();
+            g_lastRemoteMouseInjectMs.store(nowMs, std::memory_order_release);
+            bool uipiBlocked = IsForegroundBlockedByUipi();
+            bool fallbackLatched = (nowMs < g_setCursorFallbackUntilMs.load(std::memory_order_acquire));
+            POINT beforePt = {};
+            bool haveBefore = (GetCursorPos(&beforePt) != FALSE);
+            if (haveBefore && !uipiBlocked && !fallbackLatched && (pkt->a != 0 || pkt->b != 0)) {
+                int prevX = g_prevCursorX.load(std::memory_order_relaxed);
+                int prevY = g_prevCursorY.load(std::memory_order_relaxed);
+                if (beforePt.x == prevX && beforePt.y == prevY) {
+                    int cnt = g_stuckMoveCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                    uint64_t since = g_stuckSinceMs.load(std::memory_order_relaxed);
+                    if (since == 0) {
+                        g_stuckSinceMs.store(nowMs, std::memory_order_relaxed);
+                    } else if (cnt >= 3 && (nowMs - since) >= 45ULL) {
+                        fallbackLatched = true;
+                        g_setCursorFallbackUntilMs.store(nowMs + 1500ULL, std::memory_order_release);
+                        g_stuckMoveCount.store(0, std::memory_order_relaxed);
+                        g_stuckSinceMs.store(0, std::memory_order_relaxed);
+                    }
+                } else {
+                    g_stuckMoveCount.store(0, std::memory_order_relaxed);
+                    g_stuckSinceMs.store(0, std::memory_order_relaxed);
+                }
+                g_prevCursorX.store(beforePt.x, std::memory_order_relaxed);
+                g_prevCursorY.store(beforePt.y, std::memory_order_relaxed);
+            }
+
             inp.type = INPUT_MOUSE;
             inp.mi.dwFlags = MOUSEEVENTF_MOVE;
             inp.mi.dx = pkt->a;
             inp.mi.dy = pkt->b;
             inp.mi.dwExtraInfo = kBoBoInjectedMagic;
-            SendInput(1, &inp, sizeof(INPUT));
+            UINT sent = SendInput(1, &inp, sizeof(INPUT));
+            if ((sent == 0 || uipiBlocked || fallbackLatched) && haveBefore) {
+                SetCursorPos(beforePt.x + static_cast<int>(pkt->a), beforePt.y + static_cast<int>(pkt->b));
+            }
             break;
         }
         case 3: { // Mouse buttons
@@ -1012,11 +1301,13 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             }
             if (down) g_injectedMouseMask.fetch_or(btnBit);
             else g_injectedMouseMask.fetch_and(~btnBit);
+            g_lastRemoteMouseInjectMs.store(GetTickCount64(), std::memory_order_release);
             inp.mi.dwExtraInfo = kBoBoInjectedMagic;
             SendInput(1, &inp, sizeof(INPUT));
             break;
         }
         case 4: { // Mouse wheel
+            g_lastRemoteMouseInjectMs.store(GetTickCount64(), std::memory_order_release);
             inp.type = INPUT_MOUSE;
             inp.mi.dwFlags = (pkt->flags & 1) ? MOUSEEVENTF_HWHEEL : MOUSEEVENTF_WHEEL;
             inp.mi.mouseData = static_cast<DWORD>(static_cast<int32_t>(pkt->a));
@@ -1025,6 +1316,7 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             break;
         }
         case 5: { // Keyboard key
+            g_lastRemoteKeyInjectMs.store(GetTickCount64(), std::memory_order_release);
             uint16_t vk = static_cast<uint16_t>(pkt->a) & 0xFF;
             bool down = (pkt->flags & 1) != 0;
             bool extended = (pkt->flags & 2) != 0;
@@ -1037,6 +1329,8 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             break;
         }
         case 6: { // Release all modifier keys and any remote-held mouse buttons
+            uint64_t nowMs = GetTickCount64();
+            g_lastRemoteKeyInjectMs.store(nowMs, std::memory_order_release);
             const WORD mods[] = { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
             for (WORD vk : mods) {
                 INPUT u = {};
@@ -1049,6 +1343,7 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             }
             uint32_t heldBtns = g_injectedMouseMask.exchange(0);
             if (heldBtns != 0) {
+                g_lastRemoteMouseInjectMs.store(nowMs, std::memory_order_release);
                 const struct { uint32_t bit; DWORD flag; DWORD data; } btnDefs[] = {
                     { 1u << 0, MOUSEEVENTF_LEFTUP, 0 },
                     { 1u << 1, MOUSEEVENTF_MIDDLEUP, 0 },
@@ -1074,7 +1369,7 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             int action = pkt->flags & 0x0F; // 0=Down, 1=Move, 2=Up, 3=Cancel
             if (pointerId != 0) break;
 
-            auto monitors = ScreenCapturer::EnumerateMonitors();
+            auto monitors = GetCachedHostMonitors();
             int monLeft = 0, monTop = 0, monW = GetSystemMetrics(SM_CXSCREEN), monH = GetSystemMetrics(SM_CYSCREEN);
             if (!monitors.empty()) {
                 int idx = (monitorIndex >= 0 && monitorIndex < static_cast<int>(monitors.size())) ? monitorIndex : 0;
@@ -1083,18 +1378,28 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
                 monW = monitors[static_cast<size_t>(idx)].width;
                 monH = monitors[static_cast<size_t>(idx)].height;
             }
+            if (monW <= 1) monW = 1920;
+            if (monH <= 1) monH = 1080;
             int vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
             int vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
             int vW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
             int vH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (vW <= 1) vW = 1920;
-            if (vH <= 1) vH = 1080;
+            if (vW <= 1) vW = monW;
+            if (vH <= 1) vH = monH;
 
             uint16_t nx = static_cast<uint16_t>(pkt->a);
             uint16_t ny = static_cast<uint16_t>(pkt->b);
             double px = static_cast<double>(monLeft) + (static_cast<double>(nx) / 65535.0) * static_cast<double>(monW - 1);
             double py = static_cast<double>(monTop) + (static_cast<double>(ny) / 65535.0) * static_cast<double>(monH - 1);
+            int targetX = static_cast<int>(px + 0.5);
+            int targetY = static_cast<int>(py + 0.5);
 
+            LONG dx = static_cast<LONG>(((px - vLeft) * 65535.0) / static_cast<double>(vW - 1) + 0.5);
+            LONG dy = static_cast<LONG>(((py - vTop) * 65535.0) / static_cast<double>(vH - 1) + 0.5);
+            if (dx < 0) dx = 0; else if (dx > 65535) dx = 65535;
+            if (dy < 0) dy = 0; else if (dy > 65535) dy = 65535;
+
+            g_lastRemoteMouseInjectMs.store(GetTickCount64(), std::memory_order_release);
             inp.type = INPUT_MOUSE;
             inp.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
             if (action == 0) {
@@ -1104,10 +1409,13 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
                 inp.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
                 g_injectedMouseMask.fetch_and(~(1u << 0));
             }
-            inp.mi.dx = static_cast<LONG>(((px - vLeft) * 65535.0) / static_cast<double>(vW - 1) + 0.5);
-            inp.mi.dy = static_cast<LONG>(((py - vTop) * 65535.0) / static_cast<double>(vH - 1) + 0.5);
+            inp.mi.dx = dx;
+            inp.mi.dy = dy;
             inp.mi.dwExtraInfo = kBoBoInjectedMagic;
-            SendInput(1, &inp, sizeof(INPUT));
+            UINT sent = SendInput(1, &inp, sizeof(INPUT));
+            if (sent == 0 || IsForegroundBlockedByUipi()) {
+                SetCursorPos(targetX, targetY);
+            }
             break;
         }
         case 8: { // V6.2 Mobile system navigation (no-op on Windows host)
@@ -1147,6 +1455,7 @@ BOBO_API void __stdcall BoBoHost_InjectUnicodeText(const wchar_t* text, int32_t 
         inputs.push_back(u);
     }
     if (!inputs.empty()) {
+        g_lastRemoteKeyInjectMs.store(GetTickCount64(), std::memory_order_release);
         SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
     }
 }
@@ -1250,6 +1559,7 @@ BOBO_API int32_t __stdcall BoBoHost_ApplySuperDisplay(
     }
 
     g_superDispApplied = true;
+    InvalidateHostMonitorCache();
     if (outActualWidth) *outActualWidth = static_cast<int32_t>(bestMode.dmPelsWidth);
     if (outActualHeight) *outActualHeight = static_cast<int32_t>(bestMode.dmPelsHeight);
     return 1;
@@ -1273,6 +1583,7 @@ BOBO_API void __stdcall BoBoHost_RestoreSuperDisplay() {
         safeOrig.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
         ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &safeOrig, nullptr, 0, nullptr);
     }
+    InvalidateHostMonitorCache();
     g_superDispDevice.clear();
     std::memset(&g_superDispOrigMode, 0, sizeof(g_superDispOrigMode));
 }
@@ -1326,7 +1637,13 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
         PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
         g_privHookThreadId.store(GetCurrentThreadId());
 
-        HMODULE hMod = GetModuleHandleW(nullptr);
+        HMODULE hMod = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&PrivacyLowLevelMouseProc),
+                &hMod) || !hMod) {
+            hMod = GetModuleHandleW(nullptr);
+        }
         HHOOK hMouse = SetWindowsHookExW(WH_MOUSE_LL, PrivacyLowLevelMouseProc, hMod, 0);
         HHOOK hKey = SetWindowsHookExW(WH_KEYBOARD_LL, PrivacyLowLevelKeyProc, hMod, 0);
         bool ok = (hMouse != nullptr && hKey != nullptr);
@@ -1553,6 +1870,15 @@ BOBO_API void __stdcall BoBoClient_SetSysKeys(void* handle, int32_t sendSysKeys)
     if (!st) return;
     st->sendSysKeys = (sendSysKeys != 0);
     SyncClientSysKeyHook(st);
+}
+
+BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t composited) {
+    auto* st = static_cast<BoBoClientSession*>(handle);
+    if (!st) return;
+    st->hostCursorComposited.store(composited != 0);
+    if (st->viewportHwnd && IsWindow(st->viewportHwnd)) {
+        PostMessageW(st->viewportHwnd, kMsgRefreshCursor, 0, 0);
+    }
 }
 
 BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats) {

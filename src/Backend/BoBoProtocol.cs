@@ -33,7 +33,7 @@ namespace DualRemote
         internal string DeviceName = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
-        internal string Version = "6.2.0";
+        internal string Version = "6.2.1";
         internal string Platform = BoBoProtocol.PlatformWindows;
         internal string HostControlMode = BoBoProtocol.ControlModeFull;
         internal bool AllowIncoming = true;
@@ -122,15 +122,35 @@ namespace DualRemote
             int count,
             CancellationToken ct)
         {
-            byte[] header = new byte[HeaderBytes];
-            header[0] = (byte)type;
-            WriteInt32LE(header, 1, count);
-            WriteUInt32LE(header, 5, flagsOrTs);
-            await stream.WriteAsync(header, 0, HeaderBytes, ct).ConfigureAwait(false);
-            if (count > 0 && payload != null)
+            int actualCount = (payload != null && count > 0) ? count : 0;
+            if (actualCount == 0)
             {
-                await stream.WriteAsync(payload, offset, count, ct).ConfigureAwait(false);
+                byte[] header = new byte[HeaderBytes];
+                header[0] = (byte)type;
+                WriteInt32LE(header, 1, 0);
+                WriteUInt32LE(header, 5, flagsOrTs);
+                await stream.WriteAsync(header, 0, HeaderBytes, ct).ConfigureAwait(false);
+                await stream.FlushAsync(ct).ConfigureAwait(false);
+                return;
             }
+            if (actualCount <= 4096)
+            {
+                // Combine header + small payload (input events, control JSON, audio packets) into a single TLS record write.
+                byte[] packet = new byte[HeaderBytes + actualCount];
+                packet[0] = (byte)type;
+                WriteInt32LE(packet, 1, actualCount);
+                WriteUInt32LE(packet, 5, flagsOrTs);
+                Buffer.BlockCopy(payload, offset, packet, HeaderBytes, actualCount);
+                await stream.WriteAsync(packet, 0, packet.Length, ct).ConfigureAwait(false);
+                await stream.FlushAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            byte[] hdr = new byte[HeaderBytes];
+            hdr[0] = (byte)type;
+            WriteInt32LE(hdr, 1, actualCount);
+            WriteUInt32LE(hdr, 5, flagsOrTs);
+            await stream.WriteAsync(hdr, 0, HeaderBytes, ct).ConfigureAwait(false);
+            await stream.WriteAsync(payload, offset, actualCount, ct).ConfigureAwait(false);
             await stream.FlushAsync(ct).ConfigureAwait(false);
         }
 

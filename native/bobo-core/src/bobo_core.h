@@ -151,6 +151,7 @@ BOBO_API void __stdcall BoBoClient_SetVolume(void* handle, int32_t volumePercent
 BOBO_API void __stdcall BoBoClient_SetScaleMode(void* handle, int32_t scaleMode); // 0=1:1, 1=AspectFit, 2=SuperFill(zero black bars)
 BOBO_API void __stdcall BoBoClient_SetViewOnly(void* handle, int32_t viewOnly);
 BOBO_API void __stdcall BoBoClient_SetSysKeys(void* handle, int32_t sendSysKeys);
+BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t composited);
 BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats);
 BOBO_API void __stdcall BoBoClient_Destroy(void* handle);
 

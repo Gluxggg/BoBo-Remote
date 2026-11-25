@@ -756,6 +756,7 @@ namespace DualRemote
                             started["superDisplayNativeMatch"] = superDisplayNativeMatch;
                             started["platform"] = BoBoProtocol.PlatformWindows;
                             started["hostControlMode"] = BoBoProtocol.ControlModeFull;
+                            started["hostCursorComposited"] = true;
                             started["monitors"] = BoBoProtocol.SerializeMonitors(curMons);
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
                             continue;

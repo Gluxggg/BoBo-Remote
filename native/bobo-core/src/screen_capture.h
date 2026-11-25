@@ -16,6 +16,8 @@
 
 namespace bobo {
 
+uint64_t GetLastRemoteMouseInjectMs();
+
 class ScreenCapturer {
 public:
     ScreenCapturer() = default;
@@ -76,6 +78,7 @@ private:
 
     // Reusable Host cursor capture & NV12 compositing cache (makes Host's crisp small cursor visible in DXGI + GDI!)
     void UpdateCursorShapeCache(HCURSOR hCur);
+    void BuildFallbackArrowCursor();
     void CompositeHostCursorIntoNv12(std::vector<uint8_t>& nv12);
     static void BlendRgbaCursorToNv12(
         std::vector<uint8_t>& nv12, uint32_t dstW, uint32_t dstH,

@@ -96,7 +96,7 @@ namespace DualRemote
         private CancellationTokenSource launchCts;
         private bool closingIntentionally;
         private bool switchingQuality;
-        private bool remoteSessionConnected;
+        private volatile bool remoteSessionConnected;
         private bool hasSavedWindowedBounds;
         private Rectangle savedWindowedBounds;
         private string lastErrorMessage = "";
@@ -1329,7 +1329,10 @@ namespace DualRemote
                 return;
             }
 
-            ShowStatusOverlay("正在加载实时画面", "已完成双端 TLS 身份校验，正在接收首帧 H.264 画面…", false);
+            if (!remoteSessionConnected)
+            {
+                ShowStatusOverlay("正在加载实时画面", "已完成双端 TLS 身份校验，正在接收首帧 H.264 画面…", false);
+            }
         }
 
         private void StartStatsPollingTimer()
