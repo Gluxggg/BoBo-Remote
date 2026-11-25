@@ -10,8 +10,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "6.2.2"
-    CURRENT_PROJECT_VERSION: "622"
+    MARKETING_VERSION: "6.2.3"
+    CURRENT_PROJECT_VERSION: "623"
     CODE_SIGNING_ALLOWED: "NO"
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
@@ -31,8 +31,8 @@ targets:
       path: Sources/App/Info.plist
       properties:
         CFBundleDisplayName: BoBo远程
-        CFBundleShortVersionString: "6.2.2"
-        CFBundleVersion: "622"
+        CFBundleShortVersionString: "6.2.3"
+        CFBundleVersion: "623"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -65,8 +65,8 @@ targets:
       path: Sources/BroadcastExtension/Info.plist
       properties:
         CFBundleDisplayName: BoBo投屏扩展
-        CFBundleShortVersionString: "6.2.2"
-        CFBundleVersion: "622"
+        CFBundleShortVersionString: "6.2.3"
+        CFBundleVersion: "623"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.broadcast-services-upload
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BoBoBroadcastSampleHandler"

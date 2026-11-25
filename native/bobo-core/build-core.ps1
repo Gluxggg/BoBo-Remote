@@ -116,7 +116,7 @@ try {
         ) + $sources + @(
             '/link', '/NOLOGO', '/OPT:REF', '/OPT:ICF',
             'd3d11.lib', 'dxgi.lib', 'mfplat.lib', 'mfuuid.lib', 'wmcodecdspuuid.lib',
-            'strmiids.lib', 'ole32.lib', 'oleaut32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib'
+            'strmiids.lib', 'ole32.lib', 'oleaut32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'winmm.lib'
         )
 
         & $clExe @clArgs

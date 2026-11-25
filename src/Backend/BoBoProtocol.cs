@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,7 +17,8 @@ namespace DualRemote
         VideoH264 = 0x02,
         AudioAdpcm = 0x03,
         InputEvent = 0x04,
-        FileChunk = 0x05
+        FileChunk = 0x05,
+        CursorShape = 0x06
     }
 
     internal sealed class BoBoMonitorDescriptor
@@ -33,7 +37,7 @@ namespace DualRemote
         internal string DeviceName = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
-        internal string Version = "6.2.2";
+        internal string Version = "6.2.3";
         internal string Platform = BoBoProtocol.PlatformWindows;
         internal string HostControlMode = BoBoProtocol.ControlModeFull;
         internal bool AllowIncoming = true;
@@ -107,6 +111,7 @@ namespace DualRemote
         internal const int MobileNavPowerDialog = 8;
 
         internal const int DefaultTcpPort = 49810;
+        internal const int DefaultUdpPort = 49811;
         internal const int DiscoveryUdpPort = 49812;
         internal const int HeaderBytes = 9;
         internal const int MaxControlPayloadBytes = 2 * 1024 * 1024;
@@ -130,19 +135,17 @@ namespace DualRemote
                 WriteInt32LE(header, 1, 0);
                 WriteUInt32LE(header, 5, flagsOrTs);
                 await stream.WriteAsync(header, 0, HeaderBytes, ct).ConfigureAwait(false);
-                await stream.FlushAsync(ct).ConfigureAwait(false);
                 return;
             }
-            if (actualCount <= 4096)
+            if (actualCount <= 262144)
             {
-                // Combine header + small payload (input events, control JSON, audio packets) into a single TLS record write.
+                // Combine header + payload into ONE contiguous TLS write (eliminates 9-byte split TLS record overhead!)
                 byte[] packet = new byte[HeaderBytes + actualCount];
                 packet[0] = (byte)type;
                 WriteInt32LE(packet, 1, actualCount);
                 WriteUInt32LE(packet, 5, flagsOrTs);
                 Buffer.BlockCopy(payload, offset, packet, HeaderBytes, actualCount);
                 await stream.WriteAsync(packet, 0, packet.Length, ct).ConfigureAwait(false);
-                await stream.FlushAsync(ct).ConfigureAwait(false);
                 return;
             }
             byte[] hdr = new byte[HeaderBytes];
@@ -151,7 +154,6 @@ namespace DualRemote
             WriteUInt32LE(hdr, 5, flagsOrTs);
             await stream.WriteAsync(hdr, 0, HeaderBytes, ct).ConfigureAwait(false);
             await stream.WriteAsync(payload, offset, actualCount, ct).ConfigureAwait(false);
-            await stream.FlushAsync(ct).ConfigureAwait(false);
         }
 
         internal static Task WriteJsonAsync(Stream stream, Dictionary<string, object> obj, CancellationToken ct)
@@ -423,6 +425,114 @@ namespace DualRemote
                     Height = GetInt(item, "height", 1080),
                     IsPrimary = GetBool(item, "primary", i == 0)
                 });
+            }
+            return list;
+        }
+
+        internal static List<string> GetLocalLanIpv4Addresses()
+        {
+            var result = new List<string>();
+            try
+            {
+                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                        nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    string name = nic.Name ?? "";
+                    string desc = nic.Description ?? "";
+                    if (name.IndexOf("WSL", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("Hyper-V", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("VirtualBox", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("VMware", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("ZeroTier", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("WireGuard", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("Loopback", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        continue;
+                    }
+                    IPInterfaceProperties props = nic.GetIPProperties();
+                    if (props == null) continue;
+                    foreach (UnicastIPAddressInformation uni in props.UnicastAddresses)
+                    {
+                        if (uni.Address == null || uni.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                        byte[] b = uni.Address.GetAddressBytes();
+                        if (b.Length != 4) continue;
+                        if (b[0] == 127) continue;
+                        if (b[0] == 169 && b[1] == 254) continue;
+                        if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) continue; // Tailscale CGNAT
+                        // Skip Windows Mobile Hotspot virtual 192.168.137.1 unless no other LAN IP exists
+                        string ipStr = uni.Address.ToString();
+                        if (!result.Contains(ipStr)) result.Add(ipStr);
+                    }
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        internal static List<IPAddress> GetDirectedBroadcastAddresses()
+        {
+            var list = new List<IPAddress>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                        nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    string name = nic.Name ?? "";
+                    string desc = nic.Description ?? "";
+                    if (name.IndexOf("WSL", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("Hyper-V", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        desc.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    IPInterfaceProperties props = nic.GetIPProperties();
+                    if (props == null) continue;
+                    foreach (UnicastIPAddressInformation uni in props.UnicastAddresses)
+                    {
+                        if (uni.Address == null || uni.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                        if (uni.IPv4Mask == null) continue;
+                        byte[] ip = uni.Address.GetAddressBytes();
+                        byte[] mask = uni.IPv4Mask.GetAddressBytes();
+                        if (ip.Length != 4 || mask.Length != 4) continue;
+                        if (ip[0] == 127 || (ip[0] == 169 && ip[1] == 254) || (ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127)) continue;
+                        byte[] bcast = new byte[4];
+                        for (int i = 0; i < 4; i++) bcast[i] = (byte)(ip[i] | (~mask[i]));
+                        var addr = new IPAddress(bcast);
+                        if (seen.Add(addr.ToString())) list.Add(addr);
+                    }
+                }
+            }
+            catch { }
+            if (seen.Add("255.255.255.255")) list.Add(IPAddress.Broadcast);
+            return list;
+        }
+
+        internal static bool IsTailscaleCgnatIp(string host)
+        {
+            IPAddress ip;
+            if (!IPAddress.TryParse(host ?? "", out ip) || ip.AddressFamily != AddressFamily.InterNetwork) return false;
+            byte[] b = ip.GetAddressBytes();
+            return b.Length == 4 && b[0] == 100 && b[1] >= 64 && b[1] <= 127;
+        }
+
+        internal static List<string> ParseStringList(Dictionary<string, object> map, string key)
+        {
+            var list = new List<string>();
+            object val;
+            if (map == null || !map.TryGetValue(key, out val)) return list;
+            object[] arr = val as object[];
+            if (arr == null) return list;
+            for (int i = 0; i < arr.Length; i++)
+            {
+                if (arr[i] != null)
+                {
+                    string s = arr[i].ToString().Trim();
+                    if (s.Length > 0 && !list.Contains(s)) list.Add(s);
+                }
             }
             return list;
         }

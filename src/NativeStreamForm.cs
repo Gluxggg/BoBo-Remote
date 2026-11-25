@@ -878,12 +878,16 @@ namespace DualRemote
                 freeMouseMode = true;
                 Engines.ReleaseCursorClip();
                 if (nc != null) { nc.SetMouseMode(true); nc.SetViewOnly(true); }
+                BoBoStreamClient scVo = streamClient;
+                if (scVo != null && scVo.IsConnected) scVo.SendSetCursorMode(false);
                 if (showHint) ShowToastHint("已切换至「仅查看模式」· 远端键鼠输入已锁定防误触");
             }
             else if (mode == ControlMouseMode.Locked)
             {
                 freeMouseMode = false;
                 if (nc != null) { nc.SetViewOnly(false); nc.SetMouseMode(false); }
+                BoBoStreamClient scLk = streamClient;
+                if (scLk != null && scLk.IsConnected) scLk.SendSetCursorMode(true);
                 if (showHint) ShowToastHint("已进入「锁鼠游戏模式」· 随时轻按 Ctrl+Alt 立即释放鼠标并点浮窗");
             }
             else
@@ -891,7 +895,9 @@ namespace DualRemote
                 freeMouseMode = true;
                 Engines.ReleaseCursorClip();
                 if (nc != null) { nc.SetViewOnly(false); nc.SetMouseMode(true); }
-                if (showHint) ShowToastHint("已切回「自由指针模式」· 光标可自由移出窗口并操作浮窗");
+                BoBoStreamClient scFr = streamClient;
+                if (scFr != null && scFr.IsConnected) scFr.SendSetCursorMode(false);
+                if (showHint) ShowToastHint("已切回「自由指针模式」· 光标零延迟跟随并可自由移出窗口");
             }
 
             RefreshTopBarVisuals();
@@ -1040,7 +1046,7 @@ namespace DualRemote
             if (remoteSessionConnected && sc != null && sc.IsConnected)
             {
                 // V6 热切换：原连接无缝调整分辨率/帧率/码率，零黑屏不断连
-                sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps);
+                sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps, autoBitrate);
                 return;
             }
 
@@ -1288,6 +1294,8 @@ namespace DualRemote
                 Height = currentHeight,
                 Fps = currentFps,
                 BitrateKbps = currentBitrateKbps,
+                AutoBitrate = autoBitrate,
+                FreeMouse = freeMouseMode,
                 MuteHostAudio = !hostAudio,
                 RequestPrivacy = autoRemotePrivacyOnConnect,
                 SuperDisplay = superDisplayMode,
@@ -1345,7 +1353,10 @@ namespace DualRemote
                 BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
                 BoBoStreamClient sc = streamClient;
                 if (nc == null || sc == null) return;
-                NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, currentBitrateKbps);
+                int liveBps = sc.ActiveBitrateKbps > 0 ? sc.ActiveBitrateKbps : currentBitrateKbps;
+                NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, liveBps);
+                stats.PacketLossPct = sc.LatestPacketLossPct;
+                stats.Transport = sc.ActiveTransportLabel;
                 lastRttMs = stats.RttMs;
                 if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
                 {
@@ -1986,7 +1997,7 @@ namespace DualRemote
                 StartPosition = FormStartPosition.Manual;
                 BackColor = Color.FromArgb(14, 21, 32);
                 Opacity = 0.86;
-                Size = new Size(320, 52);
+                Size = new Size(370, 54);
                 DoubleBuffered = true;
             }
 
@@ -2006,14 +2017,15 @@ namespace DualRemote
             {
                 if (s == null || IsDisposed) return;
                 double mbps = s.BitrateKbps / 1000.0;
+                string tr = string.IsNullOrEmpty(s.Transport) ? "UDP+FEC" : s.Transport;
                 line1 = string.Format(CultureInfo.InvariantCulture,
-                    "{0:F1} FPS  |  {1}x{2}  |  {3} ({4})",
+                    "{0:F1} FPS | {1}x{2} | {3} | {4}",
                     s.Fps, s.Width, s.Height,
-                    string.IsNullOrEmpty(s.Codec) ? "H264" : s.Codec,
+                    tr,
                     string.IsNullOrEmpty(s.Decoder) ? "D3D11VA" : s.Decoder);
                 line2 = string.Format(CultureInfo.InvariantCulture,
-                    "解码 {0:F1}ms · 渲染 {1:F1}ms · RTT {2:F0}ms · {3:F1} Mbps",
-                    s.DecodeMs, s.RenderMs, s.RttMs, mbps);
+                    "解码 {0:F1}ms · RTT {1:F0}ms · 丢包 {2:F1}% · {3:F1} Mbps",
+                    s.DecodeMs, s.RttMs, s.PacketLossPct, mbps);
                 Invalidate();
             }
 

@@ -51,6 +51,44 @@ std::vector<BoBoMonitorInfo> ScreenCapturer::EnumerateMonitors() {
     return list;
 }
 
+int32_t ScreenCapturer::DetectStandardCursorShape() {
+    CURSORINFO ci = {};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci)) return 1;
+    bool vis = ((ci.flags & CURSOR_SHOWING) != 0) && (ci.hCursor != nullptr);
+    if (!vis) {
+        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
+        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL) {
+            return 1; // Keep arrow visible on headless/virtual displays during active remote control
+        }
+        return 0; // Hidden
+    }
+    static HCURSOR kStdCursors[14] = { nullptr };
+    static bool kStdInit = false;
+    if (!kStdInit) {
+        kStdCursors[1]  = LoadCursorW(nullptr, IDC_ARROW);
+        kStdCursors[2]  = LoadCursorW(nullptr, IDC_IBEAM);
+        kStdCursors[3]  = LoadCursorW(nullptr, IDC_HAND);
+        kStdCursors[4]  = LoadCursorW(nullptr, IDC_WAIT);
+        kStdCursors[5]  = LoadCursorW(nullptr, IDC_APPSTARTING);
+        kStdCursors[6]  = LoadCursorW(nullptr, IDC_CROSS);
+        kStdCursors[7]  = LoadCursorW(nullptr, IDC_SIZENS);
+        kStdCursors[8]  = LoadCursorW(nullptr, IDC_SIZEWE);
+        kStdCursors[9]  = LoadCursorW(nullptr, IDC_SIZENWSE);
+        kStdCursors[10] = LoadCursorW(nullptr, IDC_SIZENESW);
+        kStdCursors[11] = LoadCursorW(nullptr, IDC_SIZEALL);
+        kStdCursors[12] = LoadCursorW(nullptr, IDC_NO);
+        kStdCursors[13] = LoadCursorW(nullptr, IDC_HELP);
+        kStdInit = true;
+    }
+    for (int32_t id = 1; id <= 13; ++id) {
+        if (kStdCursors[id] != nullptr && ci.hCursor == kStdCursors[id]) {
+            return id;
+        }
+    }
+    return 1; // Default arrow for custom/unknown visible cursors
+}
+
 ScreenCapturer::~ScreenCapturer() {
     Shutdown();
 }
@@ -154,6 +192,11 @@ bool ScreenCapturer::InitDxgiForMonitor(const BoBoMonitorInfo& mon) {
 
                 device_.As(&videoDevice_);
                 context_.As(&videoContext_);
+                Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
+                if (SUCCEEDED(device_.As(&mt)) && mt) {
+                    mt->SetMultithreadProtected(TRUE);
+                }
+                ++deviceGen_;
                 return true;
             }
         }
@@ -163,11 +206,13 @@ bool ScreenCapturer::InitDxgiForMonitor(const BoBoMonitorInfo& mon) {
 
 bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
     if (!device_ || !context_ || !videoDevice_ || !videoContext_) return false;
-    if (vp_ && nv12GpuTex_ && nv12StagingTex_ && vpSrcW_ == srcW && vpSrcH_ == srcH) return true;
+    if (vp_ && nv12GpuTex_[0] && nv12GpuTex_[1] && nv12StagingTex_ && vpSrcW_ == srcW && vpSrcH_ == srcH) return true;
 
     vp_.Reset();
     vpEnum_.Reset();
-    nv12GpuTex_.Reset();
+    nv12GpuTex_[0].Reset();
+    nv12GpuTex_[1].Reset();
+    lastProducedGpuTex_ = nullptr;
     nv12StagingTex_.Reset();
 
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc = {};
@@ -210,8 +255,13 @@ bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
     td.Format = DXGI_FORMAT_NV12;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET;
-    if (FAILED(device_->CreateTexture2D(&td, nullptr, nv12GpuTex_.GetAddressOf()))) return false;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    for (int s = 0; s < 2; ++s) {
+        if (FAILED(device_->CreateTexture2D(&td, nullptr, nv12GpuTex_[s].GetAddressOf()))) {
+            td.BindFlags = D3D11_BIND_RENDER_TARGET;
+            if (FAILED(device_->CreateTexture2D(&td, nullptr, nv12GpuTex_[s].GetAddressOf()))) return false;
+        }
+    }
 
     D3D11_TEXTURE2D_DESC sd = td;
     sd.Usage = D3D11_USAGE_STAGING;
@@ -221,168 +271,295 @@ bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
 
     vpSrcW_ = srcW;
     vpSrcH_ = srcH;
+    gpuSlot_ = 0;
     return true;
 }
 
-bool ScreenCapturer::ConvertBgraTextureToNv12(ID3D11Texture2D* bgraTex, std::vector<uint8_t>& outNv12) {
+bool ScreenCapturer::ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D11Texture2D** outGpuNv12) {
+    if (outGpuNv12) *outGpuNv12 = nullptr;
     if (!bgraTex || !device_ || !context_) return false;
     D3D11_TEXTURE2D_DESC srcDesc = {};
     bgraTex->GetDesc(&srcDesc);
 
-    if (EnsureColorConverter(srcDesc.Width, srcDesc.Height)) {
-        bool vpOk = false;
-        RECT srcRect = { 0, 0, static_cast<LONG>(srcDesc.Width), static_cast<LONG>(srcDesc.Height) };
-        RECT dstRect = { 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
-        videoContext_->VideoProcessorSetStreamSourceRect(vp_.Get(), 0, TRUE, &srcRect);
-        videoContext_->VideoProcessorSetStreamDestRect(vp_.Get(), 0, TRUE, &dstRect);
-        videoContext_->VideoProcessorSetOutputTargetRect(vp_.Get(), TRUE, &dstRect);
+    if (!EnsureColorConverter(srcDesc.Width, srcDesc.Height)) return false;
 
-        // Some GPU drivers reject CreateVideoProcessorInputView directly on raw DXGI duplication surfaces.
-        ID3D11Texture2D* vpSrcTex = lastDesktopTex_ ? lastDesktopTex_.Get() : bgraTex;
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc = {};
-        inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-        Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-        if (SUCCEEDED(videoDevice_->CreateVideoProcessorInputView(vpSrcTex, vpEnum_.Get(), &inDesc, inView.GetAddressOf()))) {
-            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = {};
-            outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-            Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-            if (SUCCEEDED(videoDevice_->CreateVideoProcessorOutputView(nv12GpuTex_.Get(), vpEnum_.Get(), &outDesc, outView.GetAddressOf()))) {
-                D3D11_VIDEO_PROCESSOR_STREAM stream = {};
-                stream.Enable = TRUE;
-                stream.pInputSurface = inView.Get();
-                if (SUCCEEDED(videoContext_->VideoProcessorBlt(vp_.Get(), outView.Get(), 0, 1, &stream))) {
-                    context_->CopyResource(nv12StagingTex_.Get(), nv12GpuTex_.Get());
-                    D3D11_MAPPED_SUBRESOURCE mapped = {};
-                    if (SUCCEEDED(context_->Map(nv12StagingTex_.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-                        outNv12.resize(static_cast<size_t>(outW_) * static_cast<size_t>(outH_) * 3 / 2);
-                        const uint8_t* srcY = static_cast<const uint8_t*>(mapped.pData);
-                        uint8_t* dstY = outNv12.data();
-                        for (uint32_t row = 0; row < outH_; ++row) {
-                            std::memcpy(dstY + row * outW_, srcY + row * mapped.RowPitch, outW_);
-                        }
-                        const uint8_t* srcUv = srcY + mapped.RowPitch * outH_;
-                        uint8_t* dstUv = dstY + outW_ * outH_;
-                        uint32_t uvRows = outH_ / 2;
-                        for (uint32_t row = 0; row < uvRows; ++row) {
-                            std::memcpy(dstUv + row * outW_, srcUv + row * mapped.RowPitch, outW_);
-                        }
-                        context_->Unmap(nv12StagingTex_.Get(), 0);
-                        vpOk = true;
-                    }
-                }
-            }
-        }
-        if (vpOk) return true;
-        // Disable GPU VP on failure and transparently fall through to CPU staging conversion below
+    RECT srcRect = { 0, 0, static_cast<LONG>(srcDesc.Width), static_cast<LONG>(srcDesc.Height) };
+    RECT dstRect = { 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
+    videoContext_->VideoProcessorSetStreamSourceRect(vp_.Get(), 0, TRUE, &srcRect);
+    videoContext_->VideoProcessorSetStreamDestRect(vp_.Get(), 0, TRUE, &dstRect);
+    videoContext_->VideoProcessorSetOutputTargetRect(vp_.Get(), TRUE, &dstRect);
+
+    ID3D11Texture2D* vpSrcTex = lastDesktopTex_ ? lastDesktopTex_.Get() : bgraTex;
+    ID3D11Texture2D* targetTex = nv12GpuTex_[gpuSlot_].Get();
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc = {};
+    inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
+    if (FAILED(videoDevice_->CreateVideoProcessorInputView(vpSrcTex, vpEnum_.Get(), &inDesc, inView.GetAddressOf()))) {
         vp_.Reset();
         vpEnum_.Reset();
         videoContext_.Reset();
         videoDevice_.Reset();
+        return false;
     }
 
-    // GPU VideoProcessor NV12 output unsupported -> copy BGRA staging and convert on CPU
-    D3D11_TEXTURE2D_DESC sd = srcDesc;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.MiscFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> stage;
-    if (FAILED(device_->CreateTexture2D(&sd, nullptr, stage.GetAddressOf()))) return false;
-    context_->CopyResource(stage.Get(), bgraTex);
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = {};
+    outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
+    if (FAILED(videoDevice_->CreateVideoProcessorOutputView(targetTex, vpEnum_.Get(), &outDesc, outView.GetAddressOf()))) {
+        vp_.Reset();
+        vpEnum_.Reset();
+        videoContext_.Reset();
+        videoDevice_.Reset();
+        return false;
+    }
 
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(context_->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
-    outNv12.resize(static_cast<size_t>(outW_) * static_cast<size_t>(outH_) * 3 / 2);
-    BgraBufferToNv12(static_cast<const uint8_t*>(mapped.pData), srcDesc.Width, srcDesc.Height, mapped.RowPitch,
-                     outNv12.data(), outW_, outH_);
-    context_->Unmap(stage.Get(), 0);
+    D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+    stream.Enable = TRUE;
+    stream.pInputSurface = inView.Get();
+    if (FAILED(videoContext_->VideoProcessorBlt(vp_.Get(), outView.Get(), 0, 1, &stream))) {
+        vp_.Reset();
+        vpEnum_.Reset();
+        videoContext_.Reset();
+        videoDevice_.Reset();
+        return false;
+    }
+
+    gpuSlot_ ^= 1;
+    lastProducedGpuTex_ = targetTex;
+    if (outGpuNv12) *outGpuNv12 = targetTex;
     return true;
 }
 
+bool ScreenCapturer::ConvertBgraTextureToCpuNv12(ID3D11Texture2D* bgraTex, std::vector<uint8_t>& outNv12) {
+    if (!bgraTex || !device_ || !context_) return false;
+    D3D11_TEXTURE2D_DESC srcDesc = {};
+    bgraTex->GetDesc(&srcDesc);
+
+    ID3D11Texture2D* gpuNv12 = nullptr;
+    if (ConvertBgraTextureToGpuNv12(bgraTex, &gpuNv12) && gpuNv12 && nv12StagingTex_) {
+        context_->CopyResource(nv12StagingTex_.Get(), gpuNv12);
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (SUCCEEDED(context_->Map(nv12StagingTex_.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+            outNv12.resize(static_cast<size_t>(outW_) * static_cast<size_t>(outH_) * 3 / 2);
+            const uint8_t* srcY = static_cast<const uint8_t*>(mapped.pData);
+            uint8_t* dstY = outNv12.data();
+            for (uint32_t row = 0; row < outH_; ++row) {
+                std::memcpy(dstY + row * outW_, srcY + row * mapped.RowPitch, outW_);
+            }
+            const uint8_t* srcUv = srcY + mapped.RowPitch * outH_;
+            uint8_t* dstUv = dstY + outW_ * outH_;
+            uint32_t uvRows = outH_ / 2;
+            for (uint32_t row = 0; row < uvRows; ++row) {
+                std::memcpy(dstUv + row * outW_, srcUv + row * mapped.RowPitch, outW_);
+            }
+            context_->Unmap(nv12StagingTex_.Get(), 0);
+            return true;
+        }
+    }
+
+    // GPU VideoProcessor NV12 output unsupported -> reuse cached BGRA staging texture and convert on CPU
+    if (!bgraStagingTex_ || bgraStageW_ != srcDesc.Width || bgraStageH_ != srcDesc.Height) {
+        bgraStagingTex_.Reset();
+        D3D11_TEXTURE2D_DESC sd = srcDesc;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.MiscFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device_->CreateTexture2D(&sd, nullptr, bgraStagingTex_.GetAddressOf()))) return false;
+        bgraStageW_ = srcDesc.Width;
+        bgraStageH_ = srcDesc.Height;
+    }
+    context_->CopyResource(bgraStagingTex_.Get(), bgraTex);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(context_->Map(bgraStagingTex_.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+    outNv12.resize(static_cast<size_t>(outW_) * static_cast<size_t>(outH_) * 3 / 2);
+    BgraBufferToNv12(static_cast<const uint8_t*>(mapped.pData), srcDesc.Width, srcDesc.Height, mapped.RowPitch,
+                     outNv12.data(), outW_, outH_);
+    context_->Unmap(bgraStagingTex_.Get(), 0);
+    return true;
+}
+
+bool ScreenCapturer::HasCursorMovedOrChanged(bool& outVisible, POINT& outPt, HCURSOR& outHandle) const {
+    CURSORINFO ci = {};
+    ci.cbSize = sizeof(ci);
+    outVisible = false;
+    outPt = POINT{ -99999, -99999 };
+    outHandle = nullptr;
+    bool hasState = false;
+    if (GetCursorInfo(&ci)) {
+        outVisible = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+        outPt = ci.ptScreenPos;
+        outHandle = ci.hCursor;
+        hasState = true;
+    }
+    if (!outVisible) {
+        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
+        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&outPt)) {
+            outVisible = true;
+            outHandle = LoadCursorW(nullptr, IDC_ARROW);
+            hasState = true;
+        }
+    }
+    if (!hasState) return false;
+    return (outVisible != lastCursorVisible_ ||
+            outHandle != lastCursorHandle_ ||
+            outPt.x != lastCursorPos_.x ||
+            outPt.y != lastCursorPos_.y);
+}
+
 bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv12, bool& outChanged, std::string& outError) {
+    ID3D11Texture2D* ignoredGpu = nullptr;
+    return CaptureFrame(timeoutMs, false, true, true, &ignoredGpu, outNv12, outChanged, outError);
+}
+
+bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compositeCursor, bool forceProduce,
+                                  ID3D11Texture2D** outGpuNv12, std::vector<uint8_t>& outCpuNv12,
+                                  bool& outChanged, std::string& outError) {
+    if (outGpuNv12) *outGpuNv12 = nullptr;
     outChanged = false;
     HRESULT lastDxgiHr = S_OK;
+
     if (dxgiReady_ && duplication_) {
         DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
         Microsoft::WRL::ComPtr<IDXGIResource> desktopRes;
-        HRESULT hr = duplication_->AcquireNextFrame(static_cast<UINT>(timeoutMs > 0 ? timeoutMs : 0), &frameInfo, desktopRes.GetAddressOf());
+        HRESULT hr = duplication_->AcquireNextFrame(static_cast<UINT>(timeoutMs > 0 ? timeoutMs : 0),
+                                                    &frameInfo, desktopRes.GetAddressOf());
         lastDxgiHr = hr;
         if (SUCCEEDED(hr)) {
-            Microsoft::WRL::ComPtr<ID3D11Texture2D> desktopTex;
+            bool desktopDirty = (!hasFirstFrame_) ||
+                                (frameInfo.LastPresentTime.QuadPart != 0) ||
+                                (frameInfo.AccumulatedFrames > 0);
             bool ok = false;
-            if (SUCCEEDED(desktopRes.As(&desktopTex)) && desktopTex) {
-                D3D11_TEXTURE2D_DESC td = {};
-                desktopTex->GetDesc(&td);
-                if (!lastDesktopTex_ || lastDesktopW_ != td.Width || lastDesktopH_ != td.Height) {
-                    lastDesktopTex_.Reset();
-                    lastDesktopW_ = 0;
-                    lastDesktopH_ = 0;
-                    D3D11_TEXTURE2D_DESC copyDesc = td;
-                    copyDesc.Usage = D3D11_USAGE_DEFAULT;
-                    copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-                    copyDesc.CPUAccessFlags = 0;
-                    copyDesc.MiscFlags = 0;
-                    if (FAILED(device_->CreateTexture2D(&copyDesc, nullptr, lastDesktopTex_.ReleaseAndGetAddressOf()))) {
-                        copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                        device_->CreateTexture2D(&copyDesc, nullptr, lastDesktopTex_.ReleaseAndGetAddressOf());
+            if (desktopDirty) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> desktopTex;
+                if (SUCCEEDED(desktopRes.As(&desktopTex)) && desktopTex) {
+                    D3D11_TEXTURE2D_DESC td = {};
+                    desktopTex->GetDesc(&td);
+                    if (!lastDesktopTex_ || lastDesktopW_ != td.Width || lastDesktopH_ != td.Height) {
+                        lastDesktopTex_.Reset();
+                        lastDesktopW_ = 0;
+                        lastDesktopH_ = 0;
+                        D3D11_TEXTURE2D_DESC copyDesc = td;
+                        copyDesc.Usage = D3D11_USAGE_DEFAULT;
+                        copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                        copyDesc.CPUAccessFlags = 0;
+                        copyDesc.MiscFlags = 0;
+                        if (FAILED(device_->CreateTexture2D(&copyDesc, nullptr, lastDesktopTex_.ReleaseAndGetAddressOf()))) {
+                            copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                            device_->CreateTexture2D(&copyDesc, nullptr, lastDesktopTex_.ReleaseAndGetAddressOf());
+                        }
+                        if (lastDesktopTex_) {
+                            lastDesktopW_ = td.Width;
+                            lastDesktopH_ = td.Height;
+                        }
                     }
                     if (lastDesktopTex_) {
-                        lastDesktopW_ = td.Width;
-                        lastDesktopH_ = td.Height;
+                        context_->CopyResource(lastDesktopTex_.Get(), desktopTex.Get());
+                    }
+
+                    if (preferGpuNv12 && !compositeCursor) {
+                        ID3D11Texture2D* gpuTex = nullptr;
+                        if (ConvertBgraTextureToGpuNv12(desktopTex.Get(), &gpuTex) && gpuTex) {
+                            if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            hasFirstFrame_ = true;
+                            outChanged = true;
+                            ok = true;
+                        }
+                    }
+                    if (!ok) {
+                        ok = ConvertBgraTextureToCpuNv12(desktopTex.Get(), lastCleanNv12_);
+                        if (ok) {
+                            outCpuNv12 = lastCleanNv12_;
+                            if (compositeCursor) {
+                                CompositeHostCursorIntoNv12(outCpuNv12);
+                            }
+                            hasFirstFrame_ = true;
+                            outChanged = true;
+                        }
+                    }
+                }
+                duplication_->ReleaseFrame();
+                if (ok) return true;
+            } else {
+                // Pointer-only DXGI update: zero desktop pixels changed!
+                duplication_->ReleaseFrame();
+                if (preferGpuNv12 && !compositeCursor && lastProducedGpuTex_) {
+                    if (forceProduce && outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                    outChanged = false;
+                    return true;
+                }
+                if (compositeCursor && !lastCleanNv12_.empty()) {
+                    bool vis = false; POINT pt = {}; HCURSOR hc = nullptr;
+                    bool curMoved = HasCursorMovedOrChanged(vis, pt, hc);
+                    if (curMoved || forceProduce) {
+                        outCpuNv12 = lastCleanNv12_;
+                        CompositeHostCursorIntoNv12(outCpuNv12);
+                        outChanged = curMoved;
+                    }
+                    return true;
+                }
+                if (lastDesktopTex_ && forceProduce) {
+                    if (preferGpuNv12 && !compositeCursor) {
+                        ID3D11Texture2D* gpuTex = nullptr;
+                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex) && gpuTex) {
+                            if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            return true;
+                        }
+                    }
+                    if (ConvertBgraTextureToCpuNv12(lastDesktopTex_.Get(), lastCleanNv12_)) {
+                        outCpuNv12 = lastCleanNv12_;
+                        if (compositeCursor) CompositeHostCursorIntoNv12(outCpuNv12);
+                        return true;
+                    }
+                }
+                return true;
+            }
+        } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+            if (hasFirstFrame_) {
+                if (preferGpuNv12 && !compositeCursor && lastProducedGpuTex_) {
+                    if (forceProduce && outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                    outChanged = false;
+                    return true;
+                }
+                if (compositeCursor) {
+                    bool vis = false; POINT pt = {}; HCURSOR hc = nullptr;
+                    bool curMoved = HasCursorMovedOrChanged(vis, pt, hc);
+                    if (!curMoved && !forceProduce) {
+                        outChanged = false;
+                        return true;
+                    }
+                    if (!lastCleanNv12_.empty()) {
+                        outCpuNv12 = lastCleanNv12_;
+                        CompositeHostCursorIntoNv12(outCpuNv12);
+                        outChanged = curMoved;
+                        return true;
                     }
                 }
                 if (lastDesktopTex_) {
-                    context_->CopyResource(lastDesktopTex_.Get(), desktopTex.Get());
-                }
-                ok = ConvertBgraTextureToNv12(desktopTex.Get(), outNv12);
-                if (ok) {
-                    CompositeHostCursorIntoNv12(outNv12);
-                    hasFirstFrame_ = true;
-                    outChanged = true;
-                }
-            }
-            duplication_->ReleaseFrame();
-            if (ok) return true;
-        } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-            if (hasFirstFrame_ && lastDesktopTex_) {
-                CURSORINFO ci = {};
-                ci.cbSize = sizeof(ci);
-                bool curMoved = false;
-                bool hasCursorState = false;
-                bool vis = false;
-                POINT curPos = { -99999, -99999 };
-                HCURSOR curHandle = nullptr;
-                if (GetCursorInfo(&ci)) {
-                    vis = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
-                    curPos = ci.ptScreenPos;
-                    curHandle = ci.hCursor;
-                    hasCursorState = true;
-                }
-                if (!vis) {
-                    uint64_t lastRemote = GetLastRemoteMouseInjectMs();
-                    if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&curPos)) {
-                        vis = true;
-                        curHandle = LoadCursorW(nullptr, IDC_ARROW);
-                        hasCursorState = true;
+                    if (!forceProduce) {
+                        outChanged = false;
+                        return true;
+                    }
+                    if (preferGpuNv12 && !compositeCursor) {
+                        ID3D11Texture2D* gpuTex = nullptr;
+                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex) && gpuTex) {
+                            if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            return true;
+                        }
+                    }
+                    if (ConvertBgraTextureToCpuNv12(lastDesktopTex_.Get(), lastCleanNv12_)) {
+                        outCpuNv12 = lastCleanNv12_;
+                        if (compositeCursor) CompositeHostCursorIntoNv12(outCpuNv12);
+                        return true;
                     }
                 }
-                if (hasCursorState) {
-                    if (vis != lastCursorVisible_ ||
-                        curHandle != lastCursorHandle_ ||
-                        curPos.x != lastCursorPos_.x ||
-                        curPos.y != lastCursorPos_.y) {
-                        curMoved = true;
-                    }
-                }
-                if (ConvertBgraTextureToNv12(lastDesktopTex_.Get(), outNv12)) {
-                    CompositeHostCursorIntoNv12(outNv12);
-                    if (curMoved) outChanged = true;
-                    return true;
-                }
             }
-            // No new desktop dirty rect yet -> grab via GDI for immediate first frame
-            if (CaptureViaGdi(outNv12)) {
-                CompositeHostCursorIntoNv12(outNv12);
+            // No first DXGI frame yet -> grab via GDI for immediate first frame
+            if (CaptureViaGdi(lastCleanNv12_)) {
+                outCpuNv12 = lastCleanNv12_;
+                if (compositeCursor) CompositeHostCursorIntoNv12(outCpuNv12);
                 hasFirstFrame_ = true;
                 outChanged = true;
                 return true;
@@ -399,8 +576,13 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
             lastDesktopH_ = 0;
             vp_.Reset();
             vpEnum_.Reset();
-            nv12GpuTex_.Reset();
+            nv12GpuTex_[0].Reset();
+            nv12GpuTex_[1].Reset();
+            lastProducedGpuTex_ = nullptr;
             nv12StagingTex_.Reset();
+            bgraStagingTex_.Reset();
+            bgraStageW_ = 0;
+            bgraStageH_ = 0;
             vpSrcW_ = 0;
             vpSrcH_ = 0;
             auto freshMonitors = EnumerateMonitors();
@@ -414,8 +596,9 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
     }
 
     // Reliable GDI fallback (covers UAC/hybrid GPU/RDP transitions cleanly)
-    if (CaptureViaGdi(outNv12)) {
-        CompositeHostCursorIntoNv12(outNv12);
+    if (CaptureViaGdi(lastCleanNv12_)) {
+        outCpuNv12 = lastCleanNv12_;
+        if (compositeCursor) CompositeHostCursorIntoNv12(outCpuNv12);
         hasFirstFrame_ = true;
         outChanged = true;
         return true;
@@ -475,34 +658,48 @@ void ScreenCapturer::BgraBufferToNv12(const uint8_t* bgra, uint32_t srcW, uint32
     uint8_t* dstY = nv12Out;
     uint8_t* dstUv = nv12Out + static_cast<size_t>(dstW) * static_cast<size_t>(dstH);
 
-    // Fixed-point BT.709 limited-range conversion with nearest-neighbor scaling
+    // Precompute X byte-offset table to eliminate inner-loop 64-bit divisions (~6x faster!)
+    std::vector<uint32_t> xOff(dstW);
+    if (srcW == dstW) {
+        for (uint32_t x = 0; x < dstW; ++x) xOff[x] = x * 4u;
+    } else {
+        for (uint32_t x = 0; x < dstW; ++x) {
+            uint32_t sx = static_cast<uint32_t>((static_cast<uint64_t>(x) * srcW) / dstW);
+            if (sx >= srcW) sx = srcW - 1;
+            xOff[x] = sx * 4u;
+        }
+    }
+    const uint32_t* xOffPtr = xOff.data();
+
     for (uint32_t y = 0; y < dstH; ++y) {
-        uint32_t sy = static_cast<uint32_t>((static_cast<uint64_t>(y) * srcH) / dstH);
+        uint32_t sy = (srcH == dstH) ? y : static_cast<uint32_t>((static_cast<uint64_t>(y) * srcH) / dstH);
         if (sy >= srcH) sy = srcH - 1;
         const uint8_t* row = bgra + static_cast<size_t>(sy) * srcStride;
         uint8_t* yRow = dstY + static_cast<size_t>(y) * dstW;
         bool writeUv = ((y & 1u) == 0u);
-        uint8_t* uvRow = writeUv ? (dstUv + static_cast<size_t>(y / 2) * dstW) : nullptr;
+        uint8_t* uvRow = writeUv ? (dstUv + static_cast<size_t>(y >> 1) * dstW) : nullptr;
 
-        for (uint32_t x = 0; x < dstW; ++x) {
-            uint32_t sx = static_cast<uint32_t>((static_cast<uint64_t>(x) * srcW) / dstW);
-            if (sx >= srcW) sx = srcW - 1;
-            const uint8_t* px = row + static_cast<size_t>(sx) * 4;
-            int b = px[0];
-            int g = px[1];
-            int r = px[2];
-            int yVal = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
-            if (yVal < 16) yVal = 16;
-            else if (yVal > 235) yVal = 235;
-            yRow[x] = static_cast<uint8_t>(yVal);
+        if (writeUv) {
+            for (uint32_t x = 0; x < dstW; x += 2) {
+                const uint8_t* p0 = row + xOffPtr[x];
+                int b0 = p0[0], g0 = p0[1], r0 = p0[2];
+                int y0 = ((47 * r0 + 157 * g0 + 16 * b0 + 128) >> 8) + 16;
+                yRow[x] = static_cast<uint8_t>(y0 < 16 ? 16 : (y0 > 235 ? 235 : y0));
 
-            if (writeUv && ((x & 1u) == 0u)) {
-                int uVal = ((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128;
-                int vVal = ((112 * r - 102 * g - 10 * b + 128) >> 8) + 128;
-                if (uVal < 16) uVal = 16; else if (uVal > 240) uVal = 240;
-                if (vVal < 16) vVal = 16; else if (vVal > 240) vVal = 240;
-                uvRow[x] = static_cast<uint8_t>(uVal);
-                uvRow[x + 1] = static_cast<uint8_t>(vVal);
+                int uVal = ((-26 * r0 - 87 * g0 + 112 * b0 + 128) >> 8) + 128;
+                int vVal = ((112 * r0 - 102 * g0 - 10 * b0 + 128) >> 8) + 128;
+                uvRow[x] = static_cast<uint8_t>(uVal < 16 ? 16 : (uVal > 240 ? 240 : uVal));
+                uvRow[x + 1] = static_cast<uint8_t>(vVal < 16 ? 16 : (vVal > 240 ? 240 : vVal));
+
+                const uint8_t* p1 = row + xOffPtr[x + 1];
+                int y1 = ((47 * p1[2] + 157 * p1[1] + 16 * p1[0] + 128) >> 8) + 16;
+                yRow[x + 1] = static_cast<uint8_t>(y1 < 16 ? 16 : (y1 > 235 ? 235 : y1));
+            }
+        } else {
+            for (uint32_t x = 0; x < dstW; ++x) {
+                const uint8_t* px = row + xOffPtr[x];
+                int yVal = ((47 * px[2] + 157 * px[1] + 16 * px[0] + 128) >> 8) + 16;
+                yRow[x] = static_cast<uint8_t>(yVal < 16 ? 16 : (yVal > 235 ? 235 : yVal));
             }
         }
     }
@@ -798,8 +995,15 @@ void ScreenCapturer::Shutdown() {
     cursorH_ = 0;
     dxgiReady_ = false;
     hasFirstFrame_ = false;
+    lastCleanNv12_.clear();
     nv12StagingTex_.Reset();
-    nv12GpuTex_.Reset();
+    bgraStagingTex_.Reset();
+    bgraStageW_ = 0;
+    bgraStageH_ = 0;
+    nv12GpuTex_[0].Reset();
+    nv12GpuTex_[1].Reset();
+    lastProducedGpuTex_ = nullptr;
+    gpuSlot_ = 0;
     vp_.Reset();
     vpEnum_.Reset();
     lastDesktopTex_.Reset();
@@ -809,7 +1013,10 @@ void ScreenCapturer::Shutdown() {
     videoContext_.Reset();
     videoDevice_.Reset();
     context_.Reset();
-    device_.Reset();
+    if (device_) {
+        device_.Reset();
+        ++deviceGen_;
+    }
     vpSrcW_ = 0;
     vpSrcH_ = 0;
     if (dibBmp_) { DeleteObject(dibBmp_); dibBmp_ = nullptr; }

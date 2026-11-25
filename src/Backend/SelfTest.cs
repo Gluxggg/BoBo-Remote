@@ -1409,10 +1409,24 @@ namespace DualRemote
                             null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
 
                         bool gotFrame = connRes.Item1 && frameEvt.Wait(6000);
-                        Check("V6 授权建流：TLS 1.2 实收 H.264 编码帧并同步触发防窥",
+                        Check("V6 授权建流：实收 H.264 编码帧并同步触发防窥",
                             connRes.Item1 && gotFrame && sessionStarted && sessionRequestedPrivacy,
                             "conn=" + connRes.Item2 + " frames=" + authClient.VideoFramesReceived + " priv=" + sessionRequestedPrivacy);
-                        Check("V6.2 光标协商：被控端 STREAM_STARTED 明确声明已合成远端光标",
+
+                        // Wait briefly for UDP+FEC fast-path punch to complete on localhost
+                        for (int uw = 0; uw < 30 && !authClient.IsUdpActive; uw++) System.Threading.Thread.Sleep(30);
+                        Check("V6.3 低延迟加密 UDP+FEC 通道：握手后自动无感升级 UDP 零队头阻塞传输",
+                            authClient.IsUdpActive && authClient.ActiveTransportLabel == "UDP+FEC",
+                            "udpActive=" + authClient.IsUdpActive + " transport=" + authClient.ActiveTransportLabel + " udpPort=" + server.ListeningUdpPort);
+
+                        Check("V6.3 零延迟本地光标模式：自由鼠标模式下关闭主机合成以启用零拷贝 GPU 采集与 0ms 本机指针",
+                            !authClient.HostCursorComposited,
+                            "hostCursorComposited=" + authClient.HostCursorComposited);
+
+                        // Toggle to Locked mode -> host enables cursor compositing dynamically
+                        authClient.SendSetCursorMode(true);
+                        for (int cw = 0; cw < 25 && !authClient.HostCursorComposited; cw++) System.Threading.Thread.Sleep(30);
+                        Check("V6.3 锁鼠模式光标热切换：SET_CURSOR_MODE(true) 动态恢复主机光标合成",
                             authClient.HostCursorComposited,
                             "hostCursorComposited=" + authClient.HostCursorComposited);
 
@@ -1538,6 +1552,9 @@ namespace DualRemote
                     Check("V6.2 四端协议 Golden Vectors：设备码/PIN证明/音视频帧/触控与移动导航/文件块字节级一致",
                         gvMatch,
                         "code=" + gvCode + " plat=" + probe1.Platform + " ctrl=" + probe1.HostControlMode + " touch=" + BytesToHex(gvTouchPayload));
+
+                    // 2h. V6.3 Encrypted UDP+FEC + Reliable Input Dedup + Adaptive Bitrate Controller unit verification
+                    RunV63LowLatencyUnitSelfTests();
                 }
             }
             catch (Exception ex)
@@ -1552,6 +1569,92 @@ namespace DualRemote
                 }
                 try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { }
             }
+        }
+
+        private static void RunV63LowLatencyUnitSelfTests()
+        {
+            // 1. AES-128-CTR + HMAC-SHA256 round-trip, out-of-order acceptance, tamper & replay rejection
+            byte[] key = BoBoUdpCrypto.GenerateRandomKey32();
+            uint sid = BoBoUdpCrypto.GenerateRandomSessionId();
+            using (var tx = new BoBoUdpCrypto(sid, key))
+            using (var rx = new BoBoUdpCrypto(sid, key))
+            {
+                byte[] msg1 = Encoding.UTF8.GetBytes("bobo-v63-udp-packet-1");
+                byte[] msg2 = Encoding.UTF8.GetBytes("bobo-v63-udp-packet-2-reordered");
+                byte[] p1 = tx.Seal(BoBoUdpPacketType.Ping, msg1, 0, msg1.Length);
+                byte[] p2 = tx.Seal(BoBoUdpPacketType.Ping, msg2, 0, msg2.Length);
+
+                BoBoUdpPacketType t2, t1, tReplay, tTamper;
+                uint s2, s1, sReplay, sTamper;
+                byte[] o2, o1, oReplay, oTamper;
+                // Deliver p2 BEFORE p1 (Wi-Fi out-of-order), then replay p1, then tamper p2
+                bool ok2 = rx.TryOpen(p2, p2.Length, out t2, out s2, out o2) && Encoding.UTF8.GetString(o2) == "bobo-v63-udp-packet-2-reordered";
+                bool ok1 = rx.TryOpen(p1, p1.Length, out t1, out s1, out o1) && Encoding.UTF8.GetString(o1) == "bobo-v63-udp-packet-1";
+                bool rejectReplay = !rx.TryOpen(p1, p1.Length, out tReplay, out sReplay, out oReplay);
+                p2[p2.Length - 1] ^= 0x5A;
+                bool rejectTamper = !rx.TryOpen(p2, p2.Length, out tTamper, out sTamper, out oTamper);
+                Check("V6.3 UDP 加密认证：AES-128-CTR + HMAC-SHA256 乱序通过、防重放与防篡改",
+                    ok2 && ok1 && rejectReplay && rejectTamper,
+                    "ok2=" + ok2 + " ok1=" + ok1 + " replayRej=" + rejectReplay + " tamperRej=" + rejectTamper);
+            }
+
+            // 2. XOR FEC 0-RTT loss recovery (drop 1 data shard per group, including shorter final shard!)
+            byte[] fakeIdr = new byte[5200]; // 5 shards (1140*4 + 640) -> 2 FEC groups on keyframe
+            for (int i = 0; i < fakeIdr.Length; i++) fakeIdr[i] = (byte)((i * 37 + 13) & 0xFF);
+            List<byte[]> shards = BoBoUdpFec.BuildVideoShards(1u, 100u, 1920, 1080, true, fakeIdr, 2.5);
+            var asm = new BoBoUdpVideoAssembler();
+            BoBoReassembledVideoFrame done = new BoBoReassembledVideoFrame();
+            bool completed = false;
+            bool needPli = false;
+            for (int i = 0; i < shards.Count; i++)
+            {
+                // Drop data shard 1 (middle of group 0) AND data shard 4 (shorter final shard in last group!)
+                bool isParity = (shards[i][12] & 2) != 0;
+                int sIdx = BoBoUdpCrypto.ReadUInt16LE(shards[i], 13);
+                if (!isParity && (sIdx == 1 || sIdx == 4)) continue;
+                BoBoReassembledVideoFrame candidate;
+                bool pli;
+                if (asm.ProcessShard(shards[i], out candidate, out pli))
+                {
+                    done = candidate;
+                    completed = true;
+                }
+                if (pli) needPli = true;
+            }
+            bool fecExact = completed && !needPli && done.H264Data != null && done.H264Data.Length == fakeIdr.Length && asm.FecRecoveredPackets >= 2;
+            if (fecExact)
+            {
+                for (int i = 0; i < fakeIdr.Length; i++)
+                {
+                    if (done.H264Data[i] != fakeIdr[i]) { fecExact = false; break; }
+                }
+            }
+            Check("V6.3 UDP XOR-FEC 零延迟纠错：每组丢 1 包（含末尾短分片）0ms 逐字节精确恢复",
+                fecExact,
+                "completed=" + completed + " recovered=" + asm.FecRecoveredPackets + " len=" + (done.H264Data != null ? done.H264Data.Length : 0));
+
+            // 3. Reliable UDP input piggyback & deduplication
+            var inTx = new BoBoUdpInputCodec();
+            var inRx = new BoBoUdpInputCodec();
+            byte[] clickPkt = inTx.BuildPacket(false, new BoBoInputPacket(), false, 0, 0,
+                new BoBoInputPacket { Kind = 3, Flags = 1, A = 1, B = 0 });
+            byte[] movePlusPiggy = inTx.BuildPacket(true, new BoBoInputPacket { Kind = 1, Flags = 0, A = 1234, B = 5678 }, false, 0, 0, null);
+            // Simulate clickPkt LOST on Wi-Fi, then movePlusPiggy arrives TWICE -> click must execute ONCE!
+            List<BoBoInputPacket> first = inRx.ParseAndDeduplicate(movePlusPiggy);
+            List<BoBoInputPacket> second = inRx.ParseAndDeduplicate(movePlusPiggy);
+            bool inOk = first.Count == 2 && first[0].Kind == 1 && first[1].Kind == 3 && second.Count == 1 && second[0].Kind == 1;
+            Check("V6.3 UDP 输入冗余去重：丢包时附带恢复点击按键，重复包严格幂等不双触发",
+                inOk,
+                "first=" + first.Count + " second=" + second.Count);
+
+            // 4. Adaptive Bitrate Controller (WAN conservative start + congestion backoff + FPS step-down)
+            var abr = new BoBoAdaptiveBitrateController(true, 14000, 60, 45.0);
+            int startBps = abr.CurrentBitrateKbps;
+            int bps1, fps1;
+            bool backedOff = abr.OnTelemetry(140.0, 5.5, out bps1, out fps1);
+            Check("V6.3 自研拥塞控制 ABR：跨网高 RTT 保守起流 + 丢包/膨胀毫秒级乘性降码率",
+                startBps <= 6000 && backedOff && bps1 < startBps,
+                "start=" + startBps + " -> afterCongestion=" + bps1 + "kbps/" + fps1 + "fps");
         }
 
         private static byte[] SerializeSingleFrame(BoBoPacketType type, uint flagsOrTs, byte[] payload)

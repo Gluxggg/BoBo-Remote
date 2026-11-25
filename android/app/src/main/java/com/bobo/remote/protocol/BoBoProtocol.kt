@@ -34,7 +34,7 @@ data class BoBoDiscoveredPeer(
     val deviceName: String,
     val host: String,
     val port: Int = BoBoProtocol.DEFAULT_TCP_PORT,
-    val version: String = "6.2.2",
+    val version: String = "6.2.3",
     val platform: String = BoBoProtocol.PLATFORM_WINDOWS,
     val hostControlMode: String = BoBoProtocol.CONTROL_MODE_FULL,
     val allowIncoming: Boolean = true,
@@ -81,7 +81,7 @@ data class BoBoFileChunk(
 object BoBoProtocol {
     const val PROTOCOL_MAGIC = "BOBO6"
     const val PROTOCOL_VERSION = "6.2"
-    const val APP_VERSION = "6.2.2"
+    const val APP_VERSION = "6.2.3"
     const val TLS_SNI_HOST = "BoBoRemote-V6-Node"
 
     const val PLATFORM_WINDOWS = "windows"

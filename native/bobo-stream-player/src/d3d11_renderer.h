@@ -8,6 +8,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -53,11 +54,17 @@ public:
 
 private:
     static RECT ComputeAspectFitRect(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH);
+    void UpdateCachedViewportRectLocked();
     bool EnsureVideoProcessorLocked(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH, std::string& outError);
     bool PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t subresourceIndex,
                                   uint32_t visibleWidth, uint32_t visibleHeight, std::string& outError);
 
     mutable std::mutex mutex_;
+    std::atomic<LONG> cachedVpLeft_{ 0 };
+    std::atomic<LONG> cachedVpTop_{ 0 };
+    std::atomic<LONG> cachedVpRight_{ 0 };
+    std::atomic<LONG> cachedVpBottom_{ 0 };
+    std::atomic<int> cachedScaleMode_{ 2 };
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice_;

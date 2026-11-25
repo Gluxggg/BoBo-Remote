@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace DualRemote
 {
@@ -141,6 +142,18 @@ namespace DualRemote
             int bitrateKbps);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostSetBitrate(IntPtr handle, int bitrateKbps);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostSetFps(IntPtr handle, int fps);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnHostSetCompositeCursor(IntPtr handle, int enable);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostGetCursorShape(int monitorIndex);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnHostRequestKeyframe(IntPtr handle);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -228,6 +241,9 @@ namespace DualRemote
         private delegate void FnClientSetHostCursorComposited(IntPtr handle, int composited);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnClientSetRemoteCursorShape(IntPtr handle, int shapeId);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientGetStats(IntPtr handle, ref BoBoNativeClientStats outStats);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -243,6 +259,10 @@ namespace DualRemote
         private static FnGetMonitorInfo fnGetMonitorInfo;
         private static FnHostCreate fnHostCreate;
         private static FnHostReconfigure fnHostReconfigure;
+        private static FnHostSetBitrate fnHostSetBitrate;
+        private static FnHostSetFps fnHostSetFps;
+        private static FnHostSetCompositeCursor fnHostSetCompositeCursor;
+        private static FnHostGetCursorShape fnHostGetCursorShape;
         private static FnHostRequestKeyframe fnHostRequestKeyframe;
         private static FnHostSetMuteHost fnHostSetMuteHost;
         private static FnHostDestroy fnHostDestroy;
@@ -264,6 +284,7 @@ namespace DualRemote
         private static FnClientSetViewOnly fnClientSetViewOnly;
         private static FnClientSetSysKeys fnClientSetSysKeys;
         private static FnClientSetHostCursorComposited fnClientSetHostCursorComposited;
+        private static FnClientSetRemoteCursorShape fnClientSetRemoteCursorShape;
         private static FnClientGetStats fnClientGetStats;
         private static FnClientDestroy fnClientDestroy;
 
@@ -310,6 +331,10 @@ namespace DualRemote
                     fnGetMonitorInfo = Bind<FnGetMonitorInfo>(mod, "BoBoCore_GetMonitorInfo");
                     fnHostCreate = Bind<FnHostCreate>(mod, "BoBoHost_Create");
                     fnHostReconfigure = Bind<FnHostReconfigure>(mod, "BoBoHost_Reconfigure");
+                    fnHostSetBitrate = TryBind<FnHostSetBitrate>(mod, "BoBoHost_SetBitrate");
+                    fnHostSetFps = TryBind<FnHostSetFps>(mod, "BoBoHost_SetFps");
+                    fnHostSetCompositeCursor = TryBind<FnHostSetCompositeCursor>(mod, "BoBoHost_SetCompositeCursor");
+                    fnHostGetCursorShape = TryBind<FnHostGetCursorShape>(mod, "BoBoHost_GetCursorShape");
                     fnHostRequestKeyframe = Bind<FnHostRequestKeyframe>(mod, "BoBoHost_RequestKeyframe");
                     fnHostSetMuteHost = Bind<FnHostSetMuteHost>(mod, "BoBoHost_SetMuteHost");
                     fnHostDestroy = Bind<FnHostDestroy>(mod, "BoBoHost_Destroy");
@@ -330,6 +355,7 @@ namespace DualRemote
                     fnClientSetViewOnly = Bind<FnClientSetViewOnly>(mod, "BoBoClient_SetViewOnly");
                     fnClientSetSysKeys = Bind<FnClientSetSysKeys>(mod, "BoBoClient_SetSysKeys");
                     fnClientSetHostCursorComposited = TryBind<FnClientSetHostCursorComposited>(mod, "BoBoClient_SetHostCursorComposited");
+                    fnClientSetRemoteCursorShape = TryBind<FnClientSetRemoteCursorShape>(mod, "BoBoClient_SetRemoteCursorShape");
                     fnClientGetStats = Bind<FnClientGetStats>(mod, "BoBoClient_GetStats");
                     fnClientDestroy = Bind<FnClientDestroy>(mod, "BoBoClient_Destroy");
 
@@ -541,6 +567,12 @@ namespace DualRemote
             return result;
         }
 
+        internal static int GetHostCursorShape(int monitorIndex)
+        {
+            if (!loaded || fnHostGetCursorShape == null) return 1;
+            try { return fnHostGetCursorShape(monitorIndex); } catch { return 1; }
+        }
+
         internal static void InjectInput(int monitorIndex, BoBoInputPacket pkt)
         {
             string err;
@@ -696,6 +728,33 @@ namespace DualRemote
                 }
             }
 
+            internal bool SetBitrate(int bitrateKbps)
+            {
+                lock (gate)
+                {
+                    if (handle == IntPtr.Zero || fnHostSetBitrate == null) return false;
+                    return fnHostSetBitrate(handle, bitrateKbps) != 0;
+                }
+            }
+
+            internal bool SetFps(int fps)
+            {
+                lock (gate)
+                {
+                    if (handle == IntPtr.Zero || fnHostSetFps == null) return false;
+                    return fnHostSetFps(handle, fps) != 0;
+                }
+            }
+
+            internal void SetCompositeCursor(bool enable)
+            {
+                lock (gate)
+                {
+                    if (handle != IntPtr.Zero && fnHostSetCompositeCursor != null)
+                        fnHostSetCompositeCursor(handle, enable ? 1 : 0);
+                }
+            }
+
             internal void RequestKeyframe()
             {
                 lock (gate)
@@ -732,7 +791,7 @@ namespace DualRemote
         internal sealed class BoBoClientNativeHandle : IDisposable
         {
             private IntPtr handle;
-            private readonly object gate = new object();
+            private readonly ReaderWriterLockSlim rwLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
             private readonly BoBoClientInputNativeCallback keepInp;
             private readonly BoBoClientHotkeyNativeCallback keepHk;
 
@@ -745,52 +804,66 @@ namespace DualRemote
 
             internal int PushVideo(byte[] h264Data, int length, bool isKeyframe, int srcWidth, int srcHeight)
             {
-                lock (gate)
+                if (h264Data == null || length <= 0) return 0;
+                rwLock.EnterReadLock();
+                try
                 {
-                    if (handle == IntPtr.Zero || h264Data == null || length <= 0) return 0;
+                    if (handle == IntPtr.Zero) return 0;
                     return fnClientPushVideo(handle, h264Data, length, isKeyframe ? 1 : 0, srcWidth, srcHeight);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void PushAudio(byte[] adpcmData, int length, int sampleRate, int channels, int sampleCount)
             {
-                lock (gate)
+                if (adpcmData == null || length <= 0) return;
+                rwLock.EnterReadLock();
+                try
                 {
-                    if (handle == IntPtr.Zero || adpcmData == null || length <= 0) return;
+                    if (handle == IntPtr.Zero) return;
                     fnClientPushAudio(handle, adpcmData, length, sampleRate, channels, sampleCount);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void Resize(int width, int height)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientResize(handle, width, height);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void Focus()
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientFocus(handle);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetMouseMode(bool freeMouse)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientSetMouseMode(handle, freeMouse ? 1 : 0);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetVolume(int volumePercent)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientSetVolume(handle, volumePercent);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetScaleMode(bool aspectFit)
@@ -801,37 +874,58 @@ namespace DualRemote
             /// <summary>0=实际大小1:1，1=等比居中缩放，2=超级屏全屏自适应无黑边</summary>
             internal void SetScaleMode(int scaleMode)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientSetScaleMode(handle, scaleMode);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetViewOnly(bool viewOnly)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientSetViewOnly(handle, viewOnly ? 1 : 0);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetSysKeys(bool sendSysKeys)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero) fnClientSetSysKeys(handle, sendSysKeys ? 1 : 0);
                 }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal void SetHostCursorComposited(bool composited)
             {
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle != IntPtr.Zero && fnClientSetHostCursorComposited != null)
                     {
                         fnClientSetHostCursorComposited(handle, composited ? 1 : 0);
                     }
                 }
+                finally { rwLock.ExitReadLock(); }
+            }
+
+            internal void SetRemoteCursorShape(int shapeId)
+            {
+                rwLock.EnterReadLock();
+                try
+                {
+                    if (handle != IntPtr.Zero && fnClientSetRemoteCursorShape != null)
+                    {
+                        fnClientSetRemoteCursorShape(handle, shapeId);
+                    }
+                }
+                finally { rwLock.ExitReadLock(); }
             }
 
             internal NativeStreamStats GetStats(double rttMs, int bitrateKbps)
@@ -843,7 +937,8 @@ namespace DualRemote
                     Codec = "H264",
                     Decoder = "D3D11VA"
                 };
-                lock (gate)
+                rwLock.EnterReadLock();
+                try
                 {
                     if (handle == IntPtr.Zero) return st;
                     var raw = new BoBoNativeClientStats();
@@ -856,21 +951,26 @@ namespace DualRemote
                     st.Height = raw.Height;
                     st.Decoder = raw.GetDecoderName();
                 }
+                finally { rwLock.ExitReadLock(); }
                 return st;
             }
 
             public void Dispose()
             {
                 IntPtr toDestroy;
-                lock (gate)
+                rwLock.EnterWriteLock();
+                try
                 {
                     toDestroy = handle;
                     handle = IntPtr.Zero;
                 }
+                finally { rwLock.ExitWriteLock(); }
+
                 if (toDestroy != IntPtr.Zero)
                 {
                     try { fnClientDestroy(toDestroy); } catch { }
                 }
+                try { rwLock.Dispose(); } catch { }
                 GC.KeepAlive(keepInp);
                 GC.KeepAlive(keepHk);
             }

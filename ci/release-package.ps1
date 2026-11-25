@@ -55,23 +55,24 @@ $sumsText = "# engines=$enginesStamp`n$hSetup  BoBoRemote-Setup-x64.exe`n$hPort 
 
 $notesPath = Join-Path $assetDir 'release-notes.md'
 $notesTemplate = @'
-## BoBo Remote __TAG__（四端互通稳定增强版：鼠标低延迟、光标合成与防窥输入加固）
+## BoBo Remote __TAG__（低延迟传输重构版：加密 UDP+FEC、零填充硬编、0 ms 本地光标与跨网自研 ABR）
 
 ### 本次核心修复与升级
-- **1. 鼠标高频移动合并与 TLS 小包单帧写入（显著降低操控延迟）**：
-  - 控制端 FIFO 发送队列自动合并高频绝对/相对鼠标移动事件，并在点击、滚轮、按键与控制指令前严格冲刷保序，消除快速移动或拖拽时的输入堆积；
-  - `<= 4096 B` 的输入事件、控制 JSON 与音频帧在协议层合并为单次 TLS 记录写入，大幅减少小包握手与系统调用开销；
-  - 锁定鼠标模式下兼容笔记本 Precision Touchpad / 笔设备的绝对 Raw Input，并提供 `RegisterRawInputDevices` 失败时的相对位移回退。
-- **2. 主机光标合成协商与无头/超级屏光标兜底**：
-  - 被控端在 `STREAM_STARTED` 中显式声明 `hostCursorComposited`，控制端仅在确认远端已合成主机光标且首帧画面到达后再隐藏本机指针，避免双光标或光标消失；
-  - 切换「仅查看模式」(`BoBoClient_SetViewOnly`) 时立即向渲染视口派发 `kMsgRefreshCursor` 刷新本机指针显隐状态，无需移动鼠标即可即时生效；
-  - 修复无头桌面、虚拟显示器或超级屏切换分辨率后系统清除 `CURSOR_SHOWING` 导致远端看不到鼠标的问题，自动保持主机指针可见并内置清晰箭头光标回退。
-- **3. 防窥低级输入钩子与 UIPI 兼容性加固**：
-  - 防窥模式下的 `WH_MOUSE_LL` / `WH_KEYBOARD_LL` 改用 `BoBoCore.dll` 自身模块句柄挂载，使用 32 位安全注入魔数并兼容第三方钩子剥离 `dwExtraInfo` 时的短窗口放行；
-  - 当被控端前台为管理员提权窗口受 UIPI 拦截导致 `SendInput` 失效时自动回退 `SetCursorPos`，同时缓存显示器枚举（250 ms TTL，超级屏切换时即时失效）；
-  - 修复首帧视频到达后异步状态回调偶发重新覆写「正在加载实时画面」浮层的竞态问题。
-- **4. 四端完整同步（Windows / Android / macOS / iOS）**：
-  - 统一升级至 `__TAG__`，保持 BoBo6.2 协议（TCP+TLS 1.2 :49810 / LAN UDP :49812）四端字节级互通与全链路自检通过。
+- **1. 根除硬编 CBR 99% 无效填充与静止空转（大幅降低同 Wi-Fi / 跨校园网带宽占用）**：
+  - 编码器切换为低延迟 `PeakConstrainedVBR`（`AVLowLatencyMode` / `0 B-Frame` / 单参考帧 / 100 ms VBV 缓冲），并硬剥离 H.264 `NAL12` 填充字节与 `NAL9` AUD，消除 AMD 等硬编在桌面静止时的 99% 垃圾流量；
+  - 用 `IMFAsyncCallback` 事件唤醒替代轮询，支持 `MF_SA_D3D11_AWARE` GPU 零拷贝 NV12 输入与无停顿动态调码率 `UpdateBitrateLive`；
+  - 采集循环启用 `timeBeginPeriod(1)` 与真正 VFR 静止跳帧（保留 1 s 保活），桌面无变化时不发冗余帧。
+- **2. 彻底根治“卡顿掉帧、鼠标移不动”根因**：
+  - 被控端引入**高优先级控制发送队列**，非阻塞回写 `PONG` 与光标事件，彻底解决视频拥塞时 `PONG` 阻塞读循环导致所有键鼠事件停读的问题；
+  - 主控端将 `GetVideoViewportRect()` 改为原子无锁读取，拆出独立解码渲染线程（积压自动追帧）并设置 DXGI `SetMaximumFrameLatency(1)`，`BoBoClientNativeHandle` 改为读写锁避免阻塞 UI 鼠标输入；
+  - 自由鼠标模式下默认启用 **GPU 零拷贝 + 0 ms 本地原生指针渲染**（自动同步 14 种系统光标形态，切锁鼠模式自动热切回主机光标合成）。
+- **3. 加密低延迟 UDP+FEC 通道与自研跨网 ABR 拥塞控制**：
+  - TLS 1.2 握手自动协商会话密钥后无感升级为 `AES-128-CTR + HMAC-SHA256` 加密 UDP 通道（端口 `49811`，`<=1140 B` 分片避免 Tailscale/校园网 IP 分片），配合分组 XOR-FEC 丢包 0 ms 当场恢复；
+  - 键鼠移动 4 ms 合并 + 尾帧补发，点击/按键原子附带最新坐标并冗余重传最近 3 条离散事件（64 序号幂等去重不双触发）；UDP 受限时自动无感回落优化后的 TCP+TLS 通道（收紧缓冲防 Bufferbloat、抑制 IDR 风暴、音频队列封顶）；
+  - 跨网高 RTT 自动保守起流并按实测丢包/排队延迟动态升降码率与帧率；超级屏增加智能像素预算上限；HUD 实时显示传输协议（`UDP+FEC` / `TCP+TLS`）、丢包率与实时码率。
+- **4. 多网卡定向广播与同 Wi-Fi 自动局域网直连**：
+  - 遍历所有非虚拟网卡定向广播并上报 `lanIps`，同 Wi-Fi 下即使从 Tailscale 地址发起连接也会自动探测并切换为高速局域网直连，绕开 DERP 中继；
+  - 四端统一同步至 `__TAG__`，保持 BoBo6.2 协议跨端字节级兼容与全链路自动化自检通过。
 
 ### 四端下载说明
 - **Windows x64**：

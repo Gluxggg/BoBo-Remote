@@ -1,6 +1,7 @@
 #include "mf_decoder.h"
 
 #include <codecapi.h>
+#include <strmif.h>
 #include <mferror.h>
 #include <cstdio>
 #include <cstring>
@@ -233,6 +234,15 @@ bool MfHardwareDecoder::OpenCodec(VideoCodec codec, uint32_t width, uint32_t hei
     // Bind D3D11VA DXGI Device Manager (ignore failure on pure software fallback)
     decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(dxgiManager_.Get()));
 
+    // Also enforce low-latency decoding via ICodecAPI (in addition to IMFAttributes)
+    Microsoft::WRL::ComPtr<ICodecAPI> decCodecApi;
+    if (SUCCEEDED(decoder_.As(&decCodecApi)) && decCodecApi) {
+        VARIANT v = {};
+        v.vt = VT_BOOL;
+        v.boolVal = VARIANT_TRUE;
+        decCodecApi->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+    }
+
     Microsoft::WRL::ComPtr<IMFMediaType> inputMt;
     hr = MFCreateMediaType(inputMt.GetAddressOf());
     if (FAILED(hr)) { outError = FormatMfHr("MFCreateMediaType failed", hr); return false; }
@@ -259,21 +269,26 @@ bool MfHardwareDecoder::SubmitAccessUnit(const uint8_t* data, size_t size, int64
         outError = "Invalid decoder input";
         return false;
     }
-    Microsoft::WRL::ComPtr<IMFMediaBuffer> buf;
-    HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(size), buf.GetAddressOf());
-    if (FAILED(hr)) { outError = FormatMfHr("MFCreateMemoryBuffer failed", hr); return false; }
+    DWORD reqSize = static_cast<DWORD>(size);
+    if (!inputBuf_ || inputBufCapacity_ < reqSize) {
+        DWORD allocCap = reqSize < 262144u ? 262144u : reqSize;
+        inputBuf_.Reset();
+        HRESULT allocHr = MFCreateMemoryBuffer(allocCap, inputBuf_.GetAddressOf());
+        if (FAILED(allocHr)) { outError = FormatMfHr("MFCreateMemoryBuffer failed", allocHr); return false; }
+        inputBufCapacity_ = allocCap;
+    }
 
     BYTE* dst = nullptr;
-    hr = buf->Lock(&dst, nullptr, nullptr);
+    HRESULT hr = inputBuf_->Lock(&dst, nullptr, nullptr);
     if (FAILED(hr)) { outError = FormatMfHr("Buffer Lock failed", hr); return false; }
     std::memcpy(dst, data, size);
-    buf->Unlock();
-    buf->SetCurrentLength(static_cast<DWORD>(size));
+    inputBuf_->Unlock();
+    inputBuf_->SetCurrentLength(reqSize);
 
     Microsoft::WRL::ComPtr<IMFSample> sample;
     hr = MFCreateSample(sample.GetAddressOf());
     if (FAILED(hr)) { outError = FormatMfHr("MFCreateSample failed", hr); return false; }
-    sample->AddBuffer(buf.Get());
+    sample->AddBuffer(inputBuf_.Get());
     sample->SetSampleTime(pts100ns);
 
     hr = decoder_->ProcessInput(0, sample.Get(), 0);

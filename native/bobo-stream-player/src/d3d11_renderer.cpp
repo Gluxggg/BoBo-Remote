@@ -52,48 +52,63 @@ RECT D3D11Renderer::ComputeAspectFitRect(uint32_t srcW, uint32_t srcH, uint32_t 
     return r;
 }
 
+void D3D11Renderer::UpdateCachedViewportRectLocked() {
+    RECT r = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
+    if (scaleMode_ == 2) {
+        r = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
+    } else if (scaleMode_ == 1) {
+        r = ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
+    } else {
+        LONG left = (static_cast<LONG>(swapW_) - static_cast<LONG>(videoW_)) / 2;
+        LONG top = (static_cast<LONG>(swapH_) - static_cast<LONG>(videoH_)) / 2;
+        r = { left, top, left + static_cast<LONG>(videoW_), top + static_cast<LONG>(videoH_) };
+    }
+    cachedVpLeft_.store(r.left, std::memory_order_relaxed);
+    cachedVpTop_.store(r.top, std::memory_order_relaxed);
+    cachedVpRight_.store(r.right, std::memory_order_relaxed);
+    cachedVpBottom_.store(r.bottom, std::memory_order_relaxed);
+    cachedScaleMode_.store(scaleMode_, std::memory_order_release);
+}
+
 void D3D11Renderer::SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (videoW > 0 && videoH > 0) {
         videoW_ = videoW;
         videoH_ = videoH;
+        UpdateCachedViewportRectLocked();
     }
 }
 
 void D3D11Renderer::SetAspectFit(bool fit) {
     std::lock_guard<std::mutex> lock(mutex_);
     scaleMode_ = fit ? 1 : 0;
+    UpdateCachedViewportRectLocked();
 }
 
 bool D3D11Renderer::IsAspectFit() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return scaleMode_ != 0;
+    return cachedScaleMode_.load(std::memory_order_acquire) != 0;
 }
 
 void D3D11Renderer::SetScaleMode(int scaleMode) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (scaleMode < 0 || scaleMode > 2) scaleMode = 1;
     scaleMode_ = scaleMode;
+    UpdateCachedViewportRectLocked();
 }
 
 int D3D11Renderer::ScaleMode() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return scaleMode_;
+    return cachedScaleMode_.load(std::memory_order_acquire);
 }
 
 RECT D3D11Renderer::GetVideoViewportRect() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (scaleMode_ == 2) {
-        // SuperFill: edge-to-edge full screen with zero black bars
-        RECT full = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
-        return full;
-    }
-    if (scaleMode_ == 1) {
-        return ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
-    }
-    LONG left = (static_cast<LONG>(swapW_) - static_cast<LONG>(videoW_)) / 2;
-    LONG top = (static_cast<LONG>(swapH_) - static_cast<LONG>(videoH_)) / 2;
-    RECT r = { left, top, left + static_cast<LONG>(videoW_), top + static_cast<LONG>(videoH_) };
+    // Lock-free atomic read: UI thread WM_MOUSEMOVE NEVER contends with video Present()!
+    (void)cachedScaleMode_.load(std::memory_order_acquire);
+    RECT r = {
+        cachedVpLeft_.load(std::memory_order_relaxed),
+        cachedVpTop_.load(std::memory_order_relaxed),
+        cachedVpRight_.load(std::memory_order_relaxed),
+        cachedVpBottom_.load(std::memory_order_relaxed)
+    };
     return r;
 }
 
@@ -189,6 +204,8 @@ bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t heigh
     Microsoft::WRL::ComPtr<IDXGIDevice1> dxgiDev;
     HRESULT hr = device_.As(&dxgiDev);
     if (FAILED(hr)) { outError = FormatHr("QI IDXGIDevice1 failed", hr); return false; }
+    // Reduce D3D11 GPU command queue from default 3 frames down to 1 frame (saves ~33-50ms display lag)
+    dxgiDev->SetMaximumFrameLatency(1);
 
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     hr = dxgiDev->GetAdapter(adapter.GetAddressOf());
@@ -223,6 +240,7 @@ bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t heigh
     factory->MakeWindowAssociation(targetHwnd, DXGI_MWA_NO_ALT_ENTER);
     swapW_ = scDesc.Width;
     swapH_ = scDesc.Height;
+    UpdateCachedViewportRectLocked();
     return true;
 }
 
@@ -239,6 +257,7 @@ bool D3D11Renderer::ResizeSwapChain(uint32_t width, uint32_t height, std::string
     }
     swapW_ = width;
     swapH_ = height;
+    UpdateCachedViewportRectLocked();
     return true;
 }
 
@@ -332,8 +351,11 @@ bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t 
     nv12Tex->GetDesc(&srcDesc);
     uint32_t visW = (visibleWidth > 0 && visibleWidth <= srcDesc.Width) ? visibleWidth : srcDesc.Width;
     uint32_t visH = (visibleHeight > 0 && visibleHeight <= srcDesc.Height) ? visibleHeight : srcDesc.Height;
-    videoW_ = visW;
-    videoH_ = visH;
+    if (videoW_ != visW || videoH_ != visH) {
+        videoW_ = visW;
+        videoH_ = visH;
+        UpdateCachedViewportRectLocked();
+    }
 
     if (!EnsureVideoProcessorLocked(srcDesc.Width, srcDesc.Height, swapW_, swapH_, outError)) {
         return false;

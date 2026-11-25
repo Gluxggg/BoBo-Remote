@@ -56,6 +56,9 @@ public:
     void Shutdown();
 
 private:
+    bool InitializeLocked(int sampleRate, int channels);
+    void ShutdownLocked();
+
     std::mutex mutex_;
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> deviceEnum_;
     Microsoft::WRL::ComPtr<IMMDevice> device_;
@@ -65,6 +68,7 @@ private:
     uint32_t bufferFrameCount_ = 0;
     int activeRate_ = 0;
     int outputChannels_ = 2;
+    int outputBitsPerSample_ = 16;
     bool outputFloat_ = false;
     bool active_ = false;
     std::atomic<float> volumeGain_{ 1.0f };

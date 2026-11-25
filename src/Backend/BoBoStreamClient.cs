@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -31,6 +32,9 @@ namespace DualRemote
         internal int ScreenOrientation = 0;
         internal string Nonce = "";
         internal List<BoBoMonitorDescriptor> Monitors = new List<BoBoMonitorDescriptor>();
+        internal List<string> LanIps = new List<string>();
+        internal bool UdpSupported;
+        internal double HandshakeRttMs;
         internal string Error = "";
     }
 
@@ -42,7 +46,9 @@ namespace DualRemote
         internal int Width = 1920;
         internal int Height = 1080;
         internal int Fps = 60;
-        internal int BitrateKbps = 14000;
+        internal int BitrateKbps = 10000;
+        internal bool AutoBitrate = true;
+        internal bool FreeMouse = true;
         internal bool MuteHostAudio = false;
         internal bool RequestPrivacy = false;
         internal bool SuperDisplay = true;
@@ -80,8 +86,27 @@ namespace DualRemote
         private BoBoCoreInterop.BoBoClientNativeHandle nativeClient;
         private volatile bool connected;
         private double latestRttMs;
+        private double latestPacketLossPct;
+        private int activeBitrateKbps;
         private long videoFramesReceived;
         private List<BoBoMonitorDescriptor> remoteMonitors = new List<BoBoMonitorDescriptor>();
+
+        // Optional V6.3 Encrypted UDP+FEC low-latency transport channel (auto-upgrades from TCP+TLS when reachable)
+        private readonly object udpGate = new object();
+        private UdpClient udpClient;
+        private IPEndPoint udpRemoteEp;
+        private BoBoUdpCrypto udpCrypto;
+        private BoBoUdpVideoAssembler udpAssembler;
+        private BoBoUdpInputCodec udpInputCodec;
+        private volatile bool udpActive;
+        private long lastUdpRxTicks;
+        private long lastUdpMoveSentTicks;
+        private bool hasDeferredUdpAbsMove;
+        private BoBoInputPacket deferredUdpAbsMove;
+        private int deferredUdpRelDx;
+        private int deferredUdpRelDy;
+        private int udpMoveFlushScheduled;
+        private int lastCursorSeq;
 
         internal event Action<List<BoBoMonitorDescriptor>, int, int, int> StreamStarted;
         internal event Action<bool, bool, int, int> SuperDisplayStateChanged;
@@ -89,6 +114,7 @@ namespace DualRemote
         internal event Action<string> Disconnected;
         internal event Action<bool> RemotePrivacyStateChanged;
         internal event Action<double> RttUpdated;
+        internal event Action<int, int> LiveBitrateUpdated;
         internal event Action<byte[], bool, int, int> RawVideoFrameReceived;
 
         internal bool SuperDisplayActive { get; private set; }
@@ -103,7 +129,11 @@ namespace DualRemote
         }
 
         internal bool IsConnected { get { return connected; } }
+        internal bool IsUdpActive { get { return udpActive; } }
+        internal string ActiveTransportLabel { get { return udpActive ? "UDP+FEC" : "TCP+TLS"; } }
         internal double LatestRttMs { get { return latestRttMs; } }
+        internal double LatestPacketLossPct { get { return latestPacketLossPct; } }
+        internal int ActiveBitrateKbps { get { return activeBitrateKbps; } }
         internal long VideoFramesReceived { get { return Interlocked.Read(ref videoFramesReceived); } }
         internal List<BoBoMonitorDescriptor> RemoteMonitors { get { return remoteMonitors; } }
 
@@ -138,8 +168,10 @@ namespace DualRemote
                             }))
                         {
                             await sslStream.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
+                            long helloStart = Stopwatch.GetTimestamp();
                             await SendHelloAsync(sslStream, id, timeoutCts.Token).ConfigureAwait(false);
                             BoBoFrame? reply = await BoBoProtocol.ReadOneFrameAsync(sslStream, timeoutCts.Token).ConfigureAwait(false);
+                            res.HandshakeRttMs = (Stopwatch.GetTimestamp() - helloStart) * 1000.0 / Stopwatch.Frequency;
                             if (!reply.HasValue || reply.Value.Type != BoBoPacketType.ControlJson)
                             {
                                 res.Error = "目标主机未返回有效的 BoBo V6 握手响应。";
@@ -167,6 +199,8 @@ namespace DualRemote
                             res.ScreenOrientation = BoBoProtocol.GetInt(ack, "screenOrientation", 0);
                             res.Nonce = BoBoProtocol.GetStr(ack, "nonce", "");
                             res.Monitors = BoBoProtocol.ParseMonitors(ack, "monitors");
+                            res.LanIps = BoBoProtocol.ParseStringList(ack, "lanIps");
+                            res.UdpSupported = BoBoProtocol.GetBool(ack, "udpSupported", false);
                             return res;
                         }
                     }
@@ -187,6 +221,63 @@ namespace DualRemote
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// 同 Wi-Fi / 同局域网自动直连升级：当用户通过 Tailscale 100.x IP 探测到目标主机且主机返回了 lanIps 时，
+        /// 并行极速（默认 350ms）探测主机局域网 IP 并校验完全一致的 NodeId + 证书指纹，命中则直接走 1ms 局域网直连，
+        /// 彻底杜绝同 Wi-Fi 绕行 Tailscale DERP 中继导致的高延迟与卡顿。
+        /// </summary>
+        internal static async Task<string> TryResolveDirectLanHostAsync(
+            BoBoHostProbeResult initialProbe,
+            BoBoIdentityStore identityStore,
+            int timeoutMs,
+            CancellationToken ct)
+        {
+            if (initialProbe == null || !initialProbe.IsBoBoHost || initialProbe.LanIps == null || initialProbe.LanIps.Count == 0)
+                return null;
+            if (!BoBoProtocol.IsTailscaleCgnatIp(initialProbe.Host))
+                return null;
+            if (string.IsNullOrEmpty(initialProbe.HostNodeId) || string.IsNullOrEmpty(initialProbe.HostThumbprint))
+                return null;
+
+            List<string> localLanIps = BoBoProtocol.GetLocalLanIpv4Addresses();
+            var candidates = new List<string>();
+            for (int i = 0; i < initialProbe.LanIps.Count && candidates.Count < 3; i++)
+            {
+                string cand = initialProbe.LanIps[i];
+                if (string.IsNullOrWhiteSpace(cand) || string.Equals(cand, initialProbe.Host, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (localLanIps.Contains(cand)) continue;
+                candidates.Add(cand);
+            }
+            if (candidates.Count == 0) return null;
+
+            int probeTimeout = timeoutMs >= 200 ? timeoutMs : 350;
+            var tasks = new List<Task<BoBoHostProbeResult>>(candidates.Count);
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                string ip = candidates[i];
+                tasks.Add(ProbeHostAsync(ip, initialProbe.Port, identityStore, probeTimeout, ct));
+            }
+
+            while (tasks.Count > 0)
+            {
+                Task<BoBoHostProbeResult> finished = await Task.WhenAny(tasks).ConfigureAwait(false);
+                tasks.Remove(finished);
+                try
+                {
+                    BoBoHostProbeResult r = await finished.ConfigureAwait(false);
+                    if (r != null && r.Reachable && r.IsBoBoHost && r.AllowIncoming &&
+                        string.Equals(r.HostNodeId, initialProbe.HostNodeId, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(r.HostThumbprint, initialProbe.HostThumbprint, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return r.Host;
+                    }
+                }
+                catch { }
+            }
+            return null;
         }
 
         internal static async Task<Tuple<bool, string, string>> PairWithPinAsync(
@@ -399,8 +490,10 @@ namespace DualRemote
             {
                 tcp = new TcpClient();
                 tcp.NoDelay = true;
-                tcp.ReceiveBufferSize = 1024 * 1024;
-                tcp.SendBufferSize = 512 * 1024;
+                // Right-sized TCP buffers prevent hidden kernel queue bloat on TCP fallback
+                tcp.ReceiveBufferSize = 262144;
+                tcp.SendBufferSize = 65536;
+                BoBoUdpSocketUtil.TrySetTcpDscp(tcp.Client);
                 ConfigureTcpKeepAlive(tcp);
                 await ConnectWithCancelAsync(tcp, options.Host, targetPort, ct).ConfigureAwait(false);
 
@@ -412,9 +505,12 @@ namespace DualRemote
                         return cert != null;
                     });
                 await ssl.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
+                long helloStartTicks = Stopwatch.GetTimestamp();
                 await SendHelloAsync(ssl, identity, ct).ConfigureAwait(false);
 
                 BoBoFrame? ackFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, ct).ConfigureAwait(false);
+                double handshakeRttMs = (Stopwatch.GetTimestamp() - helloStartTicks) * 1000.0 / Stopwatch.Frequency;
+                if (handshakeRttMs > 0 && handshakeRttMs < 5000) latestRttMs = handshakeRttMs;
                 if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson)
                 {
                     Disconnect();
@@ -458,6 +554,7 @@ namespace DualRemote
                     });
                 }
 
+                activeBitrateKbps = options.BitrateKbps;
                 var startReq = new Dictionary<string, object>();
                 startReq["type"] = "START_STREAM";
                 startReq["monitorIndex"] = options.MonitorIndex;
@@ -465,11 +562,16 @@ namespace DualRemote
                 startReq["height"] = options.Height;
                 startReq["fps"] = options.Fps;
                 startReq["bitrateKbps"] = options.BitrateKbps;
+                startReq["autoBitrate"] = options.AutoBitrate;
+                startReq["freeMouse"] = options.FreeMouse;
                 startReq["muteHost"] = options.MuteHostAudio;
                 startReq["requestPrivacy"] = options.RequestPrivacy;
                 startReq["superDisplay"] = options.SuperDisplay;
                 startReq["clientWidth"] = options.ClientWidth;
                 startReq["clientHeight"] = options.ClientHeight;
+                startReq["udpTransport"] = true;
+                startReq["nativeLocalCursor"] = true;
+                startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
                 await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
                 connected = true;
@@ -502,6 +604,7 @@ namespace DualRemote
 
                     if (frame.Type == BoBoPacketType.VideoH264)
                     {
+                        if (udpActive) continue; // Ignore straggling pre-switchover TCP video once UDP+FEC is active
                         int w, h;
                         bool isKey;
                         byte[] h264;
@@ -521,12 +624,23 @@ namespace DualRemote
 
                     if (frame.Type == BoBoPacketType.AudioAdpcm)
                     {
+                        if (udpActive) continue;
                         int sr, ch, samples;
                         byte[] adpcm;
                         if (BoBoProtocol.ParseAudioPayload(frame.Payload, out sr, out ch, out samples, out adpcm))
                         {
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
                             if (nc != null) nc.PushAudio(adpcm, adpcm.Length, sr, ch, samples);
+                        }
+                        continue;
+                    }
+
+                    if (frame.Type == BoBoPacketType.CursorShape)
+                    {
+                        if (frame.Payload != null && frame.Payload.Length >= 1)
+                        {
+                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                            if (nc != null) nc.SetRemoteCursorShape(frame.Payload[0]);
                         }
                         continue;
                     }
@@ -543,6 +657,8 @@ namespace DualRemote
                             int w = BoBoProtocol.GetInt(msg, "width", 1920);
                             int h = BoBoProtocol.GetInt(msg, "height", 1080);
                             int fps = BoBoProtocol.GetInt(msg, "fps", 60);
+                            int actualBps = BoBoProtocol.GetInt(msg, "bitrateKbps", activeBitrateKbps);
+                            if (actualBps > 0) activeBitrateKbps = actualBps;
                             bool sdActive = BoBoProtocol.GetBool(msg, "superDisplayActive", false);
                             bool sdNative = BoBoProtocol.GetBool(msg, "superDisplayNativeMatch", false);
                             string startedPlat = BoBoProtocol.GetStr(msg, "platform", "");
@@ -554,10 +670,34 @@ namespace DualRemote
                             HostCursorComposited = BoBoProtocol.GetBool(msg, "hostCursorComposited", false);
                             BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
                             if (curNc != null) curNc.SetHostCursorComposited(HostCursorComposited);
+
+                            // Auto-activate encrypted UDP+FEC media+input channel if host provided UDP session params
+                            int udpPort = BoBoProtocol.GetInt(msg, "udpPort", 0);
+                            long udpSidLong = BoBoProtocol.GetLong(msg, "udpSessionId", 0);
+                            string udpKeyB64 = BoBoProtocol.GetStr(msg, "udpKey", "");
+                            if (udpPort > 0 && udpSidLong != 0 && !string.IsNullOrEmpty(udpKeyB64))
+                            {
+                                TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, ct);
+                            }
+
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
                             if (ev != null) { try { ev(remoteMonitors, w, h, fps); } catch { } }
                             Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
                             if (sdEv != null) { try { sdEv(sdActive, sdNative, w, h); } catch { } }
+                        }
+                        else if (t == "CURSOR_MODE_STATE")
+                        {
+                            HostCursorComposited = BoBoProtocol.GetBool(msg, "hostCursorComposited", true);
+                            BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
+                            if (curNc != null) curNc.SetHostCursorComposited(HostCursorComposited);
+                        }
+                        else if (t == "BITRATE_UPDATED")
+                        {
+                            int newBps = BoBoProtocol.GetInt(msg, "bitrateKbps", activeBitrateKbps);
+                            int newFps = BoBoProtocol.GetInt(msg, "fps", 60);
+                            if (newBps > 0) activeBitrateKbps = newBps;
+                            Action<int, int> brEv = LiveBitrateUpdated;
+                            if (brEv != null) { try { brEv(newBps, newFps); } catch { } }
                         }
                         else if (t == "SUPER_DISPLAY_STATE")
                         {
@@ -624,11 +764,23 @@ namespace DualRemote
             {
                 try
                 {
-                    var ping = new Dictionary<string, object>();
-                    ping["type"] = "PING";
-                    ping["ts"] = Stopwatch.GetTimestamp();
-                    await SendJsonInternalAsync(ping, ct).ConfigureAwait(false);
-                    await Task.Delay(1500, ct).ConfigureAwait(false);
+                    if (!udpActive)
+                    {
+                        var ping = new Dictionary<string, object>();
+                        ping["type"] = "PING";
+                        ping["ts"] = Stopwatch.GetTimestamp();
+                        await SendJsonInternalAsync(ping, ct).ConfigureAwait(false);
+
+                        if (latestRttMs > 0.1)
+                        {
+                            var tel = new Dictionary<string, object>();
+                            tel["type"] = "TELEMETRY";
+                            tel["rttMs"] = Math.Round(latestRttMs, 1);
+                            tel["lossPct"] = 0.0;
+                            SendJsonFireAndForget(tel);
+                        }
+                    }
+                    await Task.Delay(750, ct).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -637,10 +789,390 @@ namespace DualRemote
             }
         }
 
+        private void TryStartUdpChannel(int udpPort, uint udpSessionId, string udpKeyB64, CancellationToken ct)
+        {
+            try
+            {
+                byte[] key = Convert.FromBase64String(udpKeyB64);
+                if (key == null || key.Length < 32) return;
+                TcpClient curTcp = tcp;
+                if (curTcp == null || curTcp.Client == null) return;
+                var tcpEp = curTcp.Client.RemoteEndPoint as IPEndPoint;
+                if (tcpEp == null) return;
+
+                IPAddress targetIp = tcpEp.Address;
+                if (targetIp.IsIPv4MappedToIPv6) targetIp = targetIp.MapToIPv4();
+
+                var uc = new UdpClient(targetIp.AddressFamily);
+                BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 131072, 1024 * 1024);
+                var ep = new IPEndPoint(targetIp, udpPort);
+                var crypto = new BoBoUdpCrypto(udpSessionId, key);
+                var assembler = new BoBoUdpVideoAssembler();
+                var inCodec = new BoBoUdpInputCodec();
+
+                lock (udpGate)
+                {
+                    DisposeUdpLocked();
+                    udpClient = uc;
+                    udpRemoteEp = ep;
+                    udpCrypto = crypto;
+                    udpAssembler = assembler;
+                    udpInputCodec = inCodec;
+                    udpActive = false;
+                    lastUdpRxTicks = 0;
+                    lastCursorSeq = 0;
+                }
+
+                Task _rx = Task.Run(delegate { return UdpReceiveLoopAsync(uc, crypto, assembler, ct); });
+                Task _hb = Task.Run(delegate { return UdpHeartbeatAndFeedbackLoopAsync(uc, crypto, assembler, ep, ct); });
+            }
+            catch { }
+        }
+
+        private async Task UdpReceiveLoopAsync(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpVideoAssembler assembler, CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested && connected)
+            {
+                try
+                {
+                    UdpReceiveResult res = await uc.ReceiveAsync().ConfigureAwait(false);
+                    byte[] buf = res.Buffer;
+                    if (buf == null || buf.Length < BoBoUdpCrypto.OverheadBytes) continue;
+
+                    BoBoUdpPacketType ptype;
+                    uint seq;
+                    byte[] plain;
+                    if (!crypto.TryOpen(buf, buf.Length, out ptype, out seq, out plain)) continue;
+
+                    Interlocked.Exchange(ref lastUdpRxTicks, Stopwatch.GetTimestamp());
+                    assembler.RecordReceivedUdpSeq(seq);
+
+                    if (ptype == BoBoUdpPacketType.HelloAck)
+                    {
+                        udpActive = true;
+                        continue;
+                    }
+
+                    if (ptype == BoBoUdpPacketType.VideoShard)
+                    {
+                        udpActive = true;
+                        BoBoReassembledVideoFrame doneFrame;
+                        bool needPli;
+                        if (assembler.ProcessShard(plain, out doneFrame, out needPli))
+                        {
+                            Interlocked.Increment(ref videoFramesReceived);
+                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                            if (nc != null)
+                            {
+                                nc.PushVideo(doneFrame.H264Data, doneFrame.H264Data.Length, doneFrame.IsKeyframe, doneFrame.Width, doneFrame.Height);
+                            }
+                            Action<byte[], bool, int, int> rawEv = RawVideoFrameReceived;
+                            if (rawEv != null) { try { rawEv(doneFrame.H264Data, doneFrame.IsKeyframe, doneFrame.Width, doneFrame.Height); } catch { } }
+                        }
+                        if (needPli)
+                        {
+                            SendUdpFeedback(uc, crypto, assembler, true);
+                        }
+                        continue;
+                    }
+
+                    if (ptype == BoBoUdpPacketType.Audio)
+                    {
+                        int sr, ch, samples;
+                        byte[] adpcm;
+                        if (BoBoProtocol.ParseAudioPayload(plain, out sr, out ch, out samples, out adpcm))
+                        {
+                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                            if (nc != null) nc.PushAudio(adpcm, adpcm.Length, sr, ch, samples);
+                        }
+                        continue;
+                    }
+
+                    if (ptype == BoBoUdpPacketType.Pong && plain != null && plain.Length >= 8)
+                    {
+                        udpActive = true;
+                        long sentTicks = BoBoUdpCrypto.ReadInt64LE(plain, 0);
+                        if (sentTicks > 0)
+                        {
+                            double rtt = (Stopwatch.GetTimestamp() - sentTicks) * 1000.0 / Stopwatch.Frequency;
+                            if (rtt >= 0 && rtt < 10000)
+                            {
+                                latestRttMs = rtt;
+                                Action<double> rttEv = RttUpdated;
+                                if (rttEv != null) { try { rttEv(rtt); } catch { } }
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (ptype == BoBoUdpPacketType.CursorShape && plain != null && plain.Length >= 5)
+                    {
+                        int cSeq = unchecked((int)BoBoUdpCrypto.ReadUInt32LE(plain, 0));
+                        int prev = Volatile.Read(ref lastCursorSeq);
+                        if (unchecked(cSeq - prev) > 0)
+                        {
+                            Volatile.Write(ref lastCursorSeq, cSeq);
+                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                            if (nc != null) nc.SetRemoteCursorShape(plain[4]);
+                        }
+                        continue;
+                    }
+                }
+                catch
+                {
+                    if (ct.IsCancellationRequested || !connected) break;
+                }
+            }
+        }
+
+        private async Task UdpHeartbeatAndFeedbackLoopAsync(
+            UdpClient uc,
+            BoBoUdpCrypto crypto,
+            BoBoUdpVideoAssembler assembler,
+            IPEndPoint ep,
+            CancellationToken ct)
+        {
+            byte[] helloPayload = new byte[] { 0x42, 0x4F, 0x36, 0x33 };
+            // 1. Rapid initial NAT punch (up to 750ms) so UDP activates in <5ms on LAN and <60ms on campus WAN
+            for (int attempt = 0; attempt < 15 && !ct.IsCancellationRequested && connected && !udpActive; attempt++)
+            {
+                SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, helloPayload, ep);
+                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch { return; }
+            }
+
+            // 2. Steady-state 350ms RTT ping + loss/ABR feedback + automatic UDP-silence fallback to TCP
+            int tick = 0;
+            while (!ct.IsCancellationRequested && connected)
+            {
+                try
+                {
+                    if (udpActive)
+                    {
+                        long rxTicks = Interlocked.Read(ref lastUdpRxTicks);
+                        double silenceMs = rxTicks == 0 ? 0.0 : ((Stopwatch.GetTimestamp() - rxTicks) * 1000.0 / Stopwatch.Frequency);
+                        if (silenceMs > 3500.0)
+                        {
+                            // UDP path dropped (e.g. campus NAT rebind/block): gracefully fall back to TCP+TLS without disconnecting!
+                            udpActive = false;
+                            latestPacketLossPct = 0.0;
+                            var fb = new Dictionary<string, object>();
+                            fb["type"] = "TRANSPORT_FALLBACK";
+                            SendJsonFireAndForget(fb);
+                        }
+                        else
+                        {
+                            byte[] pingBuf = new byte[8];
+                            BoBoUdpCrypto.WriteInt64LE(pingBuf, 0, Stopwatch.GetTimestamp());
+                            SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, pingBuf, ep);
+
+                            latestPacketLossPct = assembler.LatestLossPct;
+                            SendUdpFeedback(uc, crypto, assembler, false);
+                        }
+                    }
+                    else if ((tick % 12) == 0)
+                    {
+                        // Gentle periodic retry every ~4.5s in case UDP becomes reachable after route switch
+                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, helloPayload, ep);
+                    }
+                    tick++;
+                    await Task.Delay(380, ct).ConfigureAwait(false);
+                }
+                catch { break; }
+            }
+        }
+
+        private void SendUdpFeedback(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpVideoAssembler assembler, bool requestPli)
+        {
+            IPEndPoint ep = udpRemoteEp;
+            if (uc == null || crypto == null || ep == null) return;
+            double loss = assembler != null ? assembler.LatestLossPct : 0.0;
+            latestPacketLossPct = loss;
+            byte[] fb = new byte[11];
+            ushort lossX100 = (ushort)Math.Max(0, Math.Min(10000, (int)Math.Round(loss * 100.0)));
+            ushort rttX10 = (ushort)Math.Max(0, Math.Min(65000, (int)Math.Round(latestRttMs * 10.0)));
+            BoBoUdpCrypto.WriteUInt16LE(fb, 0, lossX100);
+            BoBoUdpCrypto.WriteUInt16LE(fb, 2, rttX10);
+            BoBoUdpCrypto.WriteUInt16LE(fb, 4, 0);
+            BoBoUdpCrypto.WriteUInt32LE(fb, 6, assembler != null ? assembler.LastDeliveredFrameId : 0u);
+            fb[10] = (byte)(requestPli ? 1 : 0);
+            SendUdpRaw(uc, crypto, BoBoUdpPacketType.Feedback, fb, ep);
+        }
+
+        private void SendUdpRaw(UdpClient uc, BoBoUdpCrypto crypto, BoBoUdpPacketType type, byte[] plain, IPEndPoint ep)
+        {
+            if (uc == null || crypto == null || ep == null) return;
+            byte[] sealedPkt = crypto.Seal(type, plain, 0, plain != null ? plain.Length : 0);
+            if (sealedPkt == null) return;
+            lock (udpGate)
+            {
+                if (udpClient != uc) return;
+                try { uc.Send(sealedPkt, sealedPkt.Length, ep); } catch { }
+            }
+        }
+
+        private void DisposeUdpLocked()
+        {
+            udpActive = false;
+            if (udpClient != null) { try { udpClient.Close(); } catch { } udpClient = null; }
+            if (udpCrypto != null) { try { udpCrypto.Dispose(); } catch { } udpCrypto = null; }
+            udpRemoteEp = null;
+            udpAssembler = null;
+            udpInputCodec = null;
+        }
+
+        private void ScheduleUdpMoveTailFlush()
+        {
+            if (Interlocked.CompareExchange(ref udpMoveFlushScheduled, 1, 0) != 0) return;
+            Task.Run(async delegate
+            {
+                try { await Task.Delay(5).ConfigureAwait(false); } catch { }
+                Interlocked.Exchange(ref udpMoveFlushScheduled, 0);
+                if (!connected || !udpActive) return;
+
+                bool sendAbs = false;
+                BoBoInputPacket absPkt = new BoBoInputPacket();
+                int relDx = 0;
+                int relDy = 0;
+                UdpClient uc;
+                BoBoUdpCrypto cr;
+                BoBoUdpInputCodec codec;
+                IPEndPoint ep;
+                lock (udpGate)
+                {
+                    uc = udpClient;
+                    cr = udpCrypto;
+                    codec = udpInputCodec;
+                    ep = udpRemoteEp;
+                    if (hasDeferredUdpAbsMove)
+                    {
+                        sendAbs = true;
+                        absPkt = deferredUdpAbsMove;
+                        hasDeferredUdpAbsMove = false;
+                    }
+                    if (deferredUdpRelDx != 0 || deferredUdpRelDy != 0)
+                    {
+                        relDx = deferredUdpRelDx;
+                        relDy = deferredUdpRelDy;
+                        deferredUdpRelDx = 0;
+                        deferredUdpRelDy = 0;
+                    }
+                }
+                if ((sendAbs || relDx != 0 || relDy != 0) && uc != null && cr != null && codec != null && ep != null)
+                {
+                    short cdx = (short)Math.Max(-32767, Math.Min(32767, relDx));
+                    short cdy = (short)Math.Max(-32767, Math.Min(32767, relDy));
+                    Interlocked.Exchange(ref lastUdpMoveSentTicks, Stopwatch.GetTimestamp());
+                    byte[] p = codec.BuildPacket(sendAbs, absPkt, cdx != 0 || cdy != 0, cdx, cdy, null);
+                    SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, p, ep);
+                }
+            });
+        }
+
         internal void SendInputPacket(BoBoInputPacket pkt)
         {
             if (!connected || ssl == null) return;
-            // Coalesce high-frequency mouse moves while an earlier TLS write is in flight so 1000Hz mice
+
+            // Zero-HoL encrypted UDP fast-path for mouse & keyboard input!
+            if (udpActive)
+            {
+                UdpClient uc;
+                BoBoUdpCrypto cr;
+                BoBoUdpInputCodec codec;
+                IPEndPoint ep;
+                lock (udpGate)
+                {
+                    uc = udpClient;
+                    cr = udpCrypto;
+                    codec = udpInputCodec;
+                    ep = udpRemoteEp;
+                }
+                if (uc != null && cr != null && codec != null && ep != null)
+                {
+                    if (pkt.Kind == 1)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        long prev = Interlocked.Read(ref lastUdpMoveSentTicks);
+                        if (prev != 0 && ((now - prev) * 1000.0 / Stopwatch.Frequency) < 4.0)
+                        {
+                            lock (udpGate)
+                            {
+                                hasDeferredUdpAbsMove = true;
+                                deferredUdpAbsMove = pkt;
+                            }
+                            ScheduleUdpMoveTailFlush();
+                            return;
+                        }
+                        lock (udpGate) { hasDeferredUdpAbsMove = false; }
+                        Interlocked.Exchange(ref lastUdpMoveSentTicks, now);
+                        byte[] p = codec.BuildPacket(true, pkt, false, 0, 0, null);
+                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, p, ep);
+                        return;
+                    }
+                    if (pkt.Kind == 2)
+                    {
+                        if (pkt.A == 0 && pkt.B == 0) return;
+                        long now = Stopwatch.GetTimestamp();
+                        long prev = Interlocked.Read(ref lastUdpMoveSentTicks);
+                        if (prev != 0 && ((now - prev) * 1000.0 / Stopwatch.Frequency) < 4.0)
+                        {
+                            lock (udpGate)
+                            {
+                                deferredUdpRelDx += pkt.A;
+                                deferredUdpRelDy += pkt.B;
+                            }
+                            ScheduleUdpMoveTailFlush();
+                            return;
+                        }
+                        int totDx, totDy;
+                        lock (udpGate)
+                        {
+                            totDx = deferredUdpRelDx + pkt.A;
+                            totDy = deferredUdpRelDy + pkt.B;
+                            deferredUdpRelDx = 0;
+                            deferredUdpRelDy = 0;
+                        }
+                        short cdx = (short)Math.Max(-32767, Math.Min(32767, totDx));
+                        short cdy = (short)Math.Max(-32767, Math.Min(32767, totDy));
+                        Interlocked.Exchange(ref lastUdpMoveSentTicks, now);
+                        byte[] p = codec.BuildPacket(false, new BoBoInputPacket(), true, cdx, cdy, null);
+                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, p, ep);
+                        return;
+                    }
+                    // Discrete input (clicks, keys, wheel, touch, releaseAll): flush any deferred move atomically
+                    // in the exact same UDP packet so clicks NEVER land off-target!
+                    bool flushAbs = false;
+                    BoBoInputPacket absToFlush = new BoBoInputPacket();
+                    int flushRelDx = 0, flushRelDy = 0;
+                    lock (udpGate)
+                    {
+                        if (hasDeferredUdpAbsMove)
+                        {
+                            flushAbs = true;
+                            absToFlush = deferredUdpAbsMove;
+                            hasDeferredUdpAbsMove = false;
+                        }
+                        if (deferredUdpRelDx != 0 || deferredUdpRelDy != 0)
+                        {
+                            flushRelDx = deferredUdpRelDx;
+                            flushRelDy = deferredUdpRelDy;
+                            deferredUdpRelDx = 0;
+                            deferredUdpRelDy = 0;
+                        }
+                    }
+                    short fdx = (short)Math.Max(-32767, Math.Min(32767, flushRelDx));
+                    short fdy = (short)Math.Max(-32767, Math.Min(32767, flushRelDy));
+                    byte[] discPkt = codec.BuildPacket(flushAbs, absToFlush, fdx != 0 || fdy != 0, fdx, fdy, pkt);
+                    SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, discPkt, ep);
+                    if (latestPacketLossPct >= 0.3 || latestRttMs >= 25.0)
+                    {
+                        // Redundant copy for lossy Wi-Fi / campus links (deduplicated by seq on host!)
+                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, discPkt, ep);
+                    }
+                    return;
+                }
+            }
+
+            // TCP fallback: Coalesce high-frequency mouse moves while an earlier TLS write is in flight so 1000Hz mice
             // never accumulate multi-second lag over WAN/Tailscale, while preserving strict ordering before
             // clicks, keys, wheel events, or control commands.
             if (pkt.Kind == 1)
@@ -715,8 +1247,9 @@ namespace DualRemote
             SendInputPacket(BoBoProtocol.BuildMobileNavInput(navAction));
         }
 
-        internal void SendReconfigure(int monitorIndex, int width, int height, int fps, int bitrateKbps)
+        internal void SendReconfigure(int monitorIndex, int width, int height, int fps, int bitrateKbps, bool autoBitrate = true)
         {
+            activeBitrateKbps = bitrateKbps;
             var cmd = new Dictionary<string, object>();
             cmd["type"] = "RECONFIGURE";
             cmd["monitorIndex"] = monitorIndex;
@@ -724,6 +1257,15 @@ namespace DualRemote
             cmd["height"] = height;
             cmd["fps"] = fps;
             cmd["bitrateKbps"] = bitrateKbps;
+            cmd["autoBitrate"] = autoBitrate;
+            SendJsonFireAndForget(cmd);
+        }
+
+        internal void SendSetCursorMode(bool hostComposite)
+        {
+            var cmd = new Dictionary<string, object>();
+            cmd["type"] = "SET_CURSOR_MODE";
+            cmd["composite"] = hostComposite;
             SendJsonFireAndForget(cmd);
         }
 
@@ -1009,6 +1551,10 @@ namespace DualRemote
                 cts = null;
             }
             DrainPendingSendQueueOnClose();
+            lock (udpGate)
+            {
+                DisposeUdpLocked();
+            }
             if (ssl != null)
             {
                 try { ssl.Dispose(); } catch { }

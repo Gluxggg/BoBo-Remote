@@ -87,6 +87,18 @@ BOBO_API void* __stdcall BoBoHost_Create(
     BoBoAudioFrameCallback onAudio,
     void* userCtx);
 
+BOBO_API void* __stdcall BoBoHost_CreateEx(
+    int32_t monitorIndex,
+    int32_t targetWidth,
+    int32_t targetHeight,
+    int32_t fps,
+    int32_t bitrateKbps,
+    int32_t muteHostSpeakers,
+    int32_t compositeCursor,
+    BoBoVideoFrameCallback onVideo,
+    BoBoAudioFrameCallback onAudio,
+    void* userCtx);
+
 BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
     void* handle,
     int32_t monitorIndex,
@@ -94,6 +106,11 @@ BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
     int32_t targetHeight,
     int32_t fps,
     int32_t bitrateKbps);
+
+BOBO_API int32_t __stdcall BoBoHost_SetBitrate(void* handle, int32_t bitrateKbps);
+BOBO_API int32_t __stdcall BoBoHost_SetFps(void* handle, int32_t fps);
+BOBO_API void __stdcall BoBoHost_SetCompositeCursor(void* handle, int32_t enable);
+BOBO_API int32_t __stdcall BoBoHost_GetCursorShape(int32_t monitorIndex);
 
 BOBO_API void __stdcall BoBoHost_RequestKeyframe(void* handle);
 BOBO_API void __stdcall BoBoHost_SetMuteHost(void* handle, int32_t mute);
@@ -152,6 +169,7 @@ BOBO_API void __stdcall BoBoClient_SetScaleMode(void* handle, int32_t scaleMode)
 BOBO_API void __stdcall BoBoClient_SetViewOnly(void* handle, int32_t viewOnly);
 BOBO_API void __stdcall BoBoClient_SetSysKeys(void* handle, int32_t sendSysKeys);
 BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t composited);
+BOBO_API void __stdcall BoBoClient_SetRemoteCursorShape(void* handle, int32_t shapeId);
 BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats);
 BOBO_API void __stdcall BoBoClient_Destroy(void* handle);
 

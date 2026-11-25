@@ -125,7 +125,7 @@ class BoBoLanDiscovery(
                         deviceName = obj.optString("deviceName", senderIp),
                         host = senderIp,
                         port = obj.optInt("port", BoBoProtocol.DEFAULT_TCP_PORT),
-                        version = obj.optString("version", "6.2.2"),
+                        version = obj.optString("version", "6.2.3"),
                         platform = obj.optString("platform", BoBoProtocol.PLATFORM_WINDOWS),
                         hostControlMode = obj.optString("hostControlMode", BoBoProtocol.CONTROL_MODE_FULL),
                         allowIncoming = obj.optBoolean("allowIncoming", true),

@@ -216,14 +216,36 @@ namespace DualRemote
             if (!string.IsNullOrEmpty(probe.HostName))
                 clientPairHostName = probe.HostName;
 
+            // 同 Wi-Fi 自动局域网直连升级：若通过 Tailscale IP 连上且双方实为同局域网，350ms 内自动切到 1ms 局域网直连！
+            string effectiveHost = cleanHost;
+            if (BoBoProtocol.IsTailscaleCgnatIp(cleanHost) && probe.LanIps != null && probe.LanIps.Count > 0)
+            {
+                string directLanIp = null;
+                try
+                {
+                    directLanIp = await BoBoStreamClient.TryResolveDirectLanHostAsync(
+                        probe, BoBoIdentityStore.Default, 400, CancellationToken.None);
+                }
+                catch { }
+                if (IsDisposed || request != connectRequestGeneration) return;
+                if (!string.IsNullOrEmpty(directLanIp))
+                {
+                    effectiveHost = directLanIp;
+                    clientPairHost = directLanIp;
+                }
+            }
+
             if (probe.Authorized)
             {
-                SetStatus("双端 BoBo远程 已匹配授权，正在建立 TLS 1.2 全内置远程桌面…", Theme.PillTone.Success);
-                await StartStreamAsync(cleanHost);
+                string routeMsg = !string.Equals(effectiveHost, cleanHost, StringComparison.OrdinalIgnoreCase)
+                    ? ("检测到同局域网，已自动升级高速直连（" + effectiveHost + " · UDP+FEC）…")
+                    : "双端 BoBo远程 已匹配授权，正在建立低延迟加密远程桌面（UDP+FEC）…";
+                SetStatus(routeMsg, Theme.PillTone.Success);
+                await StartStreamAsync(effectiveHost);
                 return;
             }
 
-            ShowClientPairPrompt(cleanHost, clientPairHostName, true, "对方 BoBo远程 在线，需要输入对方生成的 4 位临时配对码。");
+            ShowClientPairPrompt(effectiveHost, clientPairHostName, true, "对方 BoBo远程 在线，需要输入对方生成的 4 位临时配对码。");
         }
 
         private void ShowClientPairPrompt(string cleanHost, string hostName, bool readable, string detail)

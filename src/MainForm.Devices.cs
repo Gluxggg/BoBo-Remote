@@ -498,14 +498,17 @@ namespace DualRemote
 
                 var merged = new List<TsPeer>();
                 var seenIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seenLanNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                // 1. Live LAN auto-discovered BoBo V6 peers (zero external VPN needed!)
+                // 1. Live LAN auto-discovered BoBo V6 peers (zero external VPN needed, always fastest!)
                 if (boboHostServer != null)
                 {
                     foreach (BoBoDiscoveredPeer lp in boboHostServer.GetDiscoveredLanPeers())
                     {
                         if (string.IsNullOrWhiteSpace(lp.Host)) continue;
                         seenIps.Add(lp.Host);
+                        if (lp.AllowIncoming && !string.IsNullOrWhiteSpace(lp.DeviceName))
+                            seenLanNames.Add(lp.DeviceName.Trim());
                         string platTag = "Windows";
                         if (string.Equals(lp.Platform, BoBoProtocol.PlatformMacOS, StringComparison.OrdinalIgnoreCase)) platTag = "macOS";
                         else if (string.Equals(lp.Platform, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)) platTag = "Android";
@@ -517,18 +520,21 @@ namespace DualRemote
                             Ip = lp.Host,
                             Online = lp.AllowIncoming,
                             LinkText = lp.AllowIncoming
-                                ? (platTag + (isViewOnly ? " · 仅投屏观看" : " · 局域网直连") + " · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
+                                ? (platTag + (isViewOnly ? " · 仅投屏观看" : " · 局域网高速直连") + " · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
                                 : (platTag + " · 局域网 · 对方已关闭被控")
                         });
                     }
                 }
 
-                // 2. Tailscale peers (optional cross-WAN mesh)
+                // 2. Tailscale peers (optional cross-WAN mesh; deduplicate if same host is already online on LAN!)
                 if (result.Ok && result.Peers != null)
                 {
                     foreach (TsPeer tp in result.Peers)
                     {
-                        if (!string.IsNullOrWhiteSpace(tp.Ip) && seenIps.Add(tp.Ip))
+                        if (string.IsNullOrWhiteSpace(tp.Ip)) continue;
+                        if (!string.IsNullOrWhiteSpace(tp.HostName) && seenLanNames.Contains(tp.HostName.Trim()))
+                            continue;
+                        if (seenIps.Add(tp.Ip))
                             merged.Add(tp);
                     }
                 }

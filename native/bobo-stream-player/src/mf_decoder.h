@@ -71,6 +71,8 @@ private:
     uint32_t outStride_ = 0;
     bool mftProvidesSamples_ = true;
     DWORD minOutputSampleSize_ = 0;
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> inputBuf_;
+    DWORD inputBufCapacity_ = 0;
 };
 
 } // namespace bobo

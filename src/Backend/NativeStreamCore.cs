@@ -21,6 +21,7 @@ namespace DualRemote
         internal int Height;
         internal string Codec = "H264";
         internal string Decoder = "D3D11VA";
+        internal string Transport = "TCP+TLS";
     }
 
     internal sealed class NativePlayerEvent
