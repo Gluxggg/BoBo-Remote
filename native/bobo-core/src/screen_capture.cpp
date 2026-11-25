@@ -378,6 +378,20 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
         } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
             duplication_.Reset();
             lastDesktopTex_.Reset();
+            lastDesktopW_ = 0;
+            lastDesktopH_ = 0;
+            vp_.Reset();
+            vpEnum_.Reset();
+            nv12GpuTex_.Reset();
+            nv12StagingTex_.Reset();
+            vpSrcW_ = 0;
+            vpSrcH_ = 0;
+            auto freshMonitors = EnumerateMonitors();
+            if (!freshMonitors.empty()) {
+                int idx = (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(freshMonitors.size()))
+                    ? monitorIndex_ : 0;
+                activeMonitor_ = freshMonitors[static_cast<size_t>(idx)];
+            }
             dxgiReady_ = InitDxgiForMonitor(activeMonitor_);
         }
     }

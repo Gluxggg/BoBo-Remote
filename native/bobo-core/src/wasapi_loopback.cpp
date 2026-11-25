@@ -35,18 +35,24 @@ void WasapiLoopbackCapturer::SetMuteSpeakers(bool mute) {
 
 void WasapiLoopbackCapturer::ApplySpeakerMute(bool mute) {
     std::lock_guard<std::mutex> lk(muteMutex_);
-    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> en;
-    Microsoft::WRL::ComPtr<IMMDevice> dev;
-    Microsoft::WRL::ComPtr<IAudioEndpointVolume> epv;
-    if (FAILED(CoCreateInstance(kClsidMmDevEnum, nullptr, CLSCTX_ALL, kIidMmDevEnum, reinterpret_cast<void**>(en.GetAddressOf())))) return;
-    if (FAILED(en->GetDefaultAudioEndpoint(eRender, eConsole, dev.GetAddressOf()))) return;
-    if (FAILED(dev->Activate(kIidAudioEndpointVol, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(epv.GetAddressOf())))) return;
-    if (!originalMuteSaved_) {
-        if (SUCCEEDED(epv->GetMute(&originalMuteState_))) {
-            originalMuteSaved_ = true;
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool needUninit = SUCCEEDED(hrCo);
+    {
+        Microsoft::WRL::ComPtr<IMMDeviceEnumerator> en;
+        Microsoft::WRL::ComPtr<IMMDevice> dev;
+        Microsoft::WRL::ComPtr<IAudioEndpointVolume> epv;
+        if (SUCCEEDED(CoCreateInstance(kClsidMmDevEnum, nullptr, CLSCTX_ALL, kIidMmDevEnum, reinterpret_cast<void**>(en.GetAddressOf()))) &&
+            SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, dev.GetAddressOf())) &&
+            SUCCEEDED(dev->Activate(kIidAudioEndpointVol, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(epv.GetAddressOf())))) {
+            if (!originalMuteSaved_) {
+                if (SUCCEEDED(epv->GetMute(&originalMuteState_))) {
+                    originalMuteSaved_ = true;
+                }
+            }
+            epv->SetMute(mute ? TRUE : FALSE, nullptr);
         }
     }
-    epv->SetMute(mute ? TRUE : FALSE, nullptr);
+    if (needUninit) CoUninitialize();
 }
 
 void WasapiLoopbackCapturer::Stop() {
@@ -57,14 +63,19 @@ void WasapiLoopbackCapturer::Stop() {
     // Always restore original host speaker mute state when remote session ends
     std::lock_guard<std::mutex> lk(muteMutex_);
     if (originalMuteSaved_) {
-        Microsoft::WRL::ComPtr<IMMDeviceEnumerator> en;
-        Microsoft::WRL::ComPtr<IMMDevice> dev;
-        Microsoft::WRL::ComPtr<IAudioEndpointVolume> epv;
-        if (SUCCEEDED(CoCreateInstance(kClsidMmDevEnum, nullptr, CLSCTX_ALL, kIidMmDevEnum, reinterpret_cast<void**>(en.GetAddressOf()))) &&
-            SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, dev.GetAddressOf())) &&
-            SUCCEEDED(dev->Activate(kIidAudioEndpointVol, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(epv.GetAddressOf())))) {
-            epv->SetMute(originalMuteState_, nullptr);
+        HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        bool needUninit = SUCCEEDED(hrCo);
+        {
+            Microsoft::WRL::ComPtr<IMMDeviceEnumerator> en;
+            Microsoft::WRL::ComPtr<IMMDevice> dev;
+            Microsoft::WRL::ComPtr<IAudioEndpointVolume> epv;
+            if (SUCCEEDED(CoCreateInstance(kClsidMmDevEnum, nullptr, CLSCTX_ALL, kIidMmDevEnum, reinterpret_cast<void**>(en.GetAddressOf()))) &&
+                SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, dev.GetAddressOf())) &&
+                SUCCEEDED(dev->Activate(kIidAudioEndpointVol, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(epv.GetAddressOf())))) {
+                epv->SetMute(originalMuteState_, nullptr);
+            }
         }
+        if (needUninit) CoUninitialize();
         originalMuteSaved_ = false;
     }
 }
@@ -285,6 +296,7 @@ void WasapiAdpcmPlayer::PlayAdpcm(const uint8_t* adpcmData, int len, int sampleR
 }
 
 void WasapiAdpcmPlayer::Shutdown() {
+    std::lock_guard<std::mutex> lk(mutex_);
     active_ = false;
     activeRate_ = 0;
     if (audioClient_) {

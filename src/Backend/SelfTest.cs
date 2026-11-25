@@ -1428,6 +1428,9 @@ namespace DualRemote
                         bool gotSd = sdEvt.Wait(3000) && sdReceived;
                         Check("V6.1 超级屏协议：SET_SUPER_DISPLAY / SUPER_DISPLAY_STATE 闭环回执", gotSd, "sdReceived=" + sdReceived);
 
+                        // Burst ordered input + clean disconnect through FIFO writer (no SslStream write race)
+                        authClient.SendInputPacket(new BoBoInputPacket { Kind = 6, Flags = 0, A = 0, B = 0 });
+                        authClient.SendSetPrivacy(false);
                         authClient.Disconnect();
                     }
 
