@@ -38,6 +38,7 @@ namespace DualRemote
         private int boundPort;
         private volatile bool allowIncomingControl = true;
         private volatile bool activeStreamRunning;
+        private long currentStreamSessionId;
         private string activePeerName = "";
         private int activeMonitorIndex;
         private BoBoLocalPairSession activePairSession;
@@ -342,6 +343,8 @@ namespace DualRemote
                             Host = senderIp,
                             Port = BoBoProtocol.GetInt(map, "port", BoBoProtocol.DefaultTcpPort),
                             Version = BoBoProtocol.GetStr(map, "version", "6.0.0"),
+                            Platform = BoBoProtocol.GetStr(map, "platform", BoBoProtocol.PlatformWindows),
+                            HostControlMode = BoBoProtocol.GetStr(map, "hostControlMode", BoBoProtocol.ControlModeFull),
                             AllowIncoming = BoBoProtocol.GetBool(map, "allowIncoming", true),
                             LastSeenUtc = DateTime.UtcNow
                         };
@@ -377,6 +380,9 @@ namespace DualRemote
                 var map = new Dictionary<string, object>();
                 map["kind"] = kind;
                 map["protocol"] = BoBoProtocol.ProtocolMagic;
+                map["protocolVersion"] = BoBoProtocol.ProtocolVersion;
+                map["platform"] = BoBoProtocol.PlatformWindows;
+                map["hostControlMode"] = BoBoProtocol.ControlModeFull;
                 map["nodeId"] = identity.NodeId;
                 map["deviceCode"] = identity.DeviceCode;
                 map["deviceName"] = identity.DeviceName;
@@ -385,6 +391,21 @@ namespace DualRemote
                 map["allowIncoming"] = allowIncomingControl;
                 byte[] bytes = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(map));
                 udp.Send(bytes, bytes.Length, target);
+            }
+            catch { }
+        }
+
+        private static void ConfigureTcpKeepAlive(TcpClient client)
+        {
+            if (client == null || client.Client == null) return;
+            try
+            {
+                // Windows SIO_KEEPALIVE_VALS: enable=1, idle=5000ms, interval=1000ms
+                byte[] ka = new byte[12];
+                BitConverter.GetBytes(1u).CopyTo(ka, 0);
+                BitConverter.GetBytes(5000u).CopyTo(ka, 4);
+                BitConverter.GetBytes(1000u).CopyTo(ka, 8);
+                client.Client.IOControl(IOControlCode.KeepAliveValues, ka, null);
             }
             catch { }
         }
@@ -400,6 +421,7 @@ namespace DualRemote
                     client.NoDelay = true;
                     client.SendBufferSize = 1024 * 1024;
                     client.ReceiveBufferSize = 512 * 1024;
+                    ConfigureTcpKeepAlive(client);
                     TcpClient accepted = client;
                     Task _h = Task.Run(delegate { return HandleClientAsync(accepted, ct); });
                 }
@@ -431,6 +453,8 @@ namespace DualRemote
 
             BoBoCoreInterop.BoBoHostNativeHandle nativeHost = null;
             bool streamNotifiedStarted = false;
+            long myStreamSessionId = 0;
+            int lastRecoveryKeyTick = 0;
             string clientNodeId = "";
             string clientDeviceCode = "";
             string clientName = remoteIp;
@@ -450,11 +474,17 @@ namespace DualRemote
                 using (var ssl = new SslStream(tcp.GetStream(), false))
                 {
                     CancellationToken ct = linked.Token;
-                    await ssl.AuthenticateAsServerAsync(identity.Certificate, false, SslProtocols.Tls12, false).ConfigureAwait(false);
-                    conn.AttachSsl(ssl);
+                    BoBoFrame? firstFrame;
+                    using (var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    using (handshakeCts.Token.Register(delegate { try { tcp.Close(); } catch { } }))
+                    {
+                        handshakeCts.CancelAfter(8000);
+                        await ssl.AuthenticateAsServerAsync(identity.Certificate, false, SslProtocols.Tls12, false).ConfigureAwait(false);
+                        conn.AttachSsl(ssl);
 
-                    // 1. Expect HELLO within 8 seconds
-                    BoBoFrame? firstFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, ct).ConfigureAwait(false);
+                        // 1. Expect HELLO within 8 seconds
+                        firstFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, handshakeCts.Token).ConfigureAwait(false);
+                    }
                     if (!firstFrame.HasValue || firstFrame.Value.Type != BoBoPacketType.ControlJson) return;
                     var hello = BoBoProtocol.ParseJsonPayload(firstFrame.Value.Payload);
                     if (hello == null || BoBoProtocol.GetStr(hello, "type", "") != "HELLO" ||
@@ -474,6 +504,10 @@ namespace DualRemote
                     var ack = new Dictionary<string, object>();
                     ack["type"] = "HELLO_ACK";
                     ack["protocol"] = BoBoProtocol.ProtocolMagic;
+                    ack["protocolVersion"] = BoBoProtocol.ProtocolVersion;
+                    ack["platform"] = BoBoProtocol.PlatformWindows;
+                    ack["hostControlMode"] = BoBoProtocol.ControlModeFull;
+                    ack["screenOrientation"] = 0;
                     ack["nodeId"] = identity.NodeId;
                     ack["deviceCode"] = identity.DeviceCode;
                     ack["deviceName"] = identity.DeviceName;
@@ -519,6 +553,7 @@ namespace DualRemote
                                 byte[] chunk;
                                 if (BoBoProtocol.ParseFileChunkPayload(frame.Payload, out tid, out offset, out chunk) &&
                                     string.Equals(tid, activeFileId, StringComparison.Ordinal) &&
+                                    offset >= 0 &&
                                     chunk != null && chunk.Length > 0)
                                 {
                                     if (activeFileStream.Position != offset) activeFileStream.Seek(offset, SeekOrigin.Begin);
@@ -613,14 +648,17 @@ namespace DualRemote
                             }
 
                             // Update last known host IP for this authorized peer
-                            identity.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                            if (!string.IsNullOrEmpty(clientNodeId) && !string.IsNullOrEmpty(clientThumb))
                             {
-                                NodeId = clientNodeId,
-                                DeviceCode = clientDeviceCode,
-                                DeviceName = clientName,
-                                CertThumbprint = clientThumb,
-                                LastHost = remoteIp
-                            });
+                                identity.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                                {
+                                    NodeId = clientNodeId,
+                                    DeviceCode = clientDeviceCode,
+                                    DeviceName = clientName,
+                                    CertThumbprint = clientThumb,
+                                    LastHost = remoteIp
+                                });
+                            }
 
                             int reqMon = BoBoProtocol.GetInt(msg, "monitorIndex", 0);
                             int reqW = BoBoProtocol.GetInt(msg, "width", 1920);
@@ -650,6 +688,7 @@ namespace DualRemote
                             }
 
                             // CRITICAL: notify privacy curtain synchronously BEFORE creating capture engine (<5ms)!
+                            myStreamSessionId = Interlocked.Increment(ref currentStreamSessionId);
                             activeStreamRunning = true;
                             activePeerName = clientName;
                             activeMonitorIndex = reqMon;
@@ -669,11 +708,20 @@ namespace DualRemote
                                 delegate(byte[] h264, bool isKey, int w, int h, uint tsMs)
                                 {
                                     if (ct.IsCancellationRequested) return;
-                                    // Smart backpressure: never let stale P-frames pile up behind TCP send
+                                    // Smart backpressure: never let stale P-frames pile up behind TCP send;
+                                    // if a P-frame is dropped, request a debounced recovery IDR so H.264 never smears.
                                     int depth = Interlocked.Increment(ref videoQueueDepth);
                                     if (!isKey && depth > 2)
                                     {
                                         Interlocked.Decrement(ref videoQueueDepth);
+                                        int nowTick = Environment.TickCount;
+                                        int prevTick = Volatile.Read(ref lastRecoveryKeyTick);
+                                        if (unchecked(nowTick - prevTick) >= 350 &&
+                                            Interlocked.CompareExchange(ref lastRecoveryKeyTick, nowTick, prevTick) == prevTick)
+                                        {
+                                            BoBoCoreInterop.BoBoHostNativeHandle curHost = nativeHost;
+                                            if (curHost != null) { try { curHost.RequestKeyframe(); } catch { } }
+                                        }
                                         return;
                                     }
                                     byte[] payload = BoBoProtocol.BuildVideoPayload(w, h, isKey, h264);
@@ -706,6 +754,8 @@ namespace DualRemote
                             started["monitorIndex"] = reqMon;
                             started["superDisplayActive"] = superDisplayActive;
                             started["superDisplayNativeMatch"] = superDisplayNativeMatch;
+                            started["platform"] = BoBoProtocol.PlatformWindows;
+                            started["hostControlMode"] = BoBoProtocol.ControlModeFull;
                             started["monitors"] = BoBoProtocol.SerializeMonitors(curMons);
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
                             continue;
@@ -921,13 +971,24 @@ namespace DualRemote
                 {
                     nativeHost.Dispose();
                 }
-                try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
                 if (streamNotifiedStarted)
                 {
-                    activeStreamRunning = false;
-                    activePeerName = "";
-                    Action<bool, string, bool> sessEv = SessionStateChanged;
-                    if (sessEv != null) { try { sessEv(false, clientName, false); } catch { } }
+                    // 断开瞬间强制释放所有远端按下的修饰键与鼠标键，防止主机卡键/卡鼠标
+                    try
+                    {
+                        BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6, Flags = 0, A = 0, B = 0 });
+                    }
+                    catch { }
+
+                    // 仅当前断开的会话仍是最新活跃流时，才还原超级屏并通知关闭防窥，防止旧连接清理误伤新连接
+                    if (myStreamSessionId == Interlocked.Read(ref currentStreamSessionId))
+                    {
+                        try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
+                        activeStreamRunning = false;
+                        activePeerName = "";
+                        Action<bool, string, bool> sessEv = SessionStateChanged;
+                        if (sessEv != null) { try { sessEv(false, clientName, false); } catch { } }
+                    }
                 }
                 lock (activeConnections) { activeConnections.Remove(conn); }
                 conn.Dispose();
@@ -976,9 +1037,21 @@ namespace DualRemote
 
         private sealed class ActiveClientConnection : IDisposable
         {
+            private sealed class PendingWrite
+            {
+                internal BoBoPacketType Type;
+                internal uint FlagsOrTs;
+                internal byte[] Payload;
+                internal Action OnDone;
+                internal TaskCompletionSource<bool> Completion;
+            }
+
             private readonly TcpClient tcp;
             private readonly CancellationTokenSource connCts = new CancellationTokenSource();
-            private readonly SemaphoreSlim writeLock = new SemaphoreSlim(1, 1);
+            private readonly ConcurrentQueue<PendingWrite> sendQueue = new ConcurrentQueue<PendingWrite>();
+            private readonly object sendLoopGate = new object();
+            private bool sendLoopRunning;
+            private volatile bool disposed;
             private SslStream ssl;
 
             internal ActiveClientConnection(TcpClient client)
@@ -993,48 +1066,118 @@ namespace DualRemote
                 ssl = stream;
             }
 
-            internal async Task SendJsonSafeAsync(Dictionary<string, object> obj, CancellationToken ct)
+            internal Task SendJsonSafeAsync(Dictionary<string, object> obj, CancellationToken ct)
             {
-                SslStream s = ssl;
-                if (s == null) return;
-                await writeLock.WaitAsync(ct).ConfigureAwait(false);
-                try
+                if (ssl == null || disposed || connCts.IsCancellationRequested)
+                    return Task.FromResult(true);
+
+                var ser = new JavaScriptSerializer();
+                ser.MaxJsonLength = BoBoProtocol.MaxControlPayloadBytes;
+                byte[] bytes = Encoding.UTF8.GetBytes(ser.Serialize(obj));
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (ct.CanBeCanceled)
                 {
-                    await BoBoProtocol.WriteJsonAsync(s, obj, ct).ConfigureAwait(false);
+                    ct.Register(delegate { tcs.TrySetCanceled(); });
                 }
-                finally
+                EnqueueWrite(new PendingWrite
                 {
-                    writeLock.Release();
-                }
+                    Type = BoBoPacketType.ControlJson,
+                    FlagsOrTs = 0,
+                    Payload = bytes,
+                    Completion = tcs
+                });
+                return tcs.Task;
             }
 
             internal void SendFrameFireAndForget(BoBoPacketType type, uint flagsOrTs, byte[] payload, Action onDone)
             {
-                SslStream s = ssl;
-                if (s == null || connCts.IsCancellationRequested)
+                if (ssl == null || disposed || connCts.IsCancellationRequested)
                 {
-                    if (onDone != null) onDone();
+                    if (onDone != null) { try { onDone(); } catch { } }
                     return;
                 }
-                Task.Run(async delegate
+                EnqueueWrite(new PendingWrite
                 {
-                    bool acquired = false;
+                    Type = type,
+                    FlagsOrTs = flagsOrTs,
+                    Payload = payload ?? new byte[0],
+                    OnDone = onDone
+                });
+            }
+
+            private void EnqueueWrite(PendingWrite item)
+            {
+                sendQueue.Enqueue(item);
+                bool startLoop = false;
+                lock (sendLoopGate)
+                {
+                    if (!sendLoopRunning)
+                    {
+                        sendLoopRunning = true;
+                        startLoop = true;
+                    }
+                }
+                if (startLoop)
+                {
+                    Task.Run(delegate { return DrainSendQueueAsync(); });
+                }
+            }
+
+            private async Task DrainSendQueueAsync()
+            {
+                while (true)
+                {
+                    PendingWrite item;
+                    if (!sendQueue.TryDequeue(out item))
+                    {
+                        lock (sendLoopGate)
+                        {
+                            if (sendQueue.IsEmpty)
+                            {
+                                sendLoopRunning = false;
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+
+                    SslStream s = ssl;
+                    if (s == null || disposed || connCts.IsCancellationRequested)
+                    {
+                        CompleteDroppedItem(item);
+                        continue;
+                    }
+
                     try
                     {
-                        await writeLock.WaitAsync(connCts.Token).ConfigureAwait(false);
-                        acquired = true;
-                        await BoBoProtocol.WriteFrameAsync(s, type, flagsOrTs, payload, 0, payload.Length, connCts.Token).ConfigureAwait(false);
+                        await BoBoProtocol.WriteFrameAsync(s, item.Type, item.FlagsOrTs, item.Payload, 0, item.Payload.Length, connCts.Token).ConfigureAwait(false);
+                        if (item.Completion != null) item.Completion.TrySetResult(true);
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        if (item.Completion != null) item.Completion.TrySetException(ex);
                         ForceClose("send failed");
                     }
                     finally
                     {
-                        if (acquired) { try { writeLock.Release(); } catch { } }
-                        if (onDone != null) { try { onDone(); } catch { } }
+                        if (item.OnDone != null) { try { item.OnDone(); } catch { } }
                     }
-                });
+                }
+            }
+
+            private static void CompleteDroppedItem(PendingWrite item)
+            {
+                if (item.Completion != null) item.Completion.TrySetResult(false);
+                if (item.OnDone != null) { try { item.OnDone(); } catch { } }
+            }
+
+            private void DrainRemainingOnClose()
+            {
+                PendingWrite dropped;
+                while (sendQueue.TryDequeue(out dropped))
+                {
+                    CompleteDroppedItem(dropped);
+                }
             }
 
             internal void ForceClose(string reason)
@@ -1045,10 +1188,11 @@ namespace DualRemote
 
             public void Dispose()
             {
+                disposed = true;
                 try { connCts.Cancel(); } catch { }
                 try { tcp.Close(); } catch { }
+                DrainRemainingOnClose();
                 try { connCts.Dispose(); } catch { }
-                try { writeLock.Dispose(); } catch { }
             }
         }
     }

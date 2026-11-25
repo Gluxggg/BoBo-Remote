@@ -13,8 +13,8 @@ namespace DualRemote
     /// 2. 0ms Z 序守护层：通过 SetWinEventHook 实时监听前台切换/右键菜单/输入法弹出并瞬间压回最顶层（配合 50ms 保底脉冲）；
     /// 3. 物理键鼠锁定层：开启原生 WH_MOUSE_LL + WH_KEYBOARD_LL 钩子，100% 屏蔽被控端物理鼠标点击任务栏/开始页/刷新及键盘按键，
     ///    仅放行 BoBo 远控专属签名事件及紧急退出组合键 Ctrl+Alt+Shift+P；
-    /// 4. 显示器硬件熄黑层：通过 DDC/CI（dxva2.dll）将物理显示器亮度/对比度/RGB 增益归零，对 DXGI 远控采集 100% 透明，
-    ///    彻底杜绝 Win11 系统级开始菜单/现代右键刷新菜单/打字候选框外泄，退出/锁屏/异常重启均自动恢复。
+    /// 4. 可选显示器硬件背光降亮层：用户显式开启后，通过 DDC/CI（dxva2.dll）仅将非 HDR 物理显示器背光亮度（VCP 0x10）调至最低，
+    ///    绝不修改对比度与 RGB 增益（避免退出后偏色或过曝），退出/锁屏/异常重启均经回读校验精确恢复。
     /// </summary>
     internal sealed class PrivacyCurtainManager : IDisposable
     {
@@ -129,7 +129,7 @@ namespace DualRemote
                 }
                 else if (allExcluded)
                 {
-                    string extra = (inputBlocked ? " · 已锁物理键鼠" : "") + (hwBlackoutTriggered ? " · 硬件深度熄黑" : "");
+                    string extra = (inputBlocked ? " · 已锁物理键鼠" : "") + (hwBlackoutTriggered ? " · 背光降亮" : "");
                     statusMessage = "完全防窥保护已覆盖 " + windows.Count + " 块屏幕（物理屏彻底屏蔽，远控透明无干扰" + extra + "；按 Ctrl+Alt+Shift+P 退出）。";
                 }
                 else

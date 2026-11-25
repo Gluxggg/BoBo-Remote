@@ -10,22 +10,100 @@ permissions:
   contents: read
 
 jobs:
-  compile-and-selftest:
-    name: Build V6 All-In-One (BoBoCore + BoBoRemote) and Self-Test
+  windows-x64:
+    name: Windows x64 (BoBoCore + BoBoRemote + Golden Tests)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 编译内嵌原生核 BoBoCore.dll.gz -> 嵌入 BoBoRemote.exe -> 运行端到端自检与安装向导自检
       - name: Build BoBoCore.dll + BoBoRemote.exe and run --self-test
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1
 
-      - name: Upload V6 All-In-One build output
+      - name: Upload Windows EXE Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BoBoRemote-v6-allinone-exe
+          name: BoBoRemote-Windows-x64
           path: ci-out/BoBoRemote.exe
           if-no-files-found: warn
           retention-days: 7
+
+  android-apk:
+    name: Android APK (Kotlin + Compose + Golden & TLS Tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Run BoBo6.2 Golden Vector & TLS 1.2 Loopback Tests
+        working-directory: android
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Assemble Android APK
+        working-directory: android
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Copy Named Android APK
+        run: |
+          mkdir -p dist-android
+          cp android/app/build/outputs/apk/release/app-release.apk dist-android/BoBoRemote-Android.apk
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoBoRemote-Android-APK
+          path: dist-android/BoBoRemote-Android.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  apple-core-and-macos:
+    name: Apple Core Tests + macOS App & DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test BoBoAppleCore (Golden Vectors + RSA-2048 X.509/PKCS12 + TLS 1.2 Loopback)
+        working-directory: apple/BoBoAppleCore
+        run: swift test -v
+
+      - name: Build BoBoRemote.app & Package BoBoRemote-macOS.dmg
+        run: bash apple/scripts/package-macos-dmg.sh
+
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoBoRemote-macOS-DMG
+          path: dist-apple/BoBoRemote-macOS.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  ios-ipa:
+    name: iOS / iPadOS Unsigned IPA (App + ReplayKit Extension)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build & Package BoBoRemote-iOS-Unsigned.ipa
+        run: bash apple/scripts/package-ios-ipa.sh
+
+      - name: Upload iOS Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoBoRemote-iOS-IPA
+          path: dist-apple/BoBoRemote-iOS-Unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

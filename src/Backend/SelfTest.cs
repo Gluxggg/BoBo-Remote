@@ -1466,7 +1466,7 @@ namespace DualRemote
                     var st0 = new PrivacyDisplayDimmer.MonitorSavedState { MonitorOrdinal = 0, Description = "Generic PnP Monitor" };
                     st0.VcpValues[0x10] = 75;
                     st0.VcpValues[0x12] = 50;
-                    st0.VcpValues[0x16] = 100;
+                    st0.VcpValues[0x16] = 20;
                     sampleStates.Add(st0);
                     string serializedRestore = PrivacyDisplayDimmer.SerializeRestoreRecords(sampleStates);
                     var parsedRestore = PrivacyDisplayDimmer.ParseRestoreRecords(serializedRestore);
@@ -1474,15 +1474,56 @@ namespace DualRemote
                         && parsedRestore[0].MonitorOrdinal == 0
                         && parsedRestore[0].VcpValues.ContainsKey(0x10) && parsedRestore[0].VcpValues[0x10] == 75
                         && parsedRestore[0].VcpValues.ContainsKey(0x12) && parsedRestore[0].VcpValues[0x12] == 50
-                        && parsedRestore[0].VcpValues.ContainsKey(0x16) && parsedRestore[0].VcpValues[0x16] == 100;
-                    Check("V6.1 防窥物理屏熄黑：DDC/CI 崩溃自愈恢复表序列化往返",
+                        && parsedRestore[0].VcpValues.ContainsKey(0x16) && parsedRestore[0].VcpValues[0x16] == 20
+                        && PrivacyDisplayDimmer.HasLegacyColorVcpCodes(parsedRestore[0]);
+                    Check("V6.1 防窥背光降亮：DDC/CI 崩溃自愈恢复表序列化往返与旧版 RGB 记录识别",
                         restoreRoundTrip,
                         serializedRestore.Trim());
 
+                    bool vcpSafetyOk = PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x10)
+                        && !PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x12)
+                        && !PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x14)
+                        && !PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x16)
+                        && !PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x18)
+                        && !PrivacyDisplayDimmer.IsSafeDimmingVcpCode(0x1A);
+                    Check("V6.1 防窥硬件安全不变量：仅允许 VCP 0x10 背光亮度，严禁改对比度/色温/RGB 增益",
+                        vcpSafetyOk,
+                        "only0x10=" + vcpSafetyOk);
+
                     var defaultPriv = new PrivacyWallpaperConfig();
-                    Check("V6.1 防窥默认策略：默认开启物理键鼠锁定与 DDC/CI 深度熄黑",
-                        defaultPriv.BlockLocalInput && defaultPriv.HardwareBlackout,
+                    Check("V6.1 防窥默认策略：默认开启物理键鼠锁定，DDC/CI 背光降亮默认关闭以防显示器固件异常",
+                        defaultPriv.BlockLocalInput && !defaultPriv.HardwareBlackout,
                         "blockInput=" + defaultPriv.BlockLocalInput + " hwBlackout=" + defaultPriv.HardwareBlackout);
+
+                    // 2g. V6.2 Cross-Platform Golden Vectors (must match protocol/golden-vectors.json byte-for-byte)
+                    string gvCode = BoBoIdentityStore.DeriveNineDigitCode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+                    string gvProof = BoBoIdentityStore.ComputePinProof(
+                        "7391",
+                        "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                    byte[] gvVideoPayload = BoBoProtocol.BuildVideoPayload(2560, 1440, true, HexToBytes("000000016742001e0000000168ce388000000001658884"));
+                    byte[] gvVideoFrame = SerializeSingleFrame(BoBoPacketType.VideoH264, 123456u, gvVideoPayload);
+                    byte[] gvAudioPayload = BoBoProtocol.BuildAudioPayload(48000, 2, 8, HexToBytes("000000000000000000f7f7f7f7f77f7f"));
+                    byte[] gvAudioFrame = SerializeSingleFrame(BoBoPacketType.AudioAdpcm, 0u, gvAudioPayload);
+                    byte[] gvTouchPayload = BoBoProtocol.BuildInputPayload(BoBoProtocol.BuildTouchInput(1, 0, 16384, 32768));
+                    byte[] gvNavPayload = BoBoProtocol.BuildInputPayload(BoBoProtocol.BuildMobileNavInput(BoBoProtocol.MobileNavBack));
+                    byte[] gvFilePayload = BoBoProtocol.BuildFileChunkPayload("0123456789abcdef", 65536L, HexToBytes("deadbeef"), 4);
+                    byte[] gvFileFrame = SerializeSingleFrame(BoBoPacketType.FileChunk, 0u, gvFilePayload);
+
+                    bool gvMatch =
+                        gvCode == "550555803" &&
+                        gvProof == "1f553fefb979566b1c535d36c3fa2696735d3aecc3d6df44ae2c9af8b2cd539e" &&
+                        BytesToHex(gvVideoFrame) == "021c00000040e20100000aa00501000000016742001e0000000168ce388000000001658884" &&
+                        BytesToHex(gvAudioFrame) == "03170000000000000080bb0000020800000000000000000000f7f7f7f7f77f7f" &&
+                        BytesToHex(gvTouchPayload) == "071000400080" &&
+                        BytesToHex(gvNavPayload) == "080001000000" &&
+                        BytesToHex(gvFileFrame) == "051c00000000000000303132333435363738396162636465660000010000000000deadbeef" &&
+                        probe1.Platform == BoBoProtocol.PlatformWindows &&
+                        probe1.HostControlMode == BoBoProtocol.ControlModeFull;
+                    Check("V6.2 四端协议 Golden Vectors：设备码/PIN证明/音视频帧/触控与移动导航/文件块字节级一致",
+                        gvMatch,
+                        "code=" + gvCode + " plat=" + probe1.Platform + " ctrl=" + probe1.HostControlMode + " touch=" + BytesToHex(gvTouchPayload));
                 }
             }
             catch (Exception ex)
@@ -1497,6 +1538,31 @@ namespace DualRemote
                 }
                 try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { }
             }
+        }
+
+        private static byte[] SerializeSingleFrame(BoBoPacketType type, uint flagsOrTs, byte[] payload)
+        {
+            using (var ms = new MemoryStream())
+            {
+                BoBoProtocol.WriteFrameAsync(ms, type, flagsOrTs, payload, 0, payload != null ? payload.Length : 0, System.Threading.CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                return ms.ToArray();
+            }
+        }
+
+        private static byte[] HexToBytes(string hex)
+        {
+            byte[] buf = new byte[hex.Length / 2];
+            for (int i = 0; i < buf.Length; i++)
+                buf[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+            return buf;
+        }
+
+        private static string BytesToHex(byte[] data)
+        {
+            var sb = new StringBuilder(data.Length * 2);
+            for (int i = 0; i < data.Length; i++) sb.Append(data[i].ToString("x2"));
+            return sb.ToString();
         }
 
         private static bool TryWriteReport(string reportPath)

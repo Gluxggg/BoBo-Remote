@@ -75,6 +75,7 @@ namespace DualRemote
 
         // UI components
         private readonly Panel nativeTopBar;
+        private readonly Panel mobileNavBar;
         private readonly PictureBox topBarLogo;
         private readonly Label topBarTitleLabel;
         private readonly Button topBarMousePillBtn;
@@ -294,6 +295,48 @@ namespace DualRemote
 
             nativeTopBar.Controls.Add(topBarActions);
             nativeTopBar.Controls.Add(leftFlow);
+
+            // V6.2 手机被控快捷导航条（连接 Android 被控端时自动显现）
+            mobileNavBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = Math.Max(32, (int)Math.Round(34 * dpi)),
+                BackColor = Color.FromArgb(24, 34, 52),
+                Padding = new Padding((int)Math.Round(10 * dpi), (int)Math.Round(3 * dpi), (int)Math.Round(10 * dpi), (int)Math.Round(3 * dpi)),
+                Visible = false
+            };
+            var mobileNavFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = Color.Transparent,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
+            };
+            Action<string, int> addMobBtn = delegate(string label, int navAct)
+            {
+                Button mb = CreateTopBarButton(label, Color.FromArgb(41, 56, 82), Color.FromArgb(236, 242, 252), dpi);
+                mb.Height = Math.Max(24, (int)Math.Round(26 * dpi));
+                mb.MinimumSize = new Size(0, mb.Height);
+                mb.Click += delegate
+                {
+                    BoBoStreamClient sc = streamClient;
+                    if (sc != null && sc.IsConnected) sc.SendMobileNav(navAct);
+                    FocusChildViewport();
+                };
+                mobileNavFlow.Controls.Add(mb);
+            };
+            addMobBtn("◀ 返回", BoBoProtocol.MobileNavBack);
+            addMobBtn("● 主页", BoBoProtocol.MobileNavHome);
+            addMobBtn("▢ 多任务", BoBoProtocol.MobileNavRecents);
+            addMobBtn("🔔 通知栏", BoBoProtocol.MobileNavNotifications);
+            addMobBtn("🔊 音量+", BoBoProtocol.MobileNavVolumeUp);
+            addMobBtn("🔉 音量-", BoBoProtocol.MobileNavVolumeDown);
+            addMobBtn("🔒 锁屏", BoBoProtocol.MobileNavLock);
+            mobileNavBar.Controls.Add(mobileNavFlow);
+            Controls.Add(mobileNavBar);
+
             Controls.Add(nativeTopBar);
             RefreshTopBarVisuals();
 
@@ -1121,10 +1164,33 @@ namespace DualRemote
                     hostNativeHeight = mons[idx].Height;
                 }
                 remoteSessionConnected = true;
+                string remotePlat = client.RemotePlatform ?? BoBoProtocol.PlatformWindows;
+                string remoteCtrlMode = client.RemoteHostControlMode ?? BoBoProtocol.ControlModeFull;
+                bool isMobileRemote = string.Equals(remotePlat, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(remotePlat, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)
+                    || (h > w && w > 0);
+                bool isViewOnlyRemote = string.Equals(remoteCtrlMode, BoBoProtocol.ControlModeViewOnly, StringComparison.OrdinalIgnoreCase);
+
                 SafeUiInvoke(delegate
                 {
                     if (gen != sessionGeneration || IsDisposed) return;
                     statusOverlay.SetOverlayVisible(false);
+                    if (isMobileRemote)
+                    {
+                        superDisplayMode = false;
+                        scaleMode = 1; // 等比居中，避免竖屏手机画面被拉伸变形
+                        aspectFit = true;
+                        BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
+                        if (curNc != null) curNc.SetScaleMode(1);
+                    }
+                    if (mobileNavBar != null && !mobileNavBar.IsDisposed)
+                    {
+                        mobileNavBar.Visible = string.Equals(remotePlat, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase);
+                    }
+                    if (isViewOnlyRemote)
+                    {
+                        ApplyMouseModeSelection(ControlMouseMode.ViewOnly, false);
+                    }
                     SyncChildViewportSize();
                     FocusChildViewport();
                     StartStatsPollingTimer();
@@ -1138,11 +1204,19 @@ namespace DualRemote
                     {
                         try { PlayerProcessStarted(Process.GetCurrentProcess().Id); } catch { }
                     }
-                    if (!freeMouseMode)
+                    if (isViewOnlyRemote)
+                    {
+                        ShowToastHint("已进入仅查看协助模式（对方端仅支持屏幕共享，无法远程注入输入）");
+                    }
+                    else if (string.Equals(remotePlat, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ShowToastHint("已连接 Android 手机被控端 · 可直接点击拖动画面或使用顶部手机导航栏");
+                    }
+                    else if (!freeMouseMode)
                     {
                         ShowToastHint("已进入锁鼠模式 · 随时轻按 Ctrl+Alt 释放鼠标并点浮窗 · Ctrl+Alt+Shift+Q 退出");
                     }
-                    NotifyStatus("已通过 BoBo V6 全内置内核接通 " + hostDisplayName + "（" + currentModeTag + "）。");
+                    NotifyStatus("已通过 BoBo V6.2 全内置内核接通 " + hostDisplayName + "（" + currentModeTag + "）。");
                 });
             };
 
@@ -1159,6 +1233,11 @@ namespace DualRemote
             client.SuperDisplayStateChanged += delegate(bool active, bool nativeMatch, int w, int h)
             {
                 if (gen != sessionGeneration) return;
+                string rp = client.RemotePlatform ?? BoBoProtocol.PlatformWindows;
+                bool mobilePortrait = string.Equals(rp, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(rp, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)
+                    || (h > w && w > 0);
+                if (mobilePortrait) active = false;
                 superDisplayMode = active;
                 superDisplayNativeMatch = nativeMatch;
                 if (w > 0 && h > 0)

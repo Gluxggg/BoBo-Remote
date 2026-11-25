@@ -506,14 +506,19 @@ namespace DualRemote
                     {
                         if (string.IsNullOrWhiteSpace(lp.Host)) continue;
                         seenIps.Add(lp.Host);
+                        string platTag = "Windows";
+                        if (string.Equals(lp.Platform, BoBoProtocol.PlatformMacOS, StringComparison.OrdinalIgnoreCase)) platTag = "macOS";
+                        else if (string.Equals(lp.Platform, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)) platTag = "Android";
+                        else if (string.Equals(lp.Platform, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)) platTag = "iOS";
+                        bool isViewOnly = string.Equals(lp.HostControlMode, BoBoProtocol.ControlModeViewOnly, StringComparison.OrdinalIgnoreCase);
                         merged.Add(new TsPeer
                         {
                             HostName = lp.DeviceName,
                             Ip = lp.Host,
                             Online = lp.AllowIncoming,
                             LinkText = lp.AllowIncoming
-                                ? ("BoBo V6 在线 · 局域网直连 · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
-                                : "局域网 · 对方已关闭被控"
+                                ? (platTag + (isViewOnly ? " · 仅投屏观看" : " · 局域网直连") + " · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
+                                : (platTag + " · 局域网 · 对方已关闭被控")
                         });
                     }
                 }

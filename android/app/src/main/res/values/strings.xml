@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BoBo远程</string>
+    <string name="accessibility_service_label">BoBo远程 免Root触控辅助服务</string>
+    <string name="accessibility_service_desc">允许已配对授权的 BoBo远程 设备在本机开启「被控」时执行远程点击、滑动、返回主页与剪贴板输入。退出 BoBo远程 后立即断开，不会在后台静默运行。</string>
+</resources>

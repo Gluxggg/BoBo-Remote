@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>BoBoRemoteMac</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.bobo.remote.macos</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>BoBo远程</string>
+    <key>CFBundleDisplayName</key>
+    <string>BoBo远程</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>6.2.0</string>
+    <key>CFBundleVersion</key>
+    <string>620</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>BoBo远程需要访问局域网以自动发现同网段的 Windows、macOS、Android 和 iOS 设备。</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>BoBo远程需要屏幕录制权限以在您主动允许本机被控时传输低延迟画面与系统声音。</string>
+</dict>
+</plist>

@@ -1174,7 +1174,9 @@ namespace DualRemote
                     if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
                     {
                         ClearPrivacyButtonFocus();
-                        privacyCurtain.Deactivate(privacyConfig.LockOnLocalExit);
+                        // 远控正常断开时直接收起防窥幕布，不误触发「仅物理键退出时自动锁屏」；
+                        // 若主控端显式开启「断开后自动锁屏」，由主控端在断开前单独发送 LOCK_WORKSTATION。
+                        privacyCurtain.Deactivate(false);
                         ShowDisplayBanner("远控会话已结束，防窥壁纸已自动收起。", Theme.PillTone.Info);
                     }
                     deviceBanner.Set("远控会话已结束，本机恢复就绪状态。", Theme.PillTone.Info);
@@ -2382,7 +2384,7 @@ namespace DualRemote
                 else if (action == PrivacyGuardAction.DeactivateAuto)
                 {
                     ClearPrivacyButtonFocus();
-                    privacyCurtain.Deactivate(privacyConfig.LockOnLocalExit);
+                    privacyCurtain.Deactivate(false);
                     ShowDisplayBanner("远控会话已结束，已自动收起防窥壁纸。", Theme.PillTone.Info);
                 }
             }

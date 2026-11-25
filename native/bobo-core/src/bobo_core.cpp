@@ -58,6 +58,7 @@ struct BoBoHostSession {
         int32_t curMon = -1, curW = 0, curH = 0, curFps = 60, curBps = 14000;
         bool initialized = false;
         int64_t frameIndex = 0;
+        int consecutiveEncodeFailures = 0;
         auto startClock = std::chrono::steady_clock::now();
 
         while (running.load()) {
@@ -75,6 +76,7 @@ struct BoBoHostSession {
                     encoder.Open(capturer.OutputWidth(), capturer.OutputHeight(),
                                  static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps), err)) {
                     initialized = true;
+                    consecutiveEncodeFailures = 0;
                     keyframePending.store(true);
                 } else {
                     initialized = false;
@@ -103,11 +105,15 @@ struct BoBoHostSession {
                     hasFrame = true;
                 }
             }
+            if (!hasFrame && forceKey) {
+                keyframePending.store(true);
+            }
             if (hasFrame) {
                 int64_t sampleTimeHns = frameIndex * (10000000LL / curFps);
                 bool isKey = false;
                 std::string encErr;
                 if (encoder.EncodeNv12(nv12Buf.data(), nv12Buf.size(), sampleTimeHns, forceKey, h264Buf, isKey, encErr)) {
+                    consecutiveEncodeFailures = 0;
                     if (!h264Buf.empty() && onVideo) {
                         uint32_t tsMs = static_cast<uint32_t>(
                             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -121,6 +127,12 @@ struct BoBoHostSession {
                                 userCtx);
                     }
                     ++frameIndex;
+                } else {
+                    if (forceKey) keyframePending.store(true);
+                    if (++consecutiveEncodeFailures >= 5) {
+                        initialized = false;
+                        consecutiveEncodeFailures = 0;
+                    }
                 }
             }
 
@@ -191,12 +203,14 @@ static std::atomic<bool> g_privBlockActive{ false };
 static std::atomic<bool> g_privHookReady{ false };
 static std::atomic<bool> g_privHookSuccess{ false };
 static std::thread g_privHookThread;
-static DWORD g_privHookThreadId = 0;
-static BoBoPrivacyEscapeCallback g_privEscapeCb = nullptr;
-static void* g_privEscapeCtx = nullptr;
+static std::atomic<DWORD> g_privHookThreadId{ 0 };
+static std::atomic<uint64_t> g_privEscapeEpoch{ 0 };
+static std::atomic<BoBoPrivacyEscapeCallback> g_privEscapeCb{ nullptr };
+static std::atomic<void*> g_privEscapeCtx{ nullptr };
 static std::atomic<bool> g_physCtrl{ false };
 static std::atomic<bool> g_physAlt{ false };
 static std::atomic<bool> g_physShift{ false };
+static std::atomic<uint32_t> g_injectedMouseMask{ 0 };
 
 static LRESULT CALLBACK PrivacyLowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && g_privBlockActive.load()) {
@@ -235,10 +249,15 @@ static LRESULT CALLBACK PrivacyLowLevelKeyProc(int nCode, WPARAM wParam, LPARAM 
                     g_physCtrl.store(false);
                     g_physAlt.store(false);
                     g_physShift.store(false);
-                    BoBoPrivacyEscapeCallback cb = g_privEscapeCb;
-                    void* ctx = g_privEscapeCtx;
+                    uint64_t epoch = g_privEscapeEpoch.load();
+                    BoBoPrivacyEscapeCallback cb = g_privEscapeCb.load();
+                    void* ctx = g_privEscapeCtx.load();
                     if (cb) {
-                        std::thread([cb, ctx]() { cb(ctx); }).detach();
+                        std::thread([cb, ctx, epoch]() {
+                            if (g_privEscapeEpoch.load() == epoch && g_privBlockActive.load()) {
+                                cb(ctx);
+                            }
+                        }).detach();
                     }
                     return 1;
                 }
@@ -981,15 +1000,18 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
         }
         case 3: { // Mouse buttons
             bool down = (pkt->flags & 1) != 0;
+            uint32_t btnBit = 0;
             inp.type = INPUT_MOUSE;
             switch (pkt->a) {
-                case 1: inp.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP; break;
-                case 2: inp.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; break;
-                case 3: inp.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP; break;
-                case 4: inp.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; inp.mi.mouseData = XBUTTON1; break;
-                case 5: inp.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; inp.mi.mouseData = XBUTTON2; break;
+                case 1: inp.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP; btnBit = 1u << 0; break;
+                case 2: inp.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; btnBit = 1u << 1; break;
+                case 3: inp.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP; btnBit = 1u << 2; break;
+                case 4: inp.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; inp.mi.mouseData = XBUTTON1; btnBit = 1u << 3; break;
+                case 5: inp.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; inp.mi.mouseData = XBUTTON2; btnBit = 1u << 4; break;
                 default: return;
             }
+            if (down) g_injectedMouseMask.fetch_or(btnBit);
+            else g_injectedMouseMask.fetch_and(~btnBit);
             inp.mi.dwExtraInfo = kBoBoInjectedMagic;
             SendInput(1, &inp, sizeof(INPUT));
             break;
@@ -1014,16 +1036,81 @@ BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInp
             SendInput(1, &inp, sizeof(INPUT));
             break;
         }
-        case 6: { // Release all modifier keys
+        case 6: { // Release all modifier keys and any remote-held mouse buttons
             const WORD mods[] = { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
             for (WORD vk : mods) {
                 INPUT u = {};
                 u.type = INPUT_KEYBOARD;
                 u.ki.wVk = vk;
+                u.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
                 u.ki.dwFlags = KEYEVENTF_KEYUP;
                 u.ki.dwExtraInfo = kBoBoInjectedMagic;
                 SendInput(1, &u, sizeof(INPUT));
             }
+            uint32_t heldBtns = g_injectedMouseMask.exchange(0);
+            if (heldBtns != 0) {
+                const struct { uint32_t bit; DWORD flag; DWORD data; } btnDefs[] = {
+                    { 1u << 0, MOUSEEVENTF_LEFTUP, 0 },
+                    { 1u << 1, MOUSEEVENTF_MIDDLEUP, 0 },
+                    { 1u << 2, MOUSEEVENTF_RIGHTUP, 0 },
+                    { 1u << 3, MOUSEEVENTF_XUP, XBUTTON1 },
+                    { 1u << 4, MOUSEEVENTF_XUP, XBUTTON2 }
+                };
+                for (const auto& bd : btnDefs) {
+                    if (heldBtns & bd.bit) {
+                        INPUT mu = {};
+                        mu.type = INPUT_MOUSE;
+                        mu.mi.dwFlags = bd.flag;
+                        mu.mi.mouseData = bd.data;
+                        mu.mi.dwExtraInfo = kBoBoInjectedMagic;
+                        SendInput(1, &mu, sizeof(INPUT));
+                    }
+                }
+            }
+            break;
+        }
+        case 7: { // V6.2 Touch pointer -> map primary finger (pointerId == 0) to absolute mouse
+            int pointerId = (pkt->flags >> 4) & 0x0F;
+            int action = pkt->flags & 0x0F; // 0=Down, 1=Move, 2=Up, 3=Cancel
+            if (pointerId != 0) break;
+
+            auto monitors = ScreenCapturer::EnumerateMonitors();
+            int monLeft = 0, monTop = 0, monW = GetSystemMetrics(SM_CXSCREEN), monH = GetSystemMetrics(SM_CYSCREEN);
+            if (!monitors.empty()) {
+                int idx = (monitorIndex >= 0 && monitorIndex < static_cast<int>(monitors.size())) ? monitorIndex : 0;
+                monLeft = monitors[static_cast<size_t>(idx)].left;
+                monTop = monitors[static_cast<size_t>(idx)].top;
+                monW = monitors[static_cast<size_t>(idx)].width;
+                monH = monitors[static_cast<size_t>(idx)].height;
+            }
+            int vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            int vW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            int vH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (vW <= 1) vW = 1920;
+            if (vH <= 1) vH = 1080;
+
+            uint16_t nx = static_cast<uint16_t>(pkt->a);
+            uint16_t ny = static_cast<uint16_t>(pkt->b);
+            double px = static_cast<double>(monLeft) + (static_cast<double>(nx) / 65535.0) * static_cast<double>(monW - 1);
+            double py = static_cast<double>(monTop) + (static_cast<double>(ny) / 65535.0) * static_cast<double>(monH - 1);
+
+            inp.type = INPUT_MOUSE;
+            inp.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+            if (action == 0) {
+                inp.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+                g_injectedMouseMask.fetch_or(1u << 0);
+            } else if (action == 2 || action == 3) {
+                inp.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+                g_injectedMouseMask.fetch_and(~(1u << 0));
+            }
+            inp.mi.dx = static_cast<LONG>(((px - vLeft) * 65535.0) / static_cast<double>(vW - 1) + 0.5);
+            inp.mi.dy = static_cast<LONG>(((py - vTop) * 65535.0) / static_cast<double>(vH - 1) + 0.5);
+            inp.mi.dwExtraInfo = kBoBoInjectedMagic;
+            SendInput(1, &inp, sizeof(INPUT));
+            break;
+        }
+        case 8: { // V6.2 Mobile system navigation (no-op on Windows host)
             break;
         }
         default:
@@ -1172,9 +1259,19 @@ BOBO_API void __stdcall BoBoHost_RestoreSuperDisplay() {
     std::lock_guard<std::mutex> lk(g_superDispMutex);
     if (!g_superDispApplied) return;
     g_superDispApplied = false;
-    LONG rc = ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &g_superDispOrigMode, nullptr, 0, nullptr);
-    if (rc != DISP_CHANGE_SUCCESSFUL) {
-        ChangeDisplaySettingsExW(g_superDispDevice.c_str(), nullptr, nullptr, 0, nullptr);
+    // Prefer restoring the exact registry display mode (cleanly unwinds CDS_FULLSCREEN without touching color/HDR)
+    LONG rc = ChangeDisplaySettingsExW(g_superDispDevice.c_str(), nullptr, nullptr, 0, nullptr);
+    DEVMODEW verify = {};
+    verify.dmSize = sizeof(verify);
+    bool matched = (rc == DISP_CHANGE_SUCCESSFUL) &&
+        EnumDisplaySettingsW(g_superDispDevice.c_str(), ENUM_CURRENT_SETTINGS, &verify) &&
+        verify.dmPelsWidth == g_superDispOrigMode.dmPelsWidth &&
+        verify.dmPelsHeight == g_superDispOrigMode.dmPelsHeight &&
+        (g_superDispOrigMode.dmDisplayFrequency == 0 || verify.dmDisplayFrequency == g_superDispOrigMode.dmDisplayFrequency);
+    if (!matched && g_superDispOrigMode.dmPelsWidth > 0 && g_superDispOrigMode.dmPelsHeight > 0) {
+        DEVMODEW safeOrig = g_superDispOrigMode;
+        safeOrig.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+        ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &safeOrig, nullptr, 0, nullptr);
     }
     g_superDispDevice.clear();
     std::memset(&g_superDispOrigMode, 0, sizeof(g_superDispOrigMode));
@@ -1186,38 +1283,40 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
     void* userCtx) {
     std::lock_guard<std::mutex> lk(g_privHookMutex);
     if (!enable) {
+        g_privEscapeEpoch.fetch_add(1);
         g_privBlockActive.store(false);
         g_physCtrl.store(false);
         g_physAlt.store(false);
         g_physShift.store(false);
-        g_privEscapeCb = nullptr;
-        g_privEscapeCtx = nullptr;
+        g_privEscapeCb.store(nullptr);
+        g_privEscapeCtx.store(nullptr);
         if (g_privHookThread.joinable()) {
-            DWORD tid = g_privHookThreadId;
+            DWORD tid = g_privHookThreadId.load();
             if (tid != 0) {
                 PostThreadMessageW(tid, WM_QUIT, 0, 0);
             }
             g_privHookThread.join();
-            g_privHookThreadId = 0;
+            g_privHookThreadId.store(0);
         }
         return 1;
     }
 
-    g_privEscapeCb = onEscape;
-    g_privEscapeCtx = userCtx;
+    g_privEscapeEpoch.fetch_add(1);
+    g_privEscapeCb.store(onEscape);
+    g_privEscapeCtx.store(userCtx);
     if (g_privHookThread.joinable() && g_privBlockActive.load()) {
         return 1;
     }
     if (g_privHookThread.joinable()) {
-        DWORD tid = g_privHookThreadId;
+        DWORD tid = g_privHookThreadId.load();
         if (tid != 0) PostThreadMessageW(tid, WM_QUIT, 0, 0);
         g_privHookThread.join();
-        g_privHookThreadId = 0;
+        g_privHookThreadId.store(0);
     }
 
-    g_physCtrl.store(false);
-    g_physAlt.store(false);
-    g_physShift.store(false);
+    g_physCtrl.store((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+    g_physAlt.store((GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+    g_physShift.store((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
     g_privHookReady.store(false);
     g_privHookSuccess.store(false);
     g_privBlockActive.store(true);
@@ -1225,7 +1324,7 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
     g_privHookThread = std::thread([]() {
         MSG msg = {};
         PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-        g_privHookThreadId = GetCurrentThreadId();
+        g_privHookThreadId.store(GetCurrentThreadId());
 
         HMODULE hMod = GetModuleHandleW(nullptr);
         HHOOK hMouse = SetWindowsHookExW(WH_MOUSE_LL, PrivacyLowLevelMouseProc, hMod, 0);
@@ -1251,12 +1350,13 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
     }
 
     if (!g_privHookSuccess.load()) {
+        g_privEscapeEpoch.fetch_add(1);
         g_privBlockActive.store(false);
         if (g_privHookThread.joinable()) {
-            DWORD tid = g_privHookThreadId;
+            DWORD tid = g_privHookThreadId.load();
             if (tid != 0) PostThreadMessageW(tid, WM_QUIT, 0, 0);
             g_privHookThread.join();
-            g_privHookThreadId = 0;
+            g_privHookThreadId.store(0);
         }
         return 0;
     }
@@ -1341,6 +1441,7 @@ BOBO_API int32_t __stdcall BoBoClient_PushVideo(
     if (!st || !st->alive.load() || !h264Data || length <= 0) return 0;
 
     std::lock_guard<std::mutex> lk(st->decodeMutex);
+    if (!st->alive.load()) return 0;
     uint32_t w = srcWidth > 0 ? static_cast<uint32_t>(srcWidth) : st->videoW;
     uint32_t h = srcHeight > 0 ? static_cast<uint32_t>(srcHeight) : st->videoH;
     std::string err;
@@ -1493,14 +1594,15 @@ BOBO_API void __stdcall BoBoClient_Destroy(void* handle) {
     SyncClientSysKeyHook(st);
     ApplyClientMouseMode(st, true);
     if (g_activeClient == st) g_activeClient = nullptr;
+    if (st->viewportHwnd && IsWindow(st->viewportHwnd)) {
+        SetWindowLongPtrW(st->viewportHwnd, GWLP_USERDATA, 0);
+        DestroyWindow(st->viewportHwnd);
+        st->viewportHwnd = nullptr;
+    }
     st->audio.Shutdown();
     {
         std::lock_guard<std::mutex> lk(st->decodeMutex);
         st->decoder.CloseCodec();
-    }
-    if (st->viewportHwnd && IsWindow(st->viewportHwnd)) {
-        DestroyWindow(st->viewportHwnd);
-        st->viewportHwnd = nullptr;
     }
     delete st;
 }

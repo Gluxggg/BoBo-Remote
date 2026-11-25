@@ -492,7 +492,7 @@ namespace DualRemote
             }
         }
 
-        private static string DeriveNineDigitCode(string thumbHex)
+        internal static string DeriveNineDigitCode(string thumbHex)
         {
             byte[] hash;
             using (SHA256 sha = SHA256.Create())

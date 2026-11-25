@@ -7,17 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v4.2.0)'
+        description: 'Release tag (e.g. v6.2.0)'
         required: true
-        default: 'v4.2.0'
+        default: 'v6.2.0'
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build Windows x64 Setup EXE, Portable ZIP & Publish Release
+  build-windows:
+    name: Build Windows x64 Setup EXE, Portable ZIP & Create Release
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,3 +35,76 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\release-package.ps1 -Tag "${{ steps.meta.outputs.tag }}" -Repository "${{ github.repository }}"
+
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Test & Assemble Android APK
+        working-directory: android
+        run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace
+      - name: Prepare Android Release Asset
+        run: |
+          mkdir -p release-extra
+          cp android/app/build/outputs/apk/release/app-release.apk release-extra/BoBoRemote-Android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: release-extra/BoBoRemote-Android.apk
+
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test BoBoAppleCore
+        working-directory: apple/BoBoAppleCore
+        run: swift test
+      - name: Package macOS DMG
+        run: bash apple/scripts/package-macos-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist-apple/BoBoRemote-macOS.dmg
+
+  build-ios:
+    name: Build iOS Unsigned IPA
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Package iOS Unsigned IPA
+        run: bash apple/scripts/package-ios-ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ios
+          path: dist-apple/BoBoRemote-iOS-Unsigned.ipa
+
+  attach-cross-platform-assets:
+    name: Attach Android APK, macOS DMG & iOS IPA to Release
+    needs: [build-windows, build-android, build-macos, build-ios]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: cross-assets
+
+      - name: Upload Cross-Platform Installers to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build-windows.outputs.tag }}
+        run: |
+          gh release upload "$TAG" \
+            cross-assets/release-android/BoBoRemote-Android.apk \
+            cross-assets/release-macos/BoBoRemote-macOS.dmg \
+            cross-assets/release-ios/BoBoRemote-iOS-Unsigned.ipa \
+            --repo "${{ github.repository }}" --clobber

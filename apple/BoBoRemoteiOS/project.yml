@@ -1,0 +1,78 @@
+name: BoBoRemoteiOS
+options:
+  bundleIdPrefix: com.bobo.remote
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+packages:
+  BoBoAppleCore:
+    path: ../BoBoAppleCore
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "6.2.0"
+    CURRENT_PROJECT_VERSION: "620"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    ENABLE_BITCODE: "NO"
+targets:
+  BoBoRemoteiOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/App
+    dependencies:
+      - package: BoBoAppleCore
+        product: BoBoAppleCore
+      - target: BoBoBroadcastExtension
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: BoBo远程
+        CFBundleShortVersionString: "6.2.0"
+        CFBundleVersion: "620"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: "BoBo远程需要访问局域网以自动发现同网段的 Windows、macOS、Android 和 iOS 设备。"
+        NSBonjourServices:
+          - _bobo-remote._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bobo.remote.ios
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: "NO"
+
+  BoBoBroadcastExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/BroadcastExtension
+    dependencies:
+      - package: BoBoAppleCore
+        product: BoBoAppleCore
+    info:
+      path: Sources/BroadcastExtension/Info.plist
+      properties:
+        CFBundleDisplayName: BoBo投屏扩展
+        CFBundleShortVersionString: "6.2.0"
+        CFBundleVersion: "620"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).BoBoBroadcastSampleHandler"
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bobo.remote.ios.broadcast
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: "NO"

@@ -33,7 +33,9 @@ namespace DualRemote
         internal string DeviceName = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
-        internal string Version = "6.0.0";
+        internal string Version = "6.2.0";
+        internal string Platform = BoBoProtocol.PlatformWindows;
+        internal string HostControlMode = BoBoProtocol.ControlModeFull;
         internal bool AllowIncoming = true;
         internal DateTime LastSeenUtc = DateTime.UtcNow;
     }
@@ -84,6 +86,26 @@ namespace DualRemote
     internal static class BoBoProtocol
     {
         internal const string ProtocolMagic = "BOBO6";
+        internal const string ProtocolVersion = "6.2";
+        internal const string PlatformWindows = "windows";
+        internal const string PlatformMacOS = "macos";
+        internal const string PlatformAndroid = "android";
+        internal const string PlatformIOS = "ios";
+        internal const string ControlModeFull = "full";
+        internal const string ControlModeViewOnly = "view_only";
+
+        internal const byte InputKindTouch = 7;
+        internal const byte InputKindMobileNav = 8;
+
+        internal const int MobileNavBack = 1;
+        internal const int MobileNavHome = 2;
+        internal const int MobileNavRecents = 3;
+        internal const int MobileNavNotifications = 4;
+        internal const int MobileNavLock = 5;
+        internal const int MobileNavVolumeUp = 6;
+        internal const int MobileNavVolumeDown = 7;
+        internal const int MobileNavPowerDialog = 8;
+
         internal const int DefaultTcpPort = 49810;
         internal const int DiscoveryUdpPort = 49812;
         internal const int HeaderBytes = 9;
@@ -248,6 +270,29 @@ namespace DualRemote
             pkt.A = ReadInt16LE(payload, 2);
             pkt.B = ReadInt16LE(payload, 4);
             return true;
+        }
+
+        internal static BoBoInputPacket BuildTouchInput(int pointerId, int action, ushort nx, ushort ny)
+        {
+            byte flags = (byte)(((pointerId & 0x0F) << 4) | (action & 0x0F));
+            return new BoBoInputPacket
+            {
+                Kind = InputKindTouch,
+                Flags = flags,
+                A = unchecked((short)nx),
+                B = unchecked((short)ny)
+            };
+        }
+
+        internal static BoBoInputPacket BuildMobileNavInput(int navAction)
+        {
+            return new BoBoInputPacket
+            {
+                Kind = InputKindMobileNav,
+                Flags = 0,
+                A = (short)navAction,
+                B = 0
+            };
         }
 
         internal static byte[] BuildFileChunkPayload(string transferId16, long offset, byte[] data, int count)

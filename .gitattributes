@@ -1,3 +1,4 @@
 # Keep pinned upstream license texts byte-identical (no CRLF conversion)
 # so SHA-256 verification in build.ps1 passes on Windows runners with core.autocrlf=true.
 LICENSES/*.txt -text
+*.sh text eol=lf

@@ -68,7 +68,7 @@ namespace DualRemote
                 SyncRemoteGuardTimer();
                 UpdatePrivacyIndicators();
                 ShowDisplayBanner(autoSwitch.Checked
-                    ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏、锁定物理键鼠并熄黑，断开后自动恢复。"
+                    ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏并锁定物理键鼠，断开后自动恢复。"
                     : "已关闭自动防窥守护。", Theme.PillTone.Info);
             };
             AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启完全防窥保护",
@@ -90,7 +90,7 @@ namespace DualRemote
             AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "防窥时彻底锁定被控端物理键鼠",
                 "阻断被控端本机物理鼠标点击任务栏/开始页/右键刷新与键盘输入，仅放行远控操控及 Ctrl+Alt+Shift+P", blockInputSwitch);
 
-            var hwBlackoutSwitch = BuildToggle("物理显示器深度熄黑", privacyConfig.HardwareBlackout);
+            var hwBlackoutSwitch = BuildToggle("物理屏背光降亮", privacyConfig.HardwareBlackout);
             hwBlackoutSwitch.CheckedChanged += delegate
             {
                 privacyConfig.HardwareBlackout = hwBlackoutSwitch.Checked;
@@ -101,11 +101,11 @@ namespace DualRemote
                     else PrivacyDisplayDimmer.RestoreAllAsync();
                 }
                 ShowDisplayBanner(hwBlackoutSwitch.Checked
-                    ? "已开启物理屏 DDC/CI 硬件深度熄黑：彻底屏蔽打字输入法与右键菜单外泄，退出或重启自动恢复。"
-                    : "已关闭硬件深度熄黑（防窥时将仅显示上方防窥壁纸与 0ms 置顶遮挡）。", Theme.PillTone.Info);
+                    ? "已开启物理屏背光降亮（仅调节非 HDR 显示器 VCP 0x10 背光亮度，绝不修改对比度与 RGB 色温，断开后回读校验恢复）。"
+                    : "已关闭物理屏背光降亮（防窥时仅使用防窥壁纸、0ms 置顶遮挡与物理键鼠锁定，完全不改动显示器硬件参数）。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "深度熄黑物理显示器（DDC/CI 硬件级屏蔽）",
-                "防窥时通过显示器硬件通道将亮度/对比度/RGB 增益归零，对远控画面 100% 透明，杜绝打字候选框与右键菜单外泄", hwBlackoutSwitch);
+            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "防窥时降低物理屏背光亮度（DDC/CI 仅调亮度，可选）",
+                "仅将非 HDR 显示器背光亮度（0x10）调低并回读校验恢复，绝不改对比度或 RGB 增益，杜绝退出后过曝偏色", hwBlackoutSwitch);
 
             var lockSwitch = BuildToggle("退出防窥自动锁屏", privacyConfig.LockOnLocalExit);
             lockSwitch.CheckedChanged += delegate

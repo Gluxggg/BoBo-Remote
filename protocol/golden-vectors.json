@@ -1,0 +1,133 @@
+{
+  "protocol": "BOBO6",
+  "protocolVersion": "6.2",
+  "deviceCodeDerivation": {
+    "thumbprintHex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "expectedDeviceCode": "550555803"
+  },
+  "pinProof": {
+    "pin": "7391",
+    "nonceHex": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "clientThumbprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "hostThumbprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expectedProofHex": "1f553fefb979566b1c535d36c3fa2696735d3aecc3d6df44ae2c9af8b2cd539e"
+  },
+  "videoFrame": {
+    "width": 2560,
+    "height": 1440,
+    "isKeyframe": true,
+    "timestampMs": 123456,
+    "h264Hex": "000000016742001e0000000168ce388000000001658884",
+    "payloadHex": "000aa00501000000016742001e0000000168ce388000000001658884",
+    "frameHex": "021c00000040e20100000aa00501000000016742001e0000000168ce388000000001658884"
+  },
+  "audioAdpcm": {
+    "sampleRate": 48000,
+    "channels": 2,
+    "sampleCount": 8,
+    "pcmInterleaved": [
+      0,
+      0,
+      1200,
+      -1200,
+      4500,
+      -4500,
+      12000,
+      -12000,
+      18000,
+      -16000,
+      9000,
+      -8000,
+      -3000,
+      3500,
+      -10000,
+      11000
+    ],
+    "adpcmPacketHex": "000000000000000000f7f7f7f7f77f7f",
+    "expectedDecodedPcm": [
+      0,
+      0,
+      11,
+      -11,
+      41,
+      -41,
+      104,
+      -104,
+      240,
+      -240,
+      533,
+      -533,
+      -98,
+      98,
+      -1455,
+      1455
+    ],
+    "payloadHex": "80bb0000020800000000000000000000f7f7f7f7f77f7f",
+    "frameHex": "03170000000000000080bb0000020800000000000000000000f7f7f7f7f77f7f"
+  },
+  "inputPackets": {
+    "mouseAbsCenter": {
+      "kind": 1,
+      "flags": 0,
+      "a": 32767,
+      "b": -32768,
+      "payloadHex": "0100ff7f0080"
+    },
+    "mouseRel": {
+      "kind": 2,
+      "flags": 0,
+      "a": -18,
+      "b": 42,
+      "payloadHex": "0200eeff2a00"
+    },
+    "mouseBtnRightDown": {
+      "kind": 3,
+      "flags": 1,
+      "a": 3,
+      "b": 0,
+      "payloadHex": "030103000000"
+    },
+    "mouseWheelDown": {
+      "kind": 4,
+      "flags": 0,
+      "a": -120,
+      "b": 0,
+      "payloadHex": "040088ff0000"
+    },
+    "keyEnterDown": {
+      "kind": 5,
+      "flags": 1,
+      "a": 13,
+      "b": 0,
+      "payloadHex": "05010d000000"
+    },
+    "releaseAll": {
+      "kind": 6,
+      "flags": 0,
+      "a": 0,
+      "b": 0,
+      "payloadHex": "060000000000"
+    },
+    "touchPointer1Down": {
+      "kind": 7,
+      "flags": 16,
+      "a": 16384,
+      "b": -32768,
+      "payloadHex": "071000400080"
+    },
+    "mobileNavBack": {
+      "kind": 8,
+      "flags": 0,
+      "a": 1,
+      "b": 0,
+      "payloadHex": "080001000000"
+    }
+  },
+  "fileChunk": {
+    "transferId": "0123456789abcdef",
+    "offset": 65536,
+    "chunkHex": "deadbeef",
+    "payloadHex": "303132333435363738396162636465660000010000000000deadbeef",
+    "frameHex": "051c00000000000000303132333435363738396162636465660000010000000000deadbeef"
+  }
+}

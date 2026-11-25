@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.BoBoRemote" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FFF4F7FC</item>
+        <item name="android:navigationBarColor">#FFFFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <style name="Theme.BoBoRemote.Fullscreen" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:statusBarColor">#FF0E1520</item>
+        <item name="android:navigationBarColor">#FF0E1520</item>
+    </style>
+</resources>

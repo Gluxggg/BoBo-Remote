@@ -17,3 +17,15 @@ native/bobo-stream-player/third_party/
 *.exe
 *.pdb
 *.obj
+
+# Android & Apple 构建缓存与产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+apple/**/.build/
+apple/**/.swiftpm/
+apple/BoBoRemoteiOS/build/
+apple/BoBoRemoteiOS/*.xcodeproj/
+dist-apple/
+one-sku-study.zip

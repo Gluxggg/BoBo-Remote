@@ -1,0 +1,2 @@
+-keep class com.bobo.remote.protocol.** { *; }
+-keep class com.bobo.remote.network.** { *; }
