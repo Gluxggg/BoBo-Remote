@@ -55,28 +55,26 @@ $sumsText = "# engines=$enginesStamp`n$hSetup  BoBoRemote-Setup-x64.exe`n$hPort 
 
 $notesPath = Join-Path $assetDir 'release-notes.md'
 $notesTemplate = @'
-## BoBo Remote __TAG__ (Windows x64 · V6 全内置单文件架构)
+## BoBo Remote __TAG__ (Windows x64 · V6.1 全内置单文件架构)
 
-### 核心升级亮点（彻底解决外置内核独立连控与笔记本配对码问题）
-- **全部内核写入单一软件，彻底移除所有独立外置可执行内核**：
-  - 不再包含 `engines\Sunshine\sunshine.exe`、`engines\Moonlight\Moonlight.exe`、`engines\MoonlightVPlus\Moonlight.exe`、`engines\RustDesk\rustdesk.exe` 或独立 `BoBoStreamPlayer.exe`；
-  - DXGI/GDI 屏幕采编、Media Foundation H.264 硬件编码/D3D11VA 硬解渲染、WASAPI 回环与播放音频、键鼠 Unicode 注入、TLS 1.2 专属协议与文件传输全部内嵌进 `BoBo远程.exe`（通过进程内原生库 `BoBoCore.dll` 唯一加载，无法脱离软件独立运行），整包体积从 ~250 MB 瘦身至 **< 1 MB**！
-- **严格双端必开 + 双向加密授权（彻底杜绝未开 BoBo远程 被连控）**：
-  - 使用专属端口 `49810`（TLS 1.2）与局域网 UDP `49812` 自动发现，与任何第三方 Sunshine (`47989`) 彻底隔离；
-  - 必须**控制端与被控端双方同时打开 BoBo远程** 且完成 BoBo 自身 4 位临时配对码（HMAC-SHA256 双向认证）后才允许连控；
-  - 退出 BoBo远程 立即关闭 `49810` 监听端口，从物理层面杜绝软件未打开时仍可被外部内核连控的隐患。
-- **台式机 & 笔记本零毫秒 100% 生成 4 位临时配对码**：
-  - 配对码全内存加密随机即时生成，不再依赖外置 Sunshine WebUI/令牌轮询，每台电脑即点即出，有效期 120 秒。
-- **原生全功能升级**：
-  - 毫秒级（<5ms）被控端物理防窥幕布同步触发（首帧编码前即落下）；
-  - 实时无缝切屏（`Ctrl+Alt+→`）、无缝热切换分辨率/帧率/码率（不黑屏不断连）、被控端扬声器实时静音/自动恢复、断开自动锁屏；
-  - 内置 TLS 1.2 极速点对点文件传输（自动 SHA-256 校验，自动保存至「下载\BoBoRemote」）；
-  - 保留 UU 风格完整控制中心、四边贴边隐藏可拖动方形悬浮球与锁鼠 `Ctrl+Alt` 随时释放。
+### 本次核心升级亮点
+- **1. 框内主机小指针 · 框外本机大鼠标无缝分离**：
+  - 被控端内置原生主机光标实时合成（支持彩色透明、阴影及反色 I-Beam 光标，DXGI 与 GDI 路径均精确合成，静态桌面移动光标亦实时刷新）；
+  - 控制端视口进入视频画面区域瞬间零闪烁隐藏本机大鼠标，仅呈现被控端原生小鼠标指针；移出画面框（顶栏、悬浮球、控制中心、窗口外或副屏）瞬间无缝切回本机大鼠标点击，彻底告别双光标重叠；
+  - 修正边缘像素坐标精度及点击瞬间坐标同步，锁鼠模式依然支持 `Ctrl+Alt` 瞬间释放。
+- **2. UU 同款「超级屏」全屏自适应模式（彻底消除笔记本上下黑边）**：
+  - 默认开启超级屏全屏自适应（`scaleMode=2`），在 16:10（如 2880×1800）等异形屏笔记本全屏远控 16:9 台式机时自动消除上下黑边；
+  - 新增 `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` 协议闭环：优先尝试以无闪烁临时模式（`CDS_FULLSCREEN`）匹配被控端原生同比例高分辨率（低于 1440×900 自动保护不降质），未匹配时客户端以 GPU SuperFill 满屏无黑边呈现且鼠标点击 1:1 精准对应，断开/退出自动还原被控端分辨率；
+  - 控制中心「显示屏」新增「切换使用超级屏」，「窗口」菜单提供「全屏自适应（无黑边）/ 等比居中 / 实际大小 1:1」三档实时切换。
+- **3. 被控端真·物理级完全防窥保护（防任务栏/开始菜单/右键刷新/打字外泄）**：
+  - **原生低级物理键鼠锁（`WH_MOUSE_LL` + `WH_KEYBOARD_LL`）**：防窥开启瞬间 100% 阻断被控端现场物理鼠标（点击任务栏、开始菜单、右键刷新、悬停）与物理键盘输入，仅精准放行带 BoBo 专属签名（`kBoBoInjectedMagic`）的远控注入事件及机主紧急退出热键 `Ctrl+Alt+Shift+P`；
+  - **DDC/CI 显示器硬件级深度熄黑（`dxva2.dll`）**：将物理显示器面板亮度/对比度/RGB 增益归零，对 DXGI 远控采集 100% 透明，彻底杜绝 Win11 开始菜单、现代右键刷新菜单及中文输入法打字候选框外泄；熄黑前落盘原始寄存器表，支持退出防窥、锁屏、退出软件及异常重启自动恢复；
+  - **0ms `SetWinEventHook` Z 序守护 + 分辨率变更无缝重绘**：超级屏切分辨率时防窥锁鼠与熄黑全程不中断、不闪烁。
 
 ### 下载说明
-- **`BoBoRemote-Setup-x64.exe`（标准图形化安装包，< 1 MB）**：默认免 UAC 安装至 `%LOCALAPPDATA%\BoBoRemote`，从 V5 覆盖升级时自动清理旧版 `engines\` 与 `BoBoStreamPlayer.exe`。
+- **`BoBoRemote-Setup-x64.exe`（标准图形化安装包，< 1 MB）**：默认免 UAC 安装至 `%LOCALAPPDATA%\BoBoRemote`，支持无缝静默覆盖升级。
 - **`BoBoRemote-Portable-x64.zip`（绿色便携包，< 1 MB）**：解压后直接双击 `BoBo远程.exe` 即可运行。
-- **`BoBoRemote-Update-x64.zip`（应用内增量更新包）**：供已有 V6 客户端自动检测升级。
+- **`BoBoRemote-Update-x64.zip`（应用内增量更新包）**：供已有 V6 客户端应用内一键升级。
 
 ### SHA-256 校验值
 ```text

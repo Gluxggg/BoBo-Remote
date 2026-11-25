@@ -313,7 +313,10 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
             if (SUCCEEDED(desktopRes.As(&desktopTex)) && desktopTex) {
                 D3D11_TEXTURE2D_DESC td = {};
                 desktopTex->GetDesc(&td);
-                if (!lastDesktopTex_) {
+                if (!lastDesktopTex_ || lastDesktopW_ != td.Width || lastDesktopH_ != td.Height) {
+                    lastDesktopTex_.Reset();
+                    lastDesktopW_ = 0;
+                    lastDesktopH_ = 0;
                     D3D11_TEXTURE2D_DESC copyDesc = td;
                     copyDesc.Usage = D3D11_USAGE_DEFAULT;
                     copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -323,12 +326,17 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
                         copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
                         device_->CreateTexture2D(&copyDesc, nullptr, lastDesktopTex_.ReleaseAndGetAddressOf());
                     }
+                    if (lastDesktopTex_) {
+                        lastDesktopW_ = td.Width;
+                        lastDesktopH_ = td.Height;
+                    }
                 }
                 if (lastDesktopTex_) {
                     context_->CopyResource(lastDesktopTex_.Get(), desktopTex.Get());
                 }
                 ok = ConvertBgraTextureToNv12(desktopTex.Get(), outNv12);
                 if (ok) {
+                    CompositeHostCursorIntoNv12(outNv12);
                     hasFirstFrame_ = true;
                     outChanged = true;
                 }
@@ -337,12 +345,27 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
             if (ok) return true;
         } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (hasFirstFrame_ && lastDesktopTex_) {
+                CURSORINFO ci = {};
+                ci.cbSize = sizeof(ci);
+                bool curMoved = false;
+                if (GetCursorInfo(&ci)) {
+                    bool vis = (ci.flags & CURSOR_SHOWING) != 0;
+                    if (vis != lastCursorVisible_ ||
+                        ci.hCursor != lastCursorHandle_ ||
+                        ci.ptScreenPos.x != lastCursorPos_.x ||
+                        ci.ptScreenPos.y != lastCursorPos_.y) {
+                        curMoved = true;
+                    }
+                }
                 if (ConvertBgraTextureToNv12(lastDesktopTex_.Get(), outNv12)) {
+                    CompositeHostCursorIntoNv12(outNv12);
+                    if (curMoved) outChanged = true;
                     return true;
                 }
             }
             // No new desktop dirty rect yet -> grab via GDI for immediate first frame
             if (CaptureViaGdi(outNv12)) {
+                CompositeHostCursorIntoNv12(outNv12);
                 hasFirstFrame_ = true;
                 outChanged = true;
                 return true;
@@ -361,6 +384,7 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
 
     // Reliable GDI fallback (covers UAC/hybrid GPU/RDP transitions cleanly)
     if (CaptureViaGdi(outNv12)) {
+        CompositeHostCursorIntoNv12(outNv12);
         hasFirstFrame_ = true;
         outChanged = true;
         return true;
@@ -404,23 +428,6 @@ bool ScreenCapturer::CaptureViaGdi(std::vector<uint8_t>& outNv12) {
         HGDIOBJ oldObj = SelectObject(memDc_, dibBmp_);
         if (BitBlt(memDc_, 0, 0, static_cast<int>(w), static_cast<int>(h),
                    screenDc, activeMonitor_.left, activeMonitor_.top, SRCCOPY)) {
-            // Draw system cursor onto GDI fallback image when visible
-            CURSORINFO ci = {};
-            ci.cbSize = sizeof(ci);
-            if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor) {
-                ICONINFO ii = {};
-                int hotX = 0, hotY = 0;
-                if (GetIconInfo(ci.hCursor, &ii)) {
-                    hotX = static_cast<int>(ii.xHotspot);
-                    hotY = static_cast<int>(ii.yHotspot);
-                    if (ii.hbmMask) DeleteObject(ii.hbmMask);
-                    if (ii.hbmColor) DeleteObject(ii.hbmColor);
-                }
-                int cx = ci.ptScreenPos.x - activeMonitor_.left - hotX;
-                int cy = ci.ptScreenPos.y - activeMonitor_.top - hotY;
-                DrawIconEx(memDc_, cx, cy, ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
-            }
-
             outNv12.resize(static_cast<size_t>(outW_) * static_cast<size_t>(outH_) * 3 / 2);
             BgraBufferToNv12(dibBits_, w, h, w * 4, outNv12.data(), outW_, outH_);
             ok = true;
@@ -470,7 +477,223 @@ void ScreenCapturer::BgraBufferToNv12(const uint8_t* bgra, uint32_t srcW, uint32
     }
 }
 
+void ScreenCapturer::UpdateCursorShapeCache(HCURSOR hCur) {
+    if (!hCur) return;
+    if (cachedCursor_ == hCur && !cursorRgba_.empty()) return;
+
+    cachedCursor_ = hCur;
+    cursorRgba_.clear();
+    cursorXor_.clear();
+    cursorW_ = 0;
+    cursorH_ = 0;
+    cursorHotX_ = 0;
+    cursorHotY_ = 0;
+
+    ICONINFO ii = {};
+    int cw = GetSystemMetrics(SM_CXCURSOR);
+    int ch = GetSystemMetrics(SM_CYCURSOR);
+    if (cw <= 0 || cw > 128) cw = 32;
+    if (ch <= 0 || ch > 128) ch = 32;
+    if (GetIconInfo(hCur, &ii)) {
+        cursorHotX_ = static_cast<int>(ii.xHotspot);
+        cursorHotY_ = static_cast<int>(ii.yHotspot);
+        BITMAP bm = {};
+        if (ii.hbmColor && GetObjectW(ii.hbmColor, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            cw = bm.bmWidth;
+            ch = bm.bmHeight;
+        } else if (ii.hbmMask && GetObjectW(ii.hbmMask, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            cw = bm.bmWidth;
+            ch = (bm.bmHeight >= bm.bmWidth * 2) ? (bm.bmHeight / 2) : bm.bmHeight;
+        }
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    }
+    if (cw < 8) cw = 32;
+    if (ch < 8) ch = 32;
+    if (cw > 128) cw = 128;
+    if (ch > 128) ch = 128;
+
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) return;
+
+    auto renderOnBg = [&](uint8_t bgByte, std::vector<uint8_t>& outBgra) -> bool {
+        HDC dc = CreateCompatibleDC(screenDc);
+        if (!dc) return false;
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = cw;
+        bmi.bmiHeader.biHeight = -ch;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        bool ok = false;
+        if (bmp && bits) {
+            std::memset(bits, bgByte, static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4);
+            HGDIOBJ old = SelectObject(dc, bmp);
+            ok = DrawIconEx(dc, 0, 0, hCur, cw, ch, 0, nullptr, DI_NORMAL) != FALSE;
+            if (ok) {
+                outBgra.assign(static_cast<const uint8_t*>(bits),
+                               static_cast<const uint8_t*>(bits) + static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4);
+            }
+            SelectObject(dc, old);
+        }
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(dc);
+        return ok;
+    };
+
+    std::vector<uint8_t> onBlack, onWhite;
+    bool okB = renderOnBg(0x00, onBlack);
+    bool okW = renderOnBg(0xFF, onWhite);
+    ReleaseDC(nullptr, screenDc);
+
+    if (!okB || !okW || onBlack.size() != onWhite.size()) return;
+
+    size_t pxCount = static_cast<size_t>(cw) * static_cast<size_t>(ch);
+    cursorRgba_.resize(pxCount * 4, 0);
+    cursorXor_.resize(pxCount, 0);
+    for (size_t i = 0; i < pxCount; ++i) {
+        int bb = onBlack[i * 4 + 0];
+        int bg = onBlack[i * 4 + 1];
+        int br = onBlack[i * 4 + 2];
+        int wb = onWhite[i * 4 + 0];
+        int wg = onWhite[i * 4 + 1];
+        int wr = onWhite[i * 4 + 2];
+
+        // Classic inverted/XOR monochrome cursor pixel (e.g. text I-Beam): black->255, white->0
+        if (br > wr + 20 && bg > wg + 20 && bb > wb + 20) {
+            cursorXor_[i] = 1;
+            continue;
+        }
+        int diffR = wr - br;
+        int diffG = wg - bg;
+        int diffB = wb - bb;
+        int avgDiff = (diffR + diffG + diffB) / 3;
+        int alpha = 255 - avgDiff;
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+        if (alpha == 0) continue;
+
+        int r = (br * 255) / alpha;
+        int g = (bg * 255) / alpha;
+        int b = (bb * 255) / alpha;
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        cursorRgba_[i * 4 + 0] = static_cast<uint8_t>(r);
+        cursorRgba_[i * 4 + 1] = static_cast<uint8_t>(g);
+        cursorRgba_[i * 4 + 2] = static_cast<uint8_t>(b);
+        cursorRgba_[i * 4 + 3] = static_cast<uint8_t>(alpha);
+    }
+    cursorW_ = cw;
+    cursorH_ = ch;
+}
+
+void ScreenCapturer::BlendRgbaCursorToNv12(
+    std::vector<uint8_t>& nv12, uint32_t dstW, uint32_t dstH,
+    const uint8_t* rgba, const uint8_t* xorMask, int cw, int ch,
+    int drawX, int drawY, int drawW, int drawH) {
+    if (!rgba || cw <= 0 || ch <= 0 || drawW <= 0 || drawH <= 0) return;
+    if (nv12.size() < static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 3 / 2) return;
+
+    uint8_t* yPlane = nv12.data();
+    uint8_t* uvPlane = nv12.data() + static_cast<size_t>(dstW) * static_cast<size_t>(dstH);
+
+    int x0 = drawX < 0 ? 0 : drawX;
+    int y0 = drawY < 0 ? 0 : drawY;
+    int x1 = (drawX + drawW > static_cast<int>(dstW)) ? static_cast<int>(dstW) : (drawX + drawW);
+    int y1 = (drawY + drawH > static_cast<int>(dstH)) ? static_cast<int>(dstH) : (drawY + drawH);
+
+    for (int py = y0; py < y1; ++py) {
+        int sy = ((py - drawY) * ch) / drawH;
+        if (sy < 0) sy = 0; else if (sy >= ch) sy = ch - 1;
+        for (int px = x0; px < x1; ++px) {
+            int sx = ((px - drawX) * cw) / drawW;
+            if (sx < 0) sx = 0; else if (sx >= cw) sx = cw - 1;
+            size_t si = static_cast<size_t>(sy) * static_cast<size_t>(cw) + static_cast<size_t>(sx);
+
+            if (xorMask && xorMask[si]) {
+                uint8_t& yRef = yPlane[static_cast<size_t>(py) * dstW + static_cast<size_t>(px)];
+                int invY = 251 - static_cast<int>(yRef);
+                if (invY < 16) invY = 16;
+                else if (invY > 235) invY = 235;
+                yRef = static_cast<uint8_t>(invY);
+                continue;
+            }
+            uint8_t a = rgba[si * 4 + 3];
+            if (a < 8) continue;
+
+            int r = rgba[si * 4 + 0];
+            int g = rgba[si * 4 + 1];
+            int b = rgba[si * 4 + 2];
+            int cy = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
+            if (cy < 16) cy = 16; else if (cy > 235) cy = 235;
+
+            size_t yIdx = static_cast<size_t>(py) * dstW + static_cast<size_t>(px);
+            if (a >= 248) {
+                yPlane[yIdx] = static_cast<uint8_t>(cy);
+            } else {
+                yPlane[yIdx] = static_cast<uint8_t>((cy * a + yPlane[yIdx] * (255 - a) + 127) / 255);
+            }
+
+            if (((px & 1) == 0) && ((py & 1) == 0)) {
+                int cu = ((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128;
+                int cv = ((112 * r - 102 * g - 10 * b + 128) >> 8) + 128;
+                if (cu < 16) cu = 16; else if (cu > 240) cu = 240;
+                if (cv < 16) cv = 16; else if (cv > 240) cv = 240;
+                size_t uvIdx = static_cast<size_t>(py / 2) * dstW + static_cast<size_t>(px);
+                if (a >= 248) {
+                    uvPlane[uvIdx] = static_cast<uint8_t>(cu);
+                    uvPlane[uvIdx + 1] = static_cast<uint8_t>(cv);
+                } else {
+                    uvPlane[uvIdx] = static_cast<uint8_t>((cu * a + uvPlane[uvIdx] * (255 - a) + 127) / 255);
+                    uvPlane[uvIdx + 1] = static_cast<uint8_t>((cv * a + uvPlane[uvIdx + 1] * (255 - a) + 127) / 255);
+                }
+            }
+        }
+    }
+}
+
+void ScreenCapturer::CompositeHostCursorIntoNv12(std::vector<uint8_t>& nv12) {
+    CURSORINFO ci = {};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci)) return;
+    bool vis = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+    lastCursorVisible_ = vis;
+    lastCursorPos_ = ci.ptScreenPos;
+    lastCursorHandle_ = ci.hCursor;
+    if (!vis) return;
+
+    int monW = activeMonitor_.width > 0 ? activeMonitor_.width : 1920;
+    int monH = activeMonitor_.height > 0 ? activeMonitor_.height : 1080;
+    int relX = ci.ptScreenPos.x - activeMonitor_.left;
+    int relY = ci.ptScreenPos.y - activeMonitor_.top;
+    if (relX < -64 || relY < -64 || relX >= monW + 64 || relY >= monH + 64) return;
+
+    UpdateCursorShapeCache(ci.hCursor);
+    if (cursorW_ <= 0 || cursorH_ <= 0 || cursorRgba_.empty()) return;
+
+    double sx = static_cast<double>(outW_) / static_cast<double>(monW);
+    double sy = static_cast<double>(outH_) / static_cast<double>(monH);
+    int drawW = static_cast<int>(cursorW_ * sx + 0.5);
+    int drawH = static_cast<int>(cursorH_ * sy + 0.5);
+    if (drawW < 12) drawW = 12;
+    if (drawH < 12) drawH = 12;
+    int drawX = static_cast<int>((relX - cursorHotX_) * sx + 0.5);
+    int drawY = static_cast<int>((relY - cursorHotY_) * sy + 0.5);
+
+    BlendRgbaCursorToNv12(nv12, outW_, outH_, cursorRgba_.data(), cursorXor_.data(),
+                          cursorW_, cursorH_, drawX, drawY, drawW, drawH);
+}
+
 void ScreenCapturer::Shutdown() {
+    cachedCursor_ = nullptr;
+    cursorRgba_.clear();
+    cursorXor_.clear();
+    cursorW_ = 0;
+    cursorH_ = 0;
     dxgiReady_ = false;
     hasFirstFrame_ = false;
     nv12StagingTex_.Reset();
@@ -478,6 +701,8 @@ void ScreenCapturer::Shutdown() {
     vp_.Reset();
     vpEnum_.Reset();
     lastDesktopTex_.Reset();
+    lastDesktopW_ = 0;
+    lastDesktopH_ = 0;
     duplication_.Reset();
     videoContext_.Reset();
     videoDevice_.Reset();

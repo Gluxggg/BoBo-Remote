@@ -47,6 +47,9 @@ namespace DualRemote
         internal bool SafeRelayMode = false;
 
         internal bool AspectFit = true;
+        internal int ScaleMode = 2; // 0=1:1, 1=AspectFit, 2=SuperFill (zero black bars)
+        internal bool SuperDisplayActive = true;
+        internal bool SuperDisplayNativeMatch = false;
         internal bool MiniWindowMode = false;
         internal int MiniWindowOpacity = 100;
         internal bool IsFullscreen = false;
@@ -82,6 +85,7 @@ namespace DualRemote
         internal Action<bool> OnToggleSafeRelay;
 
         internal Action<bool> OnSelectAspectFit;
+        internal Action<int> OnSelectScaleMode;
         internal Action OnToggleMiniWindow;
         internal Action<int> OnSelectMiniOpacity;
 
@@ -510,7 +514,11 @@ namespace DualRemote
             items.Add(new CcMenuItem
             {
                 Icon = CcIcon.SuperScreen,
-                Text = "切换使用超级屏",
+                Text = m.SuperDisplayActive ? "超级屏模式（全屏无黑边自适应）" : "切换使用超级屏（消除上下黑边）",
+                Subtitle = m.SuperDisplayActive
+                    ? (m.SuperDisplayNativeMatch ? "已原生匹配当前屏幕比例，零黑边满屏显示" : "已启用满屏无黑边自适应，点击可恢复原生比例")
+                    : "优先匹配被控端同比例分辨率，无匹配时自动满屏消除上下黑边",
+                CheckSelected = m.SuperDisplayActive,
                 OnClick = delegate { if (m.OnToggleSuperDisplay != null) m.OnToggleSuperDisplay(); }
             });
             return items;
@@ -619,15 +627,33 @@ namespace DualRemote
             var items = new List<CcMenuItem>();
             items.Add(new CcMenuItem
             {
-                Text = "自适应",
-                RadioSelected = m.AspectFit,
-                OnClick = delegate { if (m.OnSelectAspectFit != null) m.OnSelectAspectFit(true); }
+                Text = "全屏自适应（无黑边）",
+                RadioSelected = m.ScaleMode == 2,
+                OnClick = delegate
+                {
+                    if (m.OnSelectScaleMode != null) m.OnSelectScaleMode(2);
+                    else if (m.OnSelectAspectFit != null) m.OnSelectAspectFit(true);
+                }
+            });
+            items.Add(new CcMenuItem
+            {
+                Text = "等比居中（保留原比例）",
+                RadioSelected = m.ScaleMode == 1,
+                OnClick = delegate
+                {
+                    if (m.OnSelectScaleMode != null) m.OnSelectScaleMode(1);
+                    else if (m.OnSelectAspectFit != null) m.OnSelectAspectFit(true);
+                }
             });
             items.Add(new CcMenuItem
             {
                 Text = "实际大小 1:1",
-                RadioSelected = !m.AspectFit,
-                OnClick = delegate { if (m.OnSelectAspectFit != null) m.OnSelectAspectFit(false); }
+                RadioSelected = m.ScaleMode == 0,
+                OnClick = delegate
+                {
+                    if (m.OnSelectScaleMode != null) m.OnSelectScaleMode(0);
+                    else if (m.OnSelectAspectFit != null) m.OnSelectAspectFit(false);
+                }
             });
 
             items.Add(new CcMenuItem { IsSeparator = true });

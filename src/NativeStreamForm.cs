@@ -52,6 +52,9 @@ namespace DualRemote
         private bool hdrEnabled;
         private bool safeRelayMode;
         private bool aspectFit = true;
+        private int scaleMode = 2; // 2=超级屏全屏自适应无黑边（默认开启，彻底消除 16:10 笔记本上下黑边）
+        private bool superDisplayMode = true;
+        private bool superDisplayNativeMatch;
         private bool miniWindowMode;
         private int miniWindowOpacity = 100;
         private int volumePercent = 100;
@@ -448,7 +451,10 @@ namespace DualRemote
                 TrueColor = trueColor,
                 HdrEnabled = hdrEnabled,
                 SafeRelayMode = safeRelayMode,
-                AspectFit = aspectFit,
+                AspectFit = scaleMode != 0,
+                ScaleMode = scaleMode,
+                SuperDisplayActive = superDisplayMode,
+                SuperDisplayNativeMatch = superDisplayNativeMatch,
                 MiniWindowMode = miniWindowMode,
                 MiniWindowOpacity = miniWindowOpacity,
                 IsFullscreen = !windowedMode && !miniWindowMode,
@@ -481,7 +487,7 @@ namespace DualRemote
                 },
                 OnToggleSuperDisplay = delegate
                 {
-                    SwitchNextRemoteDisplay();
+                    ToggleSuperDisplayMode();
                 },
                 OnSwitchNextDisplay = delegate { SwitchNextRemoteDisplay(); },
 
@@ -523,10 +529,11 @@ namespace DualRemote
 
                 OnSelectAspectFit = delegate(bool fit)
                 {
-                    aspectFit = fit;
-                    BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                    if (nc != null) nc.SetScaleMode(fit);
-                    ShowToastHint(fit ? "窗口画面：自适应比例缩放" : "窗口画面：实际大小 1:1 像素点对点");
+                    ApplyScaleModeSelection(fit ? 2 : 0);
+                },
+                OnSelectScaleMode = delegate(int mode)
+                {
+                    ApplyScaleModeSelection(mode);
                 },
                 OnToggleMiniWindow = delegate { ToggleMiniWindowMode(); },
                 OnSelectMiniOpacity = delegate(int pct)
@@ -675,6 +682,57 @@ namespace DualRemote
                 topBarMenuSession = null;
                 s.CloseAll();
             }
+        }
+
+        private void ToggleSuperDisplayMode()
+        {
+            superDisplayMode = !superDisplayMode;
+            Screen scr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
+            Rectangle sb = scr != null ? scr.Bounds : new Rectangle(0, 0, 1920, 1080);
+
+            if (superDisplayMode)
+            {
+                scaleMode = 2;
+                aspectFit = true;
+                BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                if (nc != null) nc.SetScaleMode(2);
+                BoBoStreamClient sc = streamClient;
+                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(true, sb.Width, sb.Height);
+                ShowToastHint("已开启超级屏模式：全屏自适应消除上下黑边");
+            }
+            else
+            {
+                superDisplayNativeMatch = false;
+                scaleMode = 1;
+                aspectFit = true;
+                BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                if (nc != null) nc.SetScaleMode(1);
+                BoBoStreamClient sc = streamClient;
+                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(false, sb.Width, sb.Height);
+                ShowToastHint("已退出超级屏模式：恢复被控端原生画面比例");
+            }
+        }
+
+        private void ApplyScaleModeSelection(int mode)
+        {
+            if (mode < 0 || mode > 2) mode = 2;
+            scaleMode = mode;
+            aspectFit = mode != 0;
+            bool wantSuper = (mode == 2);
+            if (superDisplayMode != wantSuper)
+            {
+                superDisplayMode = wantSuper;
+                if (!wantSuper) superDisplayNativeMatch = false;
+                Screen scr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
+                Rectangle sb = scr != null ? scr.Bounds : new Rectangle(0, 0, 1920, 1080);
+                BoBoStreamClient sc = streamClient;
+                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(wantSuper, sb.Width, sb.Height);
+            }
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+            if (nc != null) nc.SetScaleMode(mode);
+            if (mode == 2) ShowToastHint("窗口画面：全屏自适应（超级屏无黑边）");
+            else if (mode == 1) ShowToastHint("窗口画面：等比居中缩放（保留原生比例）");
+            else ShowToastHint("窗口画面：实际大小 1:1 像素点对点");
         }
 
         private void HandleToggleFullscreenRequest()
@@ -1047,7 +1105,7 @@ namespace DualRemote
             }
 
             nc.Resize(Math.Max(16, videoHost.ClientSize.Width), Math.Max(16, videoHost.ClientSize.Height));
-            nc.SetScaleMode(aspectFit);
+            nc.SetScaleMode(scaleMode);
             nc.SetViewOnly(mouseMode == ControlMouseMode.ViewOnly);
             nc.SetSysKeys(sendSystemShortcuts);
             ApplyVolumeToNative();
@@ -1098,6 +1156,23 @@ namespace DualRemote
                 remotePrivacyActive = active;
             };
 
+            client.SuperDisplayStateChanged += delegate(bool active, bool nativeMatch, int w, int h)
+            {
+                if (gen != sessionGeneration) return;
+                superDisplayMode = active;
+                superDisplayNativeMatch = nativeMatch;
+                if (w > 0 && h > 0)
+                {
+                    currentWidth = w;
+                    currentHeight = h;
+                }
+                int targetScale = active ? 2 : (scaleMode == 0 ? 0 : 1);
+                scaleMode = targetScale;
+                aspectFit = targetScale != 0;
+                BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
+                if (curNc != null) curNc.SetScaleMode(targetScale);
+            };
+
             client.StreamError += delegate(string code, string emsg)
             {
                 if (gen != sessionGeneration) return;
@@ -1122,6 +1197,9 @@ namespace DualRemote
                 });
             };
 
+            Screen localScr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
+            Rectangle localBounds = localScr != null ? localScr.Bounds : new Rectangle(0, 0, 1920, 1080);
+
             var startOpts = new BoBoStreamStartOptions
             {
                 Host = host,
@@ -1132,7 +1210,10 @@ namespace DualRemote
                 Fps = currentFps,
                 BitrateKbps = currentBitrateKbps,
                 MuteHostAudio = !hostAudio,
-                RequestPrivacy = autoRemotePrivacyOnConnect
+                RequestPrivacy = autoRemotePrivacyOnConnect,
+                SuperDisplay = superDisplayMode,
+                ClientWidth = localBounds.Width,
+                ClientHeight = localBounds.Height
             };
 
             Tuple<bool, string, string> connRes;

@@ -91,6 +91,9 @@ namespace DualRemote
         int param,
         IntPtr userCtx);
 
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    internal delegate void BoBoPrivacyEscapeNativeCallback(IntPtr userCtx);
+
     /// <summary>
     /// BoBo V6 全内置原生内核桥接器：
     /// - 从 BoBo远程.exe 内部嵌入的压缩资源 DualRemote.BoBoCore.dll.gz 释放到版本隔离目录并仅以进程内 DLL 加载；
@@ -151,6 +154,26 @@ namespace DualRemote
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnHostInjectUnicodeText([MarshalAs(UnmanagedType.LPWStr)] string text, int length);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostApplySuperDisplay(
+            int monitorIndex,
+            int clientWidth,
+            int clientHeight,
+            out int outActualWidth,
+            out int outActualHeight);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnHostRestoreSuperDisplay();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostSetPrivacyInputBlock(
+            int enable,
+            BoBoPrivacyEscapeNativeCallback onEscape,
+            IntPtr userCtx);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostIsPrivacyInputBlocked();
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate IntPtr FnClientCreate(
@@ -222,6 +245,11 @@ namespace DualRemote
         private static FnHostDestroy fnHostDestroy;
         private static FnHostInjectInput fnHostInjectInput;
         private static FnHostInjectUnicodeText fnHostInjectUnicodeText;
+        private static FnHostApplySuperDisplay fnHostApplySuperDisplay;
+        private static FnHostRestoreSuperDisplay fnHostRestoreSuperDisplay;
+        private static FnHostSetPrivacyInputBlock fnHostSetPrivacyInputBlock;
+        private static FnHostIsPrivacyInputBlocked fnHostIsPrivacyInputBlocked;
+        private static BoBoPrivacyEscapeNativeCallback activePrivacyEscapeKeepAlive;
         private static FnClientCreate fnClientCreate;
         private static FnClientPushVideo fnClientPushVideo;
         private static FnClientPushAudio fnClientPushAudio;
@@ -283,6 +311,10 @@ namespace DualRemote
                     fnHostDestroy = Bind<FnHostDestroy>(mod, "BoBoHost_Destroy");
                     fnHostInjectInput = Bind<FnHostInjectInput>(mod, "BoBoHost_InjectInput");
                     fnHostInjectUnicodeText = Bind<FnHostInjectUnicodeText>(mod, "BoBoHost_InjectUnicodeText");
+                    fnHostApplySuperDisplay = Bind<FnHostApplySuperDisplay>(mod, "BoBoHost_ApplySuperDisplay");
+                    fnHostRestoreSuperDisplay = Bind<FnHostRestoreSuperDisplay>(mod, "BoBoHost_RestoreSuperDisplay");
+                    fnHostSetPrivacyInputBlock = Bind<FnHostSetPrivacyInputBlock>(mod, "BoBoHost_SetPrivacyInputBlock");
+                    fnHostIsPrivacyInputBlocked = Bind<FnHostIsPrivacyInputBlocked>(mod, "BoBoHost_IsPrivacyInputBlocked");
                     fnClientCreate = Bind<FnClientCreate>(mod, "BoBoClient_Create");
                     fnClientPushVideo = Bind<FnClientPushVideo>(mod, "BoBoClient_PushVideo");
                     fnClientPushAudio = Bind<FnClientPushAudio>(mod, "BoBoClient_PushAudio");
@@ -512,6 +544,53 @@ namespace DualRemote
             fnHostInjectUnicodeText(text, text.Length);
         }
 
+        internal static bool ApplySuperDisplay(int monitorIndex, int clientWidth, int clientHeight, out int actualWidth, out int actualHeight)
+        {
+            actualWidth = 0;
+            actualHeight = 0;
+            string err;
+            if (!EnsureLoaded(out err) || fnHostApplySuperDisplay == null) return false;
+            return fnHostApplySuperDisplay(monitorIndex, clientWidth, clientHeight, out actualWidth, out actualHeight) != 0;
+        }
+
+        internal static void RestoreSuperDisplay()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnHostRestoreSuperDisplay == null) return;
+            try { fnHostRestoreSuperDisplay(); } catch { }
+        }
+
+        internal static bool SetPrivacyInputBlock(bool enable, Action onLocalEscape)
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnHostSetPrivacyInputBlock == null) return false;
+            if (!enable)
+            {
+                int rcOff = fnHostSetPrivacyInputBlock(0, null, IntPtr.Zero);
+                activePrivacyEscapeKeepAlive = null;
+                return rcOff != 0;
+            }
+            BoBoPrivacyEscapeNativeCallback cb = null;
+            if (onLocalEscape != null)
+            {
+                Action captured = onLocalEscape;
+                cb = delegate(IntPtr ctx)
+                {
+                    try { captured(); } catch { }
+                };
+            }
+            activePrivacyEscapeKeepAlive = cb;
+            int rc = fnHostSetPrivacyInputBlock(1, cb, IntPtr.Zero);
+            if (rc == 0) activePrivacyEscapeKeepAlive = null;
+            return rc != 0;
+        }
+
+        internal static bool IsPrivacyInputBlocked()
+        {
+            if (!loaded || fnHostIsPrivacyInputBlocked == null) return false;
+            try { return fnHostIsPrivacyInputBlocked() != 0; } catch { return false; }
+        }
+
         internal static BoBoHostNativeHandle CreateHostSession(
             int monitorIndex,
             int targetWidth,
@@ -704,9 +783,15 @@ namespace DualRemote
 
             internal void SetScaleMode(bool aspectFit)
             {
+                SetScaleMode(aspectFit ? 1 : 0);
+            }
+
+            /// <summary>0=实际大小1:1，1=等比居中缩放，2=超级屏全屏自适应无黑边</summary>
+            internal void SetScaleMode(int scaleMode)
+            {
                 lock (gate)
                 {
-                    if (handle != IntPtr.Zero) fnClientSetScaleMode(handle, aspectFit ? 1 : 0);
+                    if (handle != IntPtr.Zero) fnClientSetScaleMode(handle, scaleMode);
                 }
             }
 

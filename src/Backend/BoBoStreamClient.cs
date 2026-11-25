@@ -41,6 +41,9 @@ namespace DualRemote
         internal int BitrateKbps = 14000;
         internal bool MuteHostAudio = false;
         internal bool RequestPrivacy = false;
+        internal bool SuperDisplay = true;
+        internal int ClientWidth = 0;
+        internal int ClientHeight = 0;
     }
 
     /// <summary>
@@ -63,11 +66,15 @@ namespace DualRemote
         private List<BoBoMonitorDescriptor> remoteMonitors = new List<BoBoMonitorDescriptor>();
 
         internal event Action<List<BoBoMonitorDescriptor>, int, int, int> StreamStarted;
+        internal event Action<bool, bool, int, int> SuperDisplayStateChanged;
         internal event Action<string, string> StreamError;
         internal event Action<string> Disconnected;
         internal event Action<bool> RemotePrivacyStateChanged;
         internal event Action<double> RttUpdated;
         internal event Action<byte[], bool, int, int> RawVideoFrameReceived;
+
+        internal bool SuperDisplayActive { get; private set; }
+        internal bool SuperDisplayNativeMatch { get; private set; }
 
         internal BoBoStreamClient(BoBoIdentityStore identityStore)
         {
@@ -433,6 +440,9 @@ namespace DualRemote
                 startReq["bitrateKbps"] = options.BitrateKbps;
                 startReq["muteHost"] = options.MuteHostAudio;
                 startReq["requestPrivacy"] = options.RequestPrivacy;
+                startReq["superDisplay"] = options.SuperDisplay;
+                startReq["clientWidth"] = options.ClientWidth;
+                startReq["clientHeight"] = options.ClientHeight;
                 await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
                 connected = true;
@@ -506,8 +516,25 @@ namespace DualRemote
                             int w = BoBoProtocol.GetInt(msg, "width", 1920);
                             int h = BoBoProtocol.GetInt(msg, "height", 1080);
                             int fps = BoBoProtocol.GetInt(msg, "fps", 60);
+                            bool sdActive = BoBoProtocol.GetBool(msg, "superDisplayActive", false);
+                            bool sdNative = BoBoProtocol.GetBool(msg, "superDisplayNativeMatch", false);
+                            SuperDisplayActive = sdActive;
+                            SuperDisplayNativeMatch = sdNative;
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
                             if (ev != null) { try { ev(remoteMonitors, w, h, fps); } catch { } }
+                            Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
+                            if (sdEv != null) { try { sdEv(sdActive, sdNative, w, h); } catch { } }
+                        }
+                        else if (t == "SUPER_DISPLAY_STATE")
+                        {
+                            bool sdActive = BoBoProtocol.GetBool(msg, "active", false);
+                            bool sdNative = BoBoProtocol.GetBool(msg, "nativeMatch", false);
+                            int w = BoBoProtocol.GetInt(msg, "width", 0);
+                            int h = BoBoProtocol.GetInt(msg, "height", 0);
+                            SuperDisplayActive = sdActive;
+                            SuperDisplayNativeMatch = sdNative;
+                            Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
+                            if (sdEv != null) { try { sdEv(sdActive, sdNative, w, h); } catch { } }
                         }
                         else if (t == "PONG")
                         {
@@ -615,6 +642,16 @@ namespace DualRemote
             var cmd = new Dictionary<string, object>();
             cmd["type"] = "SET_PRIVACY";
             cmd["enable"] = enable;
+            SendJsonFireAndForget(cmd);
+        }
+
+        internal void SendSetSuperDisplay(bool enable, int clientWidth, int clientHeight)
+        {
+            var cmd = new Dictionary<string, object>();
+            cmd["type"] = "SET_SUPER_DISPLAY";
+            cmd["enable"] = enable;
+            cmd["clientWidth"] = clientWidth;
+            cmd["clientHeight"] = clientHeight;
             SendJsonFireAndForget(cmd);
         }
 

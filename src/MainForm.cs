@@ -191,6 +191,7 @@ namespace DualRemote
             UpdateStreamHint();
 
             privacyCurtain.StateChanged += OnPrivacyCurtainStateChanged;
+            privacyCurtain.LocalEscapeRequested += delegate { TogglePrivacyCurtain(true, false); };
             SystemEvents.SessionSwitch += OnSessionSwitch;
             sessionEventsHooked = true;
             remoteGuardTimer.Interval = 350;
@@ -447,6 +448,7 @@ namespace DualRemote
             int height = Math.Min(Height, area.Height - 20);
             if (width != Width || height != Height)
                 SetBounds(area.Left + (area.Width - width) / 2, area.Top + (area.Height - height) / 2, width, height);
+            PrivacyDisplayDimmer.RecoverIfNeeded();
             EnsureBoBoHostServerStarted();
             SyncRemoteGuardTimer();
         }
@@ -2001,6 +2003,9 @@ namespace DualRemote
             {
                 try { server.Dispose(); } catch { }
             }
+            try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
+            try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
+            try { PrivacyDisplayDimmer.RestoreAllSync(); } catch { }
         }
 
         private static void RestoreRecents(ComboBox combo, List<string> entries)

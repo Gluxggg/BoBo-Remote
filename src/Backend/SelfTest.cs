@@ -1403,7 +1403,8 @@ namespace DualRemote
                                 Fps = 30,
                                 BitrateKbps = 4000,
                                 MuteHostAudio = false,
-                                RequestPrivacy = true
+                                RequestPrivacy = true,
+                                SuperDisplay = false
                             },
                             null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
 
@@ -1415,6 +1416,17 @@ namespace DualRemote
                         authClient.SendSetPrivacy(false);
                         bool gotPrivOff = privOffEvt.Wait(3000) && privacyCmdToggledOff;
                         Check("V6 直连控制：主控端直接开关被控端防窥指令", gotPrivOff, "toggledOff=" + privacyCmdToggledOff);
+
+                        var sdEvt = new System.Threading.ManualResetEventSlim(false);
+                        bool sdReceived = false;
+                        authClient.SuperDisplayStateChanged += delegate(bool act, bool nat, int sw, int sh)
+                        {
+                            sdReceived = !act;
+                            sdEvt.Set();
+                        };
+                        authClient.SendSetSuperDisplay(false, 0, 0);
+                        bool gotSd = sdEvt.Wait(3000) && sdReceived;
+                        Check("V6.1 超级屏协议：SET_SUPER_DISPLAY / SUPER_DISPLAY_STATE 闭环回执", gotSd, "sdReceived=" + sdReceived);
 
                         authClient.Disconnect();
                     }
@@ -1440,6 +1452,37 @@ namespace DualRemote
                     Check("V6 退出断口：关闭 BoBo远程 后端口立停、物理拒绝任何连控",
                         !probeAfterStop.Reachable,
                         "reachable=" + probeAfterStop.Reachable);
+
+                    // 2f. V6.1 Complete Privacy Shield: native physical input blocker + DDC/CI restore serialization
+                    bool blockOn = BoBoCoreInterop.SetPrivacyInputBlock(true, null);
+                    bool activeMid = BoBoCoreInterop.IsPrivacyInputBlocked();
+                    bool blockOff = BoBoCoreInterop.SetPrivacyInputBlock(false, null);
+                    bool activeAfter = BoBoCoreInterop.IsPrivacyInputBlocked();
+                    Check("V6.1 防窥物理键鼠锁：原生 WH_MOUSE_LL + WH_KEYBOARD_LL 启停闭环",
+                        blockOn && activeMid && blockOff && !activeAfter,
+                        "on=" + blockOn + " mid=" + activeMid + " off=" + blockOff + " after=" + activeAfter);
+
+                    var sampleStates = new System.Collections.Generic.List<PrivacyDisplayDimmer.MonitorSavedState>();
+                    var st0 = new PrivacyDisplayDimmer.MonitorSavedState { MonitorOrdinal = 0, Description = "Generic PnP Monitor" };
+                    st0.VcpValues[0x10] = 75;
+                    st0.VcpValues[0x12] = 50;
+                    st0.VcpValues[0x16] = 100;
+                    sampleStates.Add(st0);
+                    string serializedRestore = PrivacyDisplayDimmer.SerializeRestoreRecords(sampleStates);
+                    var parsedRestore = PrivacyDisplayDimmer.ParseRestoreRecords(serializedRestore);
+                    bool restoreRoundTrip = parsedRestore.Count == 1
+                        && parsedRestore[0].MonitorOrdinal == 0
+                        && parsedRestore[0].VcpValues.ContainsKey(0x10) && parsedRestore[0].VcpValues[0x10] == 75
+                        && parsedRestore[0].VcpValues.ContainsKey(0x12) && parsedRestore[0].VcpValues[0x12] == 50
+                        && parsedRestore[0].VcpValues.ContainsKey(0x16) && parsedRestore[0].VcpValues[0x16] == 100;
+                    Check("V6.1 防窥物理屏熄黑：DDC/CI 崩溃自愈恢复表序列化往返",
+                        restoreRoundTrip,
+                        serializedRestore.Trim());
+
+                    var defaultPriv = new PrivacyWallpaperConfig();
+                    Check("V6.1 防窥默认策略：默认开启物理键鼠锁定与 DDC/CI 深度熄黑",
+                        defaultPriv.BlockLocalInput && defaultPriv.HardwareBlackout,
+                        "blockInput=" + defaultPriv.BlockLocalInput + " hwBlackout=" + defaultPriv.HardwareBlackout);
                 }
             }
             catch (Exception ex)

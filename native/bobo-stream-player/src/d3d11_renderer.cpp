@@ -62,17 +62,33 @@ void D3D11Renderer::SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH) {
 
 void D3D11Renderer::SetAspectFit(bool fit) {
     std::lock_guard<std::mutex> lock(mutex_);
-    aspectFit_ = fit;
+    scaleMode_ = fit ? 1 : 0;
 }
 
 bool D3D11Renderer::IsAspectFit() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return aspectFit_;
+    return scaleMode_ != 0;
+}
+
+void D3D11Renderer::SetScaleMode(int scaleMode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (scaleMode < 0 || scaleMode > 2) scaleMode = 1;
+    scaleMode_ = scaleMode;
+}
+
+int D3D11Renderer::ScaleMode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scaleMode_;
 }
 
 RECT D3D11Renderer::GetVideoViewportRect() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (aspectFit_) {
+    if (scaleMode_ == 2) {
+        // SuperFill: edge-to-edge full screen with zero black bars
+        RECT full = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
+        return full;
+    }
+    if (scaleMode_ == 1) {
         return ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
     }
     LONG left = (static_cast<LONG>(swapW_) - static_cast<LONG>(videoW_)) / 2;
@@ -325,7 +341,10 @@ bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t 
 
     RECT srcRect = { 0, 0, static_cast<LONG>(visW), static_cast<LONG>(visH) };
     RECT dstRect = {};
-    if (aspectFit_) {
+    if (scaleMode_ == 2) {
+        // SuperFill: fill entire swapchain edge-to-edge (zero top/bottom/side black bars)
+        dstRect = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
+    } else if (scaleMode_ == 1) {
         dstRect = ComputeAspectFitRect(visW, visH, swapW_, swapH_);
     } else {
         // 1:1 pixel mapping centered in swapchain (crop symmetrically if window is smaller than stream)

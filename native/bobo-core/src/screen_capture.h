@@ -56,6 +56,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> lastDesktopTex_;
+    uint32_t lastDesktopW_ = 0;
+    uint32_t lastDesktopH_ = 0;
     Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice_;
     Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnum_;
@@ -71,6 +73,25 @@ private:
     uint8_t* dibBits_ = nullptr;
     uint32_t dibW_ = 0;
     uint32_t dibH_ = 0;
+
+    // Reusable Host cursor capture & NV12 compositing cache (makes Host's crisp small cursor visible in DXGI + GDI!)
+    void UpdateCursorShapeCache(HCURSOR hCur);
+    void CompositeHostCursorIntoNv12(std::vector<uint8_t>& nv12);
+    static void BlendRgbaCursorToNv12(
+        std::vector<uint8_t>& nv12, uint32_t dstW, uint32_t dstH,
+        const uint8_t* rgba, const uint8_t* xorMask, int cw, int ch,
+        int drawX, int drawY, int drawW, int drawH);
+
+    HCURSOR cachedCursor_ = nullptr;
+    int cursorW_ = 0;
+    int cursorH_ = 0;
+    int cursorHotX_ = 0;
+    int cursorHotY_ = 0;
+    std::vector<uint8_t> cursorRgba_;
+    std::vector<uint8_t> cursorXor_;
+    POINT lastCursorPos_ = { -99999, -99999 };
+    HCURSOR lastCursorHandle_ = nullptr;
+    bool lastCursorVisible_ = false;
 };
 
 } // namespace bobo

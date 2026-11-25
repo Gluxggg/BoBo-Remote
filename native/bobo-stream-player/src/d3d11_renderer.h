@@ -42,6 +42,9 @@ public:
     void SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH);
     void SetAspectFit(bool fit);
     bool IsAspectFit() const;
+    // scaleMode: 0 = OneToOne (1:1), 1 = AspectFit (letterbox), 2 = SuperFill (edge-to-edge full screen, zero black bars)
+    void SetScaleMode(int scaleMode);
+    int ScaleMode() const;
     RECT GetVideoViewportRect() const;
 
     ID3D11Device* Device() const { return device_.Get(); }
@@ -74,7 +77,7 @@ private:
     uint32_t swapH_ = 0;
     uint32_t videoW_ = 1920;
     uint32_t videoH_ = 1080;
-    bool aspectFit_ = true;
+    int scaleMode_ = 2; // 0=OneToOne, 1=AspectFit, 2=SuperFill (zero black bars)
     GpuCapabilities caps_;
 };
 

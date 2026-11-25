@@ -68,11 +68,44 @@ namespace DualRemote
                 SyncRemoteGuardTimer();
                 UpdatePrivacyIndicators();
                 ShowDisplayBanner(autoSwitch.Checked
-                    ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏，断开后自动恢复。"
+                    ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏、锁定物理键鼠并熄黑，断开后自动恢复。"
                     : "已关闭自动防窥守护。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启防窥壁纸",
-                "检测到 Sunshine 或 RustDesk 会话连入时自动遮挡被控端物理显示器，断开自动收起", autoSwitch);
+            AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启完全防窥保护",
+                "检测到 BoBo远程 会话连入时自动遮挡物理显示器并锁定现场键鼠，断开后自动恢复", autoSwitch);
+
+            var blockInputSwitch = BuildToggle("防窥锁定物理键鼠", privacyConfig.BlockLocalInput);
+            blockInputSwitch.CheckedChanged += delegate
+            {
+                privacyConfig.BlockLocalInput = blockInputSwitch.Checked;
+                SavePrivacyConfig();
+                if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
+                {
+                    BoBoCoreInterop.SetPrivacyInputBlock(blockInputSwitch.Checked, delegate { BeginInvoke(new Action(delegate { TogglePrivacyCurtain(true, false); })); });
+                }
+                ShowDisplayBanner(blockInputSwitch.Checked
+                    ? "已开启物理键鼠锁定：防窥期间旁人无法点击任务栏、开始菜单或右键刷新（仅放行远控与 Ctrl+Alt+Shift+P）。"
+                    : "已关闭防窥物理键鼠锁定。", Theme.PillTone.Info);
+            };
+            AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "防窥时彻底锁定被控端物理键鼠",
+                "阻断被控端本机物理鼠标点击任务栏/开始页/右键刷新与键盘输入，仅放行远控操控及 Ctrl+Alt+Shift+P", blockInputSwitch);
+
+            var hwBlackoutSwitch = BuildToggle("物理显示器深度熄黑", privacyConfig.HardwareBlackout);
+            hwBlackoutSwitch.CheckedChanged += delegate
+            {
+                privacyConfig.HardwareBlackout = hwBlackoutSwitch.Checked;
+                SavePrivacyConfig();
+                if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
+                {
+                    if (hwBlackoutSwitch.Checked) PrivacyDisplayDimmer.DimAllMonitorsAsync(null);
+                    else PrivacyDisplayDimmer.RestoreAllAsync();
+                }
+                ShowDisplayBanner(hwBlackoutSwitch.Checked
+                    ? "已开启物理屏 DDC/CI 硬件深度熄黑：彻底屏蔽打字输入法与右键菜单外泄，退出或重启自动恢复。"
+                    : "已关闭硬件深度熄黑（防窥时将仅显示上方防窥壁纸与 0ms 置顶遮挡）。", Theme.PillTone.Info);
+            };
+            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "深度熄黑物理显示器（DDC/CI 硬件级屏蔽）",
+                "防窥时通过显示器硬件通道将亮度/对比度/RGB 增益归零，对远控画面 100% 透明，杜绝打字候选框与右键菜单外泄", hwBlackoutSwitch);
 
             var lockSwitch = BuildToggle("退出防窥自动锁屏", privacyConfig.LockOnLocalExit);
             lockSwitch.CheckedChanged += delegate

@@ -159,6 +159,7 @@ namespace DualRemote
             }
 
             DisconnectAllActiveStreams("被控端已关闭 BoBo远程");
+            try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
 
             if (cts != null)
             {
@@ -484,6 +485,11 @@ namespace DualRemote
                     ack["monitors"] = BoBoProtocol.SerializeMonitors(monitors);
                     await conn.SendJsonSafeAsync(ack, ct).ConfigureAwait(false);
 
+                    bool superDisplayActive = false;
+                    bool superDisplayNativeMatch = false;
+                    int activeFps = 60;
+                    int activeBitrateKbps = 14000;
+
                     // 2. Main command & input loop
                     while (!ct.IsCancellationRequested)
                     {
@@ -623,6 +629,25 @@ namespace DualRemote
                             int reqBps = BoBoProtocol.GetInt(msg, "bitrateKbps", 14000);
                             bool muteHost = BoBoProtocol.GetBool(msg, "muteHost", false);
                             bool requestPrivacy = BoBoProtocol.GetBool(msg, "requestPrivacy", false);
+                            bool reqSuperDisplay = BoBoProtocol.GetBool(msg, "superDisplay", false);
+                            int clientW = BoBoProtocol.GetInt(msg, "clientWidth", 0);
+                            int clientH = BoBoProtocol.GetInt(msg, "clientHeight", 0);
+
+                            activeFps = reqFps;
+                            activeBitrateKbps = reqBps;
+                            superDisplayActive = reqSuperDisplay;
+                            superDisplayNativeMatch = false;
+                            if (reqSuperDisplay && clientW >= 640 && clientH >= 480)
+                            {
+                                int actualW, actualH;
+                                if (BoBoCoreInterop.ApplySuperDisplay(reqMon, clientW, clientH, out actualW, out actualH) &&
+                                    actualW >= 640 && actualH >= 480)
+                                {
+                                    superDisplayNativeMatch = true;
+                                    reqW = Math.Min(actualW, 3840);
+                                    reqH = Math.Min(actualH, 2160);
+                                }
+                            }
 
                             // CRITICAL: notify privacy curtain synchronously BEFORE creating capture engine (<5ms)!
                             activeStreamRunning = true;
@@ -679,6 +704,8 @@ namespace DualRemote
                             started["fps"] = reqFps;
                             started["bitrateKbps"] = reqBps;
                             started["monitorIndex"] = reqMon;
+                            started["superDisplayActive"] = superDisplayActive;
+                            started["superDisplayNativeMatch"] = superDisplayNativeMatch;
                             started["monitors"] = BoBoProtocol.SerializeMonitors(curMons);
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
                             continue;
@@ -698,6 +725,8 @@ namespace DualRemote
                             int reqFps = BoBoProtocol.GetInt(msg, "fps", 60);
                             int reqBps = BoBoProtocol.GetInt(msg, "bitrateKbps", 14000);
                             activeMonitorIndex = reqMon;
+                            activeFps = reqFps;
+                            activeBitrateKbps = reqBps;
                             nativeHost.Reconfigure(reqMon, reqW, reqH, reqFps, reqBps);
                             var ackCfg = new Dictionary<string, object>();
                             ackCfg["type"] = "RECONFIGURED";
@@ -707,6 +736,55 @@ namespace DualRemote
                             ackCfg["fps"] = reqFps;
                             ackCfg["bitrateKbps"] = reqBps;
                             await conn.SendJsonSafeAsync(ackCfg, ct).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        if (msgType == "SET_SUPER_DISPLAY")
+                        {
+                            bool enable = BoBoProtocol.GetBool(msg, "enable", false);
+                            int clientW = BoBoProtocol.GetInt(msg, "clientWidth", 0);
+                            int clientH = BoBoProtocol.GetInt(msg, "clientHeight", 0);
+                            int outW = 0;
+                            int outH = 0;
+
+                            if (enable && clientW >= 640 && clientH >= 480)
+                            {
+                                int actualW, actualH;
+                                bool matched = BoBoCoreInterop.ApplySuperDisplay(activeMonitorIndex, clientW, clientH, out actualW, out actualH);
+                                superDisplayActive = true;
+                                superDisplayNativeMatch = matched;
+                                outW = actualW;
+                                outH = actualH;
+                                if (matched && actualW >= 640 && actualH >= 480 && nativeHost != null)
+                                {
+                                    nativeHost.Reconfigure(activeMonitorIndex, Math.Min(actualW, 3840), Math.Min(actualH, 2160), activeFps, activeBitrateKbps);
+                                }
+                            }
+                            else
+                            {
+                                BoBoCoreInterop.RestoreSuperDisplay();
+                                superDisplayActive = false;
+                                superDisplayNativeMatch = false;
+                                List<BoBoMonitorDescriptor> monsNow = BoBoCoreInterop.EnumerateMonitors();
+                                if (monsNow.Count > 0)
+                                {
+                                    int idx = Math.Max(0, Math.Min(activeMonitorIndex, monsNow.Count - 1));
+                                    outW = monsNow[idx].Width;
+                                    outH = monsNow[idx].Height;
+                                    if (nativeHost != null && outW >= 640 && outH >= 480)
+                                    {
+                                        nativeHost.Reconfigure(activeMonitorIndex, Math.Min(outW, 3840), Math.Min(outH, 2160), activeFps, activeBitrateKbps);
+                                    }
+                                }
+                            }
+
+                            var ackSd = new Dictionary<string, object>();
+                            ackSd["type"] = "SUPER_DISPLAY_STATE";
+                            ackSd["active"] = superDisplayActive;
+                            ackSd["nativeMatch"] = superDisplayNativeMatch;
+                            ackSd["width"] = outW;
+                            ackSd["height"] = outH;
+                            await conn.SendJsonSafeAsync(ackSd, ct).ConfigureAwait(false);
                             continue;
                         }
 
@@ -843,6 +921,7 @@ namespace DualRemote
                 {
                     nativeHost.Dispose();
                 }
+                try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
                 if (streamNotifiedStarted)
                 {
                     activeStreamRunning = false;

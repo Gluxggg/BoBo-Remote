@@ -182,6 +182,8 @@ namespace DualRemote
         internal bool AutoOnRemote = true;
         internal bool ShowOverlayBadge = true;
         internal bool LockOnLocalExit = false;
+        internal bool BlockLocalInput = true;
+        internal bool HardwareBlackout = true;
         internal string Caption = "远程安全防窥保护中";
 
         internal static string ConfigPath
@@ -208,6 +210,8 @@ namespace DualRemote
                     else if (k == "auto") cfg.AutoOnRemote = v == "1";
                     else if (k == "badge") cfg.ShowOverlayBadge = v != "0";
                     else if (k == "lock") cfg.LockOnLocalExit = v == "1";
+                    else if (k == "blockInput") cfg.BlockLocalInput = v != "0";
+                    else if (k == "hwBlackout") cfg.HardwareBlackout = v != "0";
                     else if (k == "caption" && v.Length <= 60) cfg.Caption = v;
                 }
                 if (cfg.Preset == PresetCustomImage && (string.IsNullOrEmpty(cfg.CustomImagePath) || !File.Exists(cfg.CustomImagePath)))
@@ -234,6 +238,8 @@ namespace DualRemote
                 sb.AppendLine("auto=" + (AutoOnRemote ? "1" : "0"));
                 sb.AppendLine("badge=" + (ShowOverlayBadge ? "1" : "0"));
                 sb.AppendLine("lock=" + (LockOnLocalExit ? "1" : "0"));
+                sb.AppendLine("blockInput=" + (BlockLocalInput ? "1" : "0"));
+                sb.AppendLine("hwBlackout=" + (HardwareBlackout ? "1" : "0"));
                 sb.AppendLine("caption=" + (Caption ?? "").Replace("\r", "").Replace("\n", ""));
                 File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
                 return true;
