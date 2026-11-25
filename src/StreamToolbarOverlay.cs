@@ -116,6 +116,8 @@ namespace DualRemote
         private Func<bool> customSessionAlive;
         private Action<int[]> nativeSendKeys;
         private Action<string> nativeSendText;
+        private Form ownerStreamForm;
+        private readonly int selfPid = System.Diagnostics.Process.GetCurrentProcess().Id;
 
         private int trackedPid;
         private int activeQualityIndex;
@@ -316,11 +318,34 @@ namespace DualRemote
         internal void StartWatching()
         {
             ApplyGeometry();
-            Show();
+            if (ownerStreamForm != null && !ownerStreamForm.IsDisposed)
+                Show(ownerStreamForm);
+            else
+                Show();
             EnsureTopMostNoActivate();
             collapseTimer.Start();
             processWatchTimer.Start();
             freeMouseTimer.Start();
+        }
+
+        internal void SetOwnerForm(Form owner)
+        {
+            ownerStreamForm = owner;
+            if (!IsDisposed && IsHandleCreated)
+            {
+                ApplyGeometry();
+                EnsureTopMostNoActivate();
+                Invalidate();
+            }
+        }
+
+        internal void RepositionToOwnerScreen()
+        {
+            if (IsDisposed || dragging) return;
+            customCenterX = -1;
+            ApplyGeometry();
+            EnsureTopMostNoActivate();
+            Invalidate();
         }
 
         internal void PauseWatchingForRestart()
@@ -413,14 +438,17 @@ namespace DualRemote
 
         private void EnforceFreeMouseIfNeeded()
         {
-            if (IsDisposed || !freeMouseGuardEnabled || trackedPid <= 0) return;
+            if (IsDisposed || !freeMouseGuardEnabled) return;
+            if (trackedPid <= 0 && ownerStreamForm == null) return;
             try
             {
                 IntPtr fg = GetForegroundWindow();
                 if (fg == IntPtr.Zero) return;
                 uint fgPid;
                 GetWindowThreadProcessId(fg, out fgPid);
-                if ((int)fgPid != trackedPid) return;
+                bool matchesTracked = (trackedPid > 0 && (int)fgPid == trackedPid)
+                    || (ownerStreamForm != null && !ownerStreamForm.IsDisposed && (int)fgPid == selfPid);
+                if (!matchesTracked) return;
 
                 // 仅在桌面可见指针模式下解除窗口禁锢，不影响 3D FPS 隐藏指针的相对视角
                 CursorInfo ci = new CursorInfo { CbSize = Marshal.SizeOf(typeof(CursorInfo)) };
@@ -489,9 +517,13 @@ namespace DualRemote
 
         private void ApplyGeometry()
         {
-            Screen scr = Screen.FromPoint(customCenterX >= 0
-                ? new Point(customCenterX, Screen.PrimaryScreen.Bounds.Top + 12)
-                : new Point(Screen.PrimaryScreen.Bounds.Left + Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Top + 12));
+            Screen baseScreen = (ownerStreamForm != null && !ownerStreamForm.IsDisposed)
+                ? Screen.FromControl(ownerStreamForm)
+                : Screen.PrimaryScreen;
+            if (baseScreen == null) baseScreen = Screen.PrimaryScreen;
+            Screen scr = customCenterX >= 0
+                ? Screen.FromPoint(new Point(customCenterX, baseScreen.Bounds.Top + 12))
+                : baseScreen;
             float scale = CurrentScale();
             Rectangle bounds = ComputeBarBounds(scr.Bounds, expanded, scale, customCenterX);
             Bounds = bounds;

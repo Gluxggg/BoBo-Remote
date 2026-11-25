@@ -887,7 +887,15 @@ namespace DualRemote
             Theme.FixedColumn(row, 124);
 
             streamConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary);
-            streamConnectBtn.Click += async delegate { await ConnectToDeviceAsync(SelectedHost(), null); };
+            streamConnectBtn.Click += async delegate
+            {
+                if (IsActivelyControlling())
+                {
+                    DisconnectActiveStreamSession();
+                    return;
+                }
+                await ConnectToDeviceAsync(SelectedHost(), null);
+            };
             discover.Click += async delegate { await DiscoverPeers(); };
             streamHost.KeyDown += delegate(object sender, KeyEventArgs args) { RunOnEnter(streamHost, streamConnectBtn, args); };
             streamHost.TextChanged += delegate { UpdateAssistConnectButtons(); };
@@ -973,10 +981,32 @@ namespace DualRemote
             UpdateAssistConnectButtons();
         }
 
+        private bool IsActivelyControlling()
+        {
+            return (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                || (activeStreamPid > 0 && Engines.IsProcessAlive(activeStreamPid));
+        }
+
         private void UpdateAssistConnectButtons()
         {
             if (streamConnectBtn != null)
-                streamConnectBtn.Enabled = !string.IsNullOrWhiteSpace(streamHost.Text);
+            {
+                bool controlling = IsActivelyControlling();
+                if (controlling)
+                {
+                    streamConnectBtn.Text = "退出控制";
+                    Theme.ChangeStyle(streamConnectBtn, Theme.ButtonStyle.DangerPill);
+                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.Close);
+                    streamConnectBtn.Enabled = true;
+                }
+                else
+                {
+                    streamConnectBtn.Text = "连接";
+                    Theme.ChangeStyle(streamConnectBtn, Theme.ButtonStyle.Primary);
+                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.None);
+                    streamConnectBtn.Enabled = !string.IsNullOrWhiteSpace(streamHost.Text);
+                }
+            }
             if (rustDeskConnectBtn != null)
                 rustDeskConnectBtn.Enabled = !string.IsNullOrWhiteSpace(remoteId.Text);
         }
@@ -1626,6 +1656,48 @@ namespace DualRemote
                 }));
             };
 
+            nativeForm.BoundsMoved += delegate
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.RepositionToOwnerScreen();
+            };
+
+            nativeForm.RestoreMainRequested += delegate
+            {
+                if (!IsDisposed) RestoreFromTray();
+            };
+
+            nativeForm.ToggleWindowedRequested += delegate
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                windowedStream = !windowedStream;
+                SavePreferences();
+                nativeForm.SetWindowedMode(windowedStream);
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.RefreshVisualState();
+            };
+
+            nativeForm.ToggleHudRequested += delegate
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                showStreamStats = !showStreamStats;
+                SavePreferences();
+                nativeForm.SetHudVisible(showStreamStats);
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.RefreshVisualState();
+            };
+
+            nativeForm.ToggleMouseRequested += delegate
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                useAbsoluteMouse = !useAbsoluteMouse;
+                SavePreferences();
+                nativeForm.SetFreeMouse(useAbsoluteMouse);
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.RefreshVisualState();
+            };
+
             nativeForm.StatusUpdated += delegate(string statusText)
             {
                 if (IsDisposed) return;
@@ -1679,7 +1751,7 @@ namespace DualRemote
             Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
 
             nativeForm.Show();
-            ShowOrUpdateStreamToolbar(host, profile, 0);
+            ShowOrUpdateStreamToolbar(host, profile, 0, nativeForm);
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
             {
                 activeStreamToolbar.SetNativeCallbacks(
@@ -1698,7 +1770,7 @@ namespace DualRemote
             SyncActiveControlIndicators();
         }
 
-        private void ShowOrUpdateStreamToolbar(string host, QualityOption profile, int pid)
+        private void ShowOrUpdateStreamToolbar(string host, QualityOption profile, int pid, Form ownerForm = null)
         {
             activeStreamHost = host ?? "";
             activeStreamPid = pid;
@@ -1711,6 +1783,7 @@ namespace DualRemote
 
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
             {
+                if (ownerForm != null) activeStreamToolbar.SetOwnerForm(ownerForm);
                 activeStreamToolbar.UpdateSession(pid, modeTag, selectedIdx);
                 return;
             }
@@ -1770,6 +1843,7 @@ namespace DualRemote
                     }
                     SyncActiveControlIndicators();
                 });
+            if (ownerForm != null) activeStreamToolbar.SetOwnerForm(ownerForm);
             activeStreamToolbar.StartWatching();
         }
 
@@ -1807,6 +1881,7 @@ namespace DualRemote
                     && string.Equals(activeStreamHost, detailDeviceAddress, StringComparison.OrdinalIgnoreCase);
                 detailPreviewCanvas.SetControlling(controllingDetail);
             }
+            UpdateAssistConnectButtons();
         }
 
         private async void SwitchActiveStreamQuality(int newIndex)

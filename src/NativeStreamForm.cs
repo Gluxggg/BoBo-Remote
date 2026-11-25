@@ -47,6 +47,13 @@ namespace DualRemote
         private bool freeMouseMode;
         private bool hudVisible;
 
+        private readonly Panel nativeTopBar;
+        private readonly Label topBarTitleLabel;
+        private readonly Button topBarMouseBtn;
+        private readonly Button topBarModeBtn;
+        private readonly Button topBarHudBtn;
+        private readonly Button topBarMainBtn;
+        private readonly Button topBarExitBtn;
         private readonly Panel videoHost;
         private readonly Panel statusOverlay;
         private readonly Label statusTitleLabel;
@@ -71,6 +78,11 @@ namespace DualRemote
         internal event Action<int> PlayerProcessStarted;
         internal event Action<bool> MouseModeChanged;
         internal event Action ToolbarHotkeyPressed;
+        internal event Action BoundsMoved;
+        internal event Action RestoreMainRequested;
+        internal event Action ToggleWindowedRequested;
+        internal event Action ToggleHudRequested;
+        internal event Action ToggleMouseRequested;
         internal event Action<string> StatusUpdated;
         internal event Action<string> PairRequired;
         internal event Action SessionEnded;
@@ -133,6 +145,71 @@ namespace DualRemote
             videoHost.SizeChanged += delegate { SyncChildViewportSize(); };
             Controls.Add(videoHost);
 
+            // 内置顶栏控制条（窗口模式常驻于画面正上方，不被 D3D11 视口遮挡，提供醒目红色「退出控制」按钮）
+            nativeTopBar = new Panel();
+            nativeTopBar.Dock = DockStyle.Top;
+            nativeTopBar.Height = 38;
+            nativeTopBar.BackColor = Color.FromArgb(18, 27, 42);
+            nativeTopBar.Padding = new Padding(12, 5, 10, 5);
+            nativeTopBar.Paint += delegate(object s, PaintEventArgs e)
+            {
+                using (var pen = new Pen(Color.FromArgb(46, 74, 110), 1f))
+                    e.Graphics.DrawLine(pen, 0, nativeTopBar.Height - 1, nativeTopBar.Width, nativeTopBar.Height - 1);
+            };
+
+            topBarTitleLabel = new Label();
+            topBarTitleLabel.Dock = DockStyle.Fill;
+            topBarTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
+            topBarTitleLabel.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+            topBarTitleLabel.ForeColor = Color.FromArgb(228, 238, 250);
+            topBarTitleLabel.AutoEllipsis = true;
+            nativeTopBar.Controls.Add(topBarTitleLabel);
+
+            var topBarActions = new FlowLayoutPanel();
+            topBarActions.Dock = DockStyle.Right;
+            topBarActions.AutoSize = true;
+            topBarActions.WrapContents = false;
+            topBarActions.FlowDirection = FlowDirection.LeftToRight;
+            topBarActions.BackColor = Color.Transparent;
+            topBarActions.Margin = Padding.Empty;
+            topBarActions.Padding = Padding.Empty;
+
+            topBarMouseBtn = CreateTopBarButton("自由鼠标", Color.FromArgb(30, 88, 152));
+            topBarMouseBtn.Click += delegate
+            {
+                if (ToggleMouseRequested != null) ToggleMouseRequested();
+                else SetFreeMouse(!freeMouseMode);
+            };
+            topBarModeBtn = CreateTopBarButton("无边全屏", Color.FromArgb(36, 52, 76));
+            topBarModeBtn.Click += delegate
+            {
+                if (ToggleWindowedRequested != null) ToggleWindowedRequested();
+                else SetWindowedMode(!windowedMode);
+            };
+            topBarHudBtn = CreateTopBarButton("性能", Color.FromArgb(36, 52, 76));
+            topBarHudBtn.Click += delegate
+            {
+                if (ToggleHudRequested != null) ToggleHudRequested();
+                else SetHudVisible(!hudVisible);
+            };
+            topBarMainBtn = CreateTopBarButton("主界面", Color.FromArgb(36, 52, 76));
+            topBarMainBtn.Click += delegate
+            {
+                Engines.ReleaseCursorClip();
+                if (RestoreMainRequested != null) RestoreMainRequested();
+            };
+            topBarExitBtn = CreateTopBarButton("退出控制", Color.FromArgb(208, 52, 56));
+            topBarExitBtn.Click += delegate { DisconnectAndClose(true); };
+
+            topBarActions.Controls.Add(topBarMouseBtn);
+            topBarActions.Controls.Add(topBarModeBtn);
+            topBarActions.Controls.Add(topBarHudBtn);
+            topBarActions.Controls.Add(topBarMainBtn);
+            topBarActions.Controls.Add(topBarExitBtn);
+            nativeTopBar.Controls.Add(topBarActions);
+            Controls.Add(nativeTopBar);
+            RefreshTopBarVisuals();
+
             statusOverlay = new Panel();
             statusOverlay.Size = new Size(440, 176);
             statusOverlay.BackColor = Color.FromArgb(22, 32, 48);
@@ -193,9 +270,14 @@ namespace DualRemote
                 CenterStatusOverlay();
                 SyncChildViewportSize();
                 UpdateHudPosition();
+                if (BoundsMoved != null) { try { BoundsMoved(); } catch { } }
             };
 
-            Move += delegate { UpdateHudPosition(); };
+            Move += delegate
+            {
+                UpdateHudPosition();
+                if (BoundsMoved != null) { try { BoundsMoved(); } catch { } }
+            };
 
             Activated += delegate
             {
@@ -247,6 +329,7 @@ namespace DualRemote
             if (windowedMode == windowed) return;
             windowedMode = windowed;
             ApplyWindowStyle(windowedMode, false);
+            RefreshTopBarVisuals();
             CenterStatusOverlay();
             SyncChildViewportSize();
             UpdateHudPosition();
@@ -258,6 +341,7 @@ namespace DualRemote
             freeMouseMode = free;
             if (free) Engines.ReleaseCursorClip();
             SendIpcLine(NativeStreamCore.BuildMouseModeCommand(free));
+            RefreshTopBarVisuals();
             if (MouseModeChanged != null)
             {
                 try { MouseModeChanged(free); } catch { }
@@ -268,6 +352,7 @@ namespace DualRemote
         {
             hudVisible = visible;
             SendIpcLine(NativeStreamCore.BuildHudCommand(visible));
+            RefreshTopBarVisuals();
             if (hudOverlay != null && !hudOverlay.IsDisposed)
             {
                 if (visible && remoteSessionConnected)
@@ -305,6 +390,7 @@ namespace DualRemote
                 ? (currentWidth + "x" + currentHeight + "@" + currentFps)
                 : modeTag;
             Text = BuildWindowTitle();
+            RefreshTopBarVisuals();
 
             switchingQuality = true;
             try
@@ -603,7 +689,7 @@ namespace DualRemote
                 return;
             }
 
-            if (ev.EventType == "hotkey" && ev.Name == "toolbar")
+            if ((ev.EventType == "hotkey" && ev.Name == "toolbar") || ev.EventType == "edge_top")
             {
                 SafeUiInvoke(delegate { RaiseToolbarHotkey(); });
                 return;
@@ -800,6 +886,49 @@ namespace DualRemote
             if (hudOverlay == null || hudOverlay.IsDisposed || IsDisposed) return;
             Point pt = videoHost.PointToScreen(new Point(14, 14));
             hudOverlay.Location = pt;
+        }
+
+        private static Button CreateTopBarButton(string text, Color bgColor)
+        {
+            Button btn = new Button();
+            btn.Text = text;
+            btn.AutoSize = true;
+            btn.MinimumSize = new Size(68, 26);
+            btn.Height = 26;
+            btn.Padding = new Padding(8, 0, 8, 0);
+            btn.Margin = new Padding(6, 1, 0, 1);
+            btn.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+            btn.ForeColor = Color.White;
+            btn.BackColor = bgColor;
+            btn.FlatStyle = FlatStyle.Flat;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Cursor = Cursors.Hand;
+            btn.TabStop = false;
+            return btn;
+        }
+
+        private void RefreshTopBarVisuals()
+        {
+            if (IsDisposed || nativeTopBar == null) return;
+            SafeUiInvoke(delegate
+            {
+                if (IsDisposed || nativeTopBar == null) return;
+                nativeTopBar.Visible = windowedMode;
+                if (topBarTitleLabel != null)
+                    topBarTitleLabel.Text = "●  " + hostDisplayName + "  ·  " + currentModeTag + "  ·  BoBo 一体化内置内核";
+                if (topBarMouseBtn != null)
+                {
+                    topBarMouseBtn.Text = freeMouseMode ? "自由鼠标" : "锁鼠模式";
+                    topBarMouseBtn.BackColor = freeMouseMode ? Color.FromArgb(30, 108, 180) : Color.FromArgb(52, 68, 96);
+                }
+                if (topBarModeBtn != null)
+                    topBarModeBtn.Text = windowedMode ? "无边全屏" : "窗口模式";
+                if (topBarHudBtn != null)
+                {
+                    topBarHudBtn.Text = hudVisible ? "性能 开" : "性能";
+                    topBarHudBtn.BackColor = hudVisible ? Color.FromArgb(30, 108, 180) : Color.FromArgb(36, 52, 76);
+                }
+            });
         }
 
         private string BuildWindowTitle()

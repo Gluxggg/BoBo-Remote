@@ -248,6 +248,7 @@ struct StreamViewportState {
     bool rawMouseRegistered = false;
     bool hudEnabled = false;
     bool cursorHidden = false;
+    DWORD lastTopEdgeTick = 0;
     std::atomic<bool> quitRequested{ false };
 };
 
@@ -322,6 +323,13 @@ static LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (st->freeMouse && st->bridge && st->renderer) {
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
+                if (y <= 6) {
+                    DWORD nowTick = GetTickCount();
+                    if (nowTick - st->lastTopEdgeTick >= 600) {
+                        st->lastTopEdgeTick = nowTick;
+                        EmitJsonLine("{\"event\":\"edge_top\"}");
+                    }
+                }
                 RECT vp = st->renderer->GetVideoViewportRect();
                 int vpW = vp.right - vp.left;
                 int vpH = vp.bottom - vp.top;
@@ -634,7 +642,31 @@ static int RunStreamSession(HWND parentHwnd, const StreamSessionConfig& cfg, boo
     return 0;
 }
 
+static void EnableDpiAwareness() {
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL(WINAPI* SetDpiCtxFn)(void*);
+        auto fnCtx = reinterpret_cast<SetDpiCtxFn>(GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+        if (fnCtx) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (DPI_AWARENESS_CONTEXT)-4
+            if (fnCtx(reinterpret_cast<void*>(static_cast<intptr_t>(-4)))) {
+                return;
+            }
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE == (DPI_AWARENESS_CONTEXT)-3
+            if (fnCtx(reinterpret_cast<void*>(static_cast<intptr_t>(-3)))) {
+                return;
+            }
+        }
+        typedef BOOL(WINAPI* SetDpiAwareFn)();
+        auto fnAware = reinterpret_cast<SetDpiAwareFn>(GetProcAddress(hUser32, "SetProcessDPIAware"));
+        if (fnAware) {
+            fnAware();
+        }
+    }
+}
+
 int main(int argc, char** argv) {
+    EnableDpiAwareness();
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     bool selfTest = false;

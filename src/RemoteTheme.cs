@@ -462,6 +462,14 @@ namespace DualRemote
             action.Invalidate();
         }
 
+        internal static void ChangeStyle(Button button, ButtonStyle style)
+        {
+            var action = button as ActionButton;
+            if (action == null) return;
+            action.Style = style;
+            action.Invalidate();
+        }
+
         internal static TableLayoutPanel Grid(int columns)
         {
             return new GridPanel
@@ -898,7 +906,8 @@ namespace DualRemote
 
         private sealed class ActionButton : Button
         {
-            private readonly ButtonStyle style;
+            private ButtonStyle style;
+            internal ButtonStyle Style { get { return style; } set { style = value; } }
             private bool hovered;
             private bool pressed;
             private bool keyboardFocus;

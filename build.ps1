@@ -729,7 +729,7 @@ function Invoke-CompileStage {
     if (-not (Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Force -Path $appDir | Out-Null }
     $exePath = Join-Path $appDir 'BoBo远程.exe'
     if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
-    $appVerLabel = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '5.0.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+    $appVerLabel = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '5.0.1' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
     $appVerFile = Join-Path $appDir 'app-version.txt'
     [System.IO.File]::WriteAllText($appVerFile, $appVerLabel, (New-Object System.Text.UTF8Encoding($false)))
 
