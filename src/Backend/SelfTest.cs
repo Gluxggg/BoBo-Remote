@@ -1180,6 +1180,71 @@ namespace DualRemote
                     launchMessage);
             }
 
+            // V5 原生一体化 GameStream 协议、X.509 身份生成与 IPC 编解码自检
+            string nativeTempDir = Path.Combine(Path.GetTempPath(), "bobo-native-id-test-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                System.Security.Cryptography.X509Certificates.X509Certificate2 idCert;
+                string idPem, idUid, idErr;
+                bool idCreated = GameStreamClient.EnsureIdentityInDir(nativeTempDir, false, out idCert, out idPem, out idUid, out idErr);
+                Check("V5 内置客户端生成 RSA-2048 证书与 PFX", idCreated && idCert != null && idCert.HasPrivateKey && !string.IsNullOrEmpty(idPem) && idUid.Length == 16, idErr);
+                if (idCreated && idCert != null)
+                {
+                    byte[] sigBytes = GameStreamClient.ExtractX509SignatureBytes(idCert.RawData);
+                    Check("V5 X.509 DER 证书签名提取（256 字节）", sigBytes != null && sigBytes.Length == 256,
+                        sigBytes == null ? "null" : sigBytes.Length.ToString());
+                    idCert.Dispose();
+
+                    // 二次加载持久化 PFX 验证
+                    System.Security.Cryptography.X509Certificates.X509Certificate2 reloaded;
+                    string rPem, rUid, rErr;
+                    bool reloadOk = GameStreamClient.EnsureIdentityInDir(nativeTempDir, false, out reloaded, out rPem, out rUid, out rErr);
+                    Check("V5 内置客户端重新加载持久化 PFX", reloadOk && reloaded != null && reloaded.HasPrivateKey && rUid == idUid, rErr);
+                    if (reloaded != null) reloaded.Dispose();
+                }
+
+                byte[] testSalt = GameStreamClient.GenerateRandomBytes(16);
+                byte[] testAesKey = GameStreamClient.DerivePairingAesKey(testSalt, "4829", true);
+                byte[] testChallenge = GameStreamClient.GenerateRandomBytes(32);
+                byte[] testEnc = GameStreamClient.AesEcbEncrypt(testAesKey, testChallenge);
+                byte[] testDec = GameStreamClient.AesEcbDecrypt(testAesKey, testEnc);
+                bool aesMatch = testEnc.Length == 32 && testDec.Length == 32;
+                for (int i = 0; aesMatch && i < 32; i++) if (testChallenge[i] != testDec[i]) aesMatch = false;
+                Check("V5 配对 AES-128-ECB + SHA-256 密钥派生回环", aesMatch, "");
+
+                GameStreamServerInfo parsedInfo;
+                string infoErr;
+                string sampleServerXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><root status_code=\"200\">"
+                    + "<hostname>BoBo-Host</hostname><appversion>7.1.431.-1</appversion><GfeVersion>3.23.0.74</GfeVersion>"
+                    + "<HttpsPort>47984</HttpsPort><ExternalPort>47989</ExternalPort><ServerCodecModeSupport>769</ServerCodecModeSupport>"
+                    + "<PairStatus>1</PairStatus><currentgame>0</currentgame></root>";
+                bool infoOk = GameStreamClient.TryParseServerInfoXml(sampleServerXml, "127.0.0.1", 47989, out parsedInfo, out infoErr);
+                Check("V5 解析 Sunshine /serverinfo XML", infoOk && parsedInfo != null && parsedInfo.Paired && parsedInfo.HttpsPort == 47984 && parsedInfo.ServerCodecModeSupport == 769, infoErr);
+
+                List<GameStreamAppInfo> parsedApps = GameStreamClient.ParseAppListXml(
+                    "<root status_code=\"200\"><App><ID>881448767</ID><AppTitle>桌面</AppTitle></App><App><ID>123</ID><AppTitle>Steam</AppTitle></App></root>");
+                Check("V5 解析 Sunshine /applist 中文桌面应用", parsedApps.Count == 2 && parsedApps[0].Id == 881448767 && parsedApps[0].Title == "桌面", "");
+
+                string keysCmd = NativeStreamCore.BuildSendKeysCommand(new int[] { 17, 16, 27 });
+                string textCmd = NativeStreamCore.BuildSendTextCommand("hello \"bobo\"\n");
+                NativePlayerEvent statsEv = NativeStreamCore.TryParseEventLine(
+                    "{\"event\":\"stats\",\"fps\":89.8,\"decodeMs\":1.4,\"renderMs\":0.6,\"rttMs\":3.0,\"bitrateKbps\":22000,\"width\":2560,\"height\":1440,\"codec\":\"H264\",\"decoder\":\"D3D11VA\"}");
+                NativePlayerEvent stageEv = NativeStreamCore.TryParseEventLine(
+                    "{\"event\":\"stage\",\"stage\":\"RTSP handshake\",\"status\":\"starting\",\"errorCode\":0}");
+                NativePlayerEvent hwndEv = NativeStreamCore.TryParseEventLine("{\"event\":\"viewport_hwnd\",\"hwnd\":123456}");
+                Check("V5 原生播放核 IPC 编解码",
+                    keysCmd == "{\"cmd\":\"send_keys\",\"vks\":[17,16,27]}"
+                    && textCmd.IndexOf("\\\"bobo\\\"\\n", StringComparison.Ordinal) >= 0
+                    && statsEv != null && statsEv.Stats != null && statsEv.Stats.Width == 2560
+                    && stageEv != null && stageEv.Name == "RTSP handshake" && stageEv.State == "starting"
+                    && hwndEv != null && hwndEv.ViewportHwnd == 123456UL,
+                    keysCmd);
+            }
+            finally
+            {
+                try { if (Directory.Exists(nativeTempDir)) Directory.Delete(nativeTempDir, true); } catch { }
+            }
+
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
             string reportPath = Path.Combine(Path.GetTempPath(), "双端远程-self-test.log");

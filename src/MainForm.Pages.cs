@@ -67,6 +67,7 @@ namespace DualRemote
         private bool playAudioOnHost = false;
         private bool windowedStream = false;
         private bool preferHevc = true;
+        private bool useNativeStream = true;
         private bool useFoundationClient = true;
         private bool lowLatencyNoVsync = true;
         private bool enableFramePacing = false;
@@ -609,16 +610,30 @@ namespace DualRemote
             return page;
         }
 
+        private bool ShouldUseNativeStream()
+        {
+            return useNativeStream && NativeStreamCore.IsAvailable;
+        }
+
         private Control BuildStreamSettingsTab()
         {
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
+            var nativeToggle = PreferenceToggle("一体化内置串流内核", useNativeStream,
+                value => { useNativeStream = value; UpdateStreamHint(); });
+            nativeToggle.Enabled = NativeStreamCore.IsAvailable;
+            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "一体化内置串流内核（零外置窗口 · 推荐）",
+                nativeToggle.Enabled
+                    ? "直接在 BoBo 内部窗口完成 4 位码配对、D3D11VA 硬解渲染与键鼠控制，不再弹出第三方 Moonlight 窗口"
+                    : "当前目录缺少 BoBoStreamPlayer.exe，已自动回退到外置兼容模式",
+                nativeToggle);
+
             var enhanced = PreferenceToggle("Foundation 自适应码率", useFoundationClient,
                 value => { useFoundationClient = value; UpdateStreamHint(); });
             enhanced.Enabled = FoundationClient.IsAvailable;
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "Foundation 自适应码率（ABR · 抗丢包推荐）",
-                enhanced.Enabled ? "使用 Moonlight V+ 根据实时丢包与 RTT 动态调优码率，跨网弱网防卡死" : "当前目录缺少 engines\\MoonlightVPlus 组件",
+            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "Foundation 自适应码率（外置兼容模式 ABR）",
+                enhanced.Enabled ? "仅在关闭内置内核、使用外置 Moonlight V+ 兼容模式时按丢包与 RTT 动态调优码率" : "当前目录缺少 engines\\MoonlightVPlus 组件",
                 enhanced);
 
             AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "优先使用 HEVC (H.265) 硬件编解码",
@@ -1035,7 +1050,7 @@ namespace DualRemote
                 var infoCard = new Theme.Card { Padding = new Padding(16, 12, 16, 12) };
                 var ic = Theme.Grid(1);
                 Theme.FillColumn(ic);
-                Theme.Row(ic, 25, Theme.Text("• 串流引擎：Foundation Sunshine + Moonlight V+ (ABR + Auto-FEC + HEVC)", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 串流引擎：BoBo V5 原生一体化内核（moonlight-common-c + D3D11VA）+ Foundation Sunshine", Theme.TextSize.Small, Theme.BodyInk));
                 Theme.Row(ic, 25, Theme.Text("• 通用协助与文件传输：RustDesk 1.5.3", Theme.TextSize.Small, Theme.BodyInk));
                 Theme.Row(ic, 25, Theme.Text("• 隐私保护：WDA_EXCLUDEFROMCAPTURE 物理屏防窥壁纸 + Zako 虚拟屏", Theme.TextSize.Small, Theme.BodyInk));
                 Theme.Row(ic, 25, Theme.Text("• 配置目录：" + RecentStore.DirPath, Theme.TextSize.Small, Theme.Muted));
@@ -1555,6 +1570,7 @@ namespace DualRemote
 
         private void LoadPreferences()
         {
+            useNativeStream = NativeStreamCore.IsAvailable;
             useFoundationClient = FoundationClient.IsAvailable;
             preferHevc = true;
             lowLatencyNoVsync = true;
@@ -1584,6 +1600,7 @@ namespace DualRemote
                     minimizeToTray = ReadFlag(lines, 10, false);
                     autoCheckUpdates = ReadFlag(lines, 11, true);
                     useAbsoluteMouse = ReadFlag(lines, 12, true);
+                    useNativeStream = NativeStreamCore.IsAvailable && ReadFlag(lines, 13, true);
                 }
                 else
                 {
@@ -1624,7 +1641,8 @@ namespace DualRemote
                     WriteFlag(enableFramePacing),
                     WriteFlag(minimizeToTray),
                     WriteFlag(autoCheckUpdates),
-                    WriteFlag(useAbsoluteMouse)
+                    WriteFlag(useAbsoluteMouse),
+                    WriteFlag(useNativeStream)
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

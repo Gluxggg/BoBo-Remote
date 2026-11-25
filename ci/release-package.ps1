@@ -72,11 +72,14 @@ $notesTemplate = @'
   - 自动创建**桌面快捷方式「BoBo Remote」**、**开始菜单入口**与 Windows **「应用和功能」卸载项**；
   - 覆盖升级时自动保留原有 Moonlight 本地配对记录；
   - 支持**客户端内一键自动更新**（启动自动检测 GitHub Releases 新版本，SHA-256 校验后自动增量/覆盖升级，无需再手动去仓库下载安装包）；
-  - 首次打开自动运行 **7 步灰白框选 ClearType 新手引导**，串流时自动停靠 **UU 风格顶部小浮窗与自由鼠标守护**（无边框全屏 + 自动解除出框禁锢 / 收起态直达红色「退出」/ 快捷组合键操作 / 实时切画质 / 一键双端断开）；
-  - 设备详情预览框自动加载随机 Windows 系统风景壁纸（支持一键「换风景图」），主界面顶部与侧栏补齐醒目「退出控制 / 退出 BoBo远程」入口，新装机默认开启被控自动防窥屏守护（兼容系统安装版、内置宿主与 RustDesk）。
+  - **V5.0.0 全新一体化内置串流引擎（彻底告别外置 Moonlight 弹窗）**：
+    - 主控与被控完全集成于 BoBo Remote 内部：内嵌 ~540 KB 原生 C++17 播放核 `BoBoStreamPlayer.exe`（静态链接开源 `moonlight-common-c` + `enet` + `nanors` + Windows CNG BCrypt + Direct3D 11 VideoProcessor + Media Foundation D3D11VA 硬解 + WASAPI 低延迟音频）与纯原生 5 阶段 4 位码配对 / HTTPS 双向认证，连接后直接在 BoBo 内部窗口全屏/窗口渲染，不再调起第三方 Moonlight 窗口；
+    - 首次升级自动无感迁移旧版 `Moonlight.ini` 客户端证书与已配对主机，无需重新配对；
+    - 顶部 UU 风格悬浮控制条直连内置内核 IPC：**自由鼠标 ↔ FPS 锁鼠**、**无边框全屏 ↔ 窗口模式**、**实时性能浮层（FPS / 解码 / 渲染 / RTT）**、**远端组合键（Ctrl+Shift+Esc / Win+D / Alt+Tab）**与**剪贴板文本粘贴**全部即时生效，无需重启串流；点击「退出控制」或关闭窗口自动双端同步断开并发送 HTTPS `/cancel`；
+  - 首次打开自动运行 **7 步灰白框选 ClearType 新手引导**；设备详情预览框自动加载随机 Windows 系统风景壁纸（支持一键「换风景图」），主界面顶部与侧栏常驻醒目「退出控制 / 退出 BoBo远程」入口，新装机默认开启被控自动防窥屏守护。
 - **`BoBoRemote-Portable-x64.zip`（绿色免安装便携版）**：解压即可运行，同样支持客户端内自动更新。
-- **`BoBoRemote-Update-x64.zip`（客户端轻量增量更新包，~200 KB）**：供内置自动更新器在引擎版本未变时秒级校验覆盖升级，无需手动下载。
-- **`BoBoStreamPlayer-v5-core-x64.exe`（V5 原生 C++17 D3D11VA 播放核心预览，~300 KB）**：可运行 `--self-test` / `--probe-gpu` 检验本机 D3D11VA 硬件解码能力。
+- **`BoBoRemote-Update-x64.zip`（客户端轻量增量更新包，~650 KB）**：已包含新版 `BoBo远程.exe` 与 V5 原生播放核 `BoBoStreamPlayer.exe`，旧版用户点「设置 → 检查更新」即可秒级升级到 V5 一体化内核。
+- **`BoBoStreamPlayer-v5-core-x64.exe`（V5 原生 C++17 D3D11VA + moonlight-common-c 播放核心，~540 KB）**：可独立运行 `--self-test` / `--probe-gpu` 检验本机 D3D11VA 硬件解码能力。
 
 ### 开箱即用与可选进阶说明
 - **下载双击即用（零额外安装）**：局域网 2K 高帧串流（内置 Foundation Sunshine + Moonlight V+ 与 4 位配对码）、跨外网 RustDesk 9 位码临时协助与文件互传、软件级物理屏防窥壁纸与锁屏守护（`Ctrl+Alt+Shift+P`）、串流顶部悬浮工具条、客户端内自动更新及 7 步新手引导均已全部内置。
@@ -96,6 +99,7 @@ __H_V5__  BoBoStreamPlayer-v5-core-x64.exe
 ### 开源许可与上游源码对应说明
 - BoBo Remote 启动器、图形化安装向导与脚本以 **MIT** 许可发布。
 - 随发行包封装的上游组件以独立进程方式调用、未修改上游源码，各自保留原许可（完整哈希、许可文本与源码说明见 [`NOTICE.md`](https://github.com/__REPO__/blob/main/NOTICE.md) 与 [`THIRD-PARTY.md`](https://github.com/__REPO__/blob/main/THIRD-PARTY.md)）：
+  - moonlight-common-c (GPL-3.0, 静态链接入原生播放核 `BoBoStreamPlayer.exe`): https://github.com/moonlight-stream/moonlight-common-c
   - RustDesk `1.5.3` (AGPL-3.0): https://github.com/rustdesk/rustdesk/tree/1.5.3
   - Moonlight `6.2.0` (GPL-3.0): https://github.com/moonlight-stream/moonlight-qt/tree/v6.2.0
   - Moonlight V+ `6.5.6` (GPL-3.0): https://github.com/qiin2333/moonlight-qt/tree/v6.5.6

@@ -117,6 +117,7 @@ namespace DualRemote
         private Timer onboardingDelayTimer;
         private Timer updateCheckTimer;
         private WindowMessageFilter windowFilter;
+        private NativeStreamForm activeNativeStreamForm;
         private StreamToolbarOverlay activeStreamToolbar;
         private string activeStreamHost = "";
         private int activeStreamPid;
@@ -1487,6 +1488,14 @@ namespace DualRemote
                 streamHost.Focus();
                 return;
             }
+
+            var profile = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+            if (ShouldUseNativeStream())
+            {
+                StartNativeIntegratedStream(host, profile);
+                return;
+            }
+
             StreamEngine engine = FoundationClient.SelectEngine(true);
             if (engine == StreamEngine.Unavailable)
             {
@@ -1513,7 +1522,6 @@ namespace DualRemote
             }
             if (IsDisposed) return;
 
-            var profile = quality.SelectedItem as QualityOption ?? QualityOptions[0];
             string note;
             bool started;
             switch (engine)
@@ -1546,11 +1554,158 @@ namespace DualRemote
             ShowOrUpdateStreamToolbar(host, profile, Engines.LastStreamProcessId);
         }
 
+        private void StartNativeIntegratedStream(string host, QualityOption profile)
+        {
+            string displayName = string.IsNullOrEmpty(clientPairHostName) ? host : clientPairHostName;
+            string modeTag = profile.Height + "p" + profile.Fps + " · D3D11VA";
+
+            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+            {
+                if (string.Equals(activeNativeStreamForm.Host, host, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (activeNativeStreamForm.WindowState == FormWindowState.Minimized)
+                        activeNativeStreamForm.WindowState = FormWindowState.Normal;
+                    activeNativeStreamForm.Activate();
+                    return;
+                }
+                NativeStreamForm previous = activeNativeStreamForm;
+                activeNativeStreamForm = null;
+                previous.DisconnectAndClose(true);
+            }
+
+            var nativeForm = new NativeStreamForm(
+                host,
+                displayName,
+                profile.Width,
+                profile.Height,
+                profile.Fps,
+                profile.BitrateKbps,
+                modeTag,
+                windowedStream,
+                useAbsoluteMouse,
+                showStreamStats,
+                playAudioOnHost,
+                UsesHevc(profile),
+                appIcon ?? Icon);
+
+            nativeForm.PlayerProcessStarted += delegate(int pid)
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                    activeStreamPid = pid;
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    {
+                        var p = quality.SelectedItem as QualityOption ?? profile;
+                        activeStreamToolbar.UpdateSession(pid, p.Height + "p" + p.Fps + " · D3D11VA", Math.Max(0, quality.SelectedIndex));
+                    }
+                    SyncActiveControlIndicators();
+                }));
+            };
+
+            nativeForm.MouseModeChanged += delegate(bool free)
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                    useAbsoluteMouse = free;
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                        activeStreamToolbar.RefreshVisualState();
+                }));
+            };
+
+            nativeForm.ToolbarHotkeyPressed += delegate
+            {
+                if (IsDisposed || activeNativeStreamForm != nativeForm) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                        activeStreamToolbar.RevealFromHotkey();
+                }));
+            };
+
+            nativeForm.StatusUpdated += delegate(string statusText)
+            {
+                if (IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (!IsDisposed) SetStatus(statusText, Theme.PillTone.Info);
+                }));
+            };
+
+            nativeForm.PairRequired += delegate(string targetHost)
+            {
+                if (IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (!IsDisposed)
+                    {
+                        RestoreFromTray();
+                        ShowClientPairPrompt(targetHost, displayName, true, "该主机尚未授权当前内置客户端，请完成一次 4 位配对码授权。");
+                    }
+                }));
+            };
+
+            nativeForm.SessionEnded += delegate
+            {
+                if (IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (activeNativeStreamForm == nativeForm)
+                    {
+                        activeNativeStreamForm = null;
+                        activeStreamPid = 0;
+                        activeStreamHost = "";
+                        if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                        {
+                            activeStreamToolbar.CloseSafely();
+                            activeStreamToolbar = null;
+                        }
+                        SyncActiveControlIndicators();
+                    }
+                }));
+            };
+
+            activeNativeStreamForm = nativeForm;
+            activeStreamHost = host;
+            activeStreamPid = 0;
+
+            string note = "已在 BoBo 内部窗口启动一体化远程桌面（" + displayName + " · " + modeTag + "）。";
+            ConnectionTelemetry.RecordSubmitted("NativeV5", host, profile.Width,
+                profile.Height, profile.Fps, profile.BitrateKbps, false, true, note);
+            recent.RememberMoonlightHost(host);
+            Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
+
+            nativeForm.Show();
+            ShowOrUpdateStreamToolbar(host, profile, 0);
+            if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+            {
+                activeStreamToolbar.SetNativeCallbacks(
+                    delegate { return activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed; },
+                    delegate(int[] vks)
+                    {
+                        if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                            activeNativeStreamForm.SendRemoteKeys(vks);
+                    },
+                    delegate(string text)
+                    {
+                        if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                            activeNativeStreamForm.SendRemoteText(text);
+                    });
+            }
+            SyncActiveControlIndicators();
+        }
+
         private void ShowOrUpdateStreamToolbar(string host, QualityOption profile, int pid)
         {
             activeStreamHost = host ?? "";
             activeStreamPid = pid;
-            string modeTag = profile.Height + "p" + profile.Fps + " · " + (UsesHevc(profile) ? "HEVC" : "H.264");
+            bool isNative = activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed;
+            string modeTag = isNative
+                ? (profile.Height + "p" + profile.Fps + " · D3D11VA")
+                : (profile.Height + "p" + profile.Fps + " · " + (UsesHevc(profile) ? "HEVC" : "H.264"));
             int selectedIdx = Math.Max(0, quality.SelectedIndex);
             SyncActiveControlIndicators();
 
@@ -1578,29 +1733,41 @@ namespace DualRemote
                 {
                     showStreamStats = !showStreamStats;
                     SavePreferences();
-                    RestartActiveStreamSession();
+                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                        activeNativeStreamForm.SetHudVisible(showStreamStats);
+                    else
+                        RestartActiveStreamSession();
                 },
                 delegate { TogglePrivacyCurtain(false); },
                 delegate
                 {
                     windowedStream = !windowedStream;
                     SavePreferences();
-                    RestartActiveStreamSession();
+                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                        activeNativeStreamForm.SetWindowedMode(windowedStream);
+                    else
+                        RestartActiveStreamSession();
                 },
                 delegate
                 {
                     useAbsoluteMouse = !useAbsoluteMouse;
                     SavePreferences();
                     if (useAbsoluteMouse) Engines.ReleaseCursorClip();
-                    RestartActiveStreamSession();
+                    if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+                        activeNativeStreamForm.SetFreeMouse(useAbsoluteMouse);
+                    else
+                        RestartActiveStreamSession();
                 },
                 delegate { RestoreFromTray(); },
                 delegate { DisconnectActiveStreamSession(); },
                 delegate
                 {
                     activeStreamToolbar = null;
-                    activeStreamPid = 0;
-                    activeStreamHost = "";
+                    if (activeNativeStreamForm == null || activeNativeStreamForm.IsDisposed)
+                    {
+                        activeStreamPid = 0;
+                        activeStreamHost = "";
+                    }
                     SyncActiveControlIndicators();
                 });
             activeStreamToolbar.StartWatching();
@@ -1609,7 +1776,8 @@ namespace DualRemote
         private void SyncActiveControlIndicators()
         {
             if (IsDisposed) return;
-            bool controlling = activeStreamPid > 0 && Engines.IsProcessAlive(activeStreamPid);
+            bool nativeActive = activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed;
+            bool controlling = nativeActive || (activeStreamPid > 0 && Engines.IsProcessAlive(activeStreamPid));
             if (!controlling && activeStreamPid > 0)
             {
                 activeStreamPid = 0;
@@ -1641,11 +1809,20 @@ namespace DualRemote
             }
         }
 
-        private void SwitchActiveStreamQuality(int newIndex)
+        private async void SwitchActiveStreamQuality(int newIndex)
         {
             if (newIndex < 0 || newIndex >= QualityOptions.Length) return;
             quality.SelectedIndex = newIndex;
             SavePreferences();
+            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+            {
+                QualityOption p = QualityOptions[newIndex];
+                string modeTag = p.Height + "p" + p.Fps + " · D3D11VA";
+                if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
+                    activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid, modeTag, newIndex);
+                await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, modeTag);
+                return;
+            }
             RestartActiveStreamSession();
         }
 
@@ -1653,6 +1830,12 @@ namespace DualRemote
         {
             string target = activeStreamHost;
             if (string.IsNullOrEmpty(target)) return;
+            if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
+            {
+                var p = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+                await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, p.Height + "p" + p.Fps + " · D3D11VA");
+                return;
+            }
             int oldPid = activeStreamPid;
             activeStreamPid = 0;
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
@@ -1669,6 +1852,8 @@ namespace DualRemote
 
         private void DisconnectActiveStreamSession()
         {
+            NativeStreamForm nativeForm = activeNativeStreamForm;
+            activeNativeStreamForm = null;
             int oldPid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
@@ -1677,6 +1862,10 @@ namespace DualRemote
             {
                 activeStreamToolbar.CloseSafely();
                 activeStreamToolbar = null;
+            }
+            if (nativeForm != null && !nativeForm.IsDisposed)
+            {
+                nativeForm.DisconnectAndClose(true);
             }
             SyncActiveControlIndicators();
             SetStatus("正在断开远程串流会话…", Theme.PillTone.Info);
@@ -1705,6 +1894,9 @@ namespace DualRemote
 
         private void DisconnectAllRemoteSessionsFromUi()
         {
+            NativeStreamForm nativeForm = activeNativeStreamForm;
+            bool hadNative = nativeForm != null && !nativeForm.IsDisposed;
+            activeNativeStreamForm = null;
             int oldPid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
@@ -1714,11 +1906,16 @@ namespace DualRemote
                 activeStreamToolbar.CloseSafely();
                 activeStreamToolbar = null;
             }
+            if (hadNative)
+            {
+                nativeForm.DisconnectAndClose(true);
+            }
             SyncActiveControlIndicators();
             Task.Run(delegate
             {
                 int stoppedClients = Engines.StopManagedClientProcesses(oldPid,
                     FoundationClient.EngineExe, Engines.MoonlightExe, Engines.RustDeskExe);
+                if (hadNative) stoppedClients++;
                 bool hadHostSessions = false;
                 string hostDetail;
                 bool hostStopped = SunshinePairing.TryDisconnectActiveSessions(out hadHostSessions, out hostDetail);
@@ -1760,7 +1957,7 @@ namespace DualRemote
 
         /// <summary>
         /// 退出 BoBo远程 时，双端同步收尾远控会话：
-        /// 1. 主控端：优雅关闭 BoBo 托管的 Moonlight / RustDesk 进程（配合 --quit-after 通知被控端立即退出会话）；
+        /// 1. 主控端：优雅关闭内置 NativeStreamForm（发送 disconnect + 远端 HTTPS /cancel）及兼容模式外置进程；
         /// 2. 被控端：通过 CA 证书固定的本机 Sunshine API 主动结束所有活跃会话并关闭远程应用（兼容系统安装版与内置宿主）；
         /// 3. 内置宿主：若本机运行的是 BoBo 自带内置 Sunshine，发出断开指令后安全停止该内置进程（绝不触碰系统安装版）。
         /// </summary>
@@ -1769,6 +1966,8 @@ namespace DualRemote
             if (remoteSessionsTornDown) return;
             remoteSessionsTornDown = true;
 
+            NativeStreamForm nativeForm = activeNativeStreamForm;
+            activeNativeStreamForm = null;
             int pid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
@@ -1776,6 +1975,10 @@ namespace DualRemote
             {
                 activeStreamToolbar.CloseSafely();
                 activeStreamToolbar = null;
+            }
+            if (nativeForm != null && !nativeForm.IsDisposed)
+            {
+                try { nativeForm.DisconnectAndClose(true); } catch { }
             }
 
             try
@@ -1966,6 +2169,12 @@ namespace DualRemote
         {
             var selected = quality.SelectedItem as QualityOption;
             if (selected == null) return;
+            if (ShouldUseNativeStream())
+            {
+                streamModeBadge.UpdateStatus("V5 内置内核 · D3D11VA", Theme.PillTone.Success);
+                streamHint.Text = "一体化内置串流引擎已就绪：直接在 BoBo 内部窗口完成 4 位码配对与 D3D11VA 硬解渲染，零外置窗口。";
+                return;
+            }
             var engine = FoundationClient.SelectEngine(true);
             if (engine == StreamEngine.Unavailable)
             {

@@ -113,6 +113,9 @@ namespace DualRemote
         private readonly Func<bool> getWindowedActive;
         private readonly Func<bool> getFreeMouseActive;
         private readonly Action onClosed;
+        private Func<bool> customSessionAlive;
+        private Action<int[]> nativeSendKeys;
+        private Action<string> nativeSendText;
 
         private int trackedPid;
         private int activeQualityIndex;
@@ -215,7 +218,16 @@ namespace DualRemote
             processWatchTimer.Tick += delegate
             {
                 if (IsDisposed) return;
-                if (trackedPid > 0 && !Engines.IsProcessAlive(trackedPid))
+                bool alive = true;
+                if (customSessionAlive != null)
+                {
+                    alive = customSessionAlive();
+                }
+                else if (trackedPid > 0)
+                {
+                    alive = Engines.IsProcessAlive(trackedPid);
+                }
+                if (!alive)
                 {
                     Engines.ReleaseCursorClip();
                     CloseSafely();
@@ -328,6 +340,20 @@ namespace DualRemote
             ApplyGeometry();
             EnsureTopMostNoActivate();
             Invalidate();
+        }
+
+        internal void SetNativeCallbacks(Func<bool> isAlive, Action<int[]> sendKeys, Action<string> sendText)
+        {
+            customSessionAlive = isAlive;
+            nativeSendKeys = sendKeys;
+            nativeSendText = sendText;
+            if (!IsDisposed) BuildActionsMenu();
+        }
+
+        internal void RevealFromHotkey()
+        {
+            if (IsDisposed) return;
+            ReleaseMouseAndRevealToolbar();
         }
 
         internal void RefreshVisualState()
@@ -600,14 +626,32 @@ namespace DualRemote
             {
                 SendRemoteCombo(VkMenu, VkTab);
             });
-            AddActionMenuItem("发送剪贴板粘贴 (Ctrl+Alt+Shift+V)", delegate
+            if (nativeSendText != null)
             {
-                SendRemoteCombo(VkControl, VkMenu, VkShift, VkV);
-            });
-            AddActionMenuItem("切换串流鼠标模式 (Ctrl+Alt+Shift+M)", delegate
+                AddActionMenuItem("粘贴本机剪贴板文本到远端", delegate
+                {
+                    try
+                    {
+                        if (Clipboard.ContainsText())
+                        {
+                            string clip = Clipboard.GetText();
+                            if (!string.IsNullOrEmpty(clip)) nativeSendText(clip);
+                        }
+                    }
+                    catch { }
+                });
+            }
+            else
             {
-                SendRemoteCombo(VkControl, VkMenu, VkShift, VkM);
-            });
+                AddActionMenuItem("发送剪贴板粘贴 (Ctrl+Alt+Shift+V)", delegate
+                {
+                    SendRemoteCombo(VkControl, VkMenu, VkShift, VkV);
+                });
+                AddActionMenuItem("切换串流鼠标模式 (Ctrl+Alt+Shift+M)", delegate
+                {
+                    SendRemoteCombo(VkControl, VkMenu, VkShift, VkM);
+                });
+            }
             actionsMenu.Items.Add(new ToolStripSeparator());
 
             AddActionMenuItem("返回 BoBo远程 主界面", delegate
@@ -641,6 +685,13 @@ namespace DualRemote
         private void SendRemoteCombo(params byte[] vks)
         {
             if (vks == null || vks.Length == 0) return;
+            if (nativeSendKeys != null)
+            {
+                int[] arr = new int[vks.Length];
+                for (int i = 0; i < vks.Length; i++) arr[i] = vks[i];
+                try { nativeSendKeys(arr); } catch { }
+                return;
+            }
             try
             {
                 if (trackedPid > 0) Engines.TryFocusProcessWindow(trackedPid);

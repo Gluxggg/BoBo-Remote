@@ -168,9 +168,12 @@ namespace DualRemote
             bool paired = false;
             string detail = null;
             bool readable;
+            bool nativeMode = ShouldUseNativeStream();
             try
             {
-                readable = await Task.Run(() => FoundationClient.IsHostPaired(cleanHost, clientPairHostName, out paired, out detail));
+                readable = await Task.Run(() => nativeMode
+                    ? GameStreamClient.IsHostPaired(cleanHost, clientPairHostName, out paired, out detail)
+                    : FoundationClient.IsHostPaired(cleanHost, clientPairHostName, out paired, out detail));
             }
             catch (Exception ex)
             {
@@ -181,10 +184,22 @@ namespace DualRemote
 
             if (readable && paired)
             {
-                SetStatus("已完成授权，正在打开桌面…", Theme.PillTone.Success);
+                SetStatus(nativeMode ? "已完成内置授权，正在打开一体化远程桌面…" : "已完成授权，正在打开桌面…", Theme.PillTone.Success);
                 await StartStreamAsync(cleanHost);
                 return;
             }
+
+            ShowClientPairPrompt(cleanHost, hostName, readable, detail);
+        }
+
+        private void ShowClientPairPrompt(string cleanHost, string hostName, bool readable, string detail)
+        {
+            if (IsDisposed) return;
+            clientPairHost = cleanHost;
+            clientPairHostName = hostName ?? "";
+            ShowPage(AssistPage);
+            SelectAssistMode(0);
+            streamHost.Text = cleanHost;
 
             if (clientPairTargetLabel != null)
             {
@@ -230,7 +245,8 @@ namespace DualRemote
                 }
                 clientPairHost = host;
             }
-            if (FoundationClient.SelectEngine(true) == StreamEngine.Unavailable)
+            bool nativeMode = ShouldUseNativeStream();
+            if (!nativeMode && FoundationClient.SelectEngine(true) == StreamEngine.Unavailable)
             {
                 SetClientPairStatus(MissingStreamEngineMessage, Theme.Alert);
                 return;
@@ -242,11 +258,72 @@ namespace DualRemote
             CancellationTokenSource cancellation = new CancellationTokenSource();
             clientPairCancellation = cancellation;
             SetClientPairBusyUi(true);
-            SetClientPairStatus("正在向被控端发起配对…", Theme.Muted);
+            SetClientPairStatus(nativeMode ? "正在通过内置加密协议向被控端发起配对…" : "正在向被控端发起配对…", Theme.Muted);
             SetStatus("正在发起首次授权，请留意被控端的配对确认。", Theme.PillTone.Info);
 
             try
             {
+                if (nativeMode)
+                {
+                    string pairedHostName = "";
+                    string pairErr = null;
+                    bool pairedOk = false;
+                    try
+                    {
+                        pairedOk = await Task.Run(delegate
+                        {
+                            return GameStreamClient.PairHost(host, pin, cancellation.Token,
+                                delegate(string progressText)
+                                {
+                                    if (!IsDisposed && IsHandleCreated)
+                                    {
+                                        try
+                                        {
+                                            BeginInvoke(new Action(delegate
+                                            {
+                                                if (!IsDisposed && operation == clientPairOperation)
+                                                    SetClientPairStatus(progressText, Theme.Muted);
+                                            }));
+                                        }
+                                        catch { }
+                                    }
+                                },
+                                out pairedHostName,
+                                out pairErr);
+                        }, cancellation.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        pairedOk = false;
+                        pairErr = "内置配对异常：" + ex.Message;
+                    }
+
+                    if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested)
+                        return;
+
+                    if (pairedOk)
+                    {
+                        if (!string.IsNullOrEmpty(pairedHostName) && string.IsNullOrEmpty(clientPairHostName))
+                            clientPairHostName = pairedHostName;
+                        SetClientPairPanelVisible(false);
+                        SetClientPairStatus("内置授权完成。", Theme.Success);
+                        SetStatus("内置授权完成，正在打开一体化远程桌面…", Theme.PillTone.Success);
+                        await StartStreamAsync(host);
+                        return;
+                    }
+
+                    string errText = string.IsNullOrEmpty(pairErr)
+                        ? "内置配对未能完成，请核对 4 位配对码后重试。"
+                        : pairErr;
+                    SetClientPairStatus(errText, Theme.Alert);
+                    SetStatus(errText, Theme.PillTone.Alert);
+                    return;
+                }
+
                 Process started = null;
                 string startMessage = null;
                 bool startedOk;

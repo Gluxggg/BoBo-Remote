@@ -9,6 +9,7 @@
 
 | 组件 | 版本 | 许可证 | 上游仓库与源码 |
 | --- | --- | --- | --- |
+| moonlight-common-c | master (vendored) | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-common-c> |
 | RustDesk | 1.5.3 | AGPL-3.0 | <https://github.com/rustdesk/rustdesk/tree/1.5.3> |
 | Moonlight | 6.2.0 | GPL-3.0 | <https://github.com/moonlight-stream/moonlight-qt/tree/v6.2.0> |
 | Moonlight V+ | 6.5.6 | GPL-3.0 | <https://github.com/qiin2333/moonlight-qt/tree/v6.5.6> |

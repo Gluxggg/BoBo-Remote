@@ -1,6 +1,8 @@
 #include "d3d11_renderer.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace bobo {
 
@@ -20,6 +22,8 @@ static std::string FormatHr(const char* label, HRESULT hr) {
 }
 
 D3D11Renderer::~D3D11Renderer() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cpuUploadNv12_.Reset();
     videoProcessor_.Reset();
     vpEnum_.Reset();
     swapChain_.Reset();
@@ -29,7 +33,40 @@ D3D11Renderer::~D3D11Renderer() {
     device_.Reset();
 }
 
+RECT D3D11Renderer::ComputeAspectFitRect(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH) {
+    RECT r = { 0, 0, static_cast<LONG>(dstW), static_cast<LONG>(dstH) };
+    if (srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0) return r;
+    double scaleX = static_cast<double>(dstW) / static_cast<double>(srcW);
+    double scaleY = static_cast<double>(dstH) / static_cast<double>(srcH);
+    double s = (scaleX < scaleY) ? scaleX : scaleY;
+    LONG fitW = static_cast<LONG>(srcW * s + 0.5);
+    LONG fitH = static_cast<LONG>(srcH * s + 0.5);
+    if (fitW < 1) fitW = 1;
+    if (fitH < 1) fitH = 1;
+    if (fitW > static_cast<LONG>(dstW)) fitW = static_cast<LONG>(dstW);
+    if (fitH > static_cast<LONG>(dstH)) fitH = static_cast<LONG>(dstH);
+    r.left = (static_cast<LONG>(dstW) - fitW) / 2;
+    r.top = (static_cast<LONG>(dstH) - fitH) / 2;
+    r.right = r.left + fitW;
+    r.bottom = r.top + fitH;
+    return r;
+}
+
+void D3D11Renderer::SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (videoW > 0 && videoH > 0) {
+        videoW_ = videoW;
+        videoH_ = videoH;
+    }
+}
+
+RECT D3D11Renderer::GetVideoViewportRect() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ComputeAspectFitRect(videoW_, videoH_, swapW_, swapH_);
+}
+
 bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const D3D_FEATURE_LEVEL levels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -71,13 +108,11 @@ bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outErr
         return false;
     }
 
-    // Required when Media Foundation D3D11VA decodes on background threads
     Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
     if (SUCCEEDED(device_.As(&mt)) && mt) {
         mt->SetMultithreadProtected(TRUE);
     }
 
-    // Query adapter metadata
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
     if (SUCCEEDED(device_.As(&dxgiDev)) && dxgiDev) {
         Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
@@ -100,7 +135,7 @@ bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outErr
     if (SUCCEEDED(device_.As(&videoDevice_)) && SUCCEEDED(context_.As(&videoContext_))) {
         caps_.hasVideoDevice = true;
         std::string vpErr;
-        if (EnsureVideoProcessor(1920, 1080, 1920, 1080, vpErr)) {
+        if (EnsureVideoProcessorLocked(1920, 1080, 1920, 1080, vpErr)) {
             caps_.supportsNv12ToBgra = true;
         }
     }
@@ -109,6 +144,7 @@ bool D3D11Renderer::InitializeDevice(bool allowWarpFallback, std::string& outErr
 }
 
 bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t height, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!device_) {
         outError = "D3D11 device not initialized";
         return false;
@@ -118,12 +154,9 @@ bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t heigh
         return false;
     }
 
-    swapW_ = width > 0 ? width : 1280;
-    swapH_ = height > 0 ? height : 720;
-
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
+    Microsoft::WRL::ComPtr<IDXGIDevice1> dxgiDev;
     HRESULT hr = device_.As(&dxgiDev);
-    if (FAILED(hr)) { outError = FormatHr("Query IDXGIDevice failed", hr); return false; }
+    if (FAILED(hr)) { outError = FormatHr("QI IDXGIDevice1 failed", hr); return false; }
 
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     hr = dxgiDev->GetAdapter(adapter.GetAddressOf());
@@ -134,34 +167,21 @@ bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t heigh
     if (FAILED(hr)) { outError = FormatHr("GetParent IDXGIFactory2 failed", hr); return false; }
 
     DXGI_SWAP_CHAIN_DESC1 scDesc = {};
-    scDesc.Width = swapW_;
-    scDesc.Height = swapH_;
+    scDesc.Width = width > 0 ? width : 1280;
+    scDesc.Height = height > 0 ? height : 720;
     scDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     scDesc.SampleDesc.Count = 1;
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scDesc.BufferCount = 2;
-    scDesc.Scaling = DXGI_SCALING_STRETCH;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scDesc.Scaling = DXGI_SCALING_STRETCH;
     scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
-    hr = factory->CreateSwapChainForHwnd(
-        device_.Get(),
-        targetHwnd,
-        &scDesc,
-        nullptr,
-        nullptr,
-        swapChain_.ReleaseAndGetAddressOf());
+    hr = factory->CreateSwapChainForHwnd(device_.Get(), targetHwnd, &scDesc, nullptr, nullptr, swapChain_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) {
-        // Fallback for older drivers / virtualized adapters without flip discard
         scDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        scDesc.Scaling = DXGI_SCALING_STRETCH;
-        hr = factory->CreateSwapChainForHwnd(
-            device_.Get(),
-            targetHwnd,
-            &scDesc,
-            nullptr,
-            nullptr,
-            swapChain_.ReleaseAndGetAddressOf());
+        scDesc.Scaling = DXGI_SCALING_NONE;
+        hr = factory->CreateSwapChainForHwnd(device_.Get(), targetHwnd, &scDesc, nullptr, nullptr, swapChain_.ReleaseAndGetAddressOf());
     }
     if (FAILED(hr)) {
         outError = FormatHr("CreateSwapChainForHwnd failed", hr);
@@ -169,13 +189,17 @@ bool D3D11Renderer::AttachToHwnd(HWND targetHwnd, uint32_t width, uint32_t heigh
     }
 
     factory->MakeWindowAssociation(targetHwnd, DXGI_MWA_NO_ALT_ENTER);
+    swapW_ = scDesc.Width;
+    swapH_ = scDesc.Height;
     return true;
 }
 
 bool D3D11Renderer::ResizeSwapChain(uint32_t width, uint32_t height, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!swapChain_ || width == 0 || height == 0) return true;
-    if (width == swapW_ && height == swapH_) return true;
-    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    if (swapW_ == width && swapH_ == height) return true;
+
+    context_->ClearState();
     HRESULT hr = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
         outError = FormatHr("ResizeBuffers failed", hr);
@@ -187,11 +211,16 @@ bool D3D11Renderer::ResizeSwapChain(uint32_t width, uint32_t height, std::string
 }
 
 bool D3D11Renderer::EnsureVideoProcessor(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return EnsureVideoProcessorLocked(srcW, srcH, dstW, dstH, outError);
+}
+
+bool D3D11Renderer::EnsureVideoProcessorLocked(uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH, std::string& outError) {
     if (!videoDevice_ || !videoContext_) {
         outError = "ID3D11VideoDevice unavailable";
         return false;
     }
-    if (videoProcessor_ && srcW == vpSrcW_ && srcH == vpSrcH_ && dstW == vpDstW_ && dstH == vpDstH_) {
+    if (videoProcessor_ && vpEnum_ && vpSrcW_ == srcW && vpSrcH_ == srcH && vpDstW_ == dstW && vpDstH_ == dstH) {
         return true;
     }
 
@@ -222,6 +251,27 @@ bool D3D11Renderer::EnsureVideoProcessor(uint32_t srcW, uint32_t srcH, uint32_t 
         return false;
     }
 
+    D3D11_VIDEO_COLOR black = {};
+    black.RGBA.R = 0.04f;
+    black.RGBA.G = 0.06f;
+    black.RGBA.B = 0.09f;
+    black.RGBA.A = 1.0f;
+    videoContext_->VideoProcessorSetOutputBackgroundColor(videoProcessor_.Get(), FALSE, &black);
+
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE inCs = {};
+    inCs.Usage = 0; // Playback
+    inCs.RGB_Range = 0; // Full range
+    inCs.YCbCr_Matrix = 1; // BT.709 (matches COLORSPACE_REC_709)
+    inCs.YCbCr_xvYCC = 0;
+    inCs.Nominal_Range = 1; // Studio 16-235 (matches COLOR_RANGE_LIMITED)
+    videoContext_->VideoProcessorSetStreamColorSpace(videoProcessor_.Get(), 0, &inCs);
+
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE outCs = {};
+    outCs.Usage = 0;
+    outCs.RGB_Range = 0; // Full range RGB output to swapchain
+    outCs.Nominal_Range = 2; // 0-255
+    videoContext_->VideoProcessorSetOutputColorSpace(videoProcessor_.Get(), &outCs);
+
     vpSrcW_ = srcW;
     vpSrcH_ = srcH;
     vpDstW_ = dstW;
@@ -230,6 +280,17 @@ bool D3D11Renderer::EnsureVideoProcessor(uint32_t srcW, uint32_t srcH, uint32_t 
 }
 
 bool D3D11Renderer::PresentNv12Texture(ID3D11Texture2D* nv12Tex, uint32_t subresourceIndex, std::string& outError) {
+    return PresentNv12Texture(nv12Tex, subresourceIndex, 0, 0, outError);
+}
+
+bool D3D11Renderer::PresentNv12Texture(ID3D11Texture2D* nv12Tex, uint32_t subresourceIndex,
+                                       uint32_t visibleWidth, uint32_t visibleHeight, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return PresentNv12TextureLocked(nv12Tex, subresourceIndex, visibleWidth, visibleHeight, outError);
+}
+
+bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t subresourceIndex,
+                                             uint32_t visibleWidth, uint32_t visibleHeight, std::string& outError) {
     if (!swapChain_ || !nv12Tex || !videoDevice_ || !videoContext_) {
         outError = "Renderer not ready for NV12 presentation";
         return false;
@@ -237,9 +298,21 @@ bool D3D11Renderer::PresentNv12Texture(ID3D11Texture2D* nv12Tex, uint32_t subres
 
     D3D11_TEXTURE2D_DESC srcDesc = {};
     nv12Tex->GetDesc(&srcDesc);
-    if (!EnsureVideoProcessor(srcDesc.Width, srcDesc.Height, swapW_, swapH_, outError)) {
+    uint32_t visW = (visibleWidth > 0 && visibleWidth <= srcDesc.Width) ? visibleWidth : srcDesc.Width;
+    uint32_t visH = (visibleHeight > 0 && visibleHeight <= srcDesc.Height) ? visibleHeight : srcDesc.Height;
+    videoW_ = visW;
+    videoH_ = visH;
+
+    if (!EnsureVideoProcessorLocked(srcDesc.Width, srcDesc.Height, swapW_, swapH_, outError)) {
         return false;
     }
+
+    RECT srcRect = { 0, 0, static_cast<LONG>(visW), static_cast<LONG>(visH) };
+    RECT dstRect = ComputeAspectFitRect(visW, visH, swapW_, swapH_);
+    RECT targetRect = { 0, 0, static_cast<LONG>(swapW_), static_cast<LONG>(swapH_) };
+    videoContext_->VideoProcessorSetStreamSourceRect(videoProcessor_.Get(), 0, TRUE, &srcRect);
+    videoContext_->VideoProcessorSetStreamDestRect(videoProcessor_.Get(), 0, TRUE, &dstRect);
+    videoContext_->VideoProcessorSetOutputTargetRect(videoProcessor_.Get(), TRUE, &targetRect);
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
     HRESULT hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(backBuffer.GetAddressOf()));
@@ -270,7 +343,61 @@ bool D3D11Renderer::PresentNv12Texture(ID3D11Texture2D* nv12Tex, uint32_t subres
     return true;
 }
 
+bool D3D11Renderer::PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width, uint32_t height, uint32_t stride, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!device_ || !context_ || !nv12Data || width == 0 || height == 0) {
+        outError = "Invalid CPU NV12 buffer";
+        return false;
+    }
+
+    uint32_t alignedW = (width + 1u) & ~1u;
+    uint32_t alignedH = (height + 1u) & ~1u;
+    if (!cpuUploadNv12_ || cpuUploadW_ != alignedW || cpuUploadH_ != alignedH) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = alignedW;
+        desc.Height = alignedH;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_DECODER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        HRESULT hr = device_->CreateTexture2D(&desc, nullptr, cpuUploadNv12_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            hr = device_->CreateTexture2D(&desc, nullptr, cpuUploadNv12_.ReleaseAndGetAddressOf());
+        }
+        if (FAILED(hr)) {
+            outError = FormatHr("CreateTexture2D NV12 upload failed", hr);
+            return false;
+        }
+        cpuUploadW_ = alignedW;
+        cpuUploadH_ = alignedH;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT hr = context_->Map(cpuUploadNv12_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr)) { outError = FormatHr("Map NV12 upload failed", hr); return false; }
+
+    uint32_t srcStride = stride >= width ? stride : width;
+    uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
+    for (uint32_t row = 0; row < height; ++row) {
+        std::memcpy(dst + row * mapped.RowPitch, nv12Data + row * srcStride, width);
+    }
+    const uint8_t* srcUv = nv12Data + srcStride * height;
+    uint8_t* dstUv = dst + mapped.RowPitch * alignedH;
+    uint32_t uvRows = height / 2;
+    for (uint32_t row = 0; row < uvRows; ++row) {
+        std::memcpy(dstUv + row * mapped.RowPitch, srcUv + row * srcStride, width);
+    }
+    context_->Unmap(cpuUploadNv12_.Get(), 0);
+
+    return PresentNv12TextureLocked(cpuUploadNv12_.Get(), 0, width, height, outError);
+}
+
 bool D3D11Renderer::PresentClearFrame(float r, float g, float b, std::string& outError) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!swapChain_ || !device_ || !context_) {
         outError = "SwapChain not attached";
         return false;

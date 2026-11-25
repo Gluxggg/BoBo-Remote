@@ -3,9 +3,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 
 namespace bobo {
+
+static std::mutex g_stdoutMutex;
 
 std::string EscapeJson(const std::string& input) {
     std::string out;
@@ -67,6 +70,38 @@ std::string FormatStatsJson(const StreamStats& stats) {
     return os.str();
 }
 
+std::string FormatConnectedJson(uint32_t width, uint32_t height, uint32_t fps, const std::string& codec, const std::string& decoderName) {
+    std::ostringstream os;
+    os << "{\"event\":\"connected\""
+       << ",\"width\":" << width
+       << ",\"height\":" << height
+       << ",\"fps\":" << fps
+       << ",\"codec\":\"" << EscapeJson(codec) << "\""
+       << ",\"decoder\":\"" << EscapeJson(decoderName) << "\"}";
+    return os.str();
+}
+
+std::string FormatStageJson(const std::string& stage, const std::string& status, int errorCode) {
+    std::ostringstream os;
+    os << "{\"event\":\"stage\""
+       << ",\"stage\":\"" << EscapeJson(stage) << "\""
+       << ",\"status\":\"" << EscapeJson(status) << "\""
+       << ",\"errorCode\":" << errorCode << "}";
+    return os.str();
+}
+
+std::string FormatTerminatedJson(int code, const std::string& reason) {
+    std::ostringstream os;
+    os << "{\"event\":\"terminated\""
+       << ",\"code\":" << code
+       << ",\"reason\":\"" << EscapeJson(reason) << "\"}";
+    return os.str();
+}
+
+std::string FormatMouseModeJson(bool freeMouse) {
+    return std::string("{\"event\":\"mouse_mode\",\"free\":") + (freeMouse ? "true" : "false") + "}";
+}
+
 static bool ExtractUintField(const std::string& line, const char* key, uint32_t& outVal) {
     std::string pattern = std::string("\"") + key + "\":";
     size_t pos = line.find(pattern);
@@ -92,6 +127,52 @@ static bool ExtractBoolField(const std::string& line, const char* key, bool& out
     return false;
 }
 
+static bool ExtractUintArrayField(const std::string& line, const char* key, std::vector<uint32_t>& outVals) {
+    outVals.clear();
+    std::string pattern = std::string("\"") + key + "\":[";
+    size_t pos = line.find(pattern);
+    if (pos == std::string::npos) return false;
+    pos += pattern.size();
+    size_t end = line.find(']', pos);
+    if (end == std::string::npos) return false;
+    while (pos < end) {
+        while (pos < end && (line[pos] == ' ' || line[pos] == ',' || line[pos] == '\t')) ++pos;
+        if (pos >= end) break;
+        char* endPtr = nullptr;
+        unsigned long v = std::strtoul(line.c_str() + pos, &endPtr, 10);
+        if (endPtr == line.c_str() + pos) break;
+        outVals.push_back(static_cast<uint32_t>(v));
+        pos = static_cast<size_t>(endPtr - line.c_str());
+    }
+    return !outVals.empty();
+}
+
+static bool ExtractStringField(const std::string& line, const char* key, std::string& outVal) {
+    outVal.clear();
+    std::string pattern = std::string("\"") + key + "\":\"";
+    size_t pos = line.find(pattern);
+    if (pos == std::string::npos) return false;
+    pos += pattern.size();
+    while (pos < line.size()) {
+        char c = line[pos++];
+        if (c == '\"') return true;
+        if (c == '\\' && pos < line.size()) {
+            char esc = line[pos++];
+            switch (esc) {
+                case '\"': outVal.push_back('\"'); break;
+                case '\\': outVal.push_back('\\'); break;
+                case 'n': outVal.push_back('\n'); break;
+                case 'r': outVal.push_back('\r'); break;
+                case 't': outVal.push_back('\t'); break;
+                default: outVal.push_back(esc); break;
+            }
+        } else {
+            outVal.push_back(c);
+        }
+    }
+    return false;
+}
+
 IpcCommand ParseIpcCommand(const std::string& line) {
     IpcCommand cmd;
     if (line.find("\"cmd\":\"disconnect\"") != std::string::npos) {
@@ -101,6 +182,15 @@ IpcCommand ParseIpcCommand(const std::string& line) {
     } else if (line.find("\"cmd\":\"set_hud\"") != std::string::npos) {
         cmd.type = IpcCommandType::SetHud;
         ExtractBoolField(line, "enabled", cmd.flag);
+    } else if (line.find("\"cmd\":\"set_mouse_mode\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SetMouseMode;
+        ExtractBoolField(line, "free", cmd.flag);
+    } else if (line.find("\"cmd\":\"send_keys\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SendKeys;
+        ExtractUintArrayField(line, "vks", cmd.vks);
+    } else if (line.find("\"cmd\":\"send_text\"") != std::string::npos) {
+        cmd.type = IpcCommandType::SendText;
+        ExtractStringField(line, "text", cmd.text);
     } else if (line.find("\"cmd\":\"resize\"") != std::string::npos) {
         cmd.type = IpcCommandType::Resize;
         ExtractUintField(line, "width", cmd.width);
@@ -116,6 +206,7 @@ IpcCommand ParseIpcCommand(const std::string& line) {
 }
 
 void EmitJsonLine(const std::string& json) {
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
     std::cout << json << "\n" << std::flush;
 }
 

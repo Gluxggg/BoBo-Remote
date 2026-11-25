@@ -3,6 +3,7 @@
 #include <codecapi.h>
 #include <mferror.h>
 #include <cstdio>
+#include <cstring>
 
 namespace bobo {
 
@@ -45,11 +46,26 @@ static std::vector<std::string> EnumMftNames(const GUID& subtype, UINT32 flags) 
 }
 
 MfHardwareDecoder::~MfHardwareDecoder() {
-    decoder_.Reset();
+    CloseCodec();
     dxgiManager_.Reset();
     if (mfStarted_) {
         MFShutdown();
         mfStarted_ = false;
+    }
+}
+
+void MfHardwareDecoder::CloseCodec() {
+    if (decoder_) {
+        decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        decoder_.Reset();
+    }
+    activeDecoderName_.clear();
+}
+
+void MfHardwareDecoder::Flush() {
+    if (decoder_) {
+        decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     }
 }
 
@@ -83,25 +99,54 @@ bool MfHardwareDecoder::Initialize(ID3D11Device* d3dDevice, std::string& outErro
 DecoderProbeResult MfHardwareDecoder::ProbeHardwareDecoders() const {
     DecoderProbeResult res;
     res.dxgiManagerReady = (dxgiManager_ != nullptr);
+    const UINT32 syncFlags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER;
     const UINT32 hwFlags = MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
-    const UINT32 anyFlags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
 
-    res.h264Decoders = EnumMftNames(MFVideoFormat_H264, hwFlags);
+    res.h264Decoders = EnumMftNames(MFVideoFormat_H264, syncFlags);
+    if (res.h264Decoders.empty()) {
+        res.h264Decoders = EnumMftNames(MFVideoFormat_H264, hwFlags);
+    }
     res.h264HwAvailable = !res.h264Decoders.empty();
-    if (!res.h264HwAvailable) {
-        // Check Microsoft inbox DXVA-capable H.264 MFT (sync/async MFT that accelerates via D3D11VA internally)
-        res.h264Decoders = EnumMftNames(MFVideoFormat_H264, anyFlags);
-        res.h264HwAvailable = !res.h264Decoders.empty();
-    }
 
-    res.hevcDecoders = EnumMftNames(MFVideoFormat_HEVC, hwFlags);
-    res.hevcHwAvailable = !res.hevcDecoders.empty();
-    if (!res.hevcHwAvailable) {
-        res.hevcDecoders = EnumMftNames(MFVideoFormat_HEVC, anyFlags);
-        res.hevcHwAvailable = !res.hevcDecoders.empty();
+    res.hevcDecoders = EnumMftNames(MFVideoFormat_HEVC, syncFlags);
+    if (res.hevcDecoders.empty()) {
+        res.hevcDecoders = EnumMftNames(MFVideoFormat_HEVC, hwFlags);
     }
+    res.hevcHwAvailable = !res.hevcDecoders.empty();
 
     return res;
+}
+
+bool MfHardwareDecoder::NegotiateNv12Output() {
+    if (!decoder_) return false;
+    for (DWORD idx = 0; ; ++idx) {
+        Microsoft::WRL::ComPtr<IMFMediaType> outMt;
+        HRESULT hr = decoder_->GetOutputAvailableType(0, idx, outMt.GetAddressOf());
+        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
+        GUID outSub = GUID_NULL;
+        if (SUCCEEDED(outMt->GetGUID(MF_MT_SUBTYPE, &outSub)) && outSub == MFVideoFormat_NV12) {
+            if (SUCCEEDED(decoder_->SetOutputType(0, outMt.Get(), 0))) {
+                UINT32 w = 0, h = 0;
+                if (SUCCEEDED(MFGetAttributeSize(outMt.Get(), MF_MT_FRAME_SIZE, &w, &h)) && w > 0 && h > 0) {
+                    outWidth_ = w;
+                    outHeight_ = h;
+                }
+                UINT32 stride = 0;
+                if (SUCCEEDED(outMt->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride)) && stride > 0) {
+                    outStride_ = stride;
+                } else {
+                    outStride_ = outWidth_;
+                }
+                MFT_OUTPUT_STREAM_INFO info = {};
+                if (SUCCEEDED(decoder_->GetOutputStreamInfo(0, &info))) {
+                    mftProvidesSamples_ = ((info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0);
+                    minOutputSampleSize_ = info.cbSize;
+                }
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool MfHardwareDecoder::OpenCodec(VideoCodec codec, uint32_t width, uint32_t height, std::string& outError) {
@@ -110,77 +155,96 @@ bool MfHardwareDecoder::OpenCodec(VideoCodec codec, uint32_t width, uint32_t hei
         return false;
     }
 
+    CloseCodec();
+    outWidth_ = width;
+    outHeight_ = height;
+    outStride_ = width;
+
     const GUID subtype = (codec == VideoCodec::HEVC) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
     MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, subtype };
+
+    // Prefer synchronous DXVA/D3D11VA MFT (Microsoft H264/HEVC Video Decoder MFT works synchronously with D3D11VA across AMD/NV/Intel)
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
-
     HRESULT hr = MFTEnumEx(
         MFT_CATEGORY_VIDEO_DECODER,
-        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
         &inType,
         nullptr,
         &activates,
         &count);
+
+    if (FAILED(hr) || count == 0) {
+        if (activates) CoTaskMemFree(activates);
+        activates = nullptr;
+        count = 0;
+        hr = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            &inType,
+            nullptr,
+            &activates,
+            &count);
+    }
+
     if (FAILED(hr) || count == 0 || !activates) {
-        outError = (codec == VideoCodec::HEVC) ? "No HEVC MFT video decoder installed" : "No H.264 MFT video decoder installed";
+        outError = (codec == VideoCodec::HEVC)
+            ? "No Media Foundation HEVC decoder MFT found"
+            : "No Media Foundation H.264 decoder MFT found";
         return false;
     }
 
-    hr = activates[0]->ActivateObject(IID_PPV_ARGS(decoder_.ReleaseAndGetAddressOf()));
-    wchar_t* friendly = nullptr;
-    UINT32 cch = 0;
-    if (SUCCEEDED(activates[0]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &cch)) && friendly) {
-        activeDecoderName_ = WideToUtf8Mf(friendly);
-        CoTaskMemFree(friendly);
-    } else {
-        activeDecoderName_ = (codec == VideoCodec::HEVC) ? "HEVC D3D11VA MFT" : "H.264 D3D11VA MFT";
+    bool activated = false;
+    for (UINT32 i = 0; i < count; ++i) {
+        if (!activated) {
+            Microsoft::WRL::ComPtr<IMFTransform> candidate;
+            if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(candidate.GetAddressOf())))) {
+                Microsoft::WRL::ComPtr<IMFAttributes> mftAttrs;
+                if (SUCCEEDED(candidate->GetAttributes(mftAttrs.GetAddressOf())) && mftAttrs) {
+                    UINT32 isAsync = 0;
+                    if (SUCCEEDED(mftAttrs->GetUINT32(MF_TRANSFORM_ASYNC, &isAsync)) && isAsync != 0) {
+                        mftAttrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+                    }
+                    mftAttrs->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
+                    mftAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                }
+
+                decoder_ = candidate;
+                wchar_t* friendly = nullptr;
+                UINT32 cch = 0;
+                if (SUCCEEDED(activates[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &cch)) && friendly) {
+                    activeDecoderName_ = WideToUtf8Mf(friendly);
+                    CoTaskMemFree(friendly);
+                } else {
+                    activeDecoderName_ = "MF Video Decoder MFT";
+                }
+                activated = true;
+            }
+        }
+        activates[i]->Release();
     }
-    for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
     CoTaskMemFree(activates);
 
-    if (FAILED(hr) || !decoder_) {
-        outError = FormatMfHr("ActivateObject failed", hr);
+    if (!activated || !decoder_) {
+        outError = "Failed to activate video decoder MFT";
         return false;
     }
 
-    // Unlock async MFT if required and enable low-latency + D3D11VA
-    Microsoft::WRL::ComPtr<IMFAttributes> attrs;
-    if (SUCCEEDED(decoder_->GetAttributes(attrs.GetAddressOf())) && attrs) {
-        UINT32 isAsync = 0;
-        if (SUCCEEDED(attrs->GetUINT32(MF_TRANSFORM_ASYNC, &isAsync)) && isAsync) {
-            attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-        }
-        attrs->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
-        attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-    }
-
+    // Bind D3D11VA DXGI Device Manager (ignore failure on pure software fallback)
     decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(dxgiManager_.Get()));
 
     Microsoft::WRL::ComPtr<IMFMediaType> inputMt;
     hr = MFCreateMediaType(inputMt.GetAddressOf());
-    if (FAILED(hr)) { outError = FormatMfHr("MFCreateMediaType input failed", hr); return false; }
+    if (FAILED(hr)) { outError = FormatMfHr("MFCreateMediaType failed", hr); return false; }
     inputMt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     inputMt->SetGUID(MF_MT_SUBTYPE, subtype);
     MFSetAttributeSize(inputMt.Get(), MF_MT_FRAME_SIZE, width, height);
+    inputMt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
     hr = decoder_->SetInputType(0, inputMt.Get(), 0);
     if (FAILED(hr)) { outError = FormatMfHr("SetInputType failed", hr); return false; }
 
-    // Select NV12 output format for zero-copy D3D11VideoProcessor blt
-    bool outputSet = false;
-    for (DWORD idx = 0; ; ++idx) {
-        Microsoft::WRL::ComPtr<IMFMediaType> outMt;
-        hr = decoder_->GetOutputAvailableType(0, idx, outMt.GetAddressOf());
-        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
-        GUID outSub = GUID_NULL;
-        if (SUCCEEDED(outMt->GetGUID(MF_MT_SUBTYPE, &outSub)) && outSub == MFVideoFormat_NV12) {
-            if (SUCCEEDED(decoder_->SetOutputType(0, outMt.Get(), 0))) {
-                outputSet = true;
-                break;
-            }
-        }
-    }
-    if (!outputSet) {
+    if (!NegotiateNv12Output()) {
         outError = "Failed to negotiate NV12 output on MFT decoder";
         return false;
     }
@@ -202,7 +266,7 @@ bool MfHardwareDecoder::SubmitAccessUnit(const uint8_t* data, size_t size, int64
     BYTE* dst = nullptr;
     hr = buf->Lock(&dst, nullptr, nullptr);
     if (FAILED(hr)) { outError = FormatMfHr("Buffer Lock failed", hr); return false; }
-    memcpy(dst, data, size);
+    std::memcpy(dst, data, size);
     buf->Unlock();
     buf->SetCurrentLength(static_cast<DWORD>(size));
 
@@ -220,49 +284,99 @@ bool MfHardwareDecoder::SubmitAccessUnit(const uint8_t* data, size_t size, int64
     return true;
 }
 
-bool MfHardwareDecoder::PullDecodedTexture(Microsoft::WRL::ComPtr<ID3D11Texture2D>& outTexture, uint32_t& outSubresource) {
-    outTexture.Reset();
-    outSubresource = 0;
+bool MfHardwareDecoder::PullDecodedFrame(DecodedFrame& outFrame, bool& outNeedMoreInput) {
+    outFrame = DecodedFrame{};
+    outNeedMoreInput = false;
     if (!decoder_) return false;
 
     MFT_OUTPUT_DATA_BUFFER outBuf = {};
-    DWORD status = 0;
-    HRESULT hr = decoder_->ProcessOutput(0, 1, &outBuf, &status);
-    if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
-        if (outBuf.pSample) outBuf.pSample->Release();
-        if (outBuf.pEvents) outBuf.pEvents->Release();
-        for (DWORD idx = 0; ; ++idx) {
-            Microsoft::WRL::ComPtr<IMFMediaType> outMt;
-            if (FAILED(decoder_->GetOutputAvailableType(0, idx, outMt.GetAddressOf()))) break;
-            GUID outSub = GUID_NULL;
-            if (SUCCEEDED(outMt->GetGUID(MF_MT_SUBTYPE, &outSub)) && outSub == MFVideoFormat_NV12) {
-                decoder_->SetOutputType(0, outMt.Get(), 0);
-                break;
+    Microsoft::WRL::ComPtr<IMFSample> callerSample;
+    if (!mftProvidesSamples_) {
+        DWORD allocSize = minOutputSampleSize_;
+        if (allocSize == 0) {
+            allocSize = outStride_ * outHeight_ * 3 / 2;
+        }
+        if (SUCCEEDED(MFCreateSample(callerSample.GetAddressOf()))) {
+            Microsoft::WRL::ComPtr<IMFMediaBuffer> memBuf;
+            if (SUCCEEDED(MFCreateMemoryBuffer(allocSize, memBuf.GetAddressOf()))) {
+                callerSample->AddBuffer(memBuf.Get());
+                outBuf.pSample = callerSample.Get();
             }
         }
+    }
+
+    DWORD status = 0;
+    HRESULT hr = decoder_->ProcessOutput(0, 1, &outBuf, &status);
+    if (outBuf.pEvents) {
+        outBuf.pEvents->Release();
+        outBuf.pEvents = nullptr;
+    }
+
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        outNeedMoreInput = true;
+        return false;
+    }
+    if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+        if (mftProvidesSamples_ && outBuf.pSample) outBuf.pSample->Release();
+        NegotiateNv12Output();
         return false;
     }
     if (FAILED(hr) || !outBuf.pSample) {
-        if (outBuf.pSample) outBuf.pSample->Release();
-        if (outBuf.pEvents) outBuf.pEvents->Release();
+        if (mftProvidesSamples_ && outBuf.pSample) outBuf.pSample->Release();
         return false;
     }
 
     Microsoft::WRL::ComPtr<IMFSample> sample;
-    sample.Attach(outBuf.pSample);
-    if (outBuf.pEvents) outBuf.pEvents->Release();
+    if (mftProvidesSamples_) {
+        sample.Attach(outBuf.pSample);
+    } else {
+        sample = callerSample;
+    }
 
     Microsoft::WRL::ComPtr<IMFMediaBuffer> mediaBuf;
-    if (FAILED(sample->GetBufferByIndex(0, mediaBuf.GetAddressOf()))) return false;
+    if (FAILED(sample->GetBufferByIndex(0, mediaBuf.GetAddressOf())) || !mediaBuf) {
+        return false;
+    }
 
     Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuf;
     if (SUCCEEDED(mediaBuf.As(&dxgiBuf)) && dxgiBuf) {
         UINT sub = 0;
         dxgiBuf->GetSubresourceIndex(&sub);
-        if (SUCCEEDED(dxgiBuf->GetResource(IID_PPV_ARGS(outTexture.GetAddressOf())))) {
-            outSubresource = sub;
+        if (SUCCEEDED(dxgiBuf->GetResource(IID_PPV_ARGS(outFrame.gpuTexture.GetAddressOf()))) && outFrame.gpuTexture) {
+            outFrame.isGpuTexture = true;
+            outFrame.subresourceIndex = sub;
+            outFrame.width = outWidth_;
+            outFrame.height = outHeight_;
+            outFrame.stride = outStride_;
             return true;
         }
+    }
+
+    // Fallback: system-memory NV12 buffer
+    BYTE* raw = nullptr;
+    DWORD curLen = 0;
+    if (SUCCEEDED(mediaBuf->Lock(&raw, nullptr, &curLen)) && raw && curLen > 0) {
+        outFrame.isGpuTexture = false;
+        outFrame.width = outWidth_;
+        outFrame.height = outHeight_;
+        outFrame.stride = outStride_ >= outWidth_ ? outStride_ : outWidth_;
+        outFrame.cpuNv12.assign(raw, raw + curLen);
+        mediaBuf->Unlock();
+        return true;
+    }
+
+    return false;
+}
+
+bool MfHardwareDecoder::PullDecodedTexture(Microsoft::WRL::ComPtr<ID3D11Texture2D>& outTexture, uint32_t& outSubresource) {
+    outTexture.Reset();
+    outSubresource = 0;
+    DecodedFrame frame;
+    bool needMore = false;
+    if (PullDecodedFrame(frame, needMore) && frame.isGpuTexture && frame.gpuTexture) {
+        outTexture = frame.gpuTexture;
+        outSubresource = frame.subresourceIndex;
+        return true;
     }
     return false;
 }

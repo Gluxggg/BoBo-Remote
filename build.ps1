@@ -729,7 +729,7 @@ function Invoke-CompileStage {
     if (-not (Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Force -Path $appDir | Out-Null }
     $exePath = Join-Path $appDir 'BoBo远程.exe'
     if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
-    $appVerLabel = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '4.4.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+    $appVerLabel = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '5.0.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
     $appVerFile = Join-Path $appDir 'app-version.txt'
     [System.IO.File]::WriteAllText($appVerFile, $appVerLabel, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -771,6 +771,21 @@ function Invoke-CompileStage {
     $exeSize = (Get-Item -LiteralPath $exePath).Length
     if ($exeSize -lt 1024) { throw "生成的 exe 只有 $exeSize 字节，疑似编译异常。" }
     Write-Ok "编译完成：BoBo远程.exe（$exeSize 字节）"
+
+    # 编译 V5 原生一体化串流播放核 BoBoStreamPlayer.exe（静态链接 moonlight-common-c + D3D11VA + WASAPI）
+    $nativeScript = Join-Path $Root 'native\bobo-stream-player\build-native.ps1'
+    $nativeOutExe = Join-Path $Root 'native\bobo-stream-player\out\BoBoStreamPlayer.exe'
+    if (Test-Path -LiteralPath $nativeScript) {
+        Write-Info '正在构建 V5 原生一体化串流内核 BoBoStreamPlayer.exe…'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $nativeScript -RunSelfTest
+        if ($LASTEXITCODE -ne 0) { throw "BoBoStreamPlayer.exe 构建或自检失败（退出码 $LASTEXITCODE）。" }
+    }
+    if (-not (Test-Path -LiteralPath $nativeOutExe)) {
+        throw "缺少 V5 原生一体化串流内核：$nativeOutExe"
+    }
+    Copy-Item -LiteralPath $nativeOutExe -Destination (Join-Path $appDir 'BoBoStreamPlayer.exe') -Force
+    $nativeSize = (Get-Item -LiteralPath (Join-Path $appDir 'BoBoStreamPlayer.exe')).Length
+    Write-Ok "V5 原生串流内核就绪：BoBoStreamPlayer.exe（$nativeSize 字节）"
 }
 
 function Assert-ProjectFiles {
@@ -805,8 +820,9 @@ function Invoke-Stage {
     Remove-BuildPath $StageRoot
     New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 
-    # 启动器
+    # 启动器与 V5 原生一体化串流播放核
     Copy-Item -LiteralPath (Join-Path (Join-Path $BuildDir 'app') 'BoBo远程.exe') -Destination $PackageDir
+    Copy-Item -LiteralPath (Join-Path (Join-Path $BuildDir 'app') 'BoBoStreamPlayer.exe') -Destination $PackageDir
 
     # RustDesk：官方 MSI 管理安装展开后的原版文件布局，整体放进 engines\RustDesk
     $rdPayload = Get-RustDeskPayloadDir
@@ -927,6 +943,7 @@ function Invoke-Stage {
 
     $requiredInPackage = @(
         'BoBo远程.exe',
+        'BoBoStreamPlayer.exe',
         'engines\RustDesk\RustDesk.exe',
         'engines\RustDesk\librustdesk.dll',
         'engines\RustDesk\flutter_windows.dll',
@@ -1107,10 +1124,11 @@ function Invoke-Publish {
     Move-Item -LiteralPath $fullTmp -Destination $ZipPath -Force
     Write-Ok "完整便携包：dist\BoBo远程-Windows-x64.zip"
 
-    # 轻量更新包：只含新启动器、显示/抗丢包调优工具与最新文档，便于已装完整包的笔记本秒级覆盖更新。
+    # 轻量更新包：含新启动器、V5 原生一体化串流播放核、显示/抗丢包调优工具与最新文档，便于已装完整包的电脑秒级覆盖更新。
     $lightStage = Join-Path $BuildDir 'base-delta-stage'
     $lightPaths = @(
         'BoBo远程.exe',
+        'BoBoStreamPlayer.exe',
         'tools\Set-SunshineDisplay.ps1',
         'tools\Optimize-SunshineStream.ps1',
         'README.md',
@@ -1121,7 +1139,7 @@ function Invoke-Publish {
         '低延迟调优与防窥指南.md'
     )
     New-RelativeFileSetZip -SourceRoot $PackageDir -RelativePaths $lightPaths -StagePath $lightStage `
-        -OutputPath $LightZipPath -Context '轻量更新包' -MaxBytes 1048576
+        -OutputPath $LightZipPath -Context '轻量更新包' -MaxBytes 2097152
 
     # 标准图形化单文件安装程序：BoBoRemote-Setup-x64.exe（双击向导安装 + 桌面/开始菜单快捷方式 + 系统卸载项）
     New-SetupInstaller -ZipSource $ZipPath -OutputExe $SetupExePath -VersionLabel $BuildVersion
