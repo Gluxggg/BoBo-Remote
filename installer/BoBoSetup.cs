@@ -388,7 +388,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "4.4.0";
+            return "6.0.0";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -534,14 +534,14 @@ namespace BoBoSetup
             }
             StopRunningProcessesInDir(installDir);
 
-            // Preserve user's existing local Moonlight / MoonlightVPlus pairing folders if upgrading
+            // V6 全内置架构升级：彻底移除旧版 V5 遗留的独立外置引擎目录与独立播放核
             string backupRoot = Path.Combine(Path.GetTempPath(), "BoBoSetup-Preserve-" + Guid.NewGuid().ToString("N"));
-            var preserved = BackupPairingDirs(installDir, backupRoot);
+            RemoveLegacyExternalEngines(installDir);
 
             try
             {
                 Directory.CreateDirectory(installDir);
-                Report(report, 20, "正在解压核心程序与内置引擎…");
+                Report(report, 20, "正在释放 BoBo V6 全内置核心程序…");
 
                 long totalExtractedBytes = 0;
                 using (var fs = new FileStream(selfExe, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -587,8 +587,6 @@ namespace BoBoSetup
                         }
                     }
                 }
-
-                RestorePairingDirs(installDir, preserved);
 
                 Report(report, 90, "正在写入卸载程序…");
                 string uninstallExe = Path.Combine(installDir, UninstallExeName);
@@ -817,7 +815,7 @@ namespace BoBoSetup
         {
             string normDir = Path.GetFullPath(installDir).TrimEnd('\\') + "\\";
             int selfPid = Process.GetCurrentProcess().Id;
-            foreach (string procName in new[] { "BoBo远程", "Moonlight", "rustdesk", "sunshine" })
+            foreach (string procName in new[] { "BoBo远程", "BoBoStreamPlayer", "Moonlight", "rustdesk", "sunshine" })
             {
                 Process[] list;
                 try { list = Process.GetProcessesByName(procName); }
@@ -844,50 +842,27 @@ namespace BoBoSetup
             }
         }
 
-        private static List<KeyValuePair<string, string>> BackupPairingDirs(string installDir, string backupRoot)
+        private static void RemoveLegacyExternalEngines(string installDir)
         {
-            var saved = new List<KeyValuePair<string, string>>();
-            string[] relPaths = new[]
+            if (string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir)) return;
+            try
             {
-                @"engines\Moonlight\Moonlight Game Streaming Project",
-                @"engines\MoonlightVPlus\Moonlight Game Streaming Project",
-                @"engines\Sunshine\config"
-            };
-            int idx = 0;
-            foreach (string rel in relPaths)
-            {
-                string src = Path.Combine(installDir, rel);
-                if (!Directory.Exists(src)) continue;
-                string dst = Path.Combine(backupRoot, "keep_" + (idx++));
-                try
+                string enginesDir = Path.Combine(installDir, "engines");
+                if (Directory.Exists(enginesDir))
                 {
-                    CopyDirectory(src, dst);
-                    saved.Add(new KeyValuePair<string, string>(rel, dst));
+                    Directory.Delete(enginesDir, true);
                 }
-                catch { }
             }
-            return saved;
-        }
-
-        private static void RestorePairingDirs(string installDir, List<KeyValuePair<string, string>> saved)
-        {
-            foreach (KeyValuePair<string, string> kv in saved)
+            catch { }
+            foreach (string obsoleteFile in new[] { "BoBoStreamPlayer.exe", "opus.dll" })
             {
                 try
                 {
-                    CopyDirectory(kv.Value, Path.Combine(installDir, kv.Key));
+                    string path = Path.Combine(installDir, obsoleteFile);
+                    if (File.Exists(path)) File.Delete(path);
                 }
                 catch { }
             }
-        }
-
-        private static void CopyDirectory(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            foreach (string file in Directory.GetFiles(src))
-                File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), true);
-            foreach (string sub in Directory.GetDirectories(src))
-                CopyDirectory(sub, Path.Combine(dst, Path.GetFileName(sub)));
         }
 
         private static void DeleteDirectoryContentsExcept(string dir, string keepFileFullPath)

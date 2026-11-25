@@ -18,16 +18,22 @@ namespace DualRemote
         internal string CurAddr = "";
         internal string Relay = "";
         internal string PeerRelay = "";
+        private string customLinkText = "";
 
-        /// <summary>最近一次记录到的连接路径；这里是 status 的已记录状态，不是本次探测结论。</summary>
+        /// <summary>最近一次记录到的连接路径；对于局域网 BoBo V6 发现节点可直接写入自定义链路状态。</summary>
         internal string LinkText
         {
             get
             {
+                if (!string.IsNullOrEmpty(customLinkText)) return customLinkText;
                 if (CurAddr.Length > 0) return "直连（最近记录）";
                 if (PeerRelay.Length > 0) return "peer 中继(" + PeerRelay + ")（最近记录）";
                 if (Relay.Length > 0) return "DERP(" + Relay + ")（最近记录）";
                 return "路径未知";
+            }
+            set
+            {
+                customLinkText = value ?? "";
             }
         }
 

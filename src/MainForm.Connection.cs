@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,8 +9,6 @@ namespace DualRemote
 {
     internal sealed partial class MainForm
     {
-        private const int ClientPairTimeoutSeconds = 120;
-
         private TableLayoutPanel clientPairCardLayout;
         private Control clientPairCard;
         private Control clientPairPanel;
@@ -26,7 +23,6 @@ namespace DualRemote
         private bool clientPairBusy;
         private int clientPairOperation;
         private CancellationTokenSource clientPairCancellation;
-        private Process clientPairProcess;
         private string clientPairHost = "";
         private string clientPairHostName = "";
         private int connectRequestGeneration;
@@ -40,7 +36,7 @@ namespace DualRemote
             Theme.Row(panel, 1, Theme.Rule());
             Theme.Row(panel, 14);
 
-            clientPairTargetLabel = Theme.Text("这台电脑首次连接，需要完成一次授权。", Theme.TextSize.LabelBold, Theme.Ink);
+            clientPairTargetLabel = Theme.Text("这台电脑首次通过 BoBo远程 连接，需要完成一次 4 位临时码双向授权。", Theme.TextSize.LabelBold, Theme.Ink);
             Theme.Row(panel, 26, clientPairTargetLabel);
             Theme.Row(panel, 8);
 
@@ -58,7 +54,7 @@ namespace DualRemote
             Theme.FixedColumn(pinRow, 12);
             Theme.FillColumn(pinRow);
             Theme.Row(pinRow, 42, Theme.WrapInput(clientPairPinText), null,
-                Theme.Text("请输入被控端窗口显示的 4 位数字配对码。", Theme.TextSize.Small, Theme.Muted));
+                Theme.Text("请在被控端 BoBo远程 点「生成配对码」，并将显示的 4 位数字输入此处。", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(panel, 42, pinRow);
             Theme.Row(panel, 10);
 
@@ -83,7 +79,7 @@ namespace DualRemote
             Theme.Row(panel, 38, actions);
             Theme.Row(panel, 8);
 
-            clientPairStatusLabel = Theme.Text("等待输入配对码。", Theme.TextSize.Small, Theme.Muted);
+            clientPairStatusLabel = Theme.Text("等待输入被控端 4 位配对码。", Theme.TextSize.Small, Theme.Muted);
             Theme.Row(panel, 28, clientPairStatusLabel);
             return panel;
         }
@@ -127,17 +123,39 @@ namespace DualRemote
             if (clientPairStartButton != null)
             {
                 clientPairStartButton.Enabled = !busy;
-                clientPairStartButton.Text = busy ? "配对中…" : "配对并连接";
+                clientPairStartButton.Text = busy ? "双向验证中…" : "配对并连接";
                 clientPairStartButton.AccessibleName = clientPairStartButton.Text;
             }
             if (clientPairCancelButton != null)
                 clientPairCancelButton.Enabled = busy || (clientPairPanel != null && clientPairPanel.Visible);
         }
 
+        private string ResolveBoBoHostTarget(string rawInput)
+        {
+            if (string.IsNullOrWhiteSpace(rawInput)) return "";
+            if (boboHostServer != null)
+            {
+                string resolved = boboHostServer.ResolveTargetHost(rawInput);
+                if (!string.IsNullOrWhiteSpace(resolved)) return resolved;
+            }
+            BoBoAuthorizedPeer saved = BoBoIdentityStore.Default.FindPeerByCodeOrHost(rawInput);
+            if (saved != null && !string.IsNullOrWhiteSpace(saved.LastHost))
+                return saved.LastHost;
+            return rawInput.Trim();
+        }
+
         private async Task ConnectToDeviceAsync(string host, string hostName)
         {
+            string resolvedInput = ResolveBoBoHostTarget(host);
+            if (BoBoIdentityStore.IsNineDigitCode(resolvedInput))
+            {
+                SetStatus("未在同局域网或已授权记录中找到设备码 " + BoBoIdentityStore.FormatDeviceCode(resolvedInput) + " 对应的 IP；请先点「发现设备」或输入对方 IP 地址。", Theme.PillTone.Warning);
+                streamHost.Focus();
+                return;
+            }
+
             string error;
-            string cleanHost = Engines.NormalizeHost(host, out error);
+            string cleanHost = Engines.NormalizeHost(resolvedInput, out error);
             if (cleanHost == null)
             {
                 SetStatus(error, Theme.PillTone.Warning);
@@ -151,7 +169,7 @@ namespace DualRemote
                 if (string.Equals(clientPairHost, cleanHost, StringComparison.OrdinalIgnoreCase))
                 {
                     SetClientPairPanelVisible(true);
-                    SetClientPairStatus("正在等待被控端确认，请勿重复点击。", Theme.Muted);
+                    SetClientPairStatus("正在与对方 BoBo远程 完成双向配对，请稍候。", Theme.Muted);
                     return;
                 }
                 CancelClientPairing("已切换连接目标。");
@@ -163,271 +181,127 @@ namespace DualRemote
             SelectAssistMode(0);
             streamHost.Text = cleanHost;
             SetClientPairPanelVisible(false);
-            SetStatus("正在检查 " + (string.IsNullOrEmpty(hostName) ? cleanHost : hostName) + " 的授权状态…", Theme.PillTone.Info);
+            SetStatus("正在验证对方是否已打开 BoBo远程（" + (string.IsNullOrEmpty(hostName) ? cleanHost : hostName) + "）…", Theme.PillTone.Info);
 
-            bool paired = false;
-            string detail = null;
-            bool readable;
-            bool nativeMode = ShouldUseNativeStream();
+            BoBoHostProbeResult probe;
             try
             {
-                readable = await Task.Run(() => nativeMode
-                    ? GameStreamClient.IsHostPaired(cleanHost, clientPairHostName, out paired, out detail)
-                    : FoundationClient.IsHostPaired(cleanHost, clientPairHostName, out paired, out detail));
+                probe = await BoBoStreamClient.ProbeHostAsync(
+                    cleanHost, BoBoProtocol.DefaultTcpPort, BoBoIdentityStore.Default, 4500, CancellationToken.None);
             }
             catch (Exception ex)
             {
-                readable = false;
-                detail = "读取本机配对记录失败：" + ex.Message;
+                probe = new BoBoHostProbeResult { Error = "探测目标 BoBo远程 失败：" + ex.Message };
             }
             if (IsDisposed || request != connectRequestGeneration) return;
 
-            if (readable && paired)
+            if (!probe.Reachable || !probe.IsBoBoHost)
             {
-                SetStatus(nativeMode ? "已完成内置授权，正在打开一体化远程桌面…" : "已完成授权，正在打开桌面…", Theme.PillTone.Success);
+                string offlineMsg = string.IsNullOrEmpty(probe.Error)
+                    ? "未检测到对方打开 BoBo远程（必须双方同时打开 BoBo远程 才可连控）。"
+                    : probe.Error;
+                SetStatus(offlineMsg, Theme.PillTone.Alert);
+                deviceBanner.Set(offlineMsg, Theme.PillTone.Alert);
+                return;
+            }
+
+            if (!probe.AllowIncoming)
+            {
+                string disabledMsg = "对方 BoBo远程 当前关闭了「允许本机被控」，请在被控端开启后再连。";
+                SetStatus(disabledMsg, Theme.PillTone.Warning);
+                deviceBanner.Set(disabledMsg, Theme.PillTone.Warning);
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(probe.HostName))
+                clientPairHostName = probe.HostName;
+
+            if (probe.Authorized)
+            {
+                SetStatus("双端 BoBo远程 已匹配授权，正在建立 TLS 1.2 全内置远程桌面…", Theme.PillTone.Success);
                 await StartStreamAsync(cleanHost);
                 return;
             }
 
-            ShowClientPairPrompt(cleanHost, hostName, readable, detail);
+            ShowClientPairPrompt(cleanHost, clientPairHostName, true, "对方 BoBo远程 在线，需要输入对方生成的 4 位临时配对码。");
         }
 
         private void ShowClientPairPrompt(string cleanHost, string hostName, bool readable, string detail)
         {
-            if (IsDisposed) return;
+            string label = string.IsNullOrEmpty(hostName) ? cleanHost : (hostName + " (" + cleanHost + ")");
             clientPairHost = cleanHost;
             clientPairHostName = hostName ?? "";
-            ShowPage(AssistPage);
-            SelectAssistMode(0);
-            streamHost.Text = cleanHost;
-
-            if (clientPairTargetLabel != null)
-            {
-                string label = string.IsNullOrEmpty(hostName) ? cleanHost : hostName;
-                clientPairTargetLabel.Text = "首次连接 " + label + "，请输入被控端显示的 4 位配对码。";
-            }
-            SetClientPairStatus(readable
-                ? "尚未授权：输入 4 位码后点击「配对并连接」。"
-                : (detail ?? "无法读取本机授权记录，请检查配置目录权限；仍可尝试首次配对。"),
-                readable ? Theme.Muted : Theme.Warning);
+            clientPairTargetLabel.Text = "连接 " + label + " 需要 BoBo 双端配对授权（仅首次一次）";
+            clientPairPinText.Text = "";
             SetClientPairPanelVisible(true);
-            SetStatus(readable
-                ? "首次连接需要授权：请在下方输入被控端显示的 4 位配对码。"
-                : (detail ?? "无法读取本机授权记录，请检查配置目录权限。"),
-                readable ? Theme.PillTone.Info : Theme.PillTone.Warning);
-            if (clientPairPinText != null && readable)
-            {
-                clientPairPinText.Text = "";
-                clientPairPinText.Focus();
-            }
+            SetClientPairBusyUi(false);
+            SetClientPairStatus(string.IsNullOrEmpty(detail) ? "请输入被控端 BoBo远程 显示的 4 位临时配对码。" : detail,
+                readable ? Theme.Muted : Theme.Warning);
+            SetStatus("请在被控端 BoBo远程 点击「生成配对码」，并将 4 位码输入下方。", Theme.PillTone.Info);
+            clientPairPinText.Focus();
         }
 
         private async Task StartClientPairingAsync()
         {
-            if (clientPairBusy || IsDisposed) return;
-            string pin = clientPairPinText == null ? "" : (clientPairPinText.Text ?? "").Trim();
-            if (!IsFourDigitPin(pin))
+            if (clientPairBusy) return;
+            string host = clientPairHost;
+            if (string.IsNullOrWhiteSpace(host))
             {
-                SetClientPairStatus("请输入完整的 4 位数字配对码。", Theme.Warning);
-                if (clientPairPinText != null) clientPairPinText.Focus();
+                SetClientPairStatus("目标主机地址无效，请重新点击连接。", Theme.Alert);
                 return;
             }
 
-            string host = clientPairHost;
-            if (string.IsNullOrEmpty(host))
+            string pin = (clientPairPinText.Text ?? "").Trim();
+            if (!IsFourDigitPin(pin))
             {
-                string error;
-                host = Engines.NormalizeHost(SelectedHost(), out error);
-                if (host == null)
-                {
-                    SetClientPairStatus(error, Theme.Warning);
-                    return;
-                }
-                clientPairHost = host;
-            }
-            bool nativeMode = ShouldUseNativeStream();
-            if (!nativeMode && FoundationClient.SelectEngine(true) == StreamEngine.Unavailable)
-            {
-                SetClientPairStatus(MissingStreamEngineMessage, Theme.Alert);
+                SetClientPairStatus("请输入 4 位数字配对码。", Theme.Warning);
+                clientPairPinText.Focus();
                 return;
             }
-            string targetName = clientPairHostName;
 
             clientPairBusy = true;
             int operation = ++clientPairOperation;
             CancellationTokenSource cancellation = new CancellationTokenSource();
             clientPairCancellation = cancellation;
             SetClientPairBusyUi(true);
-            SetClientPairStatus(nativeMode ? "正在通过内置加密协议向被控端发起配对…" : "正在向被控端发起配对…", Theme.Muted);
-            SetStatus("正在发起首次授权，请留意被控端的配对确认。", Theme.PillTone.Info);
+            SetClientPairStatus("正在与对方 BoBo远程 进行 TLS 1.2 双向配对校验…", Theme.Muted);
+            SetStatus("正在提交 4 位配对码进行双向加密认证…", Theme.PillTone.Info);
 
             try
             {
-                if (nativeMode)
-                {
-                    string pairedHostName = "";
-                    string pairErr = null;
-                    bool pairedOk = false;
-                    try
-                    {
-                        pairedOk = await Task.Run(delegate
-                        {
-                            return GameStreamClient.PairHost(host, pin, cancellation.Token,
-                                delegate(string progressText)
-                                {
-                                    if (!IsDisposed && IsHandleCreated)
-                                    {
-                                        try
-                                        {
-                                            BeginInvoke(new Action(delegate
-                                            {
-                                                if (!IsDisposed && operation == clientPairOperation)
-                                                    SetClientPairStatus(progressText, Theme.Muted);
-                                            }));
-                                        }
-                                        catch { }
-                                    }
-                                },
-                                out pairedHostName,
-                                out pairErr);
-                        }, cancellation.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        pairedOk = false;
-                        pairErr = "内置配对异常：" + ex.Message;
-                    }
-
-                    if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested)
-                        return;
-
-                    if (pairedOk)
-                    {
-                        if (!string.IsNullOrEmpty(pairedHostName) && string.IsNullOrEmpty(clientPairHostName))
-                            clientPairHostName = pairedHostName;
-                        SetClientPairPanelVisible(false);
-                        SetClientPairStatus("内置授权完成。", Theme.Success);
-                        SetStatus("内置授权完成，正在打开一体化远程桌面…", Theme.PillTone.Success);
-                        await StartStreamAsync(host);
-                        return;
-                    }
-
-                    string errText = string.IsNullOrEmpty(pairErr)
-                        ? "内置配对未能完成，请核对 4 位配对码后重试。"
-                        : pairErr;
-                    SetClientPairStatus(errText, Theme.Alert);
-                    SetStatus(errText, Theme.PillTone.Alert);
-                    return;
-                }
-
-                Process started = null;
-                string startMessage = null;
-                bool startedOk;
+                Tuple<bool, string, string> res;
                 try
                 {
-                    startedOk = await Task.Run(delegate
-                    {
-                        return FoundationClient.StartPairWithPin(host, pin, out started, out startMessage);
-                    });
+                    res = await BoBoStreamClient.PairWithPinAsync(
+                        host, BoBoProtocol.DefaultTcpPort, pin, BoBoIdentityStore.Default, cancellation.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
-                    startedOk = false;
-                    startMessage = "启动配对失败：" + ex.Message;
+                    res = Tuple.Create(false, "", "配对异常：" + ex.Message);
                 }
 
                 if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested)
+                    return;
+
+                if (res.Item1)
                 {
-                    await StopClientPairProcessAsync(started);
+                    if (!string.IsNullOrEmpty(res.Item2)) clientPairHostName = res.Item2;
+                    SetClientPairPanelVisible(false);
+                    SetClientPairStatus("双向配对授权完成。", Theme.Success);
+                    SetStatus("双向配对授权完成，正在建立全内置加密远程桌面…", Theme.PillTone.Success);
+                    await StartStreamAsync(host);
                     return;
                 }
-                if (!startedOk)
-                {
-                    if (started != null) await StopClientPairProcessAsync(started);
-                    SetClientPairStatus(string.IsNullOrEmpty(startMessage)
-                        ? "无法启动配对，请检查内置串流组件。" : startMessage, Theme.Alert);
-                    return;
-                }
 
-                clientPairProcess = started;
-                Process pairingProcess = started;
-                SetClientPairStatus("已发起配对，等待被控端确认 4 位码…", Theme.Muted);
-                Stopwatch clock = Stopwatch.StartNew();
-                while (!cancellation.IsCancellationRequested
-                    && clock.Elapsed < TimeSpan.FromSeconds(ClientPairTimeoutSeconds))
-                {
-                    try
-                    {
-                        await Task.Delay(600, cancellation.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-                    if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested) return;
-
-                    bool paired = false;
-                    string detail = null;
-                    bool readable;
-                    try
-                    {
-                        readable = await Task.Run(() =>
-                            FoundationClient.IsHostPaired(host, targetName, out paired, out detail));
-                    }
-                    catch (Exception ex)
-                    {
-                        readable = false;
-                        detail = "读取授权记录失败：" + ex.Message;
-                    }
-                    if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested) return;
-
-                    if (readable && paired)
-                    {
-                        Process finishing = TakeClientPairProcess();
-                        await StopClientPairProcessAsync(finishing);
-                        if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested) return;
-                        SetClientPairPanelVisible(false);
-                        SetClientPairStatus("授权完成。", Theme.Success);
-                        SetStatus("授权完成，正在打开桌面…", Theme.PillTone.Success);
-                        await StartStreamAsync(host);
-                        return;
-                    }
-
-                    int exitCode;
-                    if (TryGetProcessExitCode(pairingProcess, out exitCode))
-                    {
-                        TakeClientPairProcess();
-                        await StopClientPairProcessAsync(pairingProcess);
-                        if (IsDisposed || operation != clientPairOperation || cancellation.IsCancellationRequested) return;
-                        string exitText = exitCode == 0
-                            ? "配对程序已退出，但本机还没有记录本次授权。请重新发起，并确认被控端仍在等待配对。"
-                            : "配对程序提前退出（退出码 " + exitCode + "），本次没有开始串流。请检查被控端窗口与组件状态。";
-                        SetClientPairStatus(exitText, Theme.Alert);
-                        SetStatus(exitText, Theme.PillTone.Alert);
-                        return;
-                    }
-
-                    int seconds = Math.Max(0, ClientPairTimeoutSeconds - (int)Math.Ceiling(clock.Elapsed.TotalSeconds));
-                    SetClientPairStatus(readable
-                        ? "等待被控端确认 4 位码… 还剩 " + seconds + " 秒"
-                        : (detail ?? "暂时无法读取授权记录，正在重试…"),
-                        readable ? Theme.Muted : Theme.Warning);
-                }
-
-                if (cancellation.IsCancellationRequested || IsDisposed || operation != clientPairOperation) return;
-                if (clock.Elapsed >= TimeSpan.FromSeconds(ClientPairTimeoutSeconds))
-                {
-                    Process expired = TakeClientPairProcess();
-                    await StopClientPairProcessAsync(expired);
-                    if (IsDisposed || operation != clientPairOperation) return;
-                    SetClientPairBusyUi(false);
-                    SetClientPairStatus("配对等待已超过 120 秒，本次没有开始串流。可重试或取消。", Theme.Warning);
-                    SetStatus("配对等待已超时，本次没有开始串流。", Theme.PillTone.Warning);
-                }
+                string errText = string.IsNullOrEmpty(res.Item3)
+                    ? "配对未能完成，请核对被控端 BoBo远程 的 4 位配对码后重试。"
+                    : res.Item3;
+                SetClientPairStatus(errText, Theme.Alert);
+                SetStatus(errText, Theme.PillTone.Alert);
             }
             finally
             {
@@ -453,54 +327,11 @@ namespace DualRemote
             if (clientPairCancellation != null) clientPairCancellation.Cancel();
             clientPairBusy = false;
             clientPairOperation++;
-            Process process = TakeClientPairProcess();
-            if (process != null)
-            {
-                StopClientPairProcessAsync(process);
-            }
             SetClientPairPanelVisible(false);
             SetClientPairStatus(string.IsNullOrEmpty(status) ? "已取消本次配对。" : status, Theme.Muted);
             SetStatus(string.IsNullOrEmpty(status) ? "已取消本次配对。" : status, Theme.PillTone.Info);
             if (clientPairStartButton != null) clientPairStartButton.Enabled = false;
             if (clientPairCancelButton != null) clientPairCancelButton.Enabled = false;
-        }
-
-        private Process TakeClientPairProcess()
-        {
-            Process process = clientPairProcess;
-            clientPairProcess = null;
-            return process;
-        }
-
-        private static Task StopClientPairProcessAsync(Process process)
-        {
-            if (process == null) return Task.FromResult(0);
-            return Task.Run(delegate
-            {
-                try
-                {
-                    if (!process.HasExited) process.Kill();
-                }
-                catch { }
-                try { process.WaitForExit(6000); } catch { }
-                try { process.Dispose(); } catch { }
-            });
-        }
-
-        private static bool TryGetProcessExitCode(Process process, out int exitCode)
-        {
-            exitCode = 0;
-            if (process == null) return false;
-            try
-            {
-                if (!process.HasExited) return false;
-                exitCode = process.ExitCode;
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private static bool IsFourDigitPin(string text)

@@ -11,42 +11,21 @@ permissions:
 
 jobs:
   compile-and-selftest:
-    name: Compile and self-test
+    name: Build V6 All-In-One (BoBoCore + BoBoRemote) and Self-Test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 编译与自检逻辑放在 ci/build.ps1（UTF-8 带 BOM）里：
-      # Windows PowerShell 5.1 会把 workflow 内联的无 BOM 脚本按 ANSI 解析，
-      # 中文会变乱码并触发语法错误。
-      - name: Build with in-box csc.exe and run --self-test
+      # 编译内嵌原生核 BoBoCore.dll.gz -> 嵌入 BoBoRemote.exe -> 运行端到端自检与安装向导自检
+      - name: Build BoBoCore.dll + BoBoRemote.exe and run --self-test
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\ci\build.ps1
 
-      - name: Upload build output
+      - name: Upload V6 All-In-One build output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BoBoRemote-exe
+          name: BoBoRemote-v6-allinone-exe
           path: ci-out/BoBoRemote.exe
-          if-no-files-found: warn
-          retention-days: 7
-
-  build-v5-native-core:
-    name: Build V5 native D3D11VA core
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Compile BoBoStreamPlayer.exe (MSVC /W4 /WX) and run --self-test
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\native\bobo-stream-player\build-native.ps1 -RunSelfTest
-
-      - name: Upload V5 native core artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: BoBoStreamPlayer-v5-core
-          path: native/bobo-stream-player/out/BoBoStreamPlayer.exe
           if-no-files-found: warn
           retention-days: 7

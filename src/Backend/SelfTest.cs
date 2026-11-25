@@ -1287,6 +1287,9 @@ namespace DualRemote
                 try { if (Directory.Exists(nativeTempDir)) Directory.Delete(nativeTempDir, true); } catch { }
             }
 
+            // V6 全内置架构端到端闭环自检：内嵌 BoBoCore.dll + 严格双端必开 TLS 1.2 + 4 位临时配对码 + 视频帧 + 防窥指令 + 文件 SHA-256 互传
+            RunV6AllInOneSelfTests();
+
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
             string reportPath = Path.Combine(Path.GetTempPath(), "双端远程-self-test.log");
@@ -1303,6 +1306,154 @@ namespace DualRemote
                 }
             }
             return _failures == 0 ? 0 : 1;
+        }
+
+        private static void RunV6AllInOneSelfTests()
+        {
+            // 1. Embedded BoBoCore.dll extraction & native capture/H.264/D3D11VA/ADPCM self-test
+            string nativeReport;
+            bool coreOk = BoBoCoreInterop.RunNativeSelfTest(out nativeReport);
+            Check("V6 全内置原生内核（BoBoCore.dll.gz 嵌入释放 + 编解码回环自检）",
+                coreOk,
+                string.IsNullOrEmpty(nativeReport) ? "empty report" : nativeReport.Replace("\r", " ").Replace("\n", " | "));
+
+            // 2. End-to-end localhost TLS 1.2 dual-end pairing, strict rejection, streaming, privacy & file transfer
+            string testRoot = Path.Combine(Path.GetTempPath(), "BoBoV6-SelfTest-" + Guid.NewGuid().ToString("N"));
+            string receivedFileToClean = null;
+            try
+            {
+                Directory.CreateDirectory(testRoot);
+                var hostId = new BoBoIdentityStore(Path.Combine(testRoot, "host"));
+                var clientId = new BoBoIdentityStore(Path.Combine(testRoot, "client"));
+                hostId.EnsureLoaded();
+                clientId.EnsureLoaded();
+
+                Check("V6 独立节点身份：RSA-2048 证书与 9 位 BoBo 设备码即时生成",
+                    !string.IsNullOrEmpty(hostId.NodeId)
+                    && BoBoIdentityStore.IsNineDigitCode(hostId.DeviceCode)
+                    && BoBoIdentityStore.IsNineDigitCode(clientId.DeviceCode)
+                    && !string.Equals(hostId.CertThumbprint, clientId.CertThumbprint, StringComparison.OrdinalIgnoreCase),
+                    "host=" + hostId.FormattedDeviceCode + " client=" + clientId.FormattedDeviceCode);
+
+                using (var server = new BoBoHostServer(hostId, 0, false))
+                {
+                    string srvErr;
+                    bool started = server.Start(out srvErr);
+                    int port = server.ListeningPort;
+                    Check("V6 内置被控服务启动（TLS 1.2 动态测试端口）", started && port > 0, srvErr ?? ("port=" + port));
+                    if (!started) return;
+
+                    // 2a. Unpaired probe & strict rejection
+                    BoBoHostProbeResult probe1 = BoBoStreamClient.ProbeHostAsync("127.0.0.1", port, clientId, 4000, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    Check("V6 双端握手探测：未配对设备识别为在线但未授权",
+                        probe1.Reachable && probe1.IsBoBoHost && probe1.AllowIncoming && !probe1.Authorized,
+                        probe1.Error ?? ("host=" + probe1.HostName));
+
+                    using (var unauthClient = new BoBoStreamClient(clientId))
+                    {
+                        var unauthRes = unauthClient.ConnectAndStartStreamAsync(
+                            new BoBoStreamStartOptions { Host = "127.0.0.1", Port = port, Width = 640, Height = 360, Fps = 30, BitrateKbps = 4000 },
+                            null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                        Check("V6 严格鉴权：未配对客户端必须返回 PAIR_REQUIRED 拒绝建流",
+                            !unauthRes.Item1 && string.Equals(unauthRes.Item2, "PAIR_REQUIRED", StringComparison.Ordinal),
+                            unauthRes.Item2 + " " + unauthRes.Item3);
+                    }
+
+                    // 2b. Instant 4-digit PIN generation + wrong PIN rejected + right PIN succeeds
+                    BoBoLocalPairSession pinSession = server.BeginPairing(120);
+                    string validPin = pinSession.Pin;
+                    string wrongPin = validPin == "0000" ? "1111" : "0000";
+
+                    var badPair = BoBoStreamClient.PairWithPinAsync("127.0.0.1", port, wrongPin, clientId, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    Check("V6 临时 4 位配对码：错误配对码必须拒绝", !badPair.Item1, badPair.Item3);
+
+                    var goodPair = BoBoStreamClient.PairWithPinAsync("127.0.0.1", port, validPin, clientId, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    Check("V6 临时 4 位配对码：正确 HMAC 校验通过并双向持久化授权",
+                        goodPair.Item1 && hostId.IsPeerAuthorized(clientId.NodeId, clientId.CertThumbprint),
+                        goodPair.Item3);
+
+                    // 2c. Authorized stream receives real H.264 frame + <5ms sync privacy callback + direct privacy toggle
+                    bool sessionStarted = false;
+                    bool sessionRequestedPrivacy = false;
+                    bool privacyCmdToggledOff = false;
+                    var frameEvt = new System.Threading.ManualResetEventSlim(false);
+                    var privOffEvt = new System.Threading.ManualResetEventSlim(false);
+                    server.SessionStateChanged += delegate(bool active, string peer, bool reqPriv)
+                    {
+                        if (active) { sessionStarted = true; sessionRequestedPrivacy = reqPriv; }
+                    };
+                    server.PrivacyCommandReceived += delegate(bool enable)
+                    {
+                        if (!enable) { privacyCmdToggledOff = true; privOffEvt.Set(); }
+                    };
+
+                    using (var authClient = new BoBoStreamClient(clientId))
+                    {
+                        authClient.RawVideoFrameReceived += delegate(byte[] data, bool isKey, int w, int h)
+                        {
+                            if (data != null && data.Length > 0) frameEvt.Set();
+                        };
+                        var connRes = authClient.ConnectAndStartStreamAsync(
+                            new BoBoStreamStartOptions
+                            {
+                                Host = "127.0.0.1",
+                                Port = port,
+                                Width = 640,
+                                Height = 360,
+                                Fps = 30,
+                                BitrateKbps = 4000,
+                                MuteHostAudio = false,
+                                RequestPrivacy = true
+                            },
+                            null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+
+                        bool gotFrame = connRes.Item1 && frameEvt.Wait(6000);
+                        Check("V6 授权建流：TLS 1.2 实收 H.264 编码帧并同步触发防窥",
+                            connRes.Item1 && gotFrame && sessionStarted && sessionRequestedPrivacy,
+                            "conn=" + connRes.Item2 + " frames=" + authClient.VideoFramesReceived + " priv=" + sessionRequestedPrivacy);
+
+                        authClient.SendSetPrivacy(false);
+                        bool gotPrivOff = privOffEvt.Wait(3000) && privacyCmdToggledOff;
+                        Check("V6 直连控制：主控端直接开关被控端防窥指令", gotPrivOff, "toggledOff=" + privacyCmdToggledOff);
+
+                        authClient.Disconnect();
+                    }
+
+                    // 2d. Built-in TLS SHA-256 file transfer
+                    string sampleFile = Path.Combine(testRoot, "bobo-v6-selftest.txt");
+                    string payloadText = "BoBoRemote V6 All-In-One TLS SHA-256 file transfer verification " + Guid.NewGuid().ToString("N");
+                    File.WriteAllText(sampleFile, payloadText, new UTF8Encoding(false));
+                    BoBoFileTransferProgress fileProg = BoBoStreamClient.SendFileAsync(
+                        "127.0.0.1", port, sampleFile, clientId, null, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    receivedFileToClean = fileProg.SavedPath;
+                    bool fileMatch = fileProg.Completed
+                        && !string.IsNullOrEmpty(fileProg.SavedPath)
+                        && File.Exists(fileProg.SavedPath)
+                        && string.Equals(File.ReadAllText(fileProg.SavedPath, Encoding.UTF8), payloadText, StringComparison.Ordinal);
+                    Check("V6 内置文件传输：TLS 1.2 分块传输与 SHA-256 完整性校验",
+                        fileMatch,
+                        fileProg.Completed ? fileProg.SavedPath : fileProg.Error);
+
+                    // 2e. Stop server -> physically unreachable (simulating closing BoBo远程)
+                    server.Stop();
+                    BoBoHostProbeResult probeAfterStop = BoBoStreamClient.ProbeHostAsync("127.0.0.1", port, clientId, 1500, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                    Check("V6 退出断口：关闭 BoBo远程 后端口立停、物理拒绝任何连控",
+                        !probeAfterStop.Reachable,
+                        "reachable=" + probeAfterStop.Reachable);
+                }
+            }
+            catch (Exception ex)
+            {
+                Check("V6 端到端闭环自检异常", false, ex.Message);
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(receivedFileToClean))
+                {
+                    try { if (File.Exists(receivedFileToClean)) File.Delete(receivedFileToClean); } catch { }
+                }
+                try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { }
+            }
         }
 
         private static bool TryWriteReport(string reportPath)

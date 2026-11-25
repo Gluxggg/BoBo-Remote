@@ -32,10 +32,10 @@ namespace DualRemote
         private Button localPairEyeButton;
         private bool localPairPinVisible = true;
         private string localPairPin;
-        private bool localPairPollBusy;
-        private bool localPairPreparing;
-        private int localPairGeneration;
-        private LocalPairSession localPairSession;
+        private BoBoLocalPairSession localPairSession;
+        private BoBoHostServer boboHostServer;
+        private bool allowIncomingControl = true;
+        private bool fileTransferBusy;
 
         private Button assistModeStreamTab;
         private Button assistModeRustDeskTab;
@@ -85,7 +85,7 @@ namespace DualRemote
         private const int CsDropShadow = 0x00020000;
         private const uint MonitorDefaultToNearest = 2;
 
-        private const string MissingStreamEngineMessage = "当前目录缺少串流组件。请完整解压 BoBo远程 便携版后再试。";
+        private const string MissingStreamEngineMessage = "内置 BoBoCore 原生内核加载异常，请重新安装或更新 BoBo远程。";
         private const int AssistPageHeight = 640;
         private const int LocalPairLifetimeSeconds = 120;
 
@@ -117,9 +117,6 @@ namespace DualRemote
         private bool remoteHotkeysRegistered;
         private bool wtsRegistered;
         private bool sessionEventsHooked;
-        private FileSystemWatcher sunshineLogWatcher;
-        private string sunshineLogWatchDir = "";
-        private DateTime lastLogWatchTriggerUtc = DateTime.MinValue;
         private DateTime lastSessionUnlockUtc = DateTime.MinValue;
         private DateTime lastPrivacyPointerDownUtc = DateTime.MinValue;
         private Control lastPrivacyPointerControl;
@@ -175,8 +172,8 @@ namespace DualRemote
             streamModeBadge.AlignRight = true;
             remoteId.MaxLength = 64;
             streamHost.MaxLength = 253;
-            Theme.Cue(remoteId, "请输入对方的 9 位设备码");
-            Theme.Cue(streamHost, "请输入对方局域网 IP、Tailscale IP 或公网 IPv6");
+            Theme.Cue(remoteId, "请输入对方的 9 位 BoBo 设备码或局域网/Tailscale IP");
+            Theme.Cue(streamHost, "请输入对方 9 位 BoBo 设备码、局域网 IP 或 Tailscale IP");
             streamHint.AutoEllipsis = true;
             streamHint.UseMnemonic = false;
             LoadPreferences();
@@ -198,8 +195,8 @@ namespace DualRemote
             sessionEventsHooked = true;
             remoteGuardTimer.Interval = 350;
             remoteGuardTimer.Tick += async delegate { await PollRemoteGuardTick(); };
-            localPairTimer.Interval = 1200;
-            localPairTimer.Tick += async delegate { await PollLocalPairingAsync(); };
+            localPairTimer.Interval = 1000;
+            localPairTimer.Tick += delegate { PollLocalPairingTick(); };
 
             Controls.Add(BuildChrome());
             SetupTrayIcon();
@@ -450,6 +447,7 @@ namespace DualRemote
             int height = Math.Min(Height, area.Height - 20);
             if (width != Width || height != Height)
                 SetBounds(area.Left + (area.Width - width) / 2, area.Top + (area.Height - height) / 2, width, height);
+            EnsureBoBoHostServerStarted();
             SyncRemoteGuardTimer();
         }
 
@@ -593,7 +591,6 @@ namespace DualRemote
             }
             remoteGuardTimer.Stop();
             remoteGuardTimer.Dispose();
-            DisposeSunshineLogWatcher();
             localPairTimer.Stop();
             localPairTimer.Dispose();
             if (onboardingDelayTimer != null)
@@ -620,13 +617,6 @@ namespace DualRemote
                 activeOnboardingTour = null;
             }
             TeardownRemoteSessionsOnExit();
-            localPairPreparing = false;
-            Process pendingPairProcess = TakeClientPairProcess();
-            if (pendingPairProcess != null)
-            {
-                try { if (!pendingPairProcess.HasExited) pendingPairProcess.Kill(); } catch { }
-                try { pendingPairProcess.Dispose(); } catch { }
-            }
             if (wtsRegistered && IsHandleCreated)
             {
                 try { WTSUnRegisterSessionNotification(Handle); } catch { }
@@ -788,12 +778,12 @@ namespace DualRemote
             Theme.FillColumn(actionCol);
             var copyShareBtn = Theme.Action("复制并分享", Theme.ButtonStyle.Secondary);
             copyShareBtn.Click += delegate { CopyLocalShareInfo(); };
-            var openRdBtn = Theme.Action("RustDesk 码", Theme.ButtonStyle.Secondary);
-            openRdBtn.Click += async delegate { await OpenLocalRustDeskOnAssist(openRdBtn); };
+            var manageAuthBtn = Theme.Action("管理授权", Theme.ButtonStyle.Secondary);
+            manageAuthBtn.Click += delegate { ShowAuthorizedPeersDialog(); };
             Theme.FillRow(actionCol);
             Theme.Row(actionCol, 36, copyShareBtn);
             Theme.Row(actionCol, 8);
-            Theme.Row(actionCol, 36, openRdBtn);
+            Theme.Row(actionCol, 36, manageAuthBtn);
             Theme.FillRow(actionCol);
 
             Theme.Row(body, 104, addrCol, null, pinCol, null, actionCol);
@@ -851,30 +841,27 @@ namespace DualRemote
 
         private void CopyLocalShareInfo()
         {
+            string code = BoBoIdentityStore.Default.FormattedDeviceCode;
             string addr = !string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4)
                 ? hostSnapshot.TailscaleIpv4
                 : !string.IsNullOrEmpty(hostSnapshot.LanIpv4)
                     ? hostSnapshot.LanIpv4
                     : hostSnapshot.PublicIpv6;
-            if (string.IsNullOrEmpty(addr))
-            {
-                SetStatus("暂未检测到本机可用网络地址，请先刷新或使用 RustDesk 设备码。", Theme.PillTone.Warning);
-                return;
-            }
             bool hasPin = !string.IsNullOrEmpty(localPairPin);
-            string share = "BoBo远程连接地址：" + addr
-                + (hasPin ? "  配对码：" + localPairPin : "");
+            string share = "BoBo设备码：" + code
+                + (string.IsNullOrEmpty(addr) ? "" : ("  连接地址：" + addr))
+                + (hasPin ? ("  4位配对码：" + localPairPin) : "");
             try
             {
                 Clipboard.SetText(share);
                 SetStatus(hasPin
-                    ? "已将本机连接地址与临时配对码复制到剪贴板（为保护隐私，状态栏不回显明文）。"
-                    : "已将本机连接地址复制到剪贴板（为保护隐私，状态栏不回显明文）。",
+                    ? "已将本机 BoBo 设备码、地址与 4 位临时配对码复制到剪贴板。"
+                    : "已将本机 BoBo 设备码与连接地址复制到剪贴板。",
                     Theme.PillTone.Success);
             }
             catch
             {
-                SetStatus("无法写入剪贴板，请点击地址或配对码右侧眼睛图标查看并手动复制。", Theme.PillTone.Warning);
+                SetStatus("无法写入剪贴板，请点击眼睛图标查看并手动复制。", Theme.PillTone.Warning);
             }
         }
 
@@ -886,17 +873,15 @@ namespace DualRemote
             clientPairCard = card;
             clientPairCardLayout = layout;
 
-            // Header section matching UU Image 3 ("远控伙伴设备" + subtitle)
             var header = Theme.Grid(1);
             header.Padding = new Padding(22, 16, 22, 14);
             Theme.FillColumn(header);
             Theme.Row(header, 28, Theme.Text("远控伙伴设备", Theme.TextSize.Section, Theme.Ink));
             Theme.Row(header, 4);
-            Theme.Row(header, 24, Theme.Text("输入伙伴的局域网/组网地址（高清高帧率串流），或 9 位设备码（临时协助与文件互传）", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(header, 24, Theme.Text("双端同时打开 BoBo远程 后，输入对方 9 位 BoBo 设备码或局域网/Tailscale IP 即可安全连控与传文件", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(layout, 86, header);
             Theme.Row(layout, 1, Theme.Rule());
 
-            // Clean underline mode switcher inside card body
             var modeStrip = Theme.Grid(5);
             modeStrip.Padding = new Padding(22, 12, 22, 0);
             Theme.FixedColumn(modeStrip, 148);
@@ -905,15 +890,14 @@ namespace DualRemote
             Theme.FillColumn(modeStrip);
             Theme.FixedColumn(modeStrip, 198);
 
-            assistModeStreamTab = Theme.Action("低延迟高清串流", Theme.ButtonStyle.UnderlineTab);
-            assistModeRustDeskTab = Theme.Action("临时协助 / 文件传输", Theme.ButtonStyle.UnderlineTab);
+            assistModeStreamTab = Theme.Action("远程桌面控制", Theme.ButtonStyle.UnderlineTab);
+            assistModeRustDeskTab = Theme.Action("内置极速传文件", Theme.ButtonStyle.UnderlineTab);
             assistModeStreamTab.Click += delegate { SelectAssistMode(0); };
             assistModeRustDeskTab.Click += delegate { SelectAssistMode(1); };
 
             Theme.Row(modeStrip, 36, assistModeStreamTab, null, assistModeRustDeskTab, null, streamModeBadge);
             Theme.Row(layout, 48, modeStrip);
 
-            // Mode content host
             assistModeHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Paper };
             assistStreamModePanel = BuildStreamModePanel();
             assistRustDeskModePanel = BuildRustDeskModePanel();
@@ -922,7 +906,6 @@ namespace DualRemote
             assistModeHostRow = layout.RowCount;
             Theme.Row(layout, 178, assistModeHost);
 
-            // Expandable inline 4-digit PIN pairing panel (for first-time Moonlight/Sunshine pairing)
             clientPairPanel = BuildClientPairPanel();
             clientPairPanel.Visible = false;
             clientPairPanelRow = layout.RowCount;
@@ -995,27 +978,23 @@ namespace DualRemote
             panel.Padding = new Padding(22, 14, 22, 8);
             Theme.FillColumn(panel);
 
-            Theme.Row(panel, 22, Theme.Text("伙伴的 9 位设备码", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 22, Theme.Text("目标电脑的 9 位 BoBo 设备码或 IP 地址", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(panel, 8);
 
-            var row = Theme.Grid(5);
+            var row = Theme.Grid(3);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 124);
-            Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 124);
+            Theme.FixedColumn(row, 160);
 
-            rustDeskConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary);
-            var transferBtn = Theme.Action("文件传输", Theme.ButtonStyle.Secondary, Theme.Glyph.Folder);
-            rustDeskConnectBtn.Click += delegate { StartRemote(false); };
-            transferBtn.Click += delegate { StartRemote(true); };
+            rustDeskConnectBtn = Theme.Action("选择文件发送", Theme.ButtonStyle.Primary, Theme.Glyph.Folder);
+            rustDeskConnectBtn.Click += async delegate { await StartBuiltInFileTransferAsync(); };
             remoteId.KeyDown += delegate(object sender, KeyEventArgs args) { RunOnEnter(remoteId, rustDeskConnectBtn, args); };
             remoteId.TextChanged += delegate { UpdateAssistConnectButtons(); };
 
-            Theme.Row(row, 40, Theme.WrapInput(remoteId), null, rustDeskConnectBtn, null, transferBtn);
+            Theme.Row(row, 40, Theme.WrapInput(remoteId), null, rustDeskConnectBtn);
             Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
-            Theme.Row(panel, 26, Theme.Text("通过内置 RustDesk 1.5.3 发起跨网通用桌面协助或直接传输文件，权限由被控端确认。", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 26, Theme.Text("通过 BoBo V6 内置 TLS 1.2 通道点对点传输文件并校验 SHA-256，接收文件自动保存到对方「下载\\BoBoRemote」。", Theme.TextSize.Small, Theme.Muted));
 
             UpdateAssistConnectButtons();
             return panel;
@@ -1075,504 +1054,397 @@ namespace DualRemote
                 rustDeskConnectBtn.Enabled = !string.IsNullOrWhiteSpace(remoteId.Text);
         }
 
-        // ==================== LOCAL PAIRING FLOW (PRESERVED 100%) ====================
+        // ==================== V6 IN-PROCESS HOST SERVER & INSTANT LOCAL PAIRING ====================
 
-        private async Task BeginLocalPairingAsync()
+        private void EnsureBoBoHostServerStarted()
         {
-            if (localPairPreparing || localPairPollBusy) return;
-            if (localPairPin != null)
-            {
-                CancelLocalPairing();
-                return;
-            }
-
-            localPairPreparing = true;
-            int prepareGeneration = ++localPairGeneration;
-            localPairGenerateButton.Enabled = false;
-            localPairCancelButton.Enabled = true;
-            localPairGenerateButton.Text = "准备中…";
-            localPairGenerateButton.AccessibleName = "准备本机被控服务";
-            localPairStatusLabel.Text = "正在准备本机被控服务…";
-            SetStatus("正在准备本机被控服务，首次启动可能需要数秒。", Theme.PillTone.Info);
-
-            LocalPairPrepareResult result;
+            if (boboHostServer != null && boboHostServer.IsRunning) return;
             try
             {
-                result = await Task.Run(delegate
+                if (boboHostServer == null)
                 {
-                    var prepared = new LocalPairPrepareResult();
-                    string prepareMessage = null;
-                    bool started = BundledHost.TryPrepareAndStart(out prepareMessage);
-                    string availabilityReason = null;
-                    bool available = SunshinePairing.TryGetAvailability(out availabilityReason);
-                    if (!available)
+                    boboHostServer = new BoBoHostServer(BoBoIdentityStore.Default, BoBoProtocol.DefaultTcpPort, true);
+                    boboHostServer.AllowIncomingControl = allowIncomingControl;
+                    boboHostServer.SessionStateChanged += OnBoBoHostSessionStateChanged;
+                    boboHostServer.PrivacyCommandReceived += delegate(bool enable)
                     {
-                        prepared.Message = JoinMessages(prepareMessage, availabilityReason);
-                        return prepared;
-                    }
+                        if (IsDisposed || !IsHandleCreated) return;
+                        try
+                        {
+                            BeginInvoke(new Action(delegate
+                            {
+                                if (IsDisposed) return;
+                                if (enable) ActivatePrivacyFromRemoteCommand();
+                                else DeactivatePrivacyFromRemoteCommand();
+                            }));
+                        }
+                        catch { }
+                    };
+                    boboHostServer.PeerPaired += delegate(BoBoAuthorizedPeer peer)
+                    {
+                        if (IsDisposed || !IsHandleCreated) return;
+                        try
+                        {
+                            BeginInvoke(new Action(delegate
+                            {
+                                if (IsDisposed) return;
+                                string name = string.IsNullOrEmpty(peer.DeviceName) ? peer.LastHost : peer.DeviceName;
+                                CancelLocalPairing("已双向授权：" + name + "，对方现在可直接连控本机。");
+                                SetStatus("双向授权完成：" + name + " 已加入本机 BoBo 可信名单。", Theme.PillTone.Success);
+                                UpdateDiagnosticsUi();
+                            }));
+                        }
+                        catch { }
+                    };
+                    boboHostServer.ClipboardTextReceived += delegate(string text)
+                    {
+                        if (IsDisposed || !IsHandleCreated || string.IsNullOrEmpty(text)) return;
+                        try
+                        {
+                            BeginInvoke(new Action(delegate
+                            {
+                                try { Clipboard.SetText(text); } catch { }
+                            }));
+                        }
+                        catch { }
+                    };
+                    boboHostServer.FileReceived += delegate(string senderName, string savedPath)
+                    {
+                        if (IsDisposed || !IsHandleCreated) return;
+                        try
+                        {
+                            BeginInvoke(new Action(delegate
+                            {
+                                if (IsDisposed) return;
+                                string fn = Path.GetFileName(savedPath ?? "");
+                                string note = "已接收来自 " + senderName + " 的文件：" + fn + "（已存至 下载\\BoBoRemote）";
+                                SetStatus(note, Theme.PillTone.Success);
+                                deviceBanner.Set(note, Theme.PillTone.Success);
+                            }));
+                        }
+                        catch { }
+                    };
+                }
 
-                    List<PairedClientInfo> paired = null;
-                    string pairedError = null;
-                    if (!SunshinePairing.TryGetPairedClients(out paired, out pairedError))
-                    {
-                        prepared.Message = JoinMessages("无法读取本机已有授权记录。", pairedError);
-                        return prepared;
-                    }
-                    List<PendingPairRequest> pending = null;
-                    string pendingError = null;
-                    if (!SunshinePairing.TryGetPending(out pending, out pendingError))
-                    {
-                        prepared.Message = JoinMessages("无法读取本机配对请求。", pendingError);
-                        return prepared;
-                    }
-
-                    var session = new LocalPairSession();
-                    session.Pin = SunshinePairing.GeneratePin();
-                    session.Clock = Stopwatch.StartNew();
-                    session.BaselinePaired = BuildPairedIdSet(paired);
-                    session.BaselinePending = BuildPendingIdSet(pending);
-                    prepared.Session = session;
-                    prepared.Message = string.IsNullOrEmpty(prepareMessage)
-                        ? (started ? "本机被控服务已准备就绪。" : "复用已有宿主，本机被控服务已就绪。")
-                        : prepareMessage;
-                    return prepared;
-                });
+                string err;
+                if (!boboHostServer.Start(out err))
+                {
+                    SetStatus(err ?? "本机 BoBo V6 被控端口监听失败，请检查端口 49810 是否被占用。", Theme.PillTone.Warning);
+                }
+                ApplyHostSnapshotToUi();
             }
             catch (Exception ex)
             {
-                result = new LocalPairPrepareResult();
-                result.Message = "准备本机被控服务失败：" + ex.Message;
+                SetStatus("启动本机 BoBo V6 服务异常：" + ex.Message, Theme.PillTone.Warning);
+            }
+        }
+
+        private void OnBoBoHostSessionStateChanged(bool active, string peerName, bool requestPrivacy)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            Action apply = delegate
+            {
+                if (IsDisposed) return;
+                hostCurrentlyControlled = active;
+                SyncActiveControlIndicators();
+                if (active)
+                {
+                    if ((privacyConfig.AutoOnRemote || requestPrivacy) && !privacyGuard.SessionLocked)
+                    {
+                        if (!privacyCurtain.IsActive || privacyCurtain.IsPreview)
+                        {
+                            ClearPrivacyButtonFocus();
+                            string msg;
+                            if (privacyCurtain.Activate(privacyConfig, false, out msg))
+                            {
+                                privacyGuard.OnManualActivate();
+                                ShowDisplayBanner("已由 " + peerName + " 发起加密远控，物理屏防窥壁纸已瞬间开启。", Theme.PillTone.Success);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        deviceBanner.Set("正在被 " + peerName + " 远程控制中（BoBo V6 全内置加密通道）。", Theme.PillTone.Info);
+                    }
+                }
+                else
+                {
+                    if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
+                    {
+                        ClearPrivacyButtonFocus();
+                        privacyCurtain.Deactivate(privacyConfig.LockOnLocalExit);
+                        ShowDisplayBanner("远控会话已结束，防窥壁纸已自动收起。", Theme.PillTone.Info);
+                    }
+                    deviceBanner.Set("远控会话已结束，本机恢复就绪状态。", Theme.PillTone.Info);
+                }
+            };
+            try
+            {
+                if (InvokeRequired)
+                {
+                    // Synchronous invoke on session start so physical curtain drops BEFORE frame 1 (<5ms)!
+                    if (active && (privacyConfig.AutoOnRemote || requestPrivacy))
+                        Invoke(apply);
+                    else
+                        BeginInvoke(apply);
+                }
+                else
+                {
+                    apply();
+                }
+            }
+            catch { }
+        }
+
+        private Task BeginLocalPairingAsync()
+        {
+            if (!allowIncomingControl)
+            {
+                allowIncomingControl = true;
+                if (boboHostServer != null) boboHostServer.AllowIncomingControl = true;
+                SavePreferences();
+            }
+            EnsureBoBoHostServerStarted();
+            if (boboHostServer == null || !boboHostServer.IsRunning)
+            {
+                localPairStatusLabel.Text = "本机 49810 端口未能启动，请检查防火墙或重启 BoBo远程。";
+                SetStatus(localPairStatusLabel.Text, Theme.PillTone.Alert);
+                return Task.FromResult(0);
             }
 
-            localPairPreparing = false;
-            if (IsDisposed) return;
-            if (prepareGeneration != localPairGeneration)
-            {
-                localPairGenerateButton.Enabled = true;
-                return;
-            }
-            if (result.Session == null)
-            {
-                localPairGenerateButton.Enabled = true;
-                localPairGenerateButton.Text = "生成配对码";
-                localPairStatusLabel.Text = result.Message ?? "本机被控服务暂不可用。";
-                SetStatus(localPairStatusLabel.Text, Theme.PillTone.Warning);
-                return;
-            }
-
-            LocalPairSession current = result.Session;
-            current.Generation = ++localPairGeneration;
-            localPairSession = current;
-            localPairPin = current.Pin;
+            BoBoLocalPairSession session = boboHostServer.BeginPairing(LocalPairLifetimeSeconds);
+            localPairSession = session;
+            localPairPin = session.Pin;
             localPairPinVisible = true;
             if (localPairEyeButton != null)
                 Theme.ChangeGlyph(localPairEyeButton, Theme.Glyph.Eye);
             RefreshLocalPairPinDisplay();
+
             localPairCancelButton.Enabled = true;
-            localPairGenerateButton.Enabled = false;
-            localPairStatusLabel.Text = "等待另一台电脑输入配对码…";
-            localPairGenerateButton.Text = "等待配对…";
-            localPairGenerateButton.AccessibleName = "等待另一台电脑输入配对码";
+            localPairGenerateButton.Enabled = true;
+            localPairGenerateButton.Text = "刷新配对码";
+            localPairGenerateButton.AccessibleName = "刷新本机 4 位临时配对码";
+            localPairStatusLabel.Text = "已生成临时码 · 对方在 BoBo远程 输入此 4 位码即可完成双向授权（还剩 " + session.RemainingSeconds + " 秒）";
             localPairTimer.Start();
-            SetStatus(result.Message + " 4 位配对码有效期 120 秒；对方输入后请点「确认允许」。", Theme.PillTone.Info);
-            await RefreshHostDiagnosticsAsync();
+            SetStatus("已即时生成 4 位临时配对码（有效期 120 秒），台式机与笔记本双端均需打开 BoBo远程 完成匹配。", Theme.PillTone.Success);
+            ApplyHostSnapshotToUi();
+            return Task.FromResult(0);
         }
 
-        private async Task LocalPairPrimaryActionAsync()
+        private Task LocalPairPrimaryActionAsync()
         {
-            if (localPairPreparing) return;
-            if (localPairPin == null)
-            {
-                await BeginLocalPairingAsync();
-                return;
-            }
-            LocalPairSession session = localPairSession;
-            if (session == null || session.PendingRequest == null) return;
-            await ConfirmLocalPendingAsync(session);
-        }
-
-        private async Task ConfirmLocalPendingAsync(LocalPairSession session)
-        {
-            if (session == null || !EnsureLocalPairCurrent(session)) return;
-            if (session.SubmitStarted) return;
-            PendingPairRequest request = session.PendingRequest;
-            if (request == null || string.IsNullOrEmpty(request.Id))
-            {
-                localPairStatusLabel.Text = "待确认请求已变化，请等待列表刷新后重试。";
-                return;
-            }
-
-            session.SubmitStarted = true;
-            session.SubmitCompleted = false;
-            session.SubmitSucceeded = false;
-            localPairGenerateButton.Enabled = false;
-            localPairGenerateButton.Text = "正在确认…";
-            localPairStatusLabel.Text = "正在提交本机授权确认…";
-            string pin = session.Pin;
-            string requestId = request.Id;
-            string deviceName = string.IsNullOrEmpty(request.DeviceName) ? "另一台电脑" : request.DeviceName;
-
-            string error = null;
-            bool confirmed = false;
-            try
-            {
-                confirmed = await Task.Run(delegate
-                {
-                    if (session.Cancelled
-                        || session.Clock == null
-                        || session.Clock.Elapsed >= TimeSpan.FromSeconds(LocalPairLifetimeSeconds))
-                        return false;
-
-                    List<PendingPairRequest> stillPending = null;
-                    string pendingError = null;
-                    if (!SunshinePairing.TryGetPending(out stillPending, out pendingError)) return false;
-                    bool found = false;
-                    if (stillPending != null)
-                    {
-                        foreach (PendingPairRequest candidate in stillPending)
-                        {
-                            if (string.Equals(candidate.Id, requestId, StringComparison.Ordinal))
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!found) return false;
-                    if (session.Cancelled
-                        || session.Clock == null
-                        || session.Clock.Elapsed >= TimeSpan.FromSeconds(LocalPairLifetimeSeconds))
-                        return false;
-                    return SunshinePairing.TryConfirm(pin, requestId, deviceName, out error);
-                });
-            }
-            catch (Exception ex)
-            {
-                error = "提交本机授权确认失败：" + ex.Message;
-            }
-
-            session.SubmitCompleted = true;
-            session.SubmitSucceeded = confirmed;
-            if (!IsCurrentLocalPairing(session)) return;
-            if (confirmed)
-            {
-                session.ConfirmationSubmitted = true;
-                localPairGenerateButton.Text = "已提交确认";
-                localPairGenerateButton.Enabled = false;
-                localPairStatusLabel.Text = "已提交确认，正在等待本机授权记录生效…";
-                SetStatus("已提交本机授权确认，正在等待授权列表更新。", Theme.PillTone.Info);
-            }
-            else
-            {
-                session.SubmitStarted = false;
-                localPairGenerateButton.Text = "确认允许";
-                localPairGenerateButton.Enabled = true;
-                localPairStatusLabel.Text = string.IsNullOrEmpty(error)
-                    ? "请求已失效或配对码已过期，本次未提交授权。" : error;
-                SetStatus(string.IsNullOrEmpty(error)
-                    ? "待确认请求已失效，本次未提交授权。" : error, Theme.PillTone.Warning);
-            }
+            return BeginLocalPairingAsync();
         }
 
         private void CancelLocalPairing()
         {
-            CancelLocalPairing("已取消等待，配对码已失效。");
+            CancelLocalPairing("已取消等待，临时配对码已失效。");
         }
 
         private void CancelLocalPairing(string status)
         {
-            LocalPairSession cancelled = localPairSession;
-            if (cancelled != null) cancelled.Cancelled = true;
-            if (cancelled != null && cancelled.PendingRequestCount > 1)
-                status = "已取消本机配对。已显示 " + cancelled.PendingRequestCount + " 个待确认请求，均未提交授权。";
-            else if (cancelled != null && cancelled.SubmitStarted)
-                status = "已取消本机配对。确认已发出，最终是否授权以本机授权列表为准。";
             localPairTimer.Stop();
+            if (boboHostServer != null) boboHostServer.CancelPairing();
             localPairSession = null;
             localPairPin = null;
-            localPairGeneration++;
             RefreshLocalPairPinDisplay();
             if (localPairStatusLabel != null) localPairStatusLabel.Text = status;
             if (localPairGenerateButton != null)
             {
                 localPairGenerateButton.Text = "生成配对码";
                 localPairGenerateButton.AccessibleName = "生成配对码";
-                localPairGenerateButton.Enabled = !localPairPollBusy;
+                localPairGenerateButton.Enabled = true;
             }
             if (localPairCancelButton != null) localPairCancelButton.Enabled = false;
         }
 
-        private async Task PollLocalPairingAsync()
+        private void PollLocalPairingTick()
         {
-            LocalPairSession session = localPairSession;
-            if (localPairPollBusy || session == null || IsDisposed) return;
-            if (session.Clock == null || session.Clock.Elapsed >= TimeSpan.FromSeconds(LocalPairLifetimeSeconds))
+            BoBoLocalPairSession session = localPairSession;
+            if (session == null || IsDisposed)
             {
-                session.Expired = true;
-                CancelLocalPairing(session.SubmitStarted
-                    ? "配对码已过期；确认已发出，最终是否授权以本机授权列表为准。"
-                    : "配对码已过期，请重新生成。");
-                SetStatus(session.SubmitStarted
-                    ? "本次配对码已过期；确认已发出，最终是否授权以本机授权列表为准。"
-                    : "本次配对码已过期，没有提交任何授权确认。", Theme.PillTone.Warning);
+                localPairTimer.Stop();
                 return;
             }
-
-            localPairPollBusy = true;
-            try
+            int rem = session.RemainingSeconds;
+            if (rem <= 0 || session.IsExpired)
             {
-                if (!session.SubmitStarted)
-                {
-                    List<PendingPairRequest> requests = null;
-                    string error = null;
-                    bool loaded = await Task.Run(() => SunshinePairing.TryGetPending(out requests, out error));
-                    if (!EnsureLocalPairCurrent(session)) return;
-                    if (!loaded)
-                    {
-                        localPairStatusLabel.Text = error ?? "暂时无法读取待确认请求，正在重试…";
-                        return;
-                    }
+                CancelLocalPairing("临时配对码已过期，请重新点击「生成配对码」。");
+                SetStatus("本次 4 位临时配对码已过期，未授权新设备。", Theme.PillTone.Warning);
+                return;
+            }
+            if (localPairStatusLabel != null)
+            {
+                localPairStatusLabel.Text = "等待对方 BoBo远程 输入此 4 位码… 还剩 " + rem + " 秒";
+            }
+        }
 
-                    PendingPairRequest request = FindNewPendingRequest(requests, session.BaselinePending);
-                    if (request == null)
+        private void ShowAuthorizedPeersDialog()
+        {
+            List<BoBoAuthorizedPeer> list = BoBoIdentityStore.Default.ListAuthorizedPeers();
+            using (var dlg = new Form())
+            {
+                dlg.Text = "BoBo远程 · 已授权设备管理";
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.ClientSize = new Size(520, 380);
+                dlg.BackColor = Theme.Workspace;
+                if (appIcon != null) dlg.Icon = appIcon;
+
+                var root = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18) };
+                var title = Theme.Text("本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode, Theme.TextSize.Section, Theme.Ink);
+                title.Dock = DockStyle.Top;
+                title.Height = 32;
+
+                var sub = Theme.Text("以下设备已完成双向 4 位配对码授权，双方同时打开 BoBo远程 时可直接连控；移除后需重新配对。", Theme.TextSize.Small, Theme.Muted);
+                sub.Dock = DockStyle.Top;
+                sub.Height = 36;
+
+                var listBox = new ListBox
+                {
+                    Dock = DockStyle.Fill,
+                    Font = new Font("Microsoft YaHei UI", 9.5f),
+                    BorderStyle = BorderStyle.FixedSingle,
+                    IntegralHeight = false
+                };
+
+                Action reload = delegate
+                {
+                    list = BoBoIdentityStore.Default.ListAuthorizedPeers();
+                    listBox.Items.Clear();
+                    if (list.Count == 0)
                     {
-                        session.PendingRequestCount = 0;
-                        session.PendingRequest = null;
-                        ShowLocalPairCountdown(session);
-                        return;
-                    }
-                    string name = string.IsNullOrEmpty(request.DeviceName) ? "另一台电脑" : request.DeviceName;
-                    if (session.PendingRequest == null || !string.Equals(session.PendingRequest.Id, request.Id, StringComparison.Ordinal))
-                    {
-                        int count = CountNewPendingRequests(requests, session.BaselinePending);
-                        session.PendingRequestCount = count;
-                        session.PendingRequest = request;
-                        localPairStatusLabel.Text = count > 1
-                            ? name + " 请求连接（共 " + count + " 个待确认）。点「确认允许」仅通过此设备。"
-                            : name + " 请求连接本机，请点右上角「确认允许」。";
-                        localPairGenerateButton.Text = "确认允许";
-                        localPairGenerateButton.AccessibleName = "确认允许 " + name + " 连接";
-                        localPairGenerateButton.Enabled = true;
+                        listBox.Items.Add("（暂无已授权设备，生成 4 位配对码即可完成首次绑定）");
                     }
                     else
                     {
-                        localPairGenerateButton.Text = "确认允许";
-                        localPairGenerateButton.Enabled = true;
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            BoBoAuthorizedPeer p = list[i];
+                            listBox.Items.Add(p.DeviceName + "  |  码 " + BoBoIdentityStore.FormatDeviceCode(p.DeviceCode) + "  |  " + p.LastHost);
+                        }
                     }
-                    return;
-                }
+                };
+                reload();
 
-                if (!session.SubmitCompleted)
+                var btnBar = new FlowLayoutPanel
                 {
-                    ShowLocalPairCountdown(session);
-                    return;
-                }
+                    Dock = DockStyle.Bottom,
+                    Height = 46,
+                    FlowDirection = FlowDirection.RightToLeft,
+                    Padding = new Padding(0, 8, 0, 0)
+                };
+                var closeBtn = Theme.Action("关闭", Theme.ButtonStyle.Primary);
+                closeBtn.Width = 88;
+                closeBtn.Height = 34;
+                closeBtn.Click += delegate { dlg.Close(); };
 
-                List<PairedClientInfo> clients = null;
-                string clientsError = null;
-                bool loadedClients = await Task.Run(() => SunshinePairing.TryGetPairedClients(out clients, out clientsError));
-                if (!EnsureLocalPairCurrent(session)) return;
-                if (!loadedClients)
+                var revokeBtn = Theme.Action("撤销选中授权", Theme.ButtonStyle.Secondary);
+                revokeBtn.Width = 128;
+                revokeBtn.Height = 34;
+                revokeBtn.Click += delegate
                 {
-                    localPairStatusLabel.Text = clientsError ?? "已提交确认，暂时无法读取授权记录，正在重试…";
-                    return;
-                }
-                PairedClientInfo added = FindNewPairedClient(clients, session.BaselinePaired);
-                if (added != null)
+                    int idx = listBox.SelectedIndex;
+                    if (idx < 0 || idx >= list.Count) return;
+                    BoBoAuthorizedPeer target = list[idx];
+                    BoBoIdentityStore.Default.RevokePeer(target.NodeId);
+                    if (boboHostServer != null) boboHostServer.DisconnectAllActiveStreams("授权已撤销");
+                    reload();
+                    UpdateDiagnosticsUi();
+                    SetStatus("已撤销 " + target.DeviceName + " 的远程控制授权。", Theme.PillTone.Info);
+                };
+
+                btnBar.Controls.Add(closeBtn);
+                btnBar.Controls.Add(revokeBtn);
+
+                root.Controls.Add(listBox);
+                root.Controls.Add(sub);
+                root.Controls.Add(title);
+                root.Controls.Add(btnBar);
+                dlg.Controls.Add(root);
+                dlg.ShowDialog(this);
+            }
+        }
+
+        private async Task StartBuiltInFileTransferAsync()
+        {
+            if (fileTransferBusy) return;
+            string raw = (remoteId.Text ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                SetStatus("请先输入对方的 9 位 BoBo 设备码或 IP 地址。", Theme.PillTone.Warning);
+                remoteId.Focus();
+                return;
+            }
+            string resolved = ResolveBoBoHostTarget(raw);
+            string err;
+            string cleanHost = Engines.NormalizeHost(resolved, out err);
+            if (cleanHost == null)
+            {
+                SetStatus(err ?? "无法解析目标主机地址，请输入有效 IP 或同网已发现的 9 位 BoBo 设备码。", Theme.PillTone.Warning);
+                remoteId.Focus();
+                return;
+            }
+
+            string selectedFile = null;
+            using (var ofd = new OpenFileDialog())
+            {
+                ofd.Title = "选择要发送到 " + cleanHost + " 的文件";
+                ofd.CheckFileExists = true;
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                selectedFile = ofd.FileName;
+            }
+
+            fileTransferBusy = true;
+            if (rustDeskConnectBtn != null) rustDeskConnectBtn.Enabled = false;
+            SetStatus("正在通过 BoBo V6 TLS 1.2 通道发送 " + Path.GetFileName(selectedFile) + "…", Theme.PillTone.Info);
+            try
+            {
+                BoBoFileTransferProgress res = await BoBoStreamClient.SendFileAsync(
+                    cleanHost,
+                    BoBoProtocol.DefaultTcpPort,
+                    selectedFile,
+                    BoBoIdentityStore.Default,
+                    delegate(BoBoFileTransferProgress p)
+                    {
+                        if (IsDisposed || !IsHandleCreated) return;
+                        try
+                        {
+                            BeginInvoke(new Action(delegate
+                            {
+                                if (IsDisposed) return;
+                                int pct = p.TotalBytes > 0 ? (int)Math.Min(100, (p.BytesTransferred * 100L) / p.TotalBytes) : 100;
+                                SetStatus("正在发送 " + p.FileName + "（" + pct + "%）…", Theme.PillTone.Info);
+                            }));
+                        }
+                        catch { }
+                    },
+                    System.Threading.CancellationToken.None);
+
+                if (IsDisposed) return;
+                if (res.Completed)
                 {
-                    string name = string.IsNullOrEmpty(added.Name) ? "另一台电脑" : added.Name;
-                    CancelLocalPairing("已允许 " + name + " 连接这台电脑。");
-                    SetStatus("完成本机授权，之后对方可直接一键连接本机。", Theme.PillTone.Success);
-                    return;
+                    recent.RememberRustDeskId(raw);
+                    Remember(remoteId, recent.RustDeskIds,
+                        "文件 " + res.FileName + " 已通过 SHA-256 校验并安全送达对方「下载\\BoBoRemote」。",
+                        Theme.PillTone.Success);
                 }
-                localPairStatusLabel.Text = "已提交确认，等待授权生效… 还剩 " + LocalPairSecondsLeft(session) + " 秒";
+                else
+                {
+                    SetStatus(string.IsNullOrEmpty(res.Error) ? "文件发送失败。" : res.Error, Theme.PillTone.Alert);
+                }
             }
             finally
             {
-                localPairPollBusy = false;
-                if (!IsDisposed && localPairSession == null && localPairGenerateButton != null)
-                    localPairGenerateButton.Enabled = true;
+                fileTransferBusy = false;
+                if (!IsDisposed && rustDeskConnectBtn != null)
+                    rustDeskConnectBtn.Enabled = !string.IsNullOrWhiteSpace(remoteId.Text);
             }
         }
 
-        private bool IsCurrentLocalPairing(LocalPairSession session)
-        {
-            return !IsDisposed && session != null && localPairSession == session
-                && session.Generation == localPairGeneration
-                && string.Equals(localPairPin, session.Pin, StringComparison.Ordinal);
-        }
-
-        private bool EnsureLocalPairCurrent(LocalPairSession session)
-        {
-            if (!IsCurrentLocalPairing(session)) return false;
-            if (session.Clock != null && session.Clock.Elapsed >= TimeSpan.FromSeconds(LocalPairLifetimeSeconds))
-            {
-                CancelLocalPairing("配对码已过期，请重新生成。");
-                SetStatus("本次配对码已过期，没有授权任何设备。", Theme.PillTone.Warning);
-                return false;
-            }
-            return true;
-        }
-
-        private void ShowLocalPairCountdown(LocalPairSession session)
-        {
-            if (!IsCurrentLocalPairing(session)) return;
-            localPairStatusLabel.Text = "正在等待另一台电脑输入配对码… 还剩 " + LocalPairSecondsLeft(session) + " 秒";
-        }
-
-        private static int LocalPairSecondsLeft(LocalPairSession session)
-        {
-            if (session == null || session.Clock == null) return 0;
-            return Math.Max(0, LocalPairLifetimeSeconds - (int)Math.Ceiling(session.Clock.Elapsed.TotalSeconds));
-        }
-
-        private static HashSet<string> BuildPendingIdSet(List<PendingPairRequest> requests)
-        {
-            var set = new HashSet<string>(StringComparer.Ordinal);
-            if (requests == null) return set;
-            foreach (PendingPairRequest request in requests)
-                if (!string.IsNullOrEmpty(request.Id)) set.Add(request.Id);
-            return set;
-        }
-
-        private static HashSet<string> BuildPairedIdSet(List<PairedClientInfo> clients)
-        {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (clients == null) return set;
-            foreach (PairedClientInfo client in clients)
-                if (!string.IsNullOrEmpty(client.Id)) set.Add(client.Id.Trim());
-            return set;
-        }
-
-        private static PendingPairRequest FindNewPendingRequest(List<PendingPairRequest> requests, HashSet<string> baseline)
-        {
-            if (requests == null) return null;
-            foreach (PendingPairRequest request in requests)
-            {
-                if (string.IsNullOrEmpty(request.Id)) continue;
-                if (baseline != null && baseline.Contains(request.Id)) continue;
-                return request;
-            }
-            return null;
-        }
-
-        private static int CountNewPendingRequests(List<PendingPairRequest> requests, HashSet<string> baseline)
-        {
-            if (requests == null) return 0;
-            int count = 0;
-            foreach (PendingPairRequest request in requests)
-            {
-                if (string.IsNullOrEmpty(request.Id)) continue;
-                if (baseline != null && baseline.Contains(request.Id)) continue;
-                count++;
-            }
-            return count;
-        }
-
-        private static PairedClientInfo FindNewPairedClient(List<PairedClientInfo> clients, HashSet<string> baseline)
-        {
-            if (clients == null) return null;
-            foreach (PairedClientInfo client in clients)
-            {
-                if (string.IsNullOrEmpty(client.Id)) continue;
-                if (baseline != null && baseline.Contains(client.Id.Trim())) continue;
-                return client;
-            }
-            return null;
-        }
-
-        private static string JoinMessages(string first, string second)
-        {
-            if (string.IsNullOrEmpty(first)) return second ?? "";
-            if (string.IsNullOrEmpty(second)) return first;
-            return first + " " + second;
-        }
-
-        private async Task OpenLocalRustDeskOnAssist(Button btn)
-        {
-            if (btn != null) btn.Enabled = false;
-            SetStatus("正在启动本机 RustDesk…", Theme.PillTone.Info);
-            try
-            {
-                string error = await Task.Run(() =>
-                {
-                    string detail;
-                    return Engines.LaunchRustDesk(out detail) ? null : detail;
-                });
-                if (!IsDisposed) SetStatus(error ?? "已打开本机 RustDesk 窗口，可查看 9 位设备码并确认连接请求。", error == null ? Theme.PillTone.Success : Theme.PillTone.Alert);
-            }
-            finally { if (btn != null && !IsDisposed) btn.Enabled = true; }
-        }
-
-        private void OpenMoonlightGui()
-        {
-            switch (FoundationClient.SelectEngine(true))
-            {
-                case StreamEngine.Enhanced:
-                    string message;
-                    if (!FoundationClient.ApplyAbrSetting(useFoundationClient, out message))
-                    {
-                        SetStatus(message, Theme.PillTone.Alert);
-                        return;
-                    }
-                    Launch(FoundationClient.Open, "已打开 Moonlight V+，可在主机列表中管理配对或调整参数。");
-                    break;
-                case StreamEngine.Official:
-                    Launch(Engines.LaunchMoonlight, "已打开原版 Moonlight，可在其中管理已配对主机。");
-                    break;
-                default:
-                    SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
-                    break;
-            }
-        }
-
-        private delegate bool OpenApplication(out string error);
-
-        private void Launch(OpenApplication open, string instruction)
-        {
-            string error;
-            bool started = open(out error);
-            SetStatus(started ? instruction : error, started ? Theme.PillTone.Success : Theme.PillTone.Alert);
-        }
-
-        private void StartRemote(bool transfer)
-        {
-            if (string.IsNullOrWhiteSpace(remoteId.Text))
-            {
-                SetStatus("请先输入对方的 9 位远程设备码。", Theme.PillTone.Warning);
-                remoteId.Focus();
-                return;
-            }
-            string message;
-            string id = Engines.NormalizeRustDeskId(remoteId.Text, out message);
-            if (id == null)
-            {
-                SetStatus(message, Theme.PillTone.Alert);
-                remoteId.Focus();
-                return;
-            }
-            string pending = null;
-            Action<string> onStatus = delegate(string update)
-            {
-                if (!IsHandleCreated || IsDisposed) return;
-                BeginInvoke(new Action(delegate
-                {
-                    if (assistBanner.Message == pending) SetStatus(update, Theme.PillTone.Success);
-                }));
-            };
-            bool launched = transfer ? Engines.TransferRustDesk(id, out message, onStatus)
-                : Engines.ConnectRustDesk(id, out message, onStatus);
-            if (!launched)
-            {
-                SetStatus(message, Theme.PillTone.Alert);
-                return;
-            }
-            pending = message;
-            recent.RememberRustDeskId(id);
-            Remember(remoteId, recent.RustDeskIds, message);
-        }
-
-        private async Task StartStreamAsync(string confirmedHost)
+        private Task StartStreamAsync(string confirmedHost)
         {
             string message;
             string host = Engines.NormalizeHost(confirmedHost, out message);
@@ -1580,72 +1452,12 @@ namespace DualRemote
             {
                 SetStatus(message, Theme.PillTone.Warning);
                 streamHost.Focus();
-                return;
+                return Task.FromResult(0);
             }
 
             var profile = quality.SelectedItem as QualityOption ?? QualityOptions[0];
-            if (ShouldUseNativeStream())
-            {
-                StartNativeIntegratedStream(host, profile);
-                return;
-            }
-
-            StreamEngine engine = FoundationClient.SelectEngine(true);
-            if (engine == StreamEngine.Unavailable)
-            {
-                SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
-                var p0 = quality.SelectedItem as QualityOption ?? QualityOptions[0];
-                ConnectionTelemetry.RecordFailed("unavailable", host, p0.Width, p0.Height, p0.Fps,
-                    p0.BitrateKbps, UsesHevc(p0), useFoundationClient, MissingStreamEngineMessage);
-                return;
-            }
-
-            string resolvedApp = Engines.MoonlightAppName;
-            try
-            {
-                resolvedApp = await Task.Run(delegate
-                {
-                    return engine == StreamEngine.Enhanced
-                        ? FoundationClient.ResolveDesktopAppName(host)
-                        : Engines.ResolveOfficialDesktopAppName(host);
-                });
-            }
-            catch
-            {
-                resolvedApp = Engines.MoonlightAppName;
-            }
-            if (IsDisposed) return;
-
-            string note;
-            bool started;
-            switch (engine)
-            {
-                case StreamEngine.Enhanced:
-                    started = FoundationClient.LaunchWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
-                        showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile), useFoundationClient,
-                        lowLatencyNoVsync, enableFramePacing, useAbsoluteMouse, true, false, out note);
-                    break;
-                case StreamEngine.Official:
-                    started = Engines.StreamMoonlightWithApp(host, resolvedApp, profile.Width, profile.Height, profile.Fps, profile.BitrateKbps,
-                        showStreamStats, playAudioOnHost, windowedStream, UsesHevc(profile),
-                        lowLatencyNoVsync, enableFramePacing, useAbsoluteMouse, true, out note);
-                    break;
-                default:
-                    SetStatus(MissingStreamEngineMessage, Theme.PillTone.Alert);
-                    return;
-            }
-            if (!started)
-            {
-                SetStatus(note, Theme.PillTone.Alert);
-                ConnectionTelemetry.RecordFailed(engine.ToString(), host, profile.Width,
-                    profile.Height, profile.Fps, profile.BitrateKbps, UsesHevc(profile), useFoundationClient, note);
-                return;
-            }
-            ConnectionTelemetry.RecordSubmitted(engine.ToString(), host, profile.Width,
-                profile.Height, profile.Fps, profile.BitrateKbps, UsesHevc(profile), useFoundationClient, note);
-            recent.RememberMoonlightHost(host);
-            Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
-            ShowOrUpdateStreamToolbar(host, profile, Engines.LastStreamProcessId);
+            StartNativeIntegratedStream(host, profile);
+            return Task.FromResult(0);
         }
 
         private void StartNativeIntegratedStream(string host, QualityOption profile)
@@ -2112,7 +1924,6 @@ namespace DualRemote
         {
             NativeStreamForm nativeForm = activeNativeStreamForm;
             activeNativeStreamForm = null;
-            int oldPid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
             Engines.ReleaseCursorClip();
@@ -2126,28 +1937,9 @@ namespace DualRemote
                 nativeForm.DisconnectAndClose(true);
             }
             SyncActiveControlIndicators();
-            SetStatus("正在断开远程串流会话…", Theme.PillTone.Info);
-            Task.Run(delegate
-            {
-                Engines.StopManagedClientProcesses(oldPid, FoundationClient.EngineExe, Engines.MoonlightExe);
-            }).ContinueWith(delegate
-            {
-                if (IsDisposed) return;
-                try
-                {
-                    BeginInvoke(new Action(delegate
-                    {
-                        if (!IsDisposed)
-                        {
-                            SyncActiveControlIndicators();
-                            SetStatus("已退出远程控制，双端会话已断开。", Theme.PillTone.Info);
-                            deviceBanner.Set("已退出远程控制，双端会话已断开。", Theme.PillTone.Info);
-                            RestoreFromTray();
-                        }
-                    }));
-                }
-                catch { }
-            });
+            SetStatus("已退出远程控制，BoBo V6 加密会话已断开。", Theme.PillTone.Info);
+            deviceBanner.Set("已退出远程控制，BoBo V6 加密会话已断开。", Theme.PillTone.Info);
+            RestoreFromTray();
         }
 
         private void DisconnectAllRemoteSessionsFromUi()
@@ -2155,7 +1947,6 @@ namespace DualRemote
             NativeStreamForm nativeForm = activeNativeStreamForm;
             bool hadNative = nativeForm != null && !nativeForm.IsDisposed;
             activeNativeStreamForm = null;
-            int oldPid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
             Engines.ReleaseCursorClip();
@@ -2168,56 +1959,22 @@ namespace DualRemote
             {
                 nativeForm.DisconnectAndClose(true);
             }
-            SyncActiveControlIndicators();
-            Task.Run(delegate
+            bool hadHostSession = boboHostServer != null && boboHostServer.HasActiveRemoteSession;
+            if (hadHostSession)
             {
-                int stoppedClients = Engines.StopManagedClientProcesses(oldPid,
-                    FoundationClient.EngineExe, Engines.MoonlightExe, Engines.RustDeskExe);
-                if (hadNative) stoppedClients++;
-                bool hadHostSessions = false;
-                string hostDetail;
-                bool hostStopped = SunshinePairing.TryDisconnectActiveSessions(out hadHostSessions, out hostDetail);
-                if (!IsDisposed)
-                {
-                    try
-                    {
-                        BeginInvoke(new Action(delegate
-                        {
-                            if (IsDisposed) return;
-                            if (hostStopped && hadHostSessions) hostCurrentlyControlled = false;
-                            SyncActiveControlIndicators();
-                            string msg;
-                            Theme.PillTone tone = Theme.PillTone.Info;
-                            if (stoppedClients > 0 || (hadHostSessions && hostStopped))
-                            {
-                                msg = "已断开当前远控会话。";
-                                tone = Theme.PillTone.Success;
-                            }
-                            else if (hadHostSessions && !hostStopped)
-                            {
-                                msg = string.IsNullOrEmpty(hostDetail)
-                                    ? "无法以当前权限断开系统安装版 Sunshine 会话，请在主控端点击「退出控制」或以管理员身份运行。"
-                                    : hostDetail;
-                                tone = Theme.PillTone.Warning;
-                            }
-                            else
-                            {
-                                msg = "当前没有进行中的远控会话。";
-                            }
-                            SetStatus(msg, tone);
-                            deviceBanner.Set(msg, tone);
-                        }));
-                    }
-                    catch { }
-                }
-            });
+                boboHostServer.DisconnectAllActiveStreams("本机用户主动断开远控");
+                hostCurrentlyControlled = false;
+            }
+            SyncActiveControlIndicators();
+            string msg = (hadNative || hadHostSession) ? "已断开所有进行中的 BoBo 远控会话。" : "当前没有进行中的远控会话。";
+            Theme.PillTone tone = (hadNative || hadHostSession) ? Theme.PillTone.Success : Theme.PillTone.Info;
+            SetStatus(msg, tone);
+            deviceBanner.Set(msg, tone);
         }
 
         /// <summary>
-        /// 退出 BoBo远程 时，双端同步收尾远控会话：
-        /// 1. 主控端：优雅关闭内置 NativeStreamForm（发送 disconnect + 远端 HTTPS /cancel）及兼容模式外置进程；
-        /// 2. 被控端：通过 CA 证书固定的本机 Sunshine API 主动结束所有活跃会话并关闭远程应用（兼容系统安装版与内置宿主）；
-        /// 3. 内置宿主：若本机运行的是 BoBo 自带内置 Sunshine，发出断开指令后安全停止该内置进程（绝不触碰系统安装版）。
+        /// 退出 BoBo远程 时，双端同步收尾远控会话并立即关闭内置 49810 监听端口，
+        /// 从物理层面杜绝软件未打开时被任何设备连控。
         /// </summary>
         private void TeardownRemoteSessionsOnExit()
         {
@@ -2226,7 +1983,6 @@ namespace DualRemote
 
             NativeStreamForm nativeForm = activeNativeStreamForm;
             activeNativeStreamForm = null;
-            int pid = activeStreamPid;
             activeStreamPid = 0;
             activeStreamHost = "";
             if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
@@ -2239,29 +1995,12 @@ namespace DualRemote
                 try { nativeForm.DisconnectAndClose(true); } catch { }
             }
 
-            try
+            BoBoHostServer server = boboHostServer;
+            boboHostServer = null;
+            if (server != null)
             {
-                Engines.StopManagedClientProcesses(pid, FoundationClient.EngineExe, Engines.MoonlightExe, Engines.RustDeskExe);
+                try { server.Dispose(); } catch { }
             }
-            catch { }
-
-            bool hadHostSessions = false;
-            try
-            {
-                string ignoredDetail;
-                SunshinePairing.TryDisconnectActiveSessions(out hadHostSessions, out ignoredDetail);
-            }
-            catch { }
-
-            try
-            {
-                if (BundledHost.RunningFromLocalRoot)
-                {
-                    if (hadHostSessions) System.Threading.Thread.Sleep(350);
-                    BundledHost.StopBundledHostOnExit();
-                }
-            }
-            catch { }
         }
 
         private static void RestoreRecents(ComboBox combo, List<string> entries)
@@ -2295,42 +2034,67 @@ namespace DualRemote
         private async Task DiscoverPeers()
         {
             discover.Enabled = false;
-            SetStatus("正在读取 Tailscale 组网设备列表…", Theme.PillTone.Info);
+            if (boboHostServer != null) boboHostServer.SendDiscoveryProbeNow();
+            SetStatus("正在扫描局域网在线 BoBo远程 设备与 Tailscale 组网设备…", Theme.PillTone.Info);
             try
             {
-                TailnetLoadResult result = await Task.Run(() => Tailscale.LoadPeers(5200));
+                await Task.Delay(350);
+                List<BoBoDiscoveredPeer> lanList = boboHostServer != null
+                    ? boboHostServer.GetDiscoveredLanPeers()
+                    : new List<BoBoDiscoveredPeer>();
+                TailnetLoadResult result = await Task.Run(() => Tailscale.LoadPeers(4200));
                 if (IsDisposed) return;
-                if (!result.Ok)
-                {
-                    SetStatus(result.Error + " 也可以直接填写局域网 IP 或公网 IPv6。", Theme.PillTone.Warning);
-                    return;
-                }
+
                 string kept = SelectedHost();
+                int foundCount = 0;
+                var seenHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 streamHost.BeginUpdate();
                 try
                 {
                     streamHost.Items.Clear();
-                    RestoreRecents(streamHost, recent.MoonlightHosts);
-                    foreach (var peer in result.Peers)
+                    foreach (BoBoDiscoveredPeer lp in lanList)
                     {
-                        if (!string.IsNullOrWhiteSpace(peer.Ip)) streamHost.Items.Add(new PeerOption(peer));
+                        if (string.IsNullOrWhiteSpace(lp.Host)) continue;
+                        seenHosts.Add(lp.Host);
+                        var synth = new TsPeer
+                        {
+                            HostName = lp.DeviceName + " (BoBo V6 · " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode) + ")",
+                            Ip = lp.Host,
+                            Online = lp.AllowIncoming,
+                            LinkText = lp.AllowIncoming ? "局域网直连 · BoBo V6 在线" : "局域网 · 已关闭被控"
+                        };
+                        streamHost.Items.Add(new PeerOption(synth));
+                        foundCount++;
                     }
+                    if (result.Ok && result.Peers != null)
+                    {
+                        foreach (var peer in result.Peers)
+                        {
+                            if (!string.IsNullOrWhiteSpace(peer.Ip) && seenHosts.Add(peer.Ip))
+                            {
+                                streamHost.Items.Add(new PeerOption(peer));
+                                foundCount++;
+                            }
+                        }
+                    }
+                    RestoreRecents(streamHost, recent.MoonlightHosts);
                     streamHost.SelectedIndex = -1;
                     streamHost.Text = kept;
                 }
                 finally { streamHost.EndUpdate(); }
-                if (result.Peers.Count == 0)
+
+                if (foundCount == 0)
                 {
-                    SetStatus("当前 Tailscale 网络里暂无其他 Windows 设备。", Theme.PillTone.Info);
+                    SetStatus("暂未发现其他已打开 BoBo远程 的同网设备，可直接输入对方 9 位 BoBo 设备码或 IP。", Theme.PillTone.Info);
                     return;
                 }
-                SetStatus("已刷新设备列表，请选择主机连接。", Theme.PillTone.Success);
+                SetStatus("已发现 " + foundCount + " 台同网设备，请选择并连接。", Theme.PillTone.Success);
                 streamHost.Focus();
                 streamHost.DroppedDown = true;
             }
             catch
             {
-                if (!IsDisposed) SetStatus("暂时读不到 Tailscale 设备，可直接手动输入 IP。", Theme.PillTone.Warning);
+                if (!IsDisposed) SetStatus("扫描设备时出现异常，可直接手动输入对方 IP 或设备码。", Theme.PillTone.Warning);
             }
             finally
             {
@@ -2412,53 +2176,17 @@ namespace DualRemote
 
         private string StreamAvailabilityText()
         {
-            switch (FoundationClient.SelectEngine(true))
-            {
-                case StreamEngine.Enhanced:
-                    return useFoundationClient ? "Moonlight V+（已请求 ABR 自适应抗丢包）" : "Moonlight V+（固定码率）";
-                case StreamEngine.Official:
-                    return "Moonlight 6.2.0（固定码率）";
-                default:
-                    return "未找到串流组件，请完整解压便携版";
-            }
+            return BoBoCoreInterop.IsLoaded
+                ? "BoBo V6 全内置原生内核（DXGI + MF H.264 + D3D11VA + WASAPI + TLS 1.2）"
+                : "正在初始化内置 BoBoCore 原生内核";
         }
 
         private void UpdateStreamHint()
         {
             var selected = quality.SelectedItem as QualityOption;
             if (selected == null) return;
-            if (ShouldUseNativeStream())
-            {
-                streamModeBadge.UpdateStatus("V5 内置内核 · D3D11VA", Theme.PillTone.Success);
-                streamHint.Text = "一体化内置串流引擎已就绪：直接在 BoBo 内部窗口完成 4 位码配对与 D3D11VA 硬解渲染，零外置窗口。";
-                return;
-            }
-            var engine = FoundationClient.SelectEngine(true);
-            if (engine == StreamEngine.Unavailable)
-            {
-                streamModeBadge.UpdateStatus("缺少串流组件", Theme.PillTone.Alert);
-                streamHint.Text = MissingStreamEngineMessage;
-                return;
-            }
-            string codec = UsesHevc(selected) ? "HEVC" : "H.264";
-            string badgeText = codec;
-            if (engine == StreamEngine.Enhanced && useFoundationClient) badgeText += " · ABR";
-            if (lowLatencyNoVsync) badgeText += " · 低延迟";
-            streamModeBadge.UpdateStatus(badgeText, engine == StreamEngine.Enhanced ? Theme.PillTone.Info : Theme.PillTone.Neutral);
-
-            string abrNote = engine == StreamEngine.Enhanced && useFoundationClient
-                ? "已启用 Foundation ABR 自适应抗丢包。"
-                : engine == StreamEngine.Enhanced ? "ABR 未开启（固定码率）。" : "官方客户端固定码率模式。";
-            if (selected.Width >= 3840)
-                streamHint.Text = "4K 超清模式，建议 HEVC 硬解 + 高带宽直连。" + abrNote;
-            else if (selected.Width * 10 == selected.Height * 16)
-                streamHint.Text = "16:10 满屏比例，建议被控端启用虚拟屏。" + abrNote;
-            else if (selected.Fps >= 120)
-                streamHint.Text = "电竞高刷档位（" + selected.Fps + "fps），建议局域网或高上行直连。" + abrNote;
-            else if (selected.Fps >= 90)
-                streamHint.Text = "高刷档位，建议同局域网或低延迟直连。" + abrNote;
-            else
-                streamHint.Text = "跨网抗丢包友好档位。" + abrNote;
+            streamModeBadge.UpdateStatus("V6 全内置内核 · 端口 49810", Theme.PillTone.Success);
+            streamHint.Text = "全内置双端加密引擎已就绪：双方同时打开 BoBo远程 并完成 4 位码授权后即可零外置进程直连（" + selected.Height + "p" + selected.Fps + "）。";
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -2575,9 +2303,7 @@ namespace DualRemote
 
         private void SyncRemoteGuardTimer()
         {
-            // 始终保持 350ms 极速守护 + sunshine.log 实时文件监听，确保被控一瞬间即刻拉起防窥壁纸
             if (!remoteGuardTimer.Enabled) remoteGuardTimer.Start();
-            EnsureSunshineLogWatcher();
             if (!privacyConfig.AutoOnRemote)
             {
                 bool wasAuto = privacyGuard.AutoActivated;
@@ -2591,63 +2317,7 @@ namespace DualRemote
             SyncActiveControlIndicators();
         }
 
-        private void EnsureSunshineLogWatcher()
-        {
-            if (IsDisposed) return;
-            try
-            {
-                string cfgDir, err;
-                if (!BundledHost.TryGetActiveConfigDirectory(out cfgDir, out err) || string.IsNullOrEmpty(cfgDir) || !Directory.Exists(cfgDir))
-                    return;
-                if (sunshineLogWatcher != null && string.Equals(sunshineLogWatchDir, cfgDir, StringComparison.OrdinalIgnoreCase))
-                    return;
-
-                DisposeSunshineLogWatcher();
-                var watcher = new FileSystemWatcher(cfgDir, "sunshine.log");
-                watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime;
-                watcher.Changed += OnSunshineLogFileChanged;
-                watcher.Created += OnSunshineLogFileChanged;
-                watcher.EnableRaisingEvents = true;
-                sunshineLogWatcher = watcher;
-                sunshineLogWatchDir = cfgDir;
-            }
-            catch { }
-        }
-
-        private void DisposeSunshineLogWatcher()
-        {
-            if (sunshineLogWatcher != null)
-            {
-                try
-                {
-                    sunshineLogWatcher.EnableRaisingEvents = false;
-                    sunshineLogWatcher.Changed -= OnSunshineLogFileChanged;
-                    sunshineLogWatcher.Created -= OnSunshineLogFileChanged;
-                    sunshineLogWatcher.Dispose();
-                }
-                catch { }
-                sunshineLogWatcher = null;
-                sunshineLogWatchDir = "";
-            }
-        }
-
-        private void OnSunshineLogFileChanged(object sender, FileSystemEventArgs e)
-        {
-            if (IsDisposed) return;
-            DateTime now = DateTime.UtcNow;
-            if ((now - lastLogWatchTriggerUtc).TotalMilliseconds < 120.0) return;
-            lastLogWatchTriggerUtc = now;
-            try
-            {
-                if (IsHandleCreated)
-                {
-                    BeginInvoke(new Action(async delegate { await PollRemoteGuardTick(); }));
-                }
-            }
-            catch { }
-        }
-
-        /// <summary>主控端发起的幂等「立即开启被控端防窥」指令（Ctrl+Alt+Shift+F11）：已开启时保持不闪烁。</summary>
+        /// <summary>主控端发起的幂等「立即开启被控端防窥」指令：已开启时保持不闪烁。</summary>
         private void ActivatePrivacyFromRemoteCommand()
         {
             if (IsDisposed || privacyGuard.SessionLocked) return;
@@ -2661,7 +2331,7 @@ namespace DualRemote
                 ok ? Theme.PillTone.Success : Theme.PillTone.Alert);
         }
 
-        /// <summary>主控端发起的幂等「立即关闭被控端防窥」指令（Ctrl+Alt+Shift+F12）：不触发本机锁屏。</summary>
+        /// <summary>主控端发起的幂等「立即关闭被控端防窥」指令：不触发本机锁屏。</summary>
         private void DeactivatePrivacyFromRemoteCommand()
         {
             if (IsDisposed || !privacyCurtain.IsActive) return;
@@ -2671,23 +2341,21 @@ namespace DualRemote
             ShowDisplayBanner("主控端已关闭防窥模式。", Theme.PillTone.Info);
         }
 
-        private async Task PollRemoteGuardTick()
+        private Task PollRemoteGuardTick()
         {
-            if (guardPollBusy || IsDisposed) return;
+            if (guardPollBusy || IsDisposed) return Task.FromResult(0);
             guardPollBusy = true;
             long pollGeneration = privacyGuard.Generation;
             try
             {
-                bool activeSession = await Task.Run(() => HostNetworkInfo.IsHostBeingControlled());
-                if (IsDisposed) return;
-
+                bool activeSession = boboHostServer != null && boboHostServer.HasActiveRemoteSession;
                 if (hostCurrentlyControlled != activeSession)
                 {
                     hostCurrentlyControlled = activeSession;
                 }
                 SyncActiveControlIndicators();
 
-                if (!privacyConfig.AutoOnRemote || privacyGuard.SessionLocked) return;
+                if (!privacyConfig.AutoOnRemote || privacyGuard.SessionLocked) return Task.FromResult(0);
 
                 PrivacyGuardAction action = privacyGuard.EvaluateAutoGuardPoll(
                     pollGeneration, activeSession, privacyCurtain.IsActive, privacyCurtain.IsPreview,
@@ -2715,6 +2383,7 @@ namespace DualRemote
             }
             catch { }
             finally { guardPollBusy = false; }
+            return Task.FromResult(0);
         }
 
         internal void TogglePrivacyCurtain(bool fromLocalHotkey)
@@ -3050,29 +2719,6 @@ namespace DualRemote
             }
 
             public override string ToString() { return label; }
-        }
-
-        private sealed class LocalPairSession
-        {
-            internal int Generation;
-            internal string Pin;
-            internal Stopwatch Clock;
-            internal HashSet<string> BaselinePending;
-            internal HashSet<string> BaselinePaired;
-            internal bool ConfirmationSubmitted;
-            internal PendingPairRequest PendingRequest;
-            internal int PendingRequestCount;
-            internal bool SubmitStarted;
-            internal bool SubmitCompleted;
-            internal bool SubmitSucceeded;
-            internal bool Expired;
-            internal bool Cancelled;
-        }
-
-        private sealed class LocalPairPrepareResult
-        {
-            internal LocalPairSession Session;
-            internal string Message;
         }
 
         private sealed class PeerOption

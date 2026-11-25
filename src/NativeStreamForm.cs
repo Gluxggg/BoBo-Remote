@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -25,32 +26,17 @@ namespace DualRemote
     /// </summary>
     internal sealed class NativeStreamForm : Form
     {
-        private const int SwpNoZOrder = 0x0004;
-        private const int SwpNoActivate = 0x0010;
-
-        // Idempotent remote host BoBo hotkeys (Ctrl+Alt+Shift+F9..F12)
-        private static readonly int[] VkRemoteLock = new[] { 0x11, 0x12, 0x10, 0x78 };           // F9
-        private static readonly int[] VkRemoteSuperDisplay = new[] { 0x11, 0x12, 0x10, 0x77 };   // F8
-        private static readonly int[] VkRemotePrivacyEnable = new[] { 0x11, 0x12, 0x10, 0x7A };  // F11
-        private static readonly int[] VkRemotePrivacyDisable = new[] { 0x11, 0x12, 0x10, 0x7B }; // F12
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr SetFocus(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindow(IntPtr hWnd);
-
         private readonly string host;
         private readonly string hostDisplayName;
+        private readonly int targetPort = BoBoProtocol.DefaultTcpPort;
         private bool hostAudio;
         private bool preferHevc;
         private int currentWidth;
         private int currentHeight;
         private int currentFps;
         private int currentBitrateKbps;
+        private int activeMonitorIndex;
+        private List<BoBoMonitorDescriptor> remoteMonitors = new List<BoBoMonitorDescriptor>();
         private string currentModeTag;
         private bool windowedMode;
         private bool freeMouseMode;
@@ -99,10 +85,9 @@ namespace DualRemote
         private UuControlCenterSession topBarMenuSession;
 
         private readonly object procGate = new object();
-        private Process playerProcess;
-        private StreamWriter playerStdin;
-        private IntPtr childViewportHwnd = IntPtr.Zero;
-        private int activeHttpsPort = GameStreamClient.DefaultHttpsPort;
+        private BoBoStreamClient streamClient;
+        private BoBoCoreInterop.BoBoClientNativeHandle nativeClient;
+        private System.Windows.Forms.Timer statsTimer;
         private int sessionGeneration;
         private CancellationTokenSource launchCts;
         private bool closingIntentionally;
@@ -151,11 +136,7 @@ namespace DualRemote
         {
             get
             {
-                lock (procGate)
-                {
-                    try { return (playerProcess != null && !playerProcess.HasExited) ? playerProcess.Id : 0; }
-                    catch { return 0; }
-                }
+                return remoteSessionConnected ? Process.GetCurrentProcess().Id : 0;
             }
         }
 
@@ -441,10 +422,18 @@ namespace DualRemote
             if (scr == null) scr = Screen.PrimaryScreen;
             Rectangle sb = scr.Bounds;
 
+            string displayLabel = "显示屏 1 (" + hostDisplayName + ")";
+            if (remoteMonitors != null && remoteMonitors.Count > 0)
+            {
+                int idx = Math.Max(0, Math.Min(activeMonitorIndex, remoteMonitors.Count - 1));
+                BoBoMonitorDescriptor m = remoteMonitors[idx];
+                displayLabel = "显示屏 " + (idx + 1) + " / " + remoteMonitors.Count + " (" + m.Name + ")";
+            }
+
             return new StreamControlCenterModel
             {
                 HostDisplayName = hostDisplayName,
-                DisplayDeviceName = "显示屏 1 (" + hostDisplayName + ")",
+                DisplayDeviceName = displayLabel,
                 LocalDisplayWidth = sb.Width,
                 LocalDisplayHeight = sb.Height,
                 HostNativeWidth = hostNativeWidth > 0 ? hostNativeWidth : currentWidth,
@@ -492,8 +481,7 @@ namespace DualRemote
                 },
                 OnToggleSuperDisplay = delegate
                 {
-                    SendRemoteKeys(VkRemoteSuperDisplay);
-                    ShowToastHint("已向被控端发送「切换使用超级屏」指令");
+                    SwitchNextRemoteDisplay();
                 },
                 OnSwitchNextDisplay = delegate { SwitchNextRemoteDisplay(); },
 
@@ -536,7 +524,8 @@ namespace DualRemote
                 OnSelectAspectFit = delegate(bool fit)
                 {
                     aspectFit = fit;
-                    SendIpcLine(NativeStreamCore.BuildScaleModeCommand(fit));
+                    BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                    if (nc != null) nc.SetScaleMode(fit);
                     ShowToastHint(fit ? "窗口画面：自适应比例缩放" : "窗口画面：实际大小 1:1 像素点对点");
                 },
                 OnToggleMiniWindow = delegate { ToggleMiniWindowMode(); },
@@ -565,13 +554,14 @@ namespace DualRemote
                         try { LockHostOnDisconnectPreferenceChanged(on); } catch { }
                     ShowToastHint(on ? "已开启：断开远控后被控端将自动锁屏" : "已关闭：断开远控后不自动锁屏");
                 },
-                OnToggleMuteHostAudio = async delegate(bool muteHost)
+                OnToggleMuteHostAudio = delegate(bool muteHost)
                 {
                     hostAudio = !muteHost;
                     if (HostAudioPreferenceChanged != null)
                         try { HostAudioPreferenceChanged(hostAudio); } catch { }
-                    ShowToastHint(muteHost ? "正在启用被控端静音运行（仅控制端播放声音）…" : "正在恢复被控端同步发声…");
-                    await SwitchQualityAsync(currentWidth, currentHeight, currentFps, currentBitrateKbps, currentModeTag);
+                    BoBoStreamClient sc = streamClient;
+                    if (sc != null && sc.IsConnected) sc.SendSetMuteHost(muteHost);
+                    ShowToastHint(muteHost ? "已实时静音被控端扬声器（仅控制端播放声音）" : "已恢复被控端同步发声");
                 },
                 OnToggleRestoreHostAudio = delegate(bool on)
                 {
@@ -581,8 +571,9 @@ namespace DualRemote
                 OnSetRemotePrivacyNow = delegate(bool enable)
                 {
                     remotePrivacyActive = enable;
-                    SendRemoteKeys(enable ? VkRemotePrivacyEnable : VkRemotePrivacyDisable);
-                    ShowToastHint(enable ? "已立即向被控端发送「开启防窥模式」指令" : "已立即向被控端发送「关闭防窥模式」指令");
+                    BoBoStreamClient sc = streamClient;
+                    if (sc != null && sc.IsConnected) sc.SendSetPrivacy(enable);
+                    ShowToastHint(enable ? "已直连通知被控端立即开启防窥屏" : "已直连通知被控端关闭防窥屏");
                 },
                 OnToggleAutoRemotePrivacy = delegate(bool on)
                 {
@@ -592,9 +583,10 @@ namespace DualRemote
                     if (on && remoteSessionConnected)
                     {
                         remotePrivacyActive = true;
-                        SendRemoteKeys(VkRemotePrivacyEnable);
+                        BoBoStreamClient sc = streamClient;
+                        if (sc != null && sc.IsConnected) sc.SendSetPrivacy(true);
                     }
-                    ShowToastHint(on ? "已开启：客户端连接瞬间将立即拉起被控端防窥模式" : "已关闭客户端连接自动防窥");
+                    ShowToastHint(on ? "已开启：连接瞬间由 BoBo 协议直连同步拉起被控端防窥" : "已关闭连接自动防窥");
                 },
                 OnToggleLocalPrivacy = delegate
                 {
@@ -604,7 +596,8 @@ namespace DualRemote
                 OnToggleSendSystemShortcuts = delegate(bool on)
                 {
                     sendSystemShortcuts = on;
-                    SendIpcLine(NativeStreamCore.BuildSysKeysCommand(on));
+                    BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                    if (nc != null) nc.SetSysKeys(on);
                     if (SendSysKeysPreferenceChanged != null)
                         try { SendSysKeysPreferenceChanged(on); } catch { }
                     ShowToastHint(on ? "已开启：Alt+Tab / Win 键将直接发送到被控端" : "已关闭：系统快捷键保留在本机生效");
@@ -613,7 +606,7 @@ namespace DualRemote
                 OnToggleMic = delegate
                 {
                     micEnabled = !micEnabled;
-                    ShowToastHint(micEnabled ? "麦克风透传提示：Moonlight 串流暂不承载上行语音，建议配合 RustDesk 音频或语音软件" : "已关闭麦克风提示状态");
+                    ShowToastHint(micEnabled ? "提示：当前版本默认传输被控端系统音频（48kHz 立体声）" : "已关闭麦克风提示状态");
                 },
 
                 OnSendRemoteKeys = delegate(int[] vks) { SendRemoteKeys(vks); },
@@ -752,35 +745,51 @@ namespace DualRemote
 
         private void SwitchNextRemoteDisplay()
         {
-            // 发送 Win+P 或多屏切换组合键并提示用户
-            SendRemoteKeys(new[] { 0x5B, 0x50 });
-            ShowToastHint("已向被控端发送屏幕切换快捷键 (Win+P)");
+            BoBoStreamClient sc = streamClient;
+            if (sc == null || !sc.IsConnected)
+            {
+                ShowToastHint("远控连接尚未建立，暂无法切换屏幕");
+                return;
+            }
+            if (remoteMonitors == null || remoteMonitors.Count <= 1)
+            {
+                ShowToastHint("被控端当前仅有 1 块活跃显示器");
+                return;
+            }
+            activeMonitorIndex = (activeMonitorIndex + 1) % remoteMonitors.Count;
+            BoBoMonitorDescriptor m = remoteMonitors[activeMonitorIndex];
+            if (m.Width > 0 && m.Height > 0)
+            {
+                hostNativeWidth = m.Width;
+                hostNativeHeight = m.Height;
+            }
+            sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps);
+            RefreshTopBarVisuals();
+            ShowToastHint("已无缝切换至显示屏 " + (activeMonitorIndex + 1) + "（" + m.Name + "）");
         }
 
         private void ApplyMouseModeSelection(ControlMouseMode mode, bool showHint)
         {
             mouseMode = mode;
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
             if (mode == ControlMouseMode.ViewOnly)
             {
                 freeMouseMode = true;
                 Engines.ReleaseCursorClip();
-                SendIpcLine(NativeStreamCore.BuildMouseModeCommand(true));
-                SendIpcLine(NativeStreamCore.BuildViewOnlyCommand(true));
+                if (nc != null) { nc.SetMouseMode(true); nc.SetViewOnly(true); }
                 if (showHint) ShowToastHint("已切换至「仅查看模式」· 远端键鼠输入已锁定防误触");
             }
             else if (mode == ControlMouseMode.Locked)
             {
                 freeMouseMode = false;
-                SendIpcLine(NativeStreamCore.BuildViewOnlyCommand(false));
-                SendIpcLine(NativeStreamCore.BuildMouseModeCommand(false));
+                if (nc != null) { nc.SetViewOnly(false); nc.SetMouseMode(false); }
                 if (showHint) ShowToastHint("已进入「锁鼠游戏模式」· 随时轻按 Ctrl+Alt 立即释放鼠标并点浮窗");
             }
             else
             {
                 freeMouseMode = true;
                 Engines.ReleaseCursorClip();
-                SendIpcLine(NativeStreamCore.BuildViewOnlyCommand(false));
-                SendIpcLine(NativeStreamCore.BuildMouseModeCommand(true));
+                if (nc != null) { nc.SetViewOnly(false); nc.SetMouseMode(true); }
                 if (showHint) ShowToastHint("已切回「自由指针模式」· 光标可自由移出窗口并操作浮窗");
             }
 
@@ -794,7 +803,8 @@ namespace DualRemote
         private void ApplyVolumeToNative()
         {
             int effective = audioMuted ? 0 : Math.Max(0, Math.Min(100, volumePercent));
-            SendIpcLine(NativeStreamCore.BuildVolumeCommand(effective));
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+            if (nc != null) nc.SetVolume(effective);
         }
 
         private void SyncLocalClipboardToRemote()
@@ -883,7 +893,6 @@ namespace DualRemote
         internal void SetHudVisible(bool visible)
         {
             hudVisible = visible;
-            SendIpcLine(NativeStreamCore.BuildHudCommand(visible));
             RefreshTopBarVisuals();
             if (hudOverlay != null && !hudOverlay.IsDisposed)
             {
@@ -902,13 +911,15 @@ namespace DualRemote
         internal void SendRemoteKeys(int[] vks)
         {
             if (vks == null || vks.Length == 0) return;
-            SendIpcLine(NativeStreamCore.BuildSendKeysCommand(vks));
+            BoBoStreamClient sc = streamClient;
+            if (sc != null && sc.IsConnected) sc.SendKeyCombo(vks);
         }
 
         internal void SendRemoteText(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            SendIpcLine(NativeStreamCore.BuildSendTextCommand(text));
+            BoBoStreamClient sc = streamClient;
+            if (sc != null && sc.IsConnected) sc.SendClipboardText(text);
         }
 
         internal async Task SwitchQualityAsync(int width, int height, int fps, int bitrateKbps, string modeTag)
@@ -923,6 +934,14 @@ namespace DualRemote
                 : modeTag;
             Text = BuildWindowTitle();
             RefreshTopBarVisuals();
+
+            BoBoStreamClient sc = streamClient;
+            if (remoteSessionConnected && sc != null && sc.IsConnected)
+            {
+                // V6 热切换：原连接无缝调整分辨率/帧率/码率，零黑屏不断连
+                sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps);
+                return;
+            }
 
             switchingQuality = true;
             try
@@ -948,14 +967,18 @@ namespace DualRemote
             }
             closingIntentionally = true;
 
-            // 若开启「远程结束后被控端自动锁屏」，在断开前立即向被控端发送锁屏指令
+            // 若开启「远程结束后被控端自动锁屏」，在断开前直接通过 BoBo 协议通知被控端锁屏
             bool shouldLockRemote = cancelRemoteHost && lockHostOnDisconnect && remoteSessionConnected;
             if (shouldLockRemote)
             {
                 try
                 {
-                    SendRemoteKeys(VkRemoteLock);
-                    Thread.Sleep(120);
+                    BoBoStreamClient sc = streamClient;
+                    if (sc != null && sc.IsConnected)
+                    {
+                        sc.SendLockWorkstation();
+                        Thread.Sleep(120);
+                    }
                 }
                 catch { }
             }
@@ -981,25 +1004,141 @@ namespace DualRemote
             StopCurrentPlayerAndCancelCts(true);
 
             if (IsDisposed || closingIntentionally) return;
-            ShowStatusOverlay("正在连接 " + hostDisplayName, "正在协商加密桌面串流（" + currentModeTag + "）…", false);
+            ShowStatusOverlay("正在连接 " + hostDisplayName, "正在与对方 BoBo远程 建立 TLS 1.2 双端加密通道（" + currentModeTag + "）…", false);
 
-            string playerExe, playerErr;
-            if (!NativeStreamCore.EnsureRuntimePlayerExe(out playerExe, out playerErr))
+            string coreErr;
+            if (!BoBoCoreInterop.EnsureLoaded(out coreErr))
             {
-                ShowFatalError(playerErr);
+                ShowFatalError(coreErr ?? "内置 BoBoCore 原生内核加载失败。");
                 return;
             }
 
             CancellationTokenSource cts = new CancellationTokenSource();
             launchCts = cts;
-            GameStreamLaunchResult launch;
+
+            var client = new BoBoStreamClient(BoBoIdentityStore.Default);
+            string nativeErr;
+            BoBoCoreInterop.BoBoClientNativeHandle nc = BoBoCoreInterop.CreateClientSession(
+                videoHost.Handle,
+                currentWidth,
+                currentHeight,
+                freeMouseMode,
+                delegate(BoBoInputPacket pkt)
+                {
+                    if (client.IsConnected) client.SendInputPacket(pkt);
+                },
+                delegate(int hotkeyCode, int param)
+                {
+                    HandleNativeHotkey(hotkeyCode, gen);
+                },
+                out nativeErr);
+
+            if (nc == null)
+            {
+                client.Dispose();
+                ShowFatalError(nativeErr ?? "初始化进程内 D3D11VA 渲染视口失败。");
+                return;
+            }
+
+            lock (procGate)
+            {
+                streamClient = client;
+                nativeClient = nc;
+            }
+
+            nc.Resize(Math.Max(16, videoHost.ClientSize.Width), Math.Max(16, videoHost.ClientSize.Height));
+            nc.SetScaleMode(aspectFit);
+            nc.SetViewOnly(mouseMode == ControlMouseMode.ViewOnly);
+            nc.SetSysKeys(sendSystemShortcuts);
+            ApplyVolumeToNative();
+
+            client.StreamStarted += delegate(List<BoBoMonitorDescriptor> mons, int w, int h, int fps)
+            {
+                if (gen != sessionGeneration) return;
+                if (mons != null && mons.Count > 0)
+                {
+                    remoteMonitors = mons;
+                    int idx = Math.Max(0, Math.Min(activeMonitorIndex, mons.Count - 1));
+                    hostNativeWidth = mons[idx].Width;
+                    hostNativeHeight = mons[idx].Height;
+                }
+                remoteSessionConnected = true;
+                SafeUiInvoke(delegate
+                {
+                    if (gen != sessionGeneration || IsDisposed) return;
+                    statusOverlay.SetOverlayVisible(false);
+                    SyncChildViewportSize();
+                    FocusChildViewport();
+                    StartStatsPollingTimer();
+                    if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
+                    {
+                        UpdateHudPosition();
+                        if (!hudOverlay.Visible) hudOverlay.Show(this);
+                    }
+                    if (autoRemotePrivacyOnConnect) remotePrivacyActive = true;
+                    if (PlayerProcessStarted != null)
+                    {
+                        try { PlayerProcessStarted(Process.GetCurrentProcess().Id); } catch { }
+                    }
+                    if (!freeMouseMode)
+                    {
+                        ShowToastHint("已进入锁鼠模式 · 随时轻按 Ctrl+Alt 释放鼠标并点浮窗 · Ctrl+Alt+Shift+Q 退出");
+                    }
+                    NotifyStatus("已通过 BoBo V6 全内置内核接通 " + hostDisplayName + "（" + currentModeTag + "）。");
+                });
+            };
+
+            client.RttUpdated += delegate(double rtt)
+            {
+                lastRttMs = rtt;
+            };
+
+            client.RemotePrivacyStateChanged += delegate(bool active)
+            {
+                remotePrivacyActive = active;
+            };
+
+            client.StreamError += delegate(string code, string emsg)
+            {
+                if (gen != sessionGeneration) return;
+                lastErrorMessage = emsg;
+            };
+
+            client.Disconnected += delegate(string reason)
+            {
+                if (gen != sessionGeneration || closingIntentionally || switchingQuality || IsDisposed) return;
+                SafeUiInvoke(delegate
+                {
+                    if (gen != sessionGeneration || closingIntentionally || switchingQuality || IsDisposed) return;
+                    if (remoteSessionConnected)
+                    {
+                        NotifyStatus("远程桌面会话已结束：" + (string.IsNullOrEmpty(reason) ? "对方已断开" : reason));
+                        DisconnectAndClose(false);
+                    }
+                    else
+                    {
+                        ShowFatalError(string.IsNullOrEmpty(lastErrorMessage) ? reason : lastErrorMessage);
+                    }
+                });
+            };
+
+            var startOpts = new BoBoStreamStartOptions
+            {
+                Host = host,
+                Port = targetPort,
+                MonitorIndex = activeMonitorIndex,
+                Width = currentWidth,
+                Height = currentHeight,
+                Fps = currentFps,
+                BitrateKbps = currentBitrateKbps,
+                MuteHostAudio = !hostAudio,
+                RequestPrivacy = autoRemotePrivacyOnConnect
+            };
+
+            Tuple<bool, string, string> connRes;
             try
             {
-                launch = await Task.Run(delegate
-                {
-                    return GameStreamClient.LaunchDesktopSession(
-                        host, currentWidth, currentHeight, currentFps, hostAudio, cts.Token);
-                }, cts.Token);
+                connRes = await client.ConnectAndStartStreamAsync(startOpts, nc, cts.Token);
             }
             catch (OperationCanceledException)
             {
@@ -1008,17 +1147,17 @@ namespace DualRemote
             catch (Exception ex)
             {
                 if (gen == sessionGeneration && !closingIntentionally && !IsDisposed)
-                    ShowFatalError("发起内置串流失败：" + ex.Message);
+                    ShowFatalError("发起 BoBo V6 加密串流失败：" + ex.Message);
                 return;
             }
 
             if (gen != sessionGeneration || closingIntentionally || IsDisposed) return;
 
-            if (!launch.Success)
+            if (!connRes.Item1)
             {
-                if (string.Equals(launch.Error, "NOT_PAIRED", StringComparison.Ordinal))
+                if (string.Equals(connRes.Item2, "PAIR_REQUIRED", StringComparison.Ordinal))
                 {
-                    NotifyStatus("目标主机尚未授权内置客户端，请完成一次 4 位配对码授权。");
+                    NotifyStatus("目标主机尚未授权本机 BoBo 客户端，请输入对方生成的 4 位临时配对码。");
                     if (PairRequired != null)
                     {
                         try { PairRequired(host); } catch { }
@@ -1026,317 +1165,76 @@ namespace DualRemote
                     DisconnectAndClose(false);
                     return;
                 }
-                ShowFatalError(string.IsNullOrEmpty(launch.Error) ? "启动远程桌面失败。" : launch.Error);
+                ShowFatalError(string.IsNullOrEmpty(connRes.Item3) ? "无法连接目标 BoBo远程 主机。" : connRes.Item3);
                 return;
             }
 
-            activeHttpsPort = launch.HttpsPort > 0 ? launch.HttpsPort : GameStreamClient.DefaultHttpsPort;
-            if (launch.HostNativeWidth > 0 && launch.HostNativeHeight > 0)
-            {
-                hostNativeWidth = launch.HostNativeWidth;
-                hostNativeHeight = launch.HostNativeHeight;
-            }
-            ShowStatusOverlay("正在启动内置 D3D11VA 解码器", "已接通 " + launch.AppTitle + "（" + currentModeTag + "），正在等待首帧画面…", false);
-
-            IntPtr parentHandle = videoHost.Handle;
-            string args = NativeStreamCore.BuildStreamArgs(
-                parentHandle,
-                launch,
-                currentWidth,
-                currentHeight,
-                currentFps,
-                currentBitrateKbps,
-                preferHevc,
-                freeMouseMode,
-                hudVisible,
-                true);
-
-            Process proc = null;
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo(playerExe, args);
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.RedirectStandardInput = true;
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
-                psi.StandardOutputEncoding = Encoding.UTF8;
-                psi.StandardErrorEncoding = Encoding.UTF8;
-                psi.WorkingDirectory = Path.GetDirectoryName(playerExe);
-
-                proc = Process.Start(psi);
-                if (proc == null)
-                {
-                    ShowFatalError("启动内置播放核 BoBoStreamPlayer.exe 失败。");
-                    return;
-                }
-
-                StreamWriter utf8In = new StreamWriter(proc.StandardInput.BaseStream, new UTF8Encoding(false));
-                utf8In.AutoFlush = true;
-
-                lock (procGate)
-                {
-                    playerProcess = proc;
-                    playerStdin = utf8In;
-                    childViewportHwnd = IntPtr.Zero;
-                }
-
-                // 立即下发当前客户端会话配置（音量、1:1、仅查看、系统快捷键透传）
-                ApplyVolumeToNative();
-                SendIpcLine(NativeStreamCore.BuildScaleModeCommand(aspectFit));
-                SendIpcLine(NativeStreamCore.BuildViewOnlyCommand(mouseMode == ControlMouseMode.ViewOnly));
-                SendIpcLine(NativeStreamCore.BuildSysKeysCommand(sendSystemShortcuts));
-
-                if (PlayerProcessStarted != null)
-                {
-                    try { PlayerProcessStarted(proc.Id); } catch { }
-                }
-
-                StartPlayerMonitorThreads(proc, gen);
-            }
-            catch (Exception ex)
-            {
-                if (proc != null)
-                {
-                    try { if (!proc.HasExited) proc.Kill(); } catch { }
-                    try { proc.Dispose(); } catch { }
-                }
-                ShowFatalError("启动内置播放核失败：" + ex.Message);
-            }
+            ShowStatusOverlay("正在加载实时画面", "已完成双端 TLS 身份校验，正在接收首帧 H.264 画面…", false);
         }
 
-        private void StartPlayerMonitorThreads(Process proc, int gen)
+        private void StartStatsPollingTimer()
         {
-            Thread stdoutThread = new Thread(delegate()
+            if (statsTimer != null) return;
+            statsTimer = new System.Windows.Forms.Timer { Interval = 500 };
+            statsTimer.Tick += delegate
             {
-                try
+                if (IsDisposed || !remoteSessionConnected) return;
+                BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+                BoBoStreamClient sc = streamClient;
+                if (nc == null || sc == null) return;
+                NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, currentBitrateKbps);
+                lastRttMs = stats.RttMs;
+                if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
                 {
-                    string line;
-                    while ((line = proc.StandardOutput.ReadLine()) != null)
-                    {
-                        if (gen != sessionGeneration) break;
-                        HandleNativeEventLine(line, gen);
-                    }
-                }
-                catch { }
-            });
-            stdoutThread.IsBackground = true;
-            stdoutThread.Start();
-
-            Thread stderrThread = new Thread(delegate()
-            {
-                try { proc.StandardError.ReadToEnd(); } catch { }
-            });
-            stderrThread.IsBackground = true;
-            stderrThread.Start();
-
-            Thread waitThread = new Thread(delegate()
-            {
-                try { proc.WaitForExit(); } catch { }
-                if (gen != sessionGeneration || closingIntentionally || switchingQuality || IsDisposed)
-                    return;
-
-                SafeUiInvoke(delegate
-                {
-                    if (gen != sessionGeneration || closingIntentionally || switchingQuality || IsDisposed)
-                        return;
-
-                    if (remoteSessionConnected)
-                    {
-                        NotifyStatus("远程桌面会话已结束。");
-                        DisconnectAndClose(false);
-                    }
-                    else
-                    {
-                        string msg = string.IsNullOrEmpty(lastErrorMessage)
-                            ? "内置串流核已退出，请确认被控端 Sunshine 正在运行且端口 47984/48010 可达。"
-                            : lastErrorMessage;
-                        ShowFatalError(msg);
-                    }
-                });
-            });
-            waitThread.IsBackground = true;
-            waitThread.Start();
-        }
-
-        private void HandleNativeEventLine(string line, int gen)
-        {
-            NativePlayerEvent ev = NativeStreamCore.TryParseEventLine(line);
-            if (ev == null || gen != sessionGeneration) return;
-
-            if (ev.EventType == "viewport_hwnd" && ev.ViewportHwnd != 0)
-            {
-                IntPtr h = new IntPtr(unchecked((long)ev.ViewportHwnd));
-                lock (procGate) { childViewportHwnd = h; }
-                SafeUiInvoke(delegate
-                {
-                    SyncChildViewportSize();
-                    FocusChildViewport();
-                });
-                return;
-            }
-
-            if (ev.EventType == "stage")
-            {
-                if (ev.State == "starting")
-                {
-                    string zh = NativeStreamCore.TranslateStageLabel(ev.Name);
-                    SafeUiInvoke(delegate
-                    {
-                        if (!remoteSessionConnected && statusOverlay.Visible)
-                        {
-                            statusOverlay.UpdateDetail(zh);
-                        }
-                    });
-                }
-                else if (ev.State == "failed")
-                {
-                    lastErrorMessage = "串流握手失败（阶段：" + ev.Name + "，错误码 " + ev.Code + "）。";
-                }
-                return;
-            }
-
-            if (ev.EventType == "connected")
-            {
-                remoteSessionConnected = true;
-                SafeUiInvoke(delegate
-                {
-                    statusOverlay.SetOverlayVisible(false);
-                    SyncChildViewportSize();
-                    FocusChildViewport();
-                    if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
+                    hudOverlay.UpdateStats(stats, currentModeTag);
+                    if (!hudOverlay.Visible)
                     {
                         UpdateHudPosition();
-                        if (!hudOverlay.Visible) hudOverlay.Show(this);
+                        hudOverlay.Show(this);
                     }
-
-                    // 客户端启用了「被控端防窥模式」时，连接成功的瞬间立即下发幂等开启防窥指令（含一次 320ms 补发防首包丢失）
-                    if (autoRemotePrivacyOnConnect)
-                    {
-                        remotePrivacyActive = true;
-                        SendRemoteKeys(VkRemotePrivacyEnable);
-                        var retryTimer = new System.Windows.Forms.Timer { Interval = 320 };
-                        retryTimer.Tick += delegate
-                        {
-                            retryTimer.Stop();
-                            retryTimer.Dispose();
-                            if (!IsDisposed && remoteSessionConnected && autoRemotePrivacyOnConnect)
-                                SendRemoteKeys(VkRemotePrivacyEnable);
-                        };
-                        retryTimer.Start();
-                    }
-
-                    if (!freeMouseMode)
-                    {
-                        ShowToastHint("已进入锁鼠模式 · 随时轻按 Ctrl+Alt 释放鼠标并点浮窗 · Ctrl+Alt+Shift+Q 退出");
-                    }
-                    NotifyStatus("已通过内置 D3D11VA 内核接通 " + hostDisplayName + "（" + currentModeTag + "）。");
-                });
-                return;
-            }
-
-            if (ev.EventType == "stats" && ev.Stats != null)
-            {
-                NativeStreamStats stats = ev.Stats;
-                lastRttMs = stats.RttMs;
-                SafeUiInvoke(delegate
-                {
-                    if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
-                    {
-                        hudOverlay.UpdateStats(stats, currentModeTag);
-                        if (!hudOverlay.Visible && remoteSessionConnected)
-                        {
-                            UpdateHudPosition();
-                            hudOverlay.Show(this);
-                        }
-                    }
-                    RefreshTopBarVisuals();
-                });
-                return;
-            }
-
-            if (ev.EventType == "mouse_mode")
-            {
-                freeMouseMode = ev.FreeMouse;
-                if (mouseMode != ControlMouseMode.ViewOnly)
-                    mouseMode = ev.FreeMouse ? ControlMouseMode.Free : ControlMouseMode.Locked;
-                SafeUiInvoke(delegate
-                {
-                    RefreshTopBarVisuals();
-                    if (MouseModeChanged != null)
-                    {
-                        try { MouseModeChanged(ev.FreeMouse); } catch { }
-                    }
-                });
-                return;
-            }
-
-            if (ev.EventType == "hotkey")
-            {
-                if (ev.Name == "toolbar")
-                {
-                    SafeUiInvoke(delegate { RaiseToolbarHotkey(); });
                 }
-                else if (ev.Name == "release_mouse")
+                RefreshTopBarVisuals();
+            };
+            statsTimer.Start();
+        }
+
+        private void HandleNativeHotkey(int hotkeyCode, int gen)
+        {
+            if (gen != sessionGeneration || IsDisposed) return;
+            SafeUiInvoke(delegate
+            {
+                if (gen != sessionGeneration || IsDisposed) return;
+                switch (hotkeyCode)
                 {
-                    SafeUiInvoke(delegate
-                    {
+                    case 1: // ReleaseMouse (Ctrl+Alt solo tap)
                         freeMouseMode = true;
                         mouseMode = ControlMouseMode.Free;
                         RefreshTopBarVisuals();
                         if (MouseModeChanged != null) { try { MouseModeChanged(true); } catch { } }
                         RaiseToolbarHotkey();
                         ShowToastHint("已释放鼠标 · 现在可直接点击悬浮球、控制中心或本机窗口");
-                    });
+                        break;
+                    case 2: // Toolbar (Ctrl+Alt+Shift+B)
+                    case 8: // EdgeTop
+                        RaiseToolbarHotkey();
+                        break;
+                    case 3: // ToggleFullscreen (Ctrl+Alt+F)
+                        HandleToggleFullscreenRequest();
+                        break;
+                    case 4: // ToggleFloatBall (Ctrl+Alt+G)
+                        ToggleHideFloatBallInFullscreen();
+                        break;
+                    case 5: // ToggleMini (Ctrl+Alt+U)
+                        ToggleMiniWindowMode();
+                        break;
+                    case 6: // NextDisplay (Ctrl+Alt+Right)
+                        SwitchNextRemoteDisplay();
+                        break;
+                    case 7: // Disconnect (Ctrl+Alt+Shift+Q)
+                        DisconnectAndClose(true);
+                        break;
                 }
-                else if (ev.Name == "toggle_fullscreen")
-                {
-                    SafeUiInvoke(delegate { HandleToggleFullscreenRequest(); });
-                }
-                else if (ev.Name == "toggle_float_ball")
-                {
-                    SafeUiInvoke(delegate { ToggleHideFloatBallInFullscreen(); });
-                }
-                else if (ev.Name == "toggle_mini_window")
-                {
-                    SafeUiInvoke(delegate { ToggleMiniWindowMode(); });
-                }
-                else if (ev.Name == "next_display")
-                {
-                    SafeUiInvoke(delegate { SwitchNextRemoteDisplay(); });
-                }
-                return;
-            }
-
-            if (ev.EventType == "edge_top")
-            {
-                SafeUiInvoke(delegate { RaiseToolbarHotkey(); });
-                return;
-            }
-
-            if (ev.EventType == "error")
-            {
-                if (!string.IsNullOrEmpty(ev.Message))
-                    lastErrorMessage = ev.Message;
-                return;
-            }
-
-            if (ev.EventType == "terminated")
-            {
-                if (!string.IsNullOrEmpty(ev.Reason))
-                    lastErrorMessage = ev.Reason;
-            }
-        }
-
-        private void SendIpcLine(string jsonLine)
-        {
-            if (string.IsNullOrEmpty(jsonLine)) return;
-            lock (procGate)
-            {
-                if (playerStdin == null) return;
-                try { playerStdin.WriteLine(jsonLine); }
-                catch { }
-            }
+            });
         }
 
         private void CleanupSessionResources(bool cancelRemoteHost)
@@ -1347,6 +1245,12 @@ namespace DualRemote
 
         private void StopCurrentPlayerAndCancelCts(bool cancelRemoteHost)
         {
+            if (statsTimer != null)
+            {
+                try { statsTimer.Stop(); statsTimer.Dispose(); } catch { }
+                statsTimer = null;
+            }
+
             CancellationTokenSource oldCts = launchCts;
             launchCts = null;
             if (oldCts != null)
@@ -1355,48 +1259,23 @@ namespace DualRemote
                 try { oldCts.Dispose(); } catch { }
             }
 
-            Process procToStop;
-            StreamWriter stdinToClose;
+            BoBoStreamClient scToClose;
+            BoBoCoreInterop.BoBoClientNativeHandle ncToClose;
             lock (procGate)
             {
-                procToStop = playerProcess;
-                stdinToClose = playerStdin;
-                playerProcess = null;
-                playerStdin = null;
-                childViewportHwnd = IntPtr.Zero;
+                scToClose = streamClient;
+                ncToClose = nativeClient;
+                streamClient = null;
+                nativeClient = null;
             }
 
-            string hostToCancel = host;
-            int httpsPortToCancel = activeHttpsPort;
-
-            if (procToStop != null || cancelRemoteHost)
+            if (scToClose != null)
             {
-                Task.Run(delegate
-                {
-                    if (stdinToClose != null)
-                    {
-                        try { stdinToClose.WriteLine(NativeStreamCore.BuildDisconnectCommand()); } catch { }
-                        try { stdinToClose.Flush(); } catch { }
-                        try { stdinToClose.Dispose(); } catch { }
-                    }
-                    if (procToStop != null)
-                    {
-                        try
-                        {
-                            if (!procToStop.HasExited && !procToStop.WaitForExit(1500))
-                            {
-                                procToStop.Kill();
-                                procToStop.WaitForExit(1000);
-                            }
-                        }
-                        catch { }
-                        try { procToStop.Dispose(); } catch { }
-                    }
-                    if (cancelRemoteHost && !string.IsNullOrEmpty(hostToCancel))
-                    {
-                        GameStreamClient.CancelSession(hostToCancel, httpsPortToCancel);
-                    }
-                });
+                try { scToClose.Dispose(); } catch { }
+            }
+            if (ncToClose != null)
+            {
+                try { ncToClose.Dispose(); } catch { }
             }
         }
 
@@ -1440,24 +1319,14 @@ namespace DualRemote
             if (IsDisposed || videoHost == null) return;
             int w = Math.Max(16, videoHost.ClientSize.Width);
             int h = Math.Max(16, videoHost.ClientSize.Height);
-
-            IntPtr child;
-            lock (procGate) { child = childViewportHwnd; }
-            if (child != IntPtr.Zero && IsWindow(child))
-            {
-                MoveWindow(child, 0, 0, w, h, true);
-            }
-            SendIpcLine(NativeStreamCore.BuildResizeCommand(w, h));
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+            if (nc != null) nc.Resize(w, h);
         }
 
         private void FocusChildViewport()
         {
-            IntPtr child;
-            lock (procGate) { child = childViewportHwnd; }
-            if (child != IntPtr.Zero && IsWindow(child))
-            {
-                try { SetFocus(child); } catch { }
-            }
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+            if (nc != null) nc.Focus();
         }
 
         private void ShowStatusOverlay(string title, string detail, bool isError)
@@ -1944,7 +1813,7 @@ namespace DualRemote
             private const int WsExNoActivate = 0x08000000;
             private const int WsExTopMost = 0x00000008;
 
-            private string line1 = "BoBo V5 · D3D11VA 硬解";
+            private string line1 = "BoBo V6 · 全内置 D3D11VA 硬解";
             private string line2 = "等待帧率统计…";
 
             internal NativeHudOverlay()

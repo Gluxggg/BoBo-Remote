@@ -776,40 +776,42 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "Moonlight V+ 6.5.6",
-                "主力低延迟串流引擎，原生支持 Foundation ABR 自适应抗丢包",
-                BuildEngineActionRow(FoundationClient.IsAvailable, "打开 V+", delegate { OpenMoonlightGui(); }), 186);
+            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "BoBo V6 全内置原生内核（BoBoCore）",
+                "DXGI 采编、MF H.264 硬编/硬解、D3D11VA 渲染、WASAPI 音频与输入注入已全部写入单文件内嵌加载，无外置独立可执行内核",
+                BuildEngineActionRow(BoBoCoreInterop.IsLoaded, "运行自检", delegate { RunNativeCoreSelfTestDialog(); }), 186);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "Moonlight 6.2.0",
-                "官方标准便携串流引擎，可作为独立备用客户端",
-                EngineAvailability(Engines.MoonlightPresent), 98);
+            AddStandaloneSettingCard(page, Theme.Glyph.Shield, "允许本机被控（BoBo 专属端口 49810 · TLS 1.2）",
+                "仅在 BoBo远程 运行且此开关开启时接受已配对设备连控；关闭软件后立刻停服断口",
+                PreferenceToggle("允许本机被控", allowIncomingControl, delegate(bool value)
+                {
+                    allowIncomingControl = value;
+                    if (boboHostServer != null) boboHostServer.AllowIncomingControl = value;
+                    ApplyHostSnapshotToUi();
+                }));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Assist, "RustDesk 1.5.3",
-                "通用远程协助、9 位设备码接入与双向文件互传引擎",
-                BuildEngineActionRow(Engines.RustDeskPresent, "打开窗口", async delegate { await OpenLocalRustDeskOnSettings(); }), 186);
+            sunshineComponentBadge = new Theme.Badge("V6 运行中", Theme.PillTone.Success);
+            AddStandaloneSettingCard(page, Theme.Glyph.Pin, "本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
+                "已授权设备保存在本机独立安全名单中，可随时查看并一键撤销授权",
+                BuildEngineActionRow(true, "管理授权", delegate { ShowAuthorizedPeersDialog(); }), 186);
 
-            sunshineComponentBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
-            AddStandaloneSettingCard(page, Theme.Glyph.Network, "Foundation Sunshine 被控宿主",
-                "支持便携版内置宿主与系统安装版，负责硬编采集与 Zako 虚拟屏",
-                sunshineComponentBadge, 114);
-
-            AddStandaloneSettingCard(page, Theme.Glyph.Link, "Tailscale 异地组网 CLI",
-                "自动发现同账号 Windows 设备并区分直连与 DERP 中继路径",
+            AddStandaloneSettingCard(page, Theme.Glyph.Link, "Tailscale 异地组网发现（可选）",
+                "局域网设备已内置 UDP 自动发现；若需跨公网高速直连可配合 Tailscale 自动发现同网设备",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
             return page;
         }
 
-        private async System.Threading.Tasks.Task OpenLocalRustDeskOnSettings()
+        private void RunNativeCoreSelfTestDialog()
         {
-            ShowSettingsBanner("正在启动本机 RustDesk…", Theme.PillTone.Info);
-            string error = await System.Threading.Tasks.Task.Run(() =>
-            {
-                string detail;
-                return Engines.LaunchRustDesk(out detail) ? null : detail;
-            });
-            if (!IsDisposed)
-                ShowSettingsBanner(error ?? "已打开本机 RustDesk 窗口。", error == null ? Theme.PillTone.Success : Theme.PillTone.Alert);
+            string report;
+            bool ok = BoBoCoreInterop.RunNativeSelfTest(out report);
+            ShowSettingsBanner(ok ? "BoBo V6 原生内核自检全部通过！" : "BoBo V6 原生内核自检发现异常。",
+                ok ? Theme.PillTone.Success : Theme.PillTone.Alert);
+            MessageBox.Show(this,
+                string.IsNullOrEmpty(report) ? (ok ? "BoBoCore 自检通过。" : "无法加载 BoBoCore。") : report,
+                "BoBo V6 全内置原生内核自检",
+                MessageBoxButtons.OK,
+                ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
 
         private static Control BuildEngineActionRow(bool ready, string buttonText, EventHandler onClick)
@@ -860,34 +862,23 @@ namespace DualRemote
 
         private void UpdateDiagnosticsUi()
         {
-            if (hostSnapshot == null) return;
-            if (!hostSnapshot.SunshineInstalled)
-            {
-                diagStatusBadge.UpdateStatus("未检测到宿主", Theme.PillTone.Neutral);
-                diagVersionLabel.Text = "本机未安装或未准备 Foundation Sunshine（仅控制他人时无需安装，被控端生成配对码时会自动准备内置宿主）。";
-                diagDetailsLabel.Text = "当前串流客户端：" + StreamAvailabilityText();
-            }
+            bool serverUp = boboHostServer != null && boboHostServer.IsRunning;
+            bool allowing = serverUp && boboHostServer.AllowIncomingControl;
+            int peerCount = BoBoIdentityStore.Default.ListAuthorizedPeers().Count;
+            if (allowing)
+                diagStatusBadge.UpdateStatus("V6 内置运行中 · 端口 " + boboHostServer.ListeningPort, Theme.PillTone.Success);
+            else if (serverUp)
+                diagStatusBadge.UpdateStatus("已暂停入站被控", Theme.PillTone.Warning);
             else
-            {
-                bool hostRunning = hostSnapshot.SunshineRunning;
-                string hostState = hostRunning ? "宿主运行中" : "宿主未运行";
-                if (hostSnapshot.AntiLossTuned)
-                    diagStatusBadge.UpdateStatus(hostState + " · 已优化", hostRunning ? Theme.PillTone.Success : Theme.PillTone.Warning);
-                else
-                    diagStatusBadge.UpdateStatus(hostState + " · 可调优", Theme.PillTone.Warning);
+                diagStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Alert);
 
-                string enc = string.IsNullOrEmpty(hostSnapshot.Encoder) ? "自动" : hostSnapshot.Encoder;
-                diagVersionLabel.Text = "版本：" + hostSnapshot.SunshineVersion + "  ·  编码器：" + enc + "  ·  来源：" + hostSnapshot.HostSourceLabel;
-                if (hostSnapshot.Recommendations.Count == 0)
-                    diagDetailsLabel.Text = (hostRunning ? "所有抗丢包关键项均已就绪。" : "宿主服务当前未运行；") + "点击「外网抗丢包调优」可按当前显卡自动写入 CBR + HRD + Auto-FEC + LTR 参数。";
-                else
-                    diagDetailsLabel.Text = "• " + string.Join("\r\n• ", hostSnapshot.Recommendations.ToArray());
-            }
+            diagVersionLabel.Text = "架构：BoBo V6 全内置单文件（零外置 Sunshine/Moonlight/RustDesk） · 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
+            diagDetailsLabel.Text = "• 已授权可连本机设备：" + peerCount + " 台（双端必须同时打开 BoBo远程 且通过 4 位临时码双向加密授权）\r\n"
+                + "• 传输通道：专属 TLS 1.2 端口 " + BoBoProtocol.DefaultTcpPort + " + 局域网 UDP " + BoBoProtocol.DiscoveryUdpPort + " 自动发现";
             if (sunshineComponentBadge != null)
             {
-                sunshineComponentBadge.UpdateStatus(
-                    hostSnapshot.SunshineInstalled ? (hostSnapshot.SunshineRunning ? "运行中" : "已就绪") : "未就绪",
-                    hostSnapshot.SunshineRunning ? Theme.PillTone.Success : (hostSnapshot.SunshineInstalled ? Theme.PillTone.Info : Theme.PillTone.Neutral));
+                sunshineComponentBadge.UpdateStatus(allowing ? "V6 运行中" : "已暂停",
+                    allowing ? Theme.PillTone.Success : Theme.PillTone.Warning);
             }
         }
 
@@ -916,8 +907,8 @@ namespace DualRemote
                 var _ = CheckForUpdatesAsync(false);
             });
             menu.Items.Add(new ToolStripSeparator());
-            AddPopupItem(menu, "打开 Moonlight V+ 管理端", delegate { OpenMoonlightGui(); });
-            AddPopupItem(menu, "打开本机 RustDesk 窗口", delegate { var _ = OpenLocalRustDeskOnSettings(); });
+            AddPopupItem(menu, "管理已授权设备（本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + "）", delegate { ShowAuthorizedPeersDialog(); });
+            AddPopupItem(menu, "运行 V6 全内置内核自检", delegate { RunNativeCoreSelfTestDialog(); });
             AddPopupItem(menu, "低延迟调优与防窥指南", delegate { OpenGuide(); });
             menu.Items.Add(new ToolStripSeparator());
             AddPopupItem(menu, "断开当前远控会话", delegate { DisconnectAllRemoteSessionsFromUi(); });
@@ -932,15 +923,19 @@ namespace DualRemote
         private void ShowHostStatusPopover()
         {
             var menu = CreateCleanPopupMenu();
-            string hostState = hostSnapshot.SunshineRunning ? "被控宿主运行中" : (hostSnapshot.SunshineInstalled ? "被控宿主已就绪" : "内置宿主待准备");
+            string hostState = (boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl)
+                ? ("V6 内置运行中 · 端口 " + boboHostServer.ListeningPort)
+                : "本机被控已暂停";
             var header = new ToolStripMenuItem("本机：" + Environment.MachineName + "  (" + hostState + ")") { Enabled = false };
             menu.Items.Add(header);
             menu.Items.Add(new ToolStripSeparator());
 
+            string code = BoBoIdentityStore.Default.FormattedDeviceCode;
             string lan = string.IsNullOrEmpty(hostSnapshot.LanIpv4) ? "未连接" : hostSnapshot.LanIpv4;
             string ts = string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4) ? "未登录" : hostSnapshot.TailscaleIpv4;
             string v6 = string.IsNullOrEmpty(hostSnapshot.PublicIpv6) ? "无公网 IPv6" : ShortenIpv6(hostSnapshot.PublicIpv6);
 
+            AddPopupItem(menu, "复制本机 BoBo 设备码：" + code, delegate { CopyHostAddress("本机 BoBo 设备码", code); });
             AddPopupItem(menu, "复制局域网 IP：" + lan, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); });
             AddPopupItem(menu, "复制 Tailscale IP：" + ts, delegate { CopyHostAddress("Tailscale IP", hostSnapshot.TailscaleIpv4); });
             AddPopupItem(menu, "复制公网 IPv6：" + v6, delegate { CopyHostAddress("公网 IPv6", hostSnapshot.PublicIpv6); });
@@ -1064,9 +1059,9 @@ namespace DualRemote
                 var infoCard = new Theme.Card { Padding = new Padding(16, 12, 16, 12) };
                 var ic = Theme.Grid(1);
                 Theme.FillColumn(ic);
-                Theme.Row(ic, 25, Theme.Text("• 串流引擎：BoBo V5 原生一体化内核（moonlight-common-c + D3D11VA）+ Foundation Sunshine", Theme.TextSize.Small, Theme.BodyInk));
-                Theme.Row(ic, 25, Theme.Text("• 通用协助与文件传输：RustDesk 1.5.3", Theme.TextSize.Small, Theme.BodyInk));
-                Theme.Row(ic, 25, Theme.Text("• 隐私保护：WDA_EXCLUDEFROMCAPTURE 物理屏防窥壁纸 + Zako 虚拟屏", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 全内置核心：BoBo V6 原生单文件内核（DXGI/GDI + MF H.264 + D3D11VA + WASAPI + TLS 1.2）", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 安全机制：双端必开 BoBo远程 + 4 位临时配对码 HMAC-SHA256 双向授权（零外置独立内核）", Theme.TextSize.Small, Theme.BodyInk));
+                Theme.Row(ic, 25, Theme.Text("• 隐私与互传：WDA_EXCLUDEFROMCAPTURE 毫秒级防窥壁纸 + 内置 SHA-256 极速文件传输", Theme.TextSize.Small, Theme.BodyInk));
                 Theme.Row(ic, 25, Theme.Text("• 配置目录：" + RecentStore.DirPath, Theme.TextSize.Small, Theme.Muted));
                 infoCard.Controls.Add(ic);
                 Theme.Row(root, 130, infoCard);
@@ -1614,7 +1609,7 @@ namespace DualRemote
                     minimizeToTray = ReadFlag(lines, 10, false);
                     autoCheckUpdates = ReadFlag(lines, 11, true);
                     useAbsoluteMouse = ReadFlag(lines, 12, true);
-                    useNativeStream = NativeStreamCore.IsAvailable && ReadFlag(lines, 13, true);
+                    useNativeStream = true;
                     autoRemotePrivacyOnConnect = ReadFlag(lines, 14, false);
                     lockHostOnDisconnect = ReadFlag(lines, 15, false);
                     hideFloatBallInFullscreen = ReadFlag(lines, 16, false);
@@ -1623,6 +1618,7 @@ namespace DualRemote
                     int op;
                     if (lines.Length > 19 && int.TryParse(lines[19], out op) && op >= 50 && op <= 100)
                         miniWindowOpacity = op;
+                    allowIncomingControl = ReadFlag(lines, 20, true);
                 }
                 else
                 {
@@ -1670,7 +1666,8 @@ namespace DualRemote
                     WriteFlag(hideFloatBallInFullscreen),
                     WriteFlag(showFloatBallInWindowed),
                     WriteFlag(sendSystemShortcuts),
-                    miniWindowOpacity.ToString()
+                    miniWindowOpacity.ToString(),
+                    WriteFlag(allowIncomingControl)
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

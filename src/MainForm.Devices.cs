@@ -450,12 +450,12 @@ namespace DualRemote
             if (heroCopyTs != null) heroCopyTs.Enabled = !string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4);
             if (heroCopyV6 != null) heroCopyV6.Enabled = !string.IsNullOrEmpty(hostSnapshot.PublicIpv6);
 
-            if (!hostSnapshot.SunshineInstalled)
-                heroSunshineBadge.UpdateStatus("内置宿主待准备", Theme.PillTone.Neutral);
-            else if (!hostSnapshot.SunshineRunning)
-                heroSunshineBadge.UpdateStatus("被控服务未运行", Theme.PillTone.Warning);
+            if (boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl)
+                heroSunshineBadge.UpdateStatus("V6 本机可被控 · 49810", Theme.PillTone.Success);
+            else if (boboHostServer != null && boboHostServer.IsRunning)
+                heroSunshineBadge.UpdateStatus("已关闭本机被控", Theme.PillTone.Neutral);
             else
-                heroSunshineBadge.UpdateStatus("本机可被控制", Theme.PillTone.Success);
+                heroSunshineBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Warning);
 
             UpdateLocalAssistAddressLabel();
             UpdateDiagnosticsUi();
@@ -492,33 +492,73 @@ namespace DualRemote
             refreshDevices.Enabled = false;
             try
             {
-                var result = await Task.Run(() => Tailscale.LoadPeers(5200));
+                if (boboHostServer != null) boboHostServer.SendDiscoveryProbeNow();
+                var result = await Task.Run(() => Tailscale.LoadPeers(4200));
                 if (IsDisposed) return;
+
+                var merged = new List<TsPeer>();
+                var seenIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // 1. Live LAN auto-discovered BoBo V6 peers (zero external VPN needed!)
+                if (boboHostServer != null)
+                {
+                    foreach (BoBoDiscoveredPeer lp in boboHostServer.GetDiscoveredLanPeers())
+                    {
+                        if (string.IsNullOrWhiteSpace(lp.Host)) continue;
+                        seenIps.Add(lp.Host);
+                        merged.Add(new TsPeer
+                        {
+                            HostName = lp.DeviceName,
+                            Ip = lp.Host,
+                            Online = lp.AllowIncoming,
+                            LinkText = lp.AllowIncoming
+                                ? ("BoBo V6 在线 · 局域网直连 · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
+                                : "局域网 · 对方已关闭被控"
+                        });
+                    }
+                }
+
+                // 2. Tailscale peers (optional cross-WAN mesh)
+                if (result.Ok && result.Peers != null)
+                {
+                    foreach (TsPeer tp in result.Peers)
+                    {
+                        if (!string.IsNullOrWhiteSpace(tp.Ip) && seenIps.Add(tp.Ip))
+                            merged.Add(tp);
+                    }
+                }
+
+                // 3. Previously authorized BoBo V6 peers with saved IP
+                foreach (BoBoAuthorizedPeer ap in BoBoIdentityStore.Default.ListAuthorizedPeers())
+                {
+                    if (!string.IsNullOrWhiteSpace(ap.LastHost) && seenIps.Add(ap.LastHost))
+                    {
+                        merged.Add(new TsPeer
+                        {
+                            HostName = string.IsNullOrWhiteSpace(ap.DeviceName) ? ap.LastHost : ap.DeviceName,
+                            Ip = ap.LastHost,
+                            Online = true,
+                            LinkText = "已授权 BoBo 设备 · 码 " + BoBoIdentityStore.FormatDeviceCode(ap.DeviceCode)
+                        });
+                    }
+                }
+
                 cachedPeers.Clear();
-                if (result.Ok && result.Peers != null) cachedPeers.AddRange(result.Peers);
-                DrawPeerRows(result.Ok ? result.Peers : null, result.Ok ? null : result.Error);
+                cachedPeers.AddRange(merged);
+                DrawPeerRows(merged, merged.Count == 0 && !result.Ok ? result.Error : null);
                 UpdateQuickDeviceShortcut();
 
-                if (result.Ok)
-                {
-                    deviceBanner.Set(
-                        hostSnapshot.SunshineInstalled && !hostSnapshot.SunshineRunning
-                            ? "提示：本机 Foundation Sunshine 服务未运行，作为被控端前请先启动。"
-                            : hostSnapshot.SunshineInstalled && !hostSnapshot.AntiLossTuned
-                                ? "提示：本机存在可优化的抗丢包编码项，建议在「设置 → 低延迟与抗丢包」一键应用。"
-                                : "设备列表与本机状态已更新。点击设备行「连接」或右侧箭头可直达远程桌面。",
-                        hostSnapshot.SunshineInstalled && (!hostSnapshot.SunshineRunning || !hostSnapshot.AntiLossTuned)
-                            ? Theme.PillTone.Warning : Theme.PillTone.Info);
-                }
-                else
-                {
-                    deviceBanner.Set("未检测到 Tailscale 组网设备；仍可直接通过局域网 IP、IPv6 或 9 位设备码连接。", Theme.PillTone.Info);
-                }
+                bool serverReady = boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl;
+                deviceBanner.Set(
+                    serverReady
+                        ? ("BoBo V6 全内置服务运行中（本机设备码 " + BoBoIdentityStore.Default.FormattedDeviceCode + " · 已发现 " + merged.Count + " 台设备）。")
+                        : "提示：本机「允许本机被控」当前已关闭，如需被控制请在设置中开启。",
+                    serverReady ? Theme.PillTone.Success : Theme.PillTone.Warning);
             }
             catch
             {
                 if (!IsDisposed)
-                    deviceBanner.Set("暂时无法读取组网设备，可点击「手动连接设备」输入 IP 或设备码。", Theme.PillTone.Warning);
+                    deviceBanner.Set("暂时无法读取同网设备，可点击「手动连接设备」输入 IP 或 9 位 BoBo 设备码。", Theme.PillTone.Warning);
             }
             finally { if (!IsDisposed) refreshDevices.Enabled = true; }
         }
@@ -790,18 +830,18 @@ namespace DualRemote
                     await ConnectToDeviceAsync(detailDeviceAddress, detailDeviceName);
             };
 
-            var actDesktop = Theme.Action("通用协助", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Desktop);
+            var actDesktop = Theme.Action("发送文件", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Folder);
             actDesktop.Click += delegate
             {
+                if (!string.IsNullOrEmpty(detailDeviceAddress)) remoteId.Text = detailDeviceAddress;
                 ShowPage(AssistPage);
                 SelectAssistMode(1);
             };
 
-            var actFile = Theme.Action("文件传输", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Folder);
+            var actFile = Theme.Action("管理授权", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Shield);
             actFile.Click += delegate
             {
-                ShowPage(AssistPage);
-                SelectAssistMode(1);
+                ShowAuthorizedPeersDialog();
             };
 
             var actSettings = Theme.Action("画质与抗丢包", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Gear);

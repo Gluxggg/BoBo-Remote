@@ -1,13 +1,9 @@
 ﻿<#
 .SYNOPSIS
-    CI 用的编译 + 自检脚本（Windows 自带 csc.exe，不需要 SDK）。
-
-.DESCRIPTION
-    把源码编译成启动器，再以 --self-test 跑无 UI 自检。
-    本文件保存为 UTF-8 带 BOM：Windows PowerShell 5.1 读取无 BOM 的 UTF-8 脚本时会按
-    ANSI 解释，中文会变成乱码并导致语法错误，因此 CI 不把脚本内联进 workflow。
+    BoBo远程 V6 CI 编译 + 全内置自检脚本（先编译内嵌原生核 BoBoCore.dll.gz，再编译单文件 BoBoRemote.exe 并运行 --self-test）。
 
 .NOTES
+    本文件保存为 UTF-8 带 BOM（适配 Windows PowerShell 5.1）。
     退出码：0 通过；其它值表示编译或自检失败。
 #>
 [CmdletBinding()]
@@ -19,6 +15,14 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($repoRoot)) { $repoRoot = (Get-Location).Path }
+
+Write-Host '=== Step 1: Build & self-test embedded BoBoCore.dll ==='
+$coreScript = Join-Path $repoRoot 'native\bobo-core\build-core.ps1'
+powershell -NoProfile -ExecutionPolicy Bypass -File $coreScript -RunSelfTest
+if ($LASTEXITCODE -ne 0) { throw "build-core.ps1 failed with exit code $LASTEXITCODE" }
+
+$coreGz = Join-Path $repoRoot 'native\bobo-core\out\BoBoCore.dll.gz'
+if (-not (Test-Path -LiteralPath $coreGz)) { throw "missing embedded core payload: $coreGz" }
 
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $compiler = Join-Path $framework 'csc.exe'
@@ -45,6 +49,7 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $exePath = Join-Path $outputRoot 'BoBoRemote.exe'
 if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
+Write-Host "=== Step 2: Compile BoBoRemote.exe with embedded BoBoCore.dll.gz ==="
 Write-Host "compiler: $compiler"
 $compilerArgs = @(
     '/nologo'
@@ -57,6 +62,7 @@ $compilerArgs = @(
     "/out:$exePath"
     "/win32manifest:$manifest"
     "/reference:$($references -join ',')"
+    "/resource:$coreGz,DualRemote.BoBoCore.dll.gz"
 )
 if (Test-Path -LiteralPath $appIcon) { $compilerArgs += "/win32icon:$appIcon" }
 if (Test-Path -LiteralPath $brandLogo) { $compilerArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
@@ -65,7 +71,7 @@ if (Test-Path -LiteralPath $optimizeTool) { $compilerArgs += "/resource:$optimiz
 $compilerArgs += $sources
 & $compiler @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
-Write-Host "compiled $($sources.Count) source files"
+Write-Host "compiled $($sources.Count) source files -> $exePath ($((Get-Item -LiteralPath $exePath).Length) bytes)"
 
 function Invoke-SelfTestBinary {
     param([string]$BinaryPath)
@@ -110,5 +116,5 @@ if (Test-Path -LiteralPath $setupSource) {
     if ($setupCode -ne 0) { throw "setup self-test failed with exit code $setupCode" }
 }
 
-Write-Host 'OK: build and self-test passed'
+Write-Host 'OK: V6 all-in-one build and self-test passed'
 exit 0
