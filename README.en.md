@@ -5,7 +5,7 @@
 <h1 align="center">BoBo Remote</h1>
 
 <p align="center">
-  <strong>Open-Source, Zero-Account, Relay-Free Low-Latency Remote Desktop Across Windows, Android, macOS &amp; iOS</strong>
+  <strong>Open-Source, Account-Free, P2P-First Remote Desktop with Bring-Your-Own VPS Relay Fallback Across Windows, Android, macOS &amp; iOS</strong>
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
 
 **BoBo Remote v7.0.4** hardens UDP transport and desktop stability: eliminates startup double-IDR and in-flight keyframe PLI storms, adds packet-reorder margin and allocation-free NACK recovery polling, avoids wasted NACK retry counts when retransmit budget is reached, spaces redundant discrete UDP inputs reliably, keeps privacy cursor masking thread-affine with safe curtain teardown, and fixes `Ctrl+Alt` cursor mode sync and UI transition disposal races. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
 
-The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices discover each other on the LAN and connect over TLS. They can also connect across networks using Tailscale or a reachable IPv6 address.
+The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices auto-discover on the LAN and connect over TLS 1.2, prioritize P2P direct links across networks (Tailscale `100.x.y.z` or reachable IPv6), and support self-hosted VPS relay fallback (currently via Tailscale Peer Relay / custom DERP, evolving toward native TURN UDP Relay). Windows-to-Windows sessions also negotiate an encrypted `UDP 49811` (`UDP+FEC/NACK`) channel.
 
 ---
 
@@ -52,12 +52,14 @@ The Windows executable embeds the compressed C++17 media and input core, `BoBoCo
 
 | Commercial Remote Desktop Suites | BoBo Remote v7 |
 | --- | --- |
-| Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No accounts, no relays, no telemetry** — LAN auto-discovery or direct Tailscale (`100.x.y.z`) / IPv6 TLS 1.2 connections |
-| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **MIT-licensed V6 source** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
+| Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No official accounts, no forced relays, BYO-VPS fallback** — LAN discovery &amp; P2P direct first; self-host your own VPS as a private relay fallback with zero vendor lock-in or telemetry |
+| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **MIT-licensed V6/V7 source** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
 | Background system services &amp; kernel drivers keep running after closing the app | **Explicit pairing and device authentication**. Use a 4-digit PIN to pair. Reconnect with certificate pinning and an RSA proof |
 | Superficial privacy overlays still let bystanders click the taskbar or type | **Physical-grade host privacy shield** — `WDA_EXCLUDEFROMCAPTURE` curtain + native `WH_MOUSE_LL`/`WH_KEYBOARD_LL` (or `CGEventTap`) input blocker + optional safe DDC/CI backlight dimming |
 
-## Architecture &amp; Unified Protocol (`BoBo6.2`)
+## Architecture &amp; Network Transport Design
+
+### A. Shipped Architecture &amp; Unified Protocol (`BoBo6.2` · `v7.0.4`)
 
 ```mermaid
 flowchart LR
@@ -69,16 +71,18 @@ flowchart LR
     IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
   end
 
-  subgraph PROTO["BoBo6.2 Wire Protocol (Shared C# / Kotlin / Swift Vectors)"]
+  subgraph PROTO["BoBo6.2 Wire Protocol &amp; Encrypted Transport"]
     direction TB
     DISC["UDP 49812 · LAN Discovery (PROBE / HELLO / BYE)"]
-    TLS["TCP 49810 · Mandatory TLS 1.2+ (RSA-2048 Cert Fingerprint Pinning)"]
+    TLS["TCP 49810 · Mandatory TLS 1.2+ Control &amp; Fallback Media (RSA-2048 TOFU)"]
     AUTH["RSA Challenge Proof and 4-Digit Temporary PIN"]
-    FRAMES["5 Binary Frames: ControlJson · H.264 · 48kHz IMA-ADPCM · Input (Touch/Nav) · FileChunk"]
+    FRAMES["6 TCP Frames: ControlJson · VideoH264 · AudioAdpcm · InputEvent · FileChunk · CursorShape"]
+    UDP["UDP 49811 (Windows Peers) · AES-128-CTR+HMAC · Interleaved XOR FEC + Selective NACK + ABR"]
     DISC --> TLS --> AUTH --> FRAMES
+    AUTH --> UDP
   end
 
-  NET["Direct LAN / Tailscale Mesh / IPv6 End-to-End (Zero Relay)"]
+  NET["Direct LAN / IPv6 / Tailscale (P2P Direct · Self-Hosted VPS Peer Relay / DERP)"]
 
   WIN <--> PROTO
   AND <--> PROTO
@@ -87,9 +91,37 @@ flowchart LR
   PROTO <--> NET
 ```
 
-- **Single Authoritative Spec**: [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines the 9-byte little-endian frame header, deterministic 9-digit device code derivation, 4-digit `HMAC-SHA256` pairing proof, H.264 Annex-B video frames, 48kHz stereo IMA-ADPCM audio, mouse/keyboard/multi-touch/mobile-nav input packets, and chunked file transfers.
-- The CI workflow runs the shared C#, Kotlin, and Swift golden vectors and TLS loopback checks. [Shared test vectors](protocol/golden-vectors.json)
-- Two Windows peers can negotiate encrypted UDP+FEC. Cross-platform sessions use TCP+TLS, and LAN discovery uses UDP 49812.
+- **Single Authoritative Spec**: [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines the 9-byte little-endian frame header (`ControlJson`, `VideoH264`, `AudioAdpcm`, `InputEvent`, `FileChunk`, `CursorShape`), deterministic 9-digit device code derivation, 4-digit `HMAC-SHA256` pairing proof, H.264 Annex-B video frames, 48kHz stereo IMA-ADPCM audio, mouse/keyboard/multi-touch/mobile-nav input packets, and chunked file transfers.
+- The CI workflow runs the shared C#, Kotlin, and Swift [test vectors (`protocol/golden-vectors.json`)](protocol/golden-vectors.json) and TLS loopback checks.
+- **Windows-to-Windows Encrypted `UDP+FEC/NACK` (`UDP 49811`)**: Cross-platform sessions use `TCP+TLS 49810`, while two Windows peers automatically upgrade to `AES-128-CTR + HMAC-SHA256` encrypted UDP featuring grouped/interleaved `XOR FEC`, selective shard `NACK` (`packetType=10`, 18-frame / 2 MiB retransmit cache &amp; budget cap, 3-shard reorder margin), static-frame tail-loss detection, 10ms-spaced discrete input redundancy, 12-second rolling-baseline ABR, and automatic fallback to `TCP+TLS` after >3.5s UDP silence.
+
+### B. Next-Generation Network Architecture &amp; BYO-VPS Relay Fallback (Planned)
+
+```mermaid
+flowchart TB
+  CLIENT["Controller Client · Windows / Android / macOS / iOS"]
+  COORD["Connection Coordinator · Device Registration / Auth / Signaling / Negotiation"]
+  P2P["Priority · P2P Direct · STUN / ICE (Zero Relay Cost)"]
+  RELAY["Fallback · UDP Relay · TURN / Self-Hosted VPS Relay (Higher Success Rate)"]
+  HOST["Controlled Host · Windows / Android / macOS / iOS"]
+
+  CLIENT --> COORD
+  COORD --> P2P
+  COORD --> RELAY
+  P2P --> HOST
+  RELAY --> HOST
+```
+
+**Network Transport Policy**
+
+1. **Try P2P first**: Attempt direct STUN / ICE hole punching to minimize latency and keep relay bandwidth near zero.
+2. **Fall back to UDP Relay if P2P fails**: Seamlessly route through a user-hosted TURN / UDP Relay VPS node so symmetric NAT and cross-ISP links still connect reliably.
+3. **Provide a `TCP/TLS 443` fallback when UDP is blocked**: Keep connectivity alive inside restrictive campus or corporate firewalls where UDP is filtered.
+4. **Adapt bitrate and FPS when link quality drops**: Continuously tune bitrate and frame rate from live RTT, jitter, and loss telemetry (Windows already ships rolling-baseline ABR and `UDP+FEC/NACK` in `v7.0.3–v7.0.4`, ready to integrate with the native coordinator/relay layer and extend across platforms).
+
+> **Open-Source Bring-Your-Own VPS (BYO-VPS) Model**
+> - Both personal deployments and open-source users follow **P2P Direct Priority + Self-Hosted VPS Relay Fallback**: instead of relying on an official hosted server cluster, anyone can spin up a lightweight regional/BGP VPS as their own private fallback node for predictable cost and full privacy ownership.
+> - **What works today (`v7.0.4`)**: Deploy your VPS as a **Tailscale Peer Relay or custom DERP node**. BoBo Remote detects `LAN Direct`, `Tailscale P2P Direct`, `Tailscale Peer Relay`, and `DERP`, and preserves high-bitrate/high-FPS streaming whenever a fast `peer-relay` measures `< 55 ms`. Once the open-source Connection Coordinator, `TURN / UDP Relay`, and `TCP/TLS 443` fallback land, external mesh tools become optional.
 
 ## Key Features
 
@@ -97,23 +129,23 @@ flowchart LR
 - `BoBo远程.exe` embeds the GZip-compressed C++17 `BoBoCore.dll` and loads it in process.
 - Full hardware-accelerated pipeline: **DXGI Desktop Duplication** (with automatic GDI fallback) → **Media Foundation H.264 HW encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48kHz audio**.
 
-### 2. Adaptive display, cursor, and connection options
+### 2. Adaptive Display, Cursor &amp; Weak-Network Transport
 
 - **Super Display** fits the stream to the viewport while preserving the desktop aspect ratio. Fullscreen sessions can use a matching mode supported by the host display, and the original mode is restored on exit. The display menu also lists virtual displays already enabled in Windows.
-- **Free mouse** uses the host pointer size and shape inside the remote viewport, then returns to the local pointer outside it. Tap `Ctrl + Alt` to release the mouse in locked mode.
-- **Connection options** include automatic, LAN direct, and Tailscale. The session shows the detected path and actual media transport. Quality presets are independent of the connection route.
+- **Free mouse** uses the host pointer size and shape inside the remote viewport, then returns to the local pointer outside it. Tap `Ctrl + Alt` to release the mouse in locked mode and automatically switch the host back to zero-latency local cursor mode (`SET_CURSOR_MODE(false)`).
+- **Route &amp; `UDP+FEC/NACK`**: Connection options include Automatic, LAN Direct, and Tailscale; the live HUD displays FPS, resolution, detected route &amp; transport, decode time, `RTT ± Jitter`, packet loss %, `F/N` FEC/NACK recovery counts, and live bitrate.
 
 ### 3. Unified Control Center &amp; Edge-Dockable Floating Ball
-- Shared real-time menu accessible from both the window header and a draggable, edge-snapping square floating ball:
+- Shared real-time menu accessible from both the window header and a draggable, edge-snapping square floating ball, enhanced with `UiTransition` animations, pixel-aligned caption glyphs, and crisp multi-size tray icons:
   - **Display &amp; Super Display**: Multi-monitor switching, resolution follow local/host, DPI scale, Super Display toggle;
-  - **Quality &amp; Frame Rate**: Auto / 30M / 14M / 8M presets and 30 / 60 / 90 / 144 fps targets;
+  - **Quality &amp; Frame Rate**: Auto / 30M / 14M / 8M presets, 30 / 60 / 90 / 144 fps targets, and Weak-Network anti-loss preset;
   - **Window &amp; Mini-Mode**: Fullscreen toggle, always-on-top mini window with adjustable opacity;
-  - **Audio &amp; Security**: Volume slider, host mute-while-connected (auto-restored), lock host on disconnect, one-click remote privacy shield;
+  - **Audio &amp; Security**: Jump-free volume slider, host mute-while-connected (auto-restored), lock host on disconnect, one-click remote privacy shield;
   - **Peripherals &amp; Tools**: System shortcut passthrough, mouse mode switch, `Ctrl+Alt+Del` injection, clipboard text send, screenshot capture, live network HUD, and instant disconnect.
 
-### 4. Host privacy shield (Windows and macOS)
+### 4. Host Privacy Shield (Windows and macOS)
 
-- **Automatic privacy curtain** covers physical displays when enabled. Windows requests capture exclusion, masks the system pointer when supported, and brings the curtain forward when ordinary input-method popups appear. Coverage depends on Windows and the display driver. macOS uses ScreenCaptureKit window exclusion.
+- **Automatic privacy curtain** covers physical displays when enabled. On Windows, the live curtain windows and `SetWinEventHook` run on a dedicated STA thread (`CurtainWindowThread`) using `WDA_EXCLUDEFROMCAPTURE` and immediately reassert Z-order when IME popups appear, while `Magnification.dll` cursor masking stays on the persistent UI thread for reliable teardown and display-change handling (actual masking depends on Windows and display drivers). macOS uses ScreenCaptureKit window exclusion.
 - **Physical Keyboard &amp; Mouse Lock (On by Default)**: Native `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks on Windows and `CGEventTap` on macOS block local bystanders from clicking the taskbar or typing, allowing only signed BoBo remote input and the emergency exit hotkey.
 - **Optional Safe DDC/CI Backlight Dimming (Off by Default)**: Uses `dxva2.dll` to adjust **only** backlight brightness (`VCP 0x10`) on non-HDR displays — never touching contrast, color temperature, or RGB gains — with crash-safe persistent restoration and read-back verification.
 - **Lock-Screen Guard State Machine**: Optional auto-lock when dismissing privacy, with post-unlock debounce to prevent unintended re-triggering.
@@ -161,7 +193,7 @@ Download the package for your platform from [**GitHub Releases (latest)**](https
 3. Keep BoBo Remote in the foreground while controlling or viewing a session. To share the device’s screen, start the **BoBo Broadcast Extension** in the Screen Share tab and pair from the viewing device.
 
 ### Connecting in 3 Steps (Any Platform Pair)
-1. **Network**: Place both devices on the same LAN (auto-discovered via `UDP 49812`), or sign both into the same [Tailscale](https://tailscale.com/) tailnet and use the `100.x.y.z` IP.
+1. **Network**: Place both devices on the same LAN (auto-discovered via `UDP 49812`), connect directly over reachable IPv6, or sign both into [Tailscale](https://tailscale.com/) for `100.x.y.z` (P2P direct first, with optional self-hosted VPS `Peer Relay` / custom DERP fallback).
 2. **Generate PIN**: Open BoBo Remote on the **host** and generate a **4-digit temporary pairing code** (valid 120s).
 3. **Pair and connect.** Select the discovered host or enter its IP, then enter the PIN. Subsequent connections use the saved certificate trust.
 
@@ -205,7 +237,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-Local Windows checks used direct compiler invocations. All 10 native and 118 managed checks passed, and the installer self-test exited with code 0. RemoteSigned blocked normal script execution in that environment. Apple SDK tests, Universal 2 packaging, and iOS device checks are pending.
+For `v7.0.4`, local Windows checks used direct compiler invocations: **10/10 native self-tests, 128/128 managed `--self-test` checks, 7/7 installer checks, 49/49 UI/animation/icon smoke checks, and 12/12 privacy curtain thread checks passed** (`RemoteSigned` blocked normal `.ps1` execution in that shell). GitHub Actions CI &amp; Release workflows automatically build and test Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA); interactive real-world WAN and cross-device QA continue alongside each release.
 
 The release workflow builds all four packages from the same existing `vMAJOR.MINOR.PATCH` tag. After all four builds succeed, it verifies the six packages and `SHA256SUMS.txt` on a draft before publishing. [Release workflow](.github/workflows/release.yml)
 
@@ -215,7 +247,7 @@ The release workflow builds all four packages from the same existing `vMAJOR.MIN
 | --- | --- |
 | `protocol/` | Authoritative wire spec [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) &amp; cross-language test suite [`golden-vectors.json`](protocol/golden-vectors.json) |
 | `native/bobo-core/` | Windows C++17 native engine (`BoBoCore.dll`): DXGI/GDI capture, cursor compositing, MF H.264 encode/decode, D3D11 Flip-Model render, WASAPI audio, Super Display &amp; input blocker |
-| `src/` | Windows C# 5 / WinForms app: glacier-blue UI, native stream window, Control Center, floating ball, 7-step onboarding, privacy curtain &amp; `Backend/` |
+| `src/` | Windows C# 5 / WinForms app: glacier-blue UI, `UiTransition` animations, native stream window, Control Center, floating ball, 7-step onboarding, threaded privacy curtain &amp; `Backend/` (protocol, host server, encrypted UDP+FEC/NACK &amp; ABR, route detection, auto-updater, DDC/CI dimmer, self-tests) |
 | `installer/` | Zero-dependency Windows GUI installer / silent updater / uninstaller (`BoBoSetup.cs`) |
 | `android/` | Native Android app (Kotlin + Jetpack Compose): zero third-party crypto deps, MediaCodec HW codecs, rootless MediaProjection + Accessibility host &amp; unit tests |
 | `apple/BoBoAppleCore/` | Pure Swift shared core (zero third-party deps): protocol, pure Swift DER RSA-2048 X.509/PKCS#12, TLS 1.2, VideoToolbox decode, audio player &amp; XCTest |
@@ -226,7 +258,7 @@ The release workflow builds all four packages from the same existing `vMAJOR.MIN
 
 ## Security, Privacy &amp; Honest Boundaries
 
-- **Zero accounts &amp; minimal local state**: No sign-in, no cloud device directory, no relays or telemetry. Local config and trusted peer fingerprints stay strictly on device (`%LOCALAPPDATA%\双端远程\` on Windows) and never ship in release packages.
+- **No official accounts, self-owned routing &amp; minimal local state**: Zero sign-in, zero vendor device directory, and zero forced third-party relays or telemetry. When using a self-hosted VPS relay fallback, you own the VPS completely, and TLS 1.2 / encrypted UDP keys are derived and verified strictly on the two endpoints — relay nodes cannot inspect media or input payloads. Local config and pinned peer fingerprints stay on device (`%LOCALAPPDATA%\双端远程\` on Windows).
 - **Explicit dual-end runtime consent**: Closing BoBo Remote on the host immediately stops port `49810` and unhooks all input filters — no hidden background services.
 - **Safe DDC/CI dimming boundary**: Disabled by default; when enabled, strictly adjusts backlight brightness (`VCP 0x10`) on non-HDR monitors only — never contrast or RGB gains — with persistent crash-safe restoration.
 - **Platform boundaries**:
@@ -244,7 +276,8 @@ The release workflow builds all four packages from the same existing `vMAJOR.MIN
 | **V6.0** | Full in-process kernel unification (embedded C++17 `BoBoCore.dll` + `BOBO6` TLS 1.2 + mandatory dual-end 4-digit pairing), zero external engines | ✅ Done |
 | **V6.1** | Host native cursor compositing, Super Display zero-black-bar mode, native physical input lock (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) &amp; hardened privacy shield | ✅ Done |
 | **V6.2** | `BoBo6.2` cross-platform protocol + 3-language Golden Vectors + **Windows / Android / macOS / iOS four-platform release** &amp; parallel CI/Release | ✅ Done |
-| **V6.3+** | Cross-platform HEVC/H.265 negotiation, enhanced bidirectional clipboard &amp; microphone passthrough, Linux client exploration | 📋 Planned |
+| **V7.0 (v7.0.0–v7.0.4)** | Super Display v2 viewport negotiation, host-sized cursor, fast `peer-relay` recognition, smooth animations &amp; crisp icons, dedicated-thread privacy curtain, Windows encrypted `UDP+FEC/NACK` &amp; 12s-baseline ABR | ✅ Done |
+| **Next-Gen Architecture (V7.1+ / V8)** | Open-source self-hostable Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` fallback + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK &amp; HEVC/H.265 negotiation, Linux client exploration | 🚧 Planned / Evolving |
 
 ## Star History
 
@@ -264,7 +297,7 @@ Issues and pull requests are welcome! Please review [CONTRIBUTING.md](CONTRIBUTI
 
 ## License
 
-All V6.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is licensed under the [**MIT License**](LICENSE). Official V6.x release binaries **do not bundle any external third-party remote desktop engines**.
+All V6.x / V7.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is licensed under the [**MIT License**](LICENSE). Official V6.x / V7.x release binaries **do not bundle any external third-party remote desktop engines**.
 
 The archive preserves V5 player sources and GPL-3.0 `moonlight-common-c`, the original third-party notices and checksums, and the historical Sunshine scripts. The current Windows app has removed the legacy engine UI, launch code, and embedded script resources. [Third-party records](THIRD-PARTY.md) · [NOTICE](NOTICE.md) · [V5 plan archive](docs/V5-NATIVE-STREAM-PLAN.md)
 
