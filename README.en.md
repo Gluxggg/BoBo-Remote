@@ -25,7 +25,7 @@
 
 **Four native apps share one protocol. Windows ships a single executable.**
 
-**BoBo Remote v7.0.0** updates the Windows interface, connection options, adaptive display, and host privacy. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
+**BoBo Remote v7.0.2** makes the Windows privacy curtain respond faster to topmost windows, reducing brief flashes of input-method candidates on the physical display. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
 
 The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices discover each other on the LAN and connect over TLS. They can also connect across networks using Tailscale or a reachable IPv6 address.
 

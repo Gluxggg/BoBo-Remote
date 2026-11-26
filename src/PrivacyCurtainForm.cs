@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using Timer = System.Windows.Forms.Timer;
 
 namespace DualRemote
 {
@@ -14,9 +17,13 @@ namespace DualRemote
     {
         private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
         private const uint EVENT_SYSTEM_MENUPOPUPEND = 0x0007;
+        private const uint EVENT_OBJECT_CREATE = 0x8000;
         private const uint EVENT_OBJECT_SHOW = 0x8002;
         private const uint EVENT_OBJECT_REORDER = 0x8004;
         private const uint EVENT_OBJECT_FOCUS = 0x8005;
+        private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TOPMOST = 0x00000008;
         private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
         private const uint GA_ROOT = 2;
         private const uint GW_HWNDPREV = 3;
@@ -33,15 +40,18 @@ namespace DualRemote
             uint dwEventThread,
             uint dwmsEventTime);
 
+        private readonly Control owner;
         private readonly List<PrivacyCurtainWindow> windows = new List<PrivacyCurtainWindow>();
-        private readonly Timer refreshTimer = new Timer();
+        private readonly Timer cursorRestoreTimer;
+        private Timer curtainTimer;
+        private CurtainWindowThread windowThread;
         private PrivacyWallpaperConfig currentConfig;
         private Bitmap cachedImage;
         private volatile bool active;
         private volatile bool previewMode;
         private volatile Control callbackAnchor;
         private bool displayEventsHooked;
-        private bool cursorRestorePending;
+        private bool reassertingCurtain;
         private volatile int activationEpoch;
         private int lastClockTick;
         private IntPtr winEventHookSys;
@@ -55,10 +65,11 @@ namespace DualRemote
         internal bool IsActive { get { return active; } }
         internal bool IsPreview { get { return active && previewMode; } }
 
-        internal PrivacyCurtainManager()
+        internal PrivacyCurtainManager(Control owner)
         {
-            refreshTimer.Interval = CurtainRefreshMs;
-            refreshTimer.Tick += delegate { KeepOnTopAndRefreshClock(); };
+            this.owner = owner;
+            cursorRestoreTimer = new Timer { Interval = CursorRestoreRetryMs };
+            cursorRestoreTimer.Tick += delegate { RestoreCursorMask(); };
         }
 
         internal bool Activate(PrivacyWallpaperConfig config, bool preview, out string statusMessage)
@@ -79,29 +90,41 @@ namespace DualRemote
 
             currentConfig = config ?? new PrivacyWallpaperConfig();
             previewMode = preview;
+            cursorRestoreTimer.Stop();
             bool cursorMasked = false;
             bool inputBlocked = false;
+            bool allExcluded = false;
+            int screenCount = 0;
             try
             {
-                ReloadImage();
-                if (!preview) cursorMasked = BoBoCoreInterop.SetPrivacyCursorMask(true);
-                windows.AddRange(CreateCurtainWindows(screens, true));
-                callbackAnchor = windows[0];
-                active = true;
-                lastClockTick = Environment.TickCount;
-                SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
-                displayEventsHooked = true;
-                if (!preview)
+                // WinEvent callbacks run on the registering thread, so keep the live curtain
+                // and its event hooks together and independent of the main form's message pump.
+                if (!preview) windowThread = new CurtainWindowThread();
+                InvokeOnWindowThread(delegate
                 {
-                    InstallWinEventHooks();
-                    EnsureAllWindowsTopMostNoActivate();
-                    if (currentConfig.BlockLocalInput)
-                        inputBlocked = BoBoCoreInterop.SetPrivacyInputBlock(true, OnNativeLocalEscapeTriggered);
-                    if (currentConfig.HardwareBlackout)
-                        PrivacyDisplayDimmer.DimAllMonitorsAsync(null);
-                }
-                refreshTimer.Interval = preview ? 1000 : CurtainRefreshMs;
-                refreshTimer.Start();
+                    ReloadImage();
+                    if (!preview) cursorMasked = BoBoCoreInterop.SetPrivacyCursorMask(true);
+                    windows.AddRange(CreateCurtainWindows(screens, true));
+                    callbackAnchor = windows[0];
+                    active = true;
+                    lastClockTick = Environment.TickCount;
+                    SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+                    displayEventsHooked = true;
+                    if (!preview)
+                    {
+                        InstallWinEventHooks();
+                        EnsureAllWindowsTopMostNoActivate();
+                    }
+                    curtainTimer = new Timer { Interval = preview ? 1000 : CurtainRefreshMs };
+                    curtainTimer.Tick += delegate { KeepOnTopAndRefreshClock(); };
+                    curtainTimer.Start();
+                    allExcluded = windows.TrueForAll(win => win.CaptureExcluded);
+                    screenCount = windows.Count;
+                });
+                if (!preview && currentConfig.BlockLocalInput)
+                    inputBlocked = BoBoCoreInterop.SetPrivacyInputBlock(true, OnNativeLocalEscapeTriggered);
+                if (!preview && currentConfig.HardwareBlackout)
+                    PrivacyDisplayDimmer.DimAllMonitorsAsync(null);
             }
             catch (Exception ex)
             {
@@ -116,8 +139,7 @@ namespace DualRemote
             }
             else
             {
-                bool allExcluded = windows.TrueForAll(win => win.CaptureExcluded);
-                var status = new List<string> { "防窥壁纸已覆盖 " + windows.Count + " 块屏幕" };
+                var status = new List<string> { "防窥壁纸已覆盖 " + screenCount + " 块屏幕" };
                 if (!allExcluded) status.Add("部分屏幕的捕获排除不可用，远端可能看到壁纸");
                 status.Add(cursorMasked ? "已请求隐藏主机指针" : "主机指针遮挡不可用");
                 if (currentConfig.BlockLocalInput)
@@ -166,26 +188,23 @@ namespace DualRemote
             activationEpoch++;
             active = false;
             previewMode = false;
-            callbackAnchor = null;
-            refreshTimer.Stop();
-            UninstallWinEventHooks();
-            if (displayEventsHooked)
-            {
-                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
-                displayEventsHooked = false;
-            }
+            cursorRestoreTimer.Stop();
 
             try
             {
-                CloseCurtainWindows(windows);
-                windows.Clear();
-                DisposeImage();
+                InvokeOnWindowThread(StopCurtainWindows);
             }
             finally
             {
-                RestoreCursorMask();
-                try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
-                try { PrivacyDisplayDimmer.RestoreAllAsync(); } catch { }
+                CurtainWindowThread thread = windowThread;
+                windowThread = null;
+                try { if (thread != null) thread.Dispose(); }
+                finally
+                {
+                    RestoreCursorMask();
+                    try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
+                    try { PrivacyDisplayDimmer.RestoreAllAsync(); } catch { }
+                }
             }
             RaiseStateChanged();
 
@@ -195,13 +214,34 @@ namespace DualRemote
             }
         }
 
+        private void InvokeOnWindowThread(Action action)
+        {
+            if (windowThread == null) action();
+            else windowThread.Invoke(action);
+        }
+
+        private void StopCurtainWindows()
+        {
+            callbackAnchor = null;
+            if (curtainTimer != null)
+            {
+                curtainTimer.Dispose();
+                curtainTimer = null;
+            }
+            UninstallWinEventHooks();
+            if (displayEventsHooked)
+            {
+                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                displayEventsHooked = false;
+            }
+            CloseCurtainWindows(windows);
+            windows.Clear();
+            DisposeImage();
+        }
+
         private void RestoreCursorMask()
         {
-            cursorRestorePending = !BoBoCoreInterop.SetPrivacyCursorMask(false);
-            if (!cursorRestorePending || disposed) return;
-            // If Windows is switching desktops, retry once its window message loop resumes.
-            refreshTimer.Interval = CursorRestoreRetryMs;
-            refreshTimer.Start();
+            cursorRestoreTimer.Enabled = !BoBoCoreInterop.SetPrivacyCursorMask(false) && !disposed;
         }
 
         private void OnNativeLocalEscapeTriggered()
@@ -215,15 +255,7 @@ namespace DualRemote
                 if (escapeHandler != null) escapeHandler();
                 else Deactivate(true);
             };
-            if (TryPost(callbackAnchor, run)) return;
-            try
-            {
-                foreach (Form form in Application.OpenForms)
-                {
-                    if (TryPost(form, run)) return;
-                }
-            }
-            catch { }
+            if (TryPost(owner, run)) return;
             if (capturedEpoch != activationEpoch) return;
             // Emergency fallback for a host whose UI window has already closed.
             try { BoBoCoreInterop.SetPrivacyCursorMask(false); } catch { }
@@ -260,8 +292,8 @@ namespace DualRemote
                     0,
                     WINEVENT_OUTOFCONTEXT);
                 winEventHookObj = SetWinEventHook(
-                    EVENT_OBJECT_SHOW,
-                    EVENT_OBJECT_FOCUS,
+                    EVENT_OBJECT_CREATE,
+                    EVENT_OBJECT_LOCATIONCHANGE,
                     IntPtr.Zero,
                     winEventCallback,
                     0,
@@ -295,14 +327,25 @@ namespace DualRemote
             uint dwEventThread,
             uint dwmsEventTime)
         {
-            if (!active || previewMode || disposed) return;
-            if (hWinEventHook == winEventHookObj && eventType != EVENT_OBJECT_SHOW &&
-                eventType != EVENT_OBJECT_REORDER && eventType != EVENT_OBJECT_FOCUS) return;
-            if (hwnd != IntPtr.Zero && IsCurtainWindow(GetAncestor(hwnd, GA_ROOT))) return;
+            if (!active || previewMode || disposed || reassertingCurtain) return;
+            IntPtr pendingWindow = IntPtr.Zero;
+            if (hWinEventHook == winEventHookObj)
+            {
+                // Accept client-object show/focus events as some IMEs reuse an existing HWND.
+                // A new or repositioned topmost window may already be in the Z order while hidden.
+                if (eventType == EVENT_OBJECT_CREATE || eventType == EVENT_OBJECT_LOCATIONCHANGE)
+                {
+                    if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0 ||
+                        GetAncestor(hwnd, GA_ROOT) != hwnd || (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) return;
+                    pendingWindow = hwnd;
+                }
+                else if (eventType != EVENT_OBJECT_SHOW && eventType != EVENT_OBJECT_REORDER &&
+                    eventType != EVENT_OBJECT_FOCUS) return;
+            }
+            else if (hWinEventHook != winEventHookSys) return;
 
-            // Candidate windows may issue client-object events and show again immediately
-            // after focus changes. Reassert the curtain synchronously on event delivery.
-            EnsureAllWindowsTopMostNoActivate();
+            if (hwnd != IntPtr.Zero && IsCurtainWindow(GetAncestor(hwnd, GA_ROOT))) return;
+            EnsureAllWindowsTopMostNoActivate(pendingWindow);
         }
 
         private bool IsCurtainWindow(IntPtr hwnd)
@@ -314,17 +357,24 @@ namespace DualRemote
             return false;
         }
 
-        private void EnsureAllWindowsTopMostNoActivate()
+        private void EnsureAllWindowsTopMostNoActivate(IntPtr pendingWindow = default(IntPtr))
         {
-            foreach (PrivacyCurtainWindow win in windows)
+            if (reassertingCurtain) return;
+            reassertingCurtain = true;
+            try
             {
-                if (win.IsDisposed || !win.IsHandleCreated) continue;
-                if (!IsWindowVisible(win.Handle) || HasWindowAboveCurtain(win))
-                    win.EnsureTopMostNoActivate();
+                foreach (PrivacyCurtainWindow win in windows)
+                {
+                    if (win.IsDisposed || !win.IsHandleCreated) continue;
+                    bool hidden = !IsWindowVisible(win.Handle);
+                    if (hidden || HasWindowAboveCurtain(win, pendingWindow))
+                        win.EnsureTopMostNoActivate(hidden);
+                }
             }
+            finally { reassertingCurtain = false; }
         }
 
-        private bool HasWindowAboveCurtain(PrivacyCurtainWindow curtain)
+        private bool HasWindowAboveCurtain(PrivacyCurtainWindow curtain, IntPtr pendingWindow)
         {
             Rectangle bounds = curtain.Bounds;
             IntPtr hwnd = GetWindow(curtain.Handle, GW_HWNDPREV);
@@ -332,7 +382,13 @@ namespace DualRemote
             for (int visited = 0; hwnd != IntPtr.Zero && visited < 128; visited++)
             {
                 NativeRect rect;
-                if (IsWindowVisible(hwnd) && !IsCurtainWindow(hwnd) && GetWindowRect(hwnd, out rect) &&
+                if (hwnd == pendingWindow)
+                {
+                    // The candidate can receive its first bounds after the creation notification.
+                    if (!GetWindowRect(hwnd, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top ||
+                        bounds.IntersectsWith(Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom))) return true;
+                }
+                else if (IsWindowVisible(hwnd) && !IsCurtainWindow(hwnd) && GetWindowRect(hwnd, out rect) &&
                     bounds.IntersectsWith(Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom)))
                 {
                     int cloaked;
@@ -364,12 +420,7 @@ namespace DualRemote
 
         private void KeepOnTopAndRefreshClock()
         {
-            if (!active)
-            {
-                if (cursorRestorePending) RestoreCursorMask();
-                if (!cursorRestorePending) refreshTimer.Stop();
-                return;
-            }
+            if (!active) return;
             if (!previewMode) EnsureAllWindowsTopMostNoActivate();
             int now = Environment.TickCount;
             if (unchecked(now - lastClockTick) < 1000) return;
@@ -441,6 +492,9 @@ namespace DualRemote
         [DllImport("user32.dll")]
         private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
 
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr hwnd, int index);
+
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hwnd);
 
@@ -464,7 +518,48 @@ namespace DualRemote
             if (disposed) return;
             disposed = true;
             Deactivate(false);
-            refreshTimer.Dispose();
+            cursorRestoreTimer.Dispose();
+        }
+
+        private sealed class CurtainWindowThread : IDisposable
+        {
+            private readonly Thread thread;
+            private readonly Control dispatcher;
+
+            internal CurtainWindowThread()
+            {
+                var started = new TaskCompletionSource<Control>();
+                thread = new Thread(delegate()
+                {
+                    try
+                    {
+                        using (var control = new Control())
+                        {
+                            if (control.Handle == IntPtr.Zero) throw new InvalidOperationException();
+                            started.SetResult(control);
+                            Application.Run();
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        if (!started.TrySetException(error)) throw;
+                    }
+                }) { IsBackground = true, Name = "BoBo Privacy Curtain" };
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+                dispatcher = started.Task.GetAwaiter().GetResult();
+            }
+
+            internal void Invoke(Action action)
+            {
+                dispatcher.Invoke(action);
+            }
+
+            public void Dispose()
+            {
+                if (dispatcher.IsHandleCreated) dispatcher.Invoke(new Action(Application.ExitThread));
+                thread.Join();
+            }
         }
     }
 
@@ -481,6 +576,7 @@ namespace DualRemote
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint SWP_NOSENDCHANGING = 0x0400;
         private const double EntryToastHoldMs = 3600.0;
         private const double EntryToastTotalMs = 4400.0;
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -622,10 +718,12 @@ namespace DualRemote
                 GetWindowDisplayAffinity(Handle, out affinity) && affinity == WDA_EXCLUDEFROMCAPTURE;
         }
 
-        internal void EnsureTopMostNoActivate()
+        internal void EnsureTopMostNoActivate(bool show = false)
         {
             if (IsDisposed || !IsHandleCreated) return;
-            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+            if (show) flags |= SWP_SHOWWINDOW;
+            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, flags);
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)

@@ -92,7 +92,7 @@ namespace DualRemote
                 }
                 ShowDisplayBanner(hwBlackoutSwitch.Checked
                     ? "已开启物理屏背光降亮（仅调节非 HDR 显示器 VCP 0x10 背光亮度，绝不修改对比度与 RGB 色温，断开后回读校验恢复）。"
-                    : "已关闭物理屏背光降亮（防窥时仅使用防窥壁纸、0ms 置顶遮挡与物理键鼠锁定，完全不改动显示器硬件参数）。", Theme.PillTone.Info);
+                    : "已关闭物理屏背光降亮。防窥期间使用防窥壁纸和已配置的物理键鼠锁定。", Theme.PillTone.Info);
             };
             AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "防窥时降低物理屏背光亮度（DDC/CI 仅调亮度，可选）",
                 "仅将非 HDR 显示器背光亮度（0x10）调低并回读校验恢复，绝不改对比度或 RGB 增益，杜绝退出后过曝偏色", hwBlackoutSwitch);

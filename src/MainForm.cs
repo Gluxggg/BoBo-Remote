@@ -104,11 +104,12 @@ namespace DualRemote
 
         private readonly RecentStore recent;
         private readonly PrivacyWallpaperConfig privacyConfig;
-        private readonly PrivacyCurtainManager privacyCurtain = new PrivacyCurtainManager();
+        private readonly PrivacyCurtainManager privacyCurtain;
         private readonly PrivacyGuardState privacyGuard = new PrivacyGuardState();
         private readonly Timer remoteGuardTimer = new Timer();
         private HostSnapshot hostSnapshot = new HostSnapshot();
         private NotifyIcon trayIcon;
+        private Icon trayAppIcon;
         private Icon appIcon;
         private bool forceExit;
         private bool remoteSessionsTornDown;
@@ -143,6 +144,7 @@ namespace DualRemote
 
         internal MainForm(bool forceTour, string updatedVersion = null)
         {
+            privacyCurtain = new PrivacyCurtainManager(this);
             forceOnboardingOnLaunch = forceTour;
             updatedFromVersion = updatedVersion;
             initialScaleApplied = false;
@@ -536,9 +538,10 @@ namespace DualRemote
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("彻底退出 BoBo远程（断开远控）", null, delegate { forceExit = true; Close(); });
 
+            trayAppIcon = Theme.CreateSmallAppIcon();
             trayIcon = new NotifyIcon
             {
-                Icon = appIcon ?? SystemIcons.Application,
+                Icon = trayAppIcon ?? appIcon ?? SystemIcons.Application,
                 Text = "BoBo远程 · 低延迟远控与防窥守护",
                 Visible = true,
                 ContextMenuStrip = menu
@@ -639,6 +642,11 @@ namespace DualRemote
                 trayIcon.Visible = false;
                 trayIcon.Dispose();
                 trayIcon = null;
+            }
+            if (trayAppIcon != null)
+            {
+                trayAppIcon.Dispose();
+                trayAppIcon = null;
             }
             if (appIcon != null)
             {

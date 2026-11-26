@@ -1057,6 +1057,9 @@ namespace DualRemote
         private const uint SwpNoSize = 0x0001;
         private const uint SwpNoActivate = 0x0010;
         private static readonly IntPtr HwndTopMost = new IntPtr(-1);
+        private const TextFormatFlags SingleLineText = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+        private const TextFormatFlags MenuText = SingleLineText | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis;
+        private const TextFormatFlags SubtitleText = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -1071,14 +1074,17 @@ namespace DualRemote
         private readonly StreamControlCenterModel model;
         private readonly float dpiScale;
 
-        private Rectangle[] itemRects = new Rectangle[0];
+        private Rectangle[] itemRects;
+        private int[] shortcutWidths;
         private int hoveredIndex = -1;
         private int openSubmenuIndex = -1;
 
-        // Volume slider geometry
         private Rectangle speakerRect;
         private Rectangle sliderTrackRect;
+        private readonly UiTransition volumePosition;
+        private readonly UiTransition sliderEmphasis;
         private bool draggingSlider;
+        private int sliderDragOffset;
         private int lastNonZeroVolume = 80;
 
         internal UuMenuPopupForm(UuControlCenterSession session, int level, List<CcMenuItem> items, bool volumeSliderMode, StreamControlCenterModel model)
@@ -1088,7 +1094,12 @@ namespace DualRemote
             this.items = items ?? new List<CcMenuItem>();
             this.volumeSliderMode = volumeSliderMode;
             this.model = model ?? new StreamControlCenterModel();
-            if (this.model.VolumePercent > 0) lastNonZeroVolume = this.model.VolumePercent;
+            if (volumeSliderMode)
+            {
+                if (this.model.VolumePercent > 0) lastNonZeroVolume = this.model.VolumePercent;
+                volumePosition = new UiTransition(this, EffectiveVolume / 100f);
+                sliderEmphasis = new UiTransition(this);
+            }
 
             dpiScale = ResolveScale();
             FormBorderStyle = FormBorderStyle.None;
@@ -1177,9 +1188,9 @@ namespace DualRemote
         {
             if (volumeSliderMode)
             {
-                Size = new Size(S(318), S(54));
+                Size = new Size(S(322), S(54));
                 speakerRect = new Rectangle(S(14), S(11), S(32), S(32));
-                sliderTrackRect = new Rectangle(S(96), S(24), S(172), S(6));
+                sliderTrackRect = new Rectangle(S(96), S(24), S(164), S(6));
                 return;
             }
 
@@ -1187,59 +1198,66 @@ namespace DualRemote
             int padX = S(6);
             int minW = Level == 0 ? S(286) : S(246);
             int maxW = S(340);
-
-            int measuredMaxW = minW;
-            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
-            using (var mainFont = new Font("Microsoft YaHei UI", 10f))
-            using (var scFont = new Font("Microsoft YaHei UI", 8.8f))
-            {
-                foreach (CcMenuItem item in items)
-                {
-                    if (item.IsSeparator) continue;
-                    int textW = (int)Math.Ceiling(g.MeasureString(item.Text ?? "", mainFont).Width);
-                    int scW = string.IsNullOrEmpty(item.Shortcut) ? 0 : (int)Math.Ceiling(g.MeasureString(item.Shortcut, scFont).Width) + S(24);
-                    int extraLeft = S(44);
-                    int extraRight = S(30) + scW;
-                    int candidate = extraLeft + textW + extraRight;
-                    if (!string.IsNullOrEmpty(item.Subtitle)) candidate = Math.Max(candidate, S(292));
-                    if (candidate > measuredMaxW) measuredMaxW = candidate;
-                }
-            }
-            int finalW = Math.Min(maxW, measuredMaxW);
-
+            int textLeft = S(40);
+            int subtitleRight = S(14);
+            Font mainFont = Theme.GetFont(Theme.TextSize.Label);
+            Font smallFont = Theme.GetFont(Theme.TextSize.Small);
+            Font headerFont = Theme.GetFont(Theme.TextSize.LabelBold);
+            var unconstrained = new Size(int.MaxValue, int.MaxValue);
             itemRects = new Rectangle[items.Count];
-            int y = padY;
+            shortcutWidths = new int[items.Count];
+
             using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
-            using (var subFont = new Font("Microsoft YaHei UI", 8.3f))
             {
-                int subAvailW = finalW - S(58);
+                int measuredMaxW = minW;
                 for (int i = 0; i < items.Count; i++)
                 {
-                    CcMenuItem it = items[i];
-                    if (it.IsSeparator)
+                    CcMenuItem item = items[i];
+                    if (item.IsSeparator) continue;
+                    Font font = item.IsHeader ? headerFont : mainFont;
+                    int titleWidth = TextRenderer.MeasureText(g, item.Text, font, unconstrained, SingleLineText).Width;
+                    if (!string.IsNullOrEmpty(item.Shortcut))
+                    {
+                        int width = TextRenderer.MeasureText(g, item.Shortcut, smallFont, unconstrained, SingleLineText).Width;
+                        shortcutWidths[i] = Math.Min(S(112), width + S(2));
+                    }
+                    int left = item.IsHeader ? S(12) : textLeft;
+                    int candidate = padX * 2 + left + titleWidth + TextRightReserve(item, i) + S(2);
+                    if (!string.IsNullOrEmpty(item.Subtitle)) candidate = Math.Max(candidate, S(292));
+                    measuredMaxW = Math.Max(measuredMaxW, candidate);
+                }
+
+                int finalW = Math.Min(maxW, measuredMaxW);
+                int itemWidth = finalW - padX * 2;
+                int y = padY;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    CcMenuItem item = items[i];
+                    if (item.IsSeparator)
                     {
                         itemRects[i] = new Rectangle(S(12), y, finalW - S(24), S(11));
                         y += S(11);
+                        continue;
                     }
-                    else if (it.IsHeader)
+
+                    int height = item.IsHeader ? S(26) : S(38);
+                    if (!item.IsHeader && !string.IsNullOrEmpty(item.Subtitle))
                     {
-                        itemRects[i] = new Rectangle(padX, y, finalW - padX * 2, S(26));
-                        y += S(26);
+                        var available = new Size(itemWidth - textLeft - subtitleRight, int.MaxValue);
+                        int subtitleHeight = TextRenderer.MeasureText(g, item.Subtitle, smallFont, available, SubtitleText).Height;
+                        height = S(34) + subtitleHeight + S(8);
                     }
-                    else
-                    {
-                        int h = S(38);
-                        if (!string.IsNullOrEmpty(it.Subtitle))
-                        {
-                            SizeF sz = g.MeasureString(it.Subtitle, subFont, subAvailW);
-                            h = S(32) + (int)Math.Ceiling(sz.Height) + S(10);
-                        }
-                        itemRects[i] = new Rectangle(padX, y, finalW - padX * 2, h);
-                        y += h + S(1);
-                    }
+                    itemRects[i] = new Rectangle(padX, y, itemWidth, height);
+                    y += height + (item.IsHeader ? 0 : S(1));
                 }
+                Size = new Size(finalW, y + padY);
             }
-            Size = new Size(finalW, y + padY);
+        }
+
+        private int TextRightReserve(CcMenuItem item, int index)
+        {
+            if (shortcutWidths[index] > 0) return S(12) + shortcutWidths[index] + S(10);
+            return item.SubmenuBuilder != null || item.IsVolumeSliderSubmenu ? S(26) : S(12);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -1247,11 +1265,8 @@ namespace DualRemote
             base.OnMouseMove(e);
             if (volumeSliderMode)
             {
-                if (draggingSlider)
-                {
-                    UpdateVolumeFromX(e.X);
-                }
-                Cursor = (speakerRect.Contains(e.Location) || IsOverSlider(e.Location)) ? Cursors.Hand : Cursors.Default;
+                if (draggingSlider) UpdateVolumeFromX(e.X - sliderDragOffset, false);
+                UpdateSliderHover(e.Location);
                 return;
             }
 
@@ -1288,7 +1303,9 @@ namespace DualRemote
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (!volumeSliderMode && openSubmenuIndex < 0)
+            if (volumeSliderMode)
+                UpdateSliderHover(new Point(-1, -1));
+            else if (openSubmenuIndex < 0)
             {
                 hoveredIndex = -1;
                 Invalidate();
@@ -1304,27 +1321,16 @@ namespace DualRemote
             {
                 if (speakerRect.Contains(e.Location))
                 {
-                    bool nextMute = !(model.AudioMuted || model.VolumePercent <= 0);
-                    if (nextMute)
-                    {
-                        if (model.VolumePercent > 0) lastNonZeroVolume = model.VolumePercent;
-                        model.AudioMuted = true;
-                        model.VolumePercent = 0;
-                    }
-                    else
-                    {
-                        model.AudioMuted = false;
-                        model.VolumePercent = Math.Max(15, lastNonZeroVolume);
-                    }
-                    if (model.OnVolumeChanged != null) model.OnVolumeChanged(model.VolumePercent, model.AudioMuted);
-                    Invalidate();
-                    return;
+                    SetVolume(EffectiveVolume == 0 ? Math.Max(15, lastNonZeroVolume) : 0, true);
                 }
-                if (IsOverSlider(e.Location))
+                else if (IsOverSlider(e.Location))
                 {
+                    bool thumbHit = Math.Abs(e.X - SliderThumbX(volumePosition.Value)) <= S(9);
+                    sliderDragOffset = thumbHit ? e.X - SliderThumbX(EffectiveVolume / 100f) : 0;
                     draggingSlider = true;
                     Capture = true;
-                    UpdateVolumeFromX(e.X);
+                    UpdateSliderHover(e.Location);
+                    if (!thumbHit) UpdateVolumeFromX(e.X, true);
                 }
                 return;
             }
@@ -1352,27 +1358,58 @@ namespace DualRemote
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (draggingSlider)
-            {
-                draggingSlider = false;
-                Capture = false;
-            }
+            if (!draggingSlider || e.Button != MouseButtons.Left) return;
+            draggingSlider = false;
+            Capture = false;
+            UpdateSliderHover(e.Location);
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!draggingSlider || Capture) return;
+            draggingSlider = false;
+            UpdateSliderHover(IsHandleCreated ? PointToClient(Cursor.Position) : new Point(-1, -1));
         }
 
         private bool IsOverSlider(Point p)
         {
-            var expanded = new Rectangle(sliderTrackRect.X - S(10), sliderTrackRect.Y - S(12), sliderTrackRect.Width + S(20), sliderTrackRect.Height + S(24));
-            return expanded.Contains(p);
+            return Rectangle.Inflate(sliderTrackRect, S(12), S(13)).Contains(p);
         }
 
-        private void UpdateVolumeFromX(int x)
+        private void UpdateSliderHover(Point point)
         {
-            float ratio = (float)(x - sliderTrackRect.X) / Math.Max(1f, sliderTrackRect.Width);
-            int pct = Math.Max(0, Math.Min(100, (int)Math.Round(ratio * 100f)));
-            model.VolumePercent = pct;
-            model.AudioMuted = pct == 0;
-            if (pct > 0) lastNonZeroVolume = pct;
-            if (model.OnVolumeChanged != null) model.OnVolumeChanged(pct, model.AudioMuted);
+            bool sliderHot = draggingSlider || IsOverSlider(point);
+            Cursor = sliderHot || speakerRect.Contains(point) ? Cursors.Hand : Cursors.Default;
+            sliderEmphasis.MoveTo(sliderHot ? 1f : 0f, 115);
+        }
+
+        private int EffectiveVolume
+        {
+            get { return model.AudioMuted ? 0 : Math.Max(0, Math.Min(100, model.VolumePercent)); }
+        }
+
+        private int SliderThumbX(float position)
+        {
+            return sliderTrackRect.Left + (int)Math.Round(sliderTrackRect.Width * position);
+        }
+
+        private void UpdateVolumeFromX(int x, bool animate)
+        {
+            float ratio = (float)(x - sliderTrackRect.Left) / sliderTrackRect.Width;
+            SetVolume((int)Math.Round(ratio * 100f), animate);
+        }
+
+        private void SetVolume(int percent, bool animate)
+        {
+            percent = Math.Max(0, Math.Min(100, percent));
+            bool muted = percent == 0;
+            volumePosition.MoveTo(percent / 100f, animate ? 135 : 0);
+            if (model.VolumePercent == percent && model.AudioMuted == muted) return;
+            model.VolumePercent = percent;
+            model.AudioMuted = muted;
+            if (percent > 0) lastNonZeroVolume = percent;
+            if (model.OnVolumeChanged != null) model.OnVolumeChanged(percent, muted);
             Invalidate();
         }
 
@@ -1390,7 +1427,6 @@ namespace DualRemote
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
             g.Clear(Theme.Paper);
             Theme.Surface(g, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f),
@@ -1402,151 +1438,126 @@ namespace DualRemote
                 return;
             }
 
-            using (var mainFont = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
-            using (var subFont = new Font("Microsoft YaHei UI", 8.3f, FontStyle.Regular))
-            using (var hdrFont = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold))
-            using (var scFont = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Regular))
-            using (var leftFmt = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
-            using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+            Font mainFont = Theme.GetFont(Theme.TextSize.Label);
+            Font smallFont = Theme.GetFont(Theme.TextSize.Small);
+            Font headerFont = Theme.GetFont(Theme.TextSize.LabelBold);
+            for (int i = 0; i < items.Count; i++)
             {
-                for (int i = 0; i < items.Count; i++)
+                CcMenuItem item = items[i];
+                Rectangle row = itemRects[i];
+                if (item.IsSeparator)
                 {
-                    CcMenuItem it = items[i];
-                    Rectangle r = itemRects[i];
+                    int midY = row.Top + row.Height / 2;
+                    using (var pen = new Pen(Theme.Divider, 1f))
+                        g.DrawLine(pen, row.Left, midY, row.Right, midY);
+                    continue;
+                }
+                if (item.IsHeader)
+                {
+                    var header = new Rectangle(row.Left + S(12), row.Top, row.Width - S(24), row.Height);
+                    TextRenderer.DrawText(g, item.Text, headerFont, header, Theme.Muted, MenuText);
+                    continue;
+                }
 
-                    if (it.IsSeparator)
-                    {
-                        int midY = r.Top + r.Height / 2;
-                        using (var sep = new Pen(Theme.Divider, 1f))
-                            g.DrawLine(sep, r.Left, midY, r.Right, midY);
-                        continue;
-                    }
+                bool submenuOpen = i == openSubmenuIndex;
+                if (item.Enabled && (i == hoveredIndex || submenuOpen))
+                {
+                    Color highlight = item.IsDanger ? Theme.AlertLight : submenuOpen ? Theme.AccentLight : Theme.SurfaceSubtle;
+                    Theme.Surface(g, row, S(6), highlight, Color.Transparent);
+                }
 
-                    if (it.IsHeader)
-                    {
-                        using (var hb = new SolidBrush(Theme.Muted))
-                            g.DrawString(it.Text, hdrFont, hb, new Rectangle(r.Left + S(12), r.Top, r.Width - S(20), r.Height), leftFmt);
-                        continue;
-                    }
+                Color foreground = !item.Enabled ? Theme.Muted : item.IsDanger ? Theme.Alert : Theme.Ink;
+                bool hasSubtitle = !string.IsNullOrEmpty(item.Subtitle);
+                int titleHeight = hasSubtitle ? S(34) : row.Height;
+                int iconCenterX = row.Left + S(21);
+                int iconCenterY = row.Top + titleHeight / 2;
+                int iconSize = S(16);
+                var iconRect = new RectangleF(iconCenterX - iconSize / 2f, iconCenterY - iconSize / 2f, iconSize, iconSize);
 
-                    bool submenuOpen = i == openSubmenuIndex;
-                    if (it.Enabled && (i == hoveredIndex || submenuOpen))
-                    {
-                        Color highlight = it.IsDanger ? Theme.AlertLight : submenuOpen ? Theme.AccentLight : Theme.SurfaceSubtle;
-                        Theme.Surface(g, r, S(6), highlight, Color.Transparent);
-                    }
+                if (item.CheckSelected)
+                {
+                    Theme.DrawGlyph(g, Theme.Glyph.Check, iconRect, item.Enabled ? Theme.Accent : Theme.Muted);
+                }
+                else if (item.RadioSelected)
+                {
+                    int diameter = S(6);
+                    using (var dot = new SolidBrush(item.Enabled ? Theme.Accent : Theme.Muted))
+                        g.FillEllipse(dot, iconCenterX - diameter / 2, iconCenterY - diameter / 2, diameter, diameter);
+                }
+                else if (item.Icon != CcIcon.None)
+                {
+                    Color iconInk = item.IsDanger || !item.Enabled ? foreground : submenuOpen ? Theme.Accent : Theme.BodyInk;
+                    DrawMenuIcon(g, item.Icon, iconRect, iconInk);
+                }
 
-                    Color fg = !it.Enabled ? Theme.Muted : it.IsDanger ? Theme.Alert : Theme.Ink;
-                    int iconCenterX = r.Left + S(21);
-                    int rowTopH = string.IsNullOrEmpty(it.Subtitle) ? r.Height : S(34);
-                    int iconCenterY = r.Top + rowTopH / 2;
-                    float iconSize = S(16);
-                    var iconRect = new RectangleF(iconCenterX - iconSize / 2f, iconCenterY - iconSize / 2f, iconSize, iconSize);
+                int textLeft = row.Left + S(40);
+                int textWidth = row.Right - TextRightReserve(item, i) - textLeft;
+                var title = new Rectangle(textLeft, row.Top, textWidth, titleHeight);
+                TextRenderer.DrawText(g, item.Text, mainFont, title, foreground, MenuText);
+                if (hasSubtitle)
+                {
+                    var subtitle = new Rectangle(textLeft, title.Bottom, row.Right - S(14) - textLeft, row.Bottom - title.Bottom);
+                    TextRenderer.DrawText(g, item.Subtitle, smallFont, subtitle, Theme.Muted, SubtitleText);
+                }
 
-                    if (it.CheckSelected)
-                    {
-                        Theme.DrawGlyph(g, Theme.Glyph.Check, iconRect, it.Enabled ? Theme.Accent : Theme.Muted);
-                    }
-                    else if (it.RadioSelected)
-                    {
-                        float d = S(5.5f);
-                        using (var dot = new SolidBrush(it.Enabled ? Theme.Accent : Theme.Muted))
-                            g.FillEllipse(dot, iconCenterX - d / 2f, iconCenterY - d / 2f, d, d);
-                    }
-                    else if (it.Icon != CcIcon.None)
-                    {
-                        Color iconInk = it.IsDanger || !it.Enabled ? fg : submenuOpen ? Theme.Accent : Theme.BodyInk;
-                        DrawMenuIcon(g, it.Icon, iconRect, iconInk);
-                    }
-
-                    // Main text
-                    int textLeft = r.Left + S(40);
-                    int rightReserve = (it.SubmenuBuilder != null || it.IsVolumeSliderSubmenu) ? S(24) : S(12);
-                    if (!string.IsNullOrEmpty(it.Shortcut)) rightReserve += S(94);
-
-                    using (var tb = new SolidBrush(fg))
-                    {
-                        g.DrawString(it.Text, mainFont, tb,
-                            new Rectangle(textLeft, r.Top, Math.Max(20, r.Right - rightReserve - textLeft), rowTopH), leftFmt);
-                    }
-
-                    // Optional subtitle
-                    if (!string.IsNullOrEmpty(it.Subtitle))
-                    {
-                        using (var sb = new SolidBrush(Theme.Muted))
-                        {
-                            g.DrawString(it.Subtitle, subFont, sb,
-                                new RectangleF(textLeft, r.Top + S(31), r.Right - S(14) - textLeft, r.Height - S(34)));
-                        }
-                    }
-
-                    // Shortcut hint or submenu chevron
-                    if (!string.IsNullOrEmpty(it.Shortcut))
-                    {
-                        using (var scb = new SolidBrush(Theme.Muted))
-                        {
-                            g.DrawString(it.Shortcut, scFont, scb,
-                                new Rectangle(r.Right - S(116), r.Top, S(104), rowTopH), rightFmt);
-                        }
-                    }
-                    else if (it.SubmenuBuilder != null || it.IsVolumeSliderSubmenu)
-                    {
-                        float chevronSize = S(13);
-                        var chevronRect = new RectangleF(r.Right - S(14) - chevronSize / 2f,
-                            iconCenterY - chevronSize / 2f, chevronSize, chevronSize);
-                        Theme.DrawGlyph(g, Theme.Glyph.ChevronRight, chevronRect, submenuOpen ? Theme.Accent : Theme.Muted);
-                    }
+                if (shortcutWidths[i] > 0)
+                {
+                    int width = shortcutWidths[i];
+                    var shortcut = new Rectangle(row.Right - S(12) - width, row.Top, width, titleHeight);
+                    TextRenderer.DrawText(g, item.Shortcut, smallFont, shortcut, Theme.Muted, MenuText | TextFormatFlags.Right);
+                }
+                else if (item.SubmenuBuilder != null || item.IsVolumeSliderSubmenu)
+                {
+                    int chevronSize = S(13);
+                    var chevron = new RectangleF(row.Right - S(14) - chevronSize / 2f,
+                        iconCenterY - chevronSize / 2f, chevronSize, chevronSize);
+                    Theme.DrawGlyph(g, Theme.Glyph.ChevronRight, chevron, submenuOpen ? Theme.Accent : Theme.Muted);
                 }
             }
         }
 
         private void PaintVolumeSlider(Graphics g)
         {
-            int effectiveVol = model.AudioMuted ? 0 : Math.Max(0, Math.Min(100, model.VolumePercent));
-            bool muted = effectiveVol == 0;
+            int volume = EffectiveVolume;
+            bool muted = volume == 0;
             Theme.Surface(g, speakerRect, S(6), muted ? Theme.AccentLight : Theme.SurfaceSubtle, Color.Transparent);
-            float speakerSize = S(18);
+            int speakerSize = S(18);
             var speakerGlyph = new RectangleF(speakerRect.X + (speakerRect.Width - speakerSize) / 2f,
                 speakerRect.Y + (speakerRect.Height - speakerSize) / 2f, speakerSize, speakerSize);
             Theme.DrawGlyph(g, muted ? Theme.Glyph.VolumeOff : Theme.Glyph.Volume, speakerGlyph,
                 muted ? Theme.Accent : Theme.BodyInk);
 
-            using (var lblFont = new Font("Microsoft YaHei UI", 10f))
-            using (var pctFont = new Font("Consolas", 9f, FontStyle.Bold))
-            using (var fg = new SolidBrush(Theme.Ink))
-            using (var hint = new SolidBrush(Theme.Muted))
-            using (var fmt = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            TextRenderer.DrawText(g, "音量", Theme.GetFont(Theme.TextSize.Label),
+                new Rectangle(S(50), 0, S(44), Height), Theme.Ink, MenuText);
+            int readoutLeft = sliderTrackRect.Right + S(14);
+            var readout = new Rectangle(readoutLeft, 0, Width - readoutLeft - S(12), Height);
+            TextRenderer.DrawText(g, volume + "%", Theme.GetFont(Theme.TextSize.Code), readout,
+                Theme.BodyInk, MenuText | TextFormatFlags.Right);
+
+            Theme.Surface(g, sliderTrackRect, sliderTrackRect.Height / 2f, Theme.StrokeStrong, Color.Transparent);
+            int thumbX = SliderThumbX(volumePosition.Value);
+            int fillWidth = thumbX - sliderTrackRect.Left;
+            if (fillWidth > 0)
             {
-                g.DrawString("音量", lblFont, fg, new Rectangle(S(50), 0, S(44), Height), fmt);
-                g.DrawString(effectiveVol + "%", pctFont, hint, new Rectangle(sliderTrackRect.Right + S(12), 0, S(42), Height), fmt);
+                var fill = new Rectangle(sliderTrackRect.Left, sliderTrackRect.Top, fillWidth, sliderTrackRect.Height);
+                Theme.Surface(g, fill, fill.Height / 2f, Theme.Accent, Color.Transparent);
             }
 
-            // Track background
-            using (var trackPath = Theme.Round(sliderTrackRect, S(3)))
-            using (var trackBg = new SolidBrush(Theme.StrokeStrong))
-                g.FillPath(trackBg, trackPath);
-
-            // Active blue fill
-            int fillW = (int)Math.Round(sliderTrackRect.Width * (effectiveVol / 100f));
-            if (fillW > 0)
+            float thumbY = sliderTrackRect.Top + sliderTrackRect.Height / 2f;
+            float emphasis = sliderEmphasis.Value;
+            float radius = (7.5f + emphasis * 0.75f) * dpiScale;
+            if (emphasis > 0f)
             {
-                var fillRect = new Rectangle(sliderTrackRect.X, sliderTrackRect.Y, Math.Max(S(4), fillW), sliderTrackRect.Height);
-                using (var fillPath = Theme.Round(fillRect, S(3)))
-                using (var fillBrush = new SolidBrush(Theme.Accent))
-                    g.FillPath(fillBrush, fillPath);
+                float halo = radius + 2.5f * dpiScale;
+                using (var brush = new SolidBrush(Color.FromArgb((int)Math.Round(42f * emphasis), Theme.Accent)))
+                    g.FillEllipse(brush, thumbX - halo, thumbY - halo, halo * 2f, halo * 2f);
             }
-
-            // White ringed thumb knob
-            float thumbX = sliderTrackRect.X + fillW;
-            float thumbY = sliderTrackRect.Y + sliderTrackRect.Height / 2f;
-            float r = S(8);
-            using (var shadow = new SolidBrush(Color.FromArgb(32, Theme.Ink)))
-                g.FillEllipse(shadow, thumbX - r, thumbY - r + 1.5f, r * 2f, r * 2f);
-            using (var white = new SolidBrush(Theme.Paper))
-            using (var ring = new Pen(Theme.Accent, Math.Max(2f, 2f * dpiScale)))
+            using (var fill = new SolidBrush(Theme.Paper))
+            using (var ring = new Pen(draggingSlider ? Theme.AccentPressed : Theme.Accent, 1.7f * dpiScale))
             {
-                g.FillEllipse(white, thumbX - r, thumbY - r, r * 2f, r * 2f);
-                g.DrawEllipse(ring, thumbX - r, thumbY - r, r * 2f, r * 2f);
+                var thumb = new RectangleF(thumbX - radius, thumbY - radius, radius * 2f, radius * 2f);
+                g.FillEllipse(fill, thumb);
+                g.DrawEllipse(ring, thumb);
             }
         }
 

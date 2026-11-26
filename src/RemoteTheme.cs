@@ -21,7 +21,7 @@ namespace DualRemote
 
         internal static readonly Color Ink = Color.FromArgb(29, 36, 49);
         internal static readonly Color BodyInk = Color.FromArgb(60, 74, 94);
-        internal static readonly Color Muted = Color.FromArgb(86, 100, 120);
+        internal static readonly Color Muted = Color.FromArgb(76, 90, 111);
         internal static readonly Color Placeholder = Color.FromArgb(102, 115, 135);
 
         internal static readonly Color Stroke = Color.FromArgb(222, 227, 235);
@@ -51,7 +51,7 @@ namespace DualRemote
         internal static readonly Color OverlayMuted = Color.FromArgb(189, 201, 222);
 
         private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.5f);
-        private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 8.5f);
+        private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 9f);
         private static readonly Font LabelFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Regular);
         private static readonly Font LabelBoldFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Bold);
         private static readonly Font SectionFont = new Font("Microsoft YaHei UI", 11.25f, FontStyle.Bold);
@@ -710,6 +710,29 @@ namespace DualRemote
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
 
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint ExtractIconEx(string file, int index, IntPtr largeIcon, out IntPtr smallIcon, uint count);
+
+        internal static Icon CreateSmallAppIcon()
+        {
+            IntPtr handle = IntPtr.Zero;
+            try
+            {
+                ExtractIconEx(Application.ExecutablePath, 0, IntPtr.Zero, out handle, 1);
+                if (handle != IntPtr.Zero)
+                {
+                    using (Icon icon = Icon.FromHandle(handle))
+                        return (Icon)icon.Clone();
+                }
+            }
+            catch { }
+            finally
+            {
+                if (handle != IntPtr.Zero) DestroyIcon(handle);
+            }
+            return null;
+        }
+
         private static Bitmap cachedBrandLogo;
         private static bool brandLogoLoaded;
 
@@ -875,6 +898,17 @@ namespace DualRemote
             }
         }
 
+        private static Color Mix(Color from, Color to, float amount)
+        {
+            if (amount <= 0f) return from;
+            if (amount >= 1f) return to;
+            return Color.FromArgb(
+                (int)Math.Round(from.A + (to.A - from.A) * amount),
+                (int)Math.Round(from.R + (to.R - from.R) * amount),
+                (int)Math.Round(from.G + (to.G - from.G) * amount),
+                (int)Math.Round(from.B + (to.B - from.B) * amount));
+        }
+
         private static void FocusOutline(Graphics graphics, RectangleF bounds, float radius, Color color, float width)
         {
             using (var path = Round(bounds, radius))
@@ -928,6 +962,7 @@ namespace DualRemote
         {
             private ButtonStyle style;
             internal ButtonStyle Style { get { return style; } set { style = value; } }
+            private readonly UiTransition hoverTransition;
             private bool hovered;
             private bool pressed;
             private bool keyboardFocus;
@@ -941,6 +976,7 @@ namespace DualRemote
             internal ActionButton(ButtonStyle style, Glyph icon)
             {
                 this.style = style;
+                hoverTransition = new UiTransition(this);
                 Icon = icon;
                 FlatStyle = FlatStyle.Flat;
                 FlatAppearance.BorderSize = 0;
@@ -951,8 +987,41 @@ namespace DualRemote
                 Cursor = Cursors.Hand;
             }
 
-            protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
-            protected override void OnMouseLeave(EventArgs e) { hovered = pressed = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hovered = true;
+                UpdateHover();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hovered = pressed = false;
+                UpdateHover();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnVisibleChanged(EventArgs e)
+            {
+                base.OnVisibleChanged(e);
+                if (Visible) return;
+                hovered = pressed = false;
+                UpdateHover();
+            }
+
+            protected override void OnEnabledChanged(EventArgs e)
+            {
+                base.OnEnabledChanged(e);
+                if (!Enabled) hovered = pressed = false;
+                UpdateHover();
+            }
+
+            private void UpdateHover()
+            {
+                if (hoverTransition != null)
+                    hoverTransition.MoveTo(Enabled && hovered && style != ButtonStyle.Close ? 1f : 0f, 115);
+                Invalidate();
+            }
             protected override void OnMouseDown(MouseEventArgs e)
             {
                 keyboardFocus = false;
@@ -961,6 +1030,14 @@ namespace DualRemote
                 base.OnMouseDown(e);
             }
             protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+            protected override void OnMouseCaptureChanged(EventArgs e)
+            {
+                base.OnMouseCaptureChanged(e);
+                if (!pressed || Capture) return;
+                pressed = false;
+                Invalidate();
+            }
+
             protected override void OnEnter(EventArgs e)
             {
                 keyboardFocus = Control.MouseButtons == MouseButtons.None;
@@ -1003,22 +1080,23 @@ namespace DualRemote
                     Color text = Ink;
                     Color glyphColor = Color.Empty;
                     bool glow = Enabled && (hovered || pressed);
-                    float scale = g.DpiX / 96f;
+                    float hover = !Enabled ? 0f : pressed ? 1f : hoverTransition.Value;
+                    float scale = GetDpiScale(this);
 
                     if (style == ButtonStyle.Primary)
                     {
-                        background = !Enabled ? DisabledBg : pressed ? AccentPressed : glow ? AccentHover : Accent;
+                        background = !Enabled ? DisabledBg : pressed ? AccentPressed : Mix(Accent, AccentHover, hover);
                         text = !Enabled ? DisabledText : Paper;
                     }
                     else if (style == ButtonStyle.Secondary)
                     {
-                        background = !Enabled ? SurfaceSubtle : pressed ? NavHover : glow ? SurfaceSubtle : Paper;
-                        stroke = glow ? AccentBorder : StrokeStrong;
+                        background = !Enabled ? SurfaceSubtle : pressed ? NavHover : Mix(Paper, SurfaceSubtle, hover);
+                        stroke = Mix(StrokeStrong, AccentBorder, hover);
                         text = Enabled ? Ink : Muted;
                     }
                     else if (style == ButtonStyle.AccentSoft)
                     {
-                        background = Active || pressed ? NavActive : glow ? NavHover : AccentLight;
+                        background = Active || pressed ? NavActive : Mix(AccentLight, NavHover, hover);
                         stroke = Active ? Accent : AccentBorder;
                         text = Accent;
                     }
@@ -1031,7 +1109,7 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Chip)
                     {
-                        background = Active ? AccentLight : glow ? SurfaceSubtle : Paper;
+                        background = Active ? AccentLight : Mix(Paper, SurfaceSubtle, hover);
                         stroke = Active ? Accent : StrokeStrong;
                         text = Active ? Accent : Ink;
                     }
@@ -1042,17 +1120,17 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Navigation)
                     {
-                        background = Active ? NavActive : glow ? NavHover : surface;
+                        background = Active ? NavActive : Mix(surface, NavHover, hover);
                         text = Active ? Ink : glow ? Ink : BodyInk;
                     }
                     else if (style == ButtonStyle.NavSection)
                     {
-                        background = glow ? NavHover : surface;
+                        background = Mix(surface, NavHover, hover);
                         text = Ink;
                     }
                     else if (style == ButtonStyle.ToolbarAction)
                     {
-                        background = glow ? SurfaceSubtle : Paper;
+                        background = Mix(Paper, SurfaceSubtle, hover);
                         text = Enabled ? BodyInk : Muted;
                     }
                     else if (style == ButtonStyle.Link)
@@ -1062,12 +1140,12 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Quiet)
                     {
-                        background = glow ? SurfaceSubtle : surface;
+                        background = Mix(surface, SurfaceSubtle, hover);
                         text = Enabled ? (Active ? Accent : BodyInk) : Muted;
                     }
                     else if (style == ButtonStyle.IconGhost)
                     {
-                        background = Active ? NavActive : glow ? NavHover : surface;
+                        background = Active ? NavActive : Mix(surface, NavHover, hover);
                         text = Ink;
                     }
                     else if (style == ButtonStyle.Close)
@@ -1077,7 +1155,7 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Caption)
                     {
-                        background = glow ? NavHover : surface;
+                        background = Mix(surface, NavHover, hover);
                         text = BodyInk;
                     }
                     else if (style == ButtonStyle.DangerPill)
@@ -1153,16 +1231,17 @@ namespace DualRemote
 
                         if (style == ButtonStyle.NavSection)
                         {
-                            float chevSize = (float)Math.Round(11f * scale);
+                            float chevSize = (float)Math.Round(13f * scale);
                             DrawGlyph(g, Active ? Glyph.ChevronUp : Glyph.ChevronDown,
-                                new RectangleF((float)Math.Round(Width - 20f * scale), (float)Math.Round((Height - chevSize) / 2f), chevSize, chevSize), Muted);
+                                new RectangleF(Width - (float)Math.Round(8f * scale) - chevSize,
+                                    (float)Math.Round((Height - chevSize) / 2f), chevSize, chevSize), Muted);
                         }
                         return;
                     }
 
                     if (string.IsNullOrEmpty(Text))
                     {
-                        float s = (float)Math.Round(((style == ButtonStyle.Caption || style == ButtonStyle.Close) ? 11f : 16f) * scale);
+                        float s = (float)Math.Round(((style == ButtonStyle.Caption || style == ButtonStyle.Close) ? 13f : 16f) * scale);
                         DrawGlyph(g, Icon, new RectangleF((float)Math.Round((Width - s) / 2f), (float)Math.Round((Height - s) / 2f), s, s), glyphColor);
                         if (ShowIndicatorDot)
                         {
@@ -1253,20 +1332,17 @@ namespace DualRemote
             }
         }
 
-        /// <summary>
-        /// UU 同款极简细条滚动视口 + 防拉伸变形响应宽度控制：
-        /// - 极细 3px 圆头悬浮滑块（Hover 舒展至 4.5px），无轨道、无箭头、不占布局宽度；
-        /// - 宽屏/全屏时限制最大内容宽度并水平居中，杜绝全屏缩在左上角或卡片变形。
-        /// </summary>
         internal sealed class SlimScrollViewport : Panel
         {
             private const int ScrollbarReserve = 14;
+            private static readonly Color ThumbIdle = Color.FromArgb(158, 167, 180);
+            private static readonly Color ThumbHover = Color.FromArgb(104, 117, 136);
+            private readonly UiTransition thumbEmphasis;
             private Control content;
             private int offset;
             private bool dragging;
             private bool thumbHot;
-            private int dragStartY;
-            private int dragStartOffset;
+            private float thumbGrab;
 
             internal int MaxContentWidth = 1680;
             internal bool SuspendResponsiveLayout;
@@ -1274,6 +1350,7 @@ namespace DualRemote
 
             internal SlimScrollViewport()
             {
+                thumbEmphasis = new UiTransition(this, invalidate: InvalidateScrollbar);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 Padding = Padding.Empty;
@@ -1284,7 +1361,7 @@ namespace DualRemote
 
             internal void ScrollByWheel(int delta)
             {
-                ScrollBy(-delta / 3);
+                if (HasOverflow()) SetOffset(offset - delta / 3);
             }
 
             internal void ResetScroll()
@@ -1321,12 +1398,13 @@ namespace DualRemote
             {
                 base.OnVisibleChanged(e);
                 if (Visible) LayoutContent();
+                else if (dragging || thumbHot) FinishDrag(false);
             }
 
             protected override void OnMouseWheel(MouseEventArgs e)
             {
                 base.OnMouseWheel(e);
-                ScrollBy(-e.Delta / 3);
+                ScrollByWheel(e.Delta);
             }
 
             protected override void OnMouseDown(MouseEventArgs e)
@@ -1336,22 +1414,14 @@ namespace DualRemote
                 RectangleF track;
                 RectangleF thumb;
                 GetScrollbarGeometry(out track, out thumb);
-                RectangleF hitThumb = RectangleF.Inflate(thumb, 6f, 4f);
-                RectangleF hitTrack = RectangleF.Inflate(track, 6f, 0f);
-                if (hitThumb.Contains(e.Location))
-                {
-                    dragging = true;
-                    dragStartY = e.Y;
-                    dragStartOffset = offset;
-                    Capture = true;
-                    Invalidate();
-                }
-                else if (hitTrack.Contains(e.Location))
-                {
-                    float travel = Math.Max(1f, track.Height - thumb.Height);
-                    float ratio = (e.Y - track.Top - thumb.Height * 0.5f) / travel;
-                    SetOffset((int)Math.Round(ratio * MaxOffset()));
-                }
+                bool overThumb = HitsThumb(e.Location, track, thumb);
+                if (!overThumb && !track.Contains(e.Location)) return;
+
+                thumbGrab = overThumb ? (e.Y - thumb.Top) / thumb.Height : 0.5f;
+                dragging = true;
+                Capture = true;
+                UpdateThumbState(true);
+                if (!overThumb) MoveThumb(e.Y, track, thumb);
             }
 
             protected override void OnMouseMove(MouseEventArgs e)
@@ -1362,43 +1432,30 @@ namespace DualRemote
                     RectangleF track;
                     RectangleF thumb;
                     GetScrollbarGeometry(out track, out thumb);
-                    float travel = Math.Max(1f, track.Height - thumb.Height);
-                    float ratio = (e.Y - dragStartY) / travel;
-                    SetOffset(dragStartOffset + (int)Math.Round(ratio * MaxOffset()));
+                    MoveThumb(e.Y, track, thumb);
                     return;
                 }
 
-                RectangleF unusedTrack;
-                RectangleF currentThumb;
-                GetScrollbarGeometry(out unusedTrack, out currentThumb);
-                bool hot = HasOverflow() && RectangleF.Inflate(currentThumb, 6f, 4f).Contains(e.Location);
-                if (hot != thumbHot)
-                {
-                    thumbHot = hot;
-                    Cursor = hot ? Cursors.Hand : Cursors.Default;
-                    Invalidate();
-                }
+                bool hot = IsOverThumb(e.Location);
+                if (hot != thumbHot) UpdateThumbState(hot);
             }
 
             protected override void OnMouseUp(MouseEventArgs e)
             {
                 base.OnMouseUp(e);
-                if (e.Button != MouseButtons.Left) return;
-                dragging = false;
-                Capture = false;
-                Invalidate();
+                if (dragging && e.Button == MouseButtons.Left) FinishDrag(IsOverThumb(e.Location));
+            }
+
+            protected override void OnMouseCaptureChanged(EventArgs e)
+            {
+                base.OnMouseCaptureChanged(e);
+                if (dragging && !Capture) FinishDrag(Visible && IsOverThumb(PointToClient(Cursor.Position)));
             }
 
             protected override void OnMouseLeave(EventArgs e)
             {
                 base.OnMouseLeave(e);
-                if (dragging) return;
-                if (thumbHot)
-                {
-                    thumbHot = false;
-                    Cursor = Cursors.Default;
-                    Invalidate();
-                }
+                if (!dragging && thumbHot) UpdateThumbState(false);
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
@@ -1412,13 +1469,13 @@ namespace DualRemote
                 base.OnPaint(e);
                 if (!HasOverflow()) return;
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
                 RectangleF track;
                 RectangleF thumb;
                 GetScrollbarGeometry(out track, out thumb);
-                Color thumbColor = dragging
-                    ? Color.FromArgb(90, 98, 110)
-                    : thumbHot ? Color.FromArgb(116, 124, 138) : Color.FromArgb(164, 171, 182);
-                Surface(e.Graphics, thumb, thumb.Width * 0.5f, thumbColor, Color.Transparent);
+                Color color = dragging ? BodyInk : Mix(ThumbIdle, ThumbHover, thumbEmphasis.Value);
+                thumb.Y = (float)Math.Round(thumb.Y);
+                Surface(e.Graphics, thumb, thumb.Width * 0.5f, color, Color.Transparent);
             }
 
             private void HookMouseWheel(Control control)
@@ -1427,19 +1484,23 @@ namespace DualRemote
                 {
                     var combo = sender as ComboBox;
                     if (combo != null && combo.DroppedDown) return;
-                    ScrollBy(-e.Delta / 3);
+                    ScrollByWheel(e.Delta);
                 };
                 control.ControlAdded += delegate(object sender, ControlEventArgs e) { HookMouseWheel(e.Control); };
                 foreach (Control child in control.Controls)
                     HookMouseWheel(child);
             }
 
+            private int ScrollbarWidth
+            {
+                get { return Math.Max(8, (int)Math.Round(ScrollbarReserve * GetDpiScale(this))); }
+            }
+
             private void LayoutContent()
             {
                 if (content == null || SuspendResponsiveLayout) return;
                 float scale = GetDpiScale(this);
-                int reserve = Math.Max(8, (int)Math.Round(ScrollbarReserve * scale));
-                int avail = Math.Max(280, ClientSize.Width - reserve);
+                int avail = Math.Max(280, ClientSize.Width - ScrollbarWidth);
                 int targetWidth = MaxContentWidth > 0
                     ? Math.Min(avail, (int)Math.Round(MaxContentWidth * scale))
                     : avail;
@@ -1452,28 +1513,22 @@ namespace DualRemote
                     var handler = ContentWidthChanged;
                     if (handler != null) handler(targetWidth);
                 }
-                int max = MaxOffset();
-                offset = Math.Max(0, Math.Min(max, offset));
+                offset = Math.Min(MaxOffset(), offset);
                 content.Location = new Point(leftX, -offset);
+                if (!HasOverflow() && (dragging || thumbHot)) FinishDrag(false);
                 Invalidate();
             }
 
             private void ClampOffsetAndRedraw()
             {
-                if (content == null) return;
-                int max = MaxOffset();
-                int next = Math.Max(0, Math.Min(max, offset));
-                if (next != offset)
-                {
-                    offset = next;
-                    content.Location = new Point(content.Location.X, -offset);
-                }
-                Invalidate();
+                SetOffset(offset);
+                if (!HasOverflow() && (dragging || thumbHot)) FinishDrag(false);
+                InvalidateScrollbar();
             }
 
             private bool HasOverflow()
             {
-                return content != null && content.Height > ClientSize.Height + 1;
+                return MaxOffset() > 1;
             }
 
             private int MaxOffset()
@@ -1483,34 +1538,73 @@ namespace DualRemote
 
             private void SetOffset(int value)
             {
-                int max = MaxOffset();
-                offset = Math.Max(0, Math.Min(max, value));
-                if (content != null)
-                    content.Location = new Point(content.Location.X, -offset);
+                int next = Math.Max(0, Math.Min(MaxOffset(), value));
+                if (offset == next) return;
+                offset = next;
+                if (content != null) content.Location = new Point(content.Left, -offset);
+                if (thumbHot && !dragging && !IsOverThumb(PointToClient(Cursor.Position))) UpdateThumbState(false);
                 Invalidate();
-            }
-
-            private void ScrollBy(int delta)
-            {
-                if (!HasOverflow()) return;
-                SetOffset(offset + delta);
             }
 
             private void GetScrollbarGeometry(out RectangleF track, out RectangleF thumb)
             {
                 float scale = GetDpiScale(this);
-                float width = (dragging || thumbHot ? 4.5f : 3f) * scale;
-                float rightEdge = Width - 7.5f * scale;
-                float top = 8f * scale;
-                float bottom = Math.Max(top + 1f, Height - 8f * scale);
-                float trackHeight = Math.Max(1f, bottom - top);
-                float contentH = content == null ? 1f : Math.Max(1f, content.Height);
-                float thumbHeight = Math.Max(32f * scale, trackHeight * ClientSize.Height / contentH);
-                thumbHeight = Math.Min(trackHeight, thumbHeight);
-                float travel = Math.Max(0f, trackHeight - thumbHeight);
+                float top = (float)Math.Round(8f * scale);
+                float trackHeight = Math.Max(1f, ClientSize.Height - top * 2f);
+                int reserve = ScrollbarWidth;
+                track = new RectangleF(ClientSize.Width - reserve, top, reserve, trackHeight);
+
+                float width = (3f + 2.5f * thumbEmphasis.Value) * scale;
+                float thumbHeight = Math.Max(32f * scale, trackHeight * ClientSize.Height / Math.Max(1f, content.Height));
+                thumbHeight = Math.Min(trackHeight, (float)Math.Round(thumbHeight));
+                float travel = trackHeight - thumbHeight;
                 float thumbTop = top + travel * offset / Math.Max(1f, MaxOffset());
-                track = new RectangleF(rightEdge - width, top, width, trackHeight);
-                thumb = new RectangleF(rightEdge - width, thumbTop, width, thumbHeight);
+                thumb = new RectangleF(track.Left + (reserve - width) / 2f, thumbTop, width, thumbHeight);
+            }
+
+            private bool IsOverThumb(Point point)
+            {
+                if (!HasOverflow()) return false;
+                RectangleF track;
+                RectangleF thumb;
+                GetScrollbarGeometry(out track, out thumb);
+                return HitsThumb(point, track, thumb);
+            }
+
+            private bool HitsThumb(Point point, RectangleF track, RectangleF thumb)
+            {
+                var hit = new RectangleF(track.Left, thumb.Top, track.Width, thumb.Height);
+                hit.Inflate(0, 4f * GetDpiScale(this));
+                return hit.Contains(point);
+            }
+
+            private void MoveThumb(int pointerY, RectangleF track, RectangleF thumb)
+            {
+                float travel = track.Height - thumb.Height;
+                if (travel <= 0) return;
+                float ratio = (pointerY - track.Top - thumbGrab * thumb.Height) / travel;
+                SetOffset((int)Math.Round(ratio * MaxOffset()));
+            }
+
+            private void FinishDrag(bool hot)
+            {
+                dragging = false;
+                if (Capture) Capture = false;
+                UpdateThumbState(hot);
+            }
+
+            private void UpdateThumbState(bool hot)
+            {
+                thumbHot = hot;
+                Cursor = hot ? Cursors.Hand : Cursors.Default;
+                thumbEmphasis.MoveTo(hot ? 1f : 0f, 120);
+                InvalidateScrollbar();
+            }
+
+            private void InvalidateScrollbar()
+            {
+                int width = Math.Min(ClientSize.Width, ScrollbarWidth);
+                Invalidate(new Rectangle(ClientSize.Width - width, 0, width, ClientSize.Height));
             }
         }
 
@@ -1569,14 +1663,15 @@ namespace DualRemote
             }
         }
 
-        /// <summary>UU 风格紧凑胶囊开关（左侧附带“开 / 关”状态字，右侧蓝色实心/白底灰边胶囊）。</summary>
         internal sealed class Switch : CheckBox
         {
+            private readonly UiTransition position;
             private bool hovered;
             internal bool ShowStateText = true;
 
             internal Switch()
             {
+                position = new UiTransition(this);
                 AutoSize = false;
                 Cursor = Cursors.Hand;
                 Margin = Padding.Empty;
@@ -1588,46 +1683,54 @@ namespace DualRemote
             protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
             protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
 
+            protected override void OnCheckedChanged(EventArgs e)
+            {
+                base.OnCheckedChanged(e);
+                position.MoveTo(Checked ? 1f : 0f, 150);
+                Invalidate();
+            }
+
             protected override void OnPaint(PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
-                Color bg = ResolveSurface(this, Paper);
-                g.Clear(bg);
+                g.Clear(ResolveSurface(this, Paper));
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
 
-                float scale = g.DpiX / 96f;
-                float w = 40f * scale;
-                float h = 22f * scale;
-                float x = Width - w - 1f;
-                float y = (Height - h) / 2f;
+                float scale = GetDpiScale(this);
+                float w = (float)Math.Round(40f * scale);
+                float h = (float)Math.Round(22f * scale);
+                float inset = (float)Math.Ceiling(4f * scale);
+                float x = Math.Max(inset, Width - w - inset);
+                float y = (float)Math.Round((Height - h) / 2f);
+                float progress = position.Value;
+                bool hot = Enabled && hovered;
 
                 if (ShowStateText && x > 22f * scale)
                 {
-                    string stateText = Checked ? "开" : "关";
                     var textRect = new Rectangle(0, 0, (int)Math.Floor(x - 8f * scale), Height);
-                    TextRenderer.DrawText(g, stateText, BodyFont, textRect, Enabled ? BodyInk : Muted,
+                    TextRenderer.DrawText(g, Checked ? "开" : "关", BodyFont, textRect, Enabled ? BodyInk : Muted,
                         TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                 }
 
-                Color trackFill = Checked
-                    ? (Enabled ? (hovered ? AccentHover : Accent) : AccentBorder)
-                    : (hovered ? SurfaceSubtle : Paper);
-                Color trackBorder = Checked
-                    ? Color.Transparent
-                    : (Enabled ? (hovered ? BodyInk : Muted) : StrokeStrong);
+                Color onFill = Enabled ? (hot ? AccentHover : Accent) : AccentBorder;
+                Color offFill = hot ? SurfaceSubtle : Paper;
+                Color offBorder = Enabled ? (hot ? BodyInk : Muted) : StrokeStrong;
+                Surface(g, new RectangleF(x, y, w, h), h / 2f, Mix(offFill, onFill, progress), Mix(offBorder, onFill, progress), scale);
 
-                Surface(g, new RectangleF(x, y, w, h), h / 2f, trackFill, trackBorder, Checked ? 0f : 1.3f * scale);
-
-                float pad = 3.2f * scale;
-                float d = h - pad * 2f;
-                float thumbX = Checked ? x + w - d - pad : x + pad;
-                Color thumbColor = Checked ? Paper : (Enabled ? BodyInk : Muted);
-                if (Focused && ShowFocusCues)
-                    FocusOutline(g, new RectangleF(x - 2f, y - 2f, w + 4f, h + 4f), h / 2f + 2f, Accent, 1.4f);
+                float pad = (float)Math.Round(3f * scale);
+                float diameter = h - pad * 2f;
+                float thumbX = x + pad + (w - h) * progress;
+                Color thumbColor = Mix(Enabled ? BodyInk : Muted, Paper, progress);
                 using (var dot = new SolidBrush(thumbColor))
-                    g.FillEllipse(dot, thumbX, y + pad, d, d);
+                    g.FillEllipse(dot, thumbX, y + pad, diameter, diameter);
+
+                if (Focused && ShowFocusCues)
+                {
+                    float gap = 2f * scale;
+                    FocusOutline(g, new RectangleF(x - gap, y - gap, w + gap * 2f, h + gap * 2f),
+                        h / 2f + gap, Accent, 1.25f * scale);
+                }
             }
         }
 
@@ -1790,18 +1893,66 @@ namespace DualRemote
             }
         }
 
+        private static void DrawWindowGlyph(Graphics g, Glyph icon, Rectangle bounds, Color color)
+        {
+            int side = (int)Math.Round(bounds.Width * 0.65f);
+            int stroke = Math.Max(1, (int)Math.Round(bounds.Width / 13f));
+            int x = bounds.Left + (bounds.Width - side) / 2;
+            int y = bounds.Top + (bounds.Height - side) / 2;
+            GraphicsState state = g.Save();
+            g.SmoothingMode = SmoothingMode.None;
+            g.PixelOffsetMode = PixelOffsetMode.None;
+            using (var ink = new SolidBrush(color))
+            {
+                if (icon == Glyph.Minus)
+                {
+                    g.FillRectangle(ink, x, y + (side - stroke) / 2, side, stroke);
+                }
+                else if (icon == Glyph.Maximize)
+                {
+                    FillPixelFrame(g, ink, new Rectangle(x, y, side, side), stroke);
+                }
+                else
+                {
+                    int shift = Math.Max(stroke + 1, side / 4);
+                    int face = side - shift;
+                    g.FillRectangle(ink, x + shift, y, face, stroke);
+                    g.FillRectangle(ink, x + side - stroke, y + stroke, stroke, Math.Max(1, face - stroke));
+                    g.FillRectangle(ink, x + shift, y + stroke, stroke, shift - stroke);
+                    g.FillRectangle(ink, x + face, y + face - stroke, shift, stroke);
+                    FillPixelFrame(g, ink, new Rectangle(x, y + shift, face, face), stroke);
+                }
+            }
+            g.Restore(state);
+        }
+
+        private static void FillPixelFrame(Graphics g, Brush ink, Rectangle box, int stroke)
+        {
+            g.FillRectangle(ink, box.Left, box.Top, box.Width, stroke);
+            g.FillRectangle(ink, box.Left, box.Bottom - stroke, box.Width, stroke);
+            g.FillRectangle(ink, box.Left, box.Top + stroke, stroke, box.Height - stroke * 2);
+            g.FillRectangle(ink, box.Right - stroke, box.Top + stroke, stroke, box.Height - stroke * 2);
+        }
+
         internal static void DrawGlyph(Graphics g, Glyph icon, RectangleF area, Color color)
         {
             if (icon == Glyph.None || area.Width < 2f || area.Height < 2f) return;
+            int dim = (int)Math.Round(Math.Min(area.Width, area.Height));
+            int x = (int)Math.Round(area.X + (area.Width - dim) * 0.5f);
+            int y = (int)Math.Round(area.Y + (area.Height - dim) * 0.5f);
+            if (dim >= 8 && (icon == Glyph.Minus || icon == Glyph.Maximize || icon == Glyph.Restore))
+            {
+                DrawWindowGlyph(g, icon, new Rectangle(x, y, dim, dim), color);
+                return;
+            }
+
             var state = g.Save();
-            g.SmoothingMode = SmoothingMode.HighQuality;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            float dim = (float)Math.Round(Math.Min(area.Width, area.Height));
-            float ox = (float)Math.Round(area.X + (area.Width - dim) * 0.5f);
-            float oy = (float)Math.Round(area.Y + (area.Height - dim) * 0.5f);
-            g.TranslateTransform(ox, oy);
-            g.ScaleTransform(dim / 24f, dim / 24f);
-            float strokeW = Math.Max(1.7f, Math.Min(3.2f, 1.5f * 24f / dim));
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            float unit = dim / 24f;
+            g.TranslateTransform(x, y);
+            g.ScaleTransform(unit, unit);
+            float strokeW = Math.Max(1.8f, 1.5f / unit);
             using (var p = new Pen(color, strokeW) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
             using (var fill = new SolidBrush(color))
             {
@@ -2003,9 +2154,9 @@ namespace DualRemote
                         g.FillEllipse(fill, 10.9f, 15.2f, 2.2f, 2.2f);
                         break;
                     case Glyph.MoreDots:
-                        g.FillEllipse(fill, 10.5f, 4.8f, 3f, 3f);
-                        g.FillEllipse(fill, 10.5f, 10.5f, 3f, 3f);
-                        g.FillEllipse(fill, 10.5f, 16.2f, 3f, 3f);
+                        g.FillEllipse(fill, 10.2f, 4.5f, 3.6f, 3.6f);
+                        g.FillEllipse(fill, 10.2f, 10.2f, 3.6f, 3.6f);
+                        g.FillEllipse(fill, 10.2f, 15.9f, 3.6f, 3.6f);
                         break;
                     case Glyph.Keypad:
                         using (var pad = Round(new RectangleF(5.4f, 3.4f, 13.2f, 17.2f), 2.2f))

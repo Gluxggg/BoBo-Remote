@@ -25,7 +25,7 @@
 
 **四端原生应用使用统一协议，Windows 主程序采用单文件封装。**
 
-**BoBo Remote v7.0.0** 更新了 Windows 的界面、连接线路选择、超级屏和防窥。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
+**BoBo Remote v7.0.2** 缩短了 Windows 防窥幕布响应置顶弹窗的时间，减少输入法候选窗在实体屏上短暂露出的情况。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
 
 Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll`。设备可在局域网内自动发现并建立 TLS 连接，也可通过 Tailscale 等组网工具跨网连接。
 
