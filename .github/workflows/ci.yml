@@ -23,6 +23,12 @@ jobs:
           cache: true
           cache-dependency-path: native/bobo-tsnet/go.sum
 
+      - name: Test tools/bobo-relay
+        shell: powershell
+        run: |
+          Push-Location tools/bobo-relay
+          try { go test -v ./...; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } finally { Pop-Location }
+
       - name: Build BoBoCore.dll + BoBoTsNet.exe + BoBoRemote.exe and run --self-test
         shell: powershell
         run: .\ci\build.ps1

@@ -26,9 +26,9 @@ namespace DualRemote
     /// </summary>
     internal sealed class NativeStreamForm : Form
     {
-        private readonly string host;
+        private string host;
         private readonly string hostDisplayName;
-        private readonly int targetPort = BoBoProtocol.DefaultTcpPort;
+        private int targetPort = BoBoProtocol.DefaultTcpPort;
         private bool hostAudio;
         private bool preferHevc;
         private int currentWidth;
@@ -1118,6 +1118,20 @@ namespace DualRemote
                 }
                 catch { }
             }
+        }
+
+        internal async Task SwitchEndpointAsync(string newHost, int newPort, string reasonText)
+        {
+            if (IsDisposed || closingIntentionally || string.IsNullOrWhiteSpace(newHost)) return;
+            host = newHost.Trim();
+            targetPort = (newPort > 0 && newPort <= 65535) ? newPort : BoBoProtocol.DefaultTcpPort;
+            ShowStatusOverlay(
+                "正在动态切换中转节点",
+                string.IsNullOrEmpty(reasonText)
+                    ? ("已优选切换至 " + host + ":" + targetPort + "，正在重建加密传输通道…")
+                    : reasonText,
+                false);
+            await StartOrRestartStreamInternalAsync();
         }
 
         private async Task StartOrRestartStreamInternalAsync()

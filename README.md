@@ -72,10 +72,11 @@
 - **免安装内置用户态 Tailscale 跨网引擎（[`BoBoTsNet`](native/bobo-tsnet/main.go) · [`BoBoEmbeddedTailnet`](src/Backend/BoBoEmbeddedTailnet.cs)）**：
   - 采用纯 Go `tailscale.com/tsnet`（`CGO_ENABLED=0`）编译并 GZip 内嵌于单文件主程序：两台 Windows 电脑装好 BoBo Remote 后，只需在侧边栏或「全部设备」卡片点击 **「一键登录账号」** 并在浏览器完成个人 Tailscale 授权，即可免装官方客户端、免装 TUN 虚拟网卡直接跨网互连，且**不干扰本机已开启的任何代理或系统 VPN**。
   - 控制通道使用每会话随机 `128-bit Token`（`X-BoBo-Token`）隔离本地 HTTP 接口，本地 SOCKS5（RFC 1928 + 1929）**严格仅放行 Tailnet 地址（`100.64.0.0/10` / `fd7a:115c:a1e0::/48` / `*.ts.net`）** 防止开放代理滥用；同时支持通过 `tsnet` 入站监听将跨网 `49810` 流量无感转发给本机 `BoBoHostServer`，完整保留 **TLS 1.2 + RSA-2048 TOFU 双端端到端加密**，并依赖 Win32 Job Object（`KILL_ON_JOB_CLOSE`）与父进程监视确保主程序退出即零残留。
-- **四档连接线路与内联自建中转面板（[`BoBoRelayStore`](src/Backend/BoBoRelayStore.cs)）**：
+- **四档连接线路与内联自建中转动态调度面板（[`BoBoRelayStore`](src/Backend/BoBoRelayStore.cs) · [`BoBoRelayScheduler`](src/Backend/BoBoRelayScheduler.cs) · [`tools/bobo-relay`](tools/bobo-relay/README.md)）**：
   - 远程协助内置 **「自动选择（局域网 / P2P 优先）」「局域网直连」「跨网 · Tailscale（优先 P2P）」「直连优先 + 自建中转兜底」** 四种策略并持久化记忆。
-  - 点击即可展开内联「自建兜底中转」管理面板，支持保存最多 12 台自购 VPS 入口（`IP:端口`、`域名:443`、`[IPv6]:端口`，默认 `49810`）并实时发起 **TCP 延迟测速**。
-  - 选中兜底模式后，客户端仍**先尝试直连目标（零中转损耗）**；直连超时/未通时自动切换至选定 VPS 入口完成 4 位配对与自定义端口建流，且 `< 55 ms` 优质中继节点自动保留高清高帧率档位。
+  - 点击即可展开内联「自建兜底中转」管理面板，支持保存最多 12 台自购 VPS 入口（`IP:端口`、`域名:443`、`[IPv6]:端口`，默认 `49810`）与实时服务器负载接口（`:49811` 简写或完整 HTTP URL），提供 **「智能动态调度（延迟 + 服务器负载）」「延迟优先（自动选最低 RTT）」「手动固定所选节点」** 三种调度策略及一键 **「智能优选」**。
+  - **并发优选、失败顺序转移 & 会话内过载自动迁移**：连控先尝试直连目标；直连未通时并发探测所有候选中转的 TCP 延迟与 `bobo-relay` CPU/活跃会话/带宽负载，按综合评分与 60s 失败熔断退避自动择优，遇首节点失败顺序切换至次优节点；串流会话中每 `15s` 监测当前节点，若出现断连/维护或连续两次高负载（`>= 85%`）/ 高延迟（`>= 130 ms`）且有明显更优备选时自动无缝切换重连。
+  - **开源自建中转服务（[`tools/bobo-relay/`](tools/bobo-relay/README.md)）**：零外部依赖纯 Go 盲中转服务端（`CGO_ENABLED=0`），保留端到端 TLS 1.2 + RSA-2048 TOFU 加密不可窥探，并在 `/bobo-relay/health` 暴露系统 CPU、会话饱和度与带宽负载指标（支持 `SIGINT`/`SIGTERM` 优雅排水）。
 - **Windows 双端加密 `UDP+FEC/NACK`（`UDP 49811`）**：
   - 跨平台连接使用通用 `TCP+TLS 49810`；两台 Windows 主被控握手后自动升级至 **`AES-128-CTR + HMAC-SHA256` 双向密钥派生 UDP 通道**（防重放、防篡改、防反射 DoS）。
   - 内建 **分组 / 交错 `XOR FEC`**（可容忍连续多片丢包零重传还原）、**选择性分片重传 `NACK`**（主机 `18` 帧 / `2 MiB` 环形缓存与限速配额、3 分片乱序容忍）、静帧尾包超时检测、`10 ms` 间隔离散输入冗余、**12 秒滚动基线自适应码率（ABR）**，且在 UDP 静默 >3.5 秒时无缝回退至 `TCP+TLS` 不断链。
@@ -105,9 +106,9 @@
 
 ## 四端能力矩阵与发布体量
 
-| 平台 | 系统要求 | Release 产物（`v7.1.0`） | 控制端（主控） | 被控端（宿主） | 核心能力与特性 |
+| 平台 | 系统要求 | Release 产物（`v7.2.0`） | 控制端（主控） | 被控端（宿主） | 核心能力与特性 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **全功能**<br>含 Android 导航栏与 iOS 观看 | ✅ **全功能**<br>DXGI/GDI + MF H.264 + WASAPI | 内嵌 `BoBoCore.dll` + **免安装 `BoBoTsNet` (`tsnet`) 一键跨网**、`UDP+FEC/NACK`、自建中转面板、超级屏、物理防窥、应用内更新 |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **全功能**<br>含 Android 导航栏与 iOS 观看 | ✅ **全功能**<br>DXGI/GDI + MF H.264 + WASAPI | 内嵌 `BoBoCore.dll` + **免安装 `BoBoTsNet` (`tsnet`)**、**多中转延迟优选与服务器负载动态调度**、`UDP+FEC/NACK`、超级屏、物理防窥、应用内更新 |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **全功能**<br>MediaCodec 零拷贝硬解 + 48kHz 立体声 | ✅ **免 Root 全功能**<br>MediaProjection + 无障碍触控 | 触控板 / 直点双模式、贴边悬浮球、控制中心、PC 快捷键盘栏、蓝牙键盘 VK 映射 |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2（Apple 芯片 & Intel） | ✅ **全功能**<br>`AVSampleBufferDisplayLayer` 零拷贝渲染 | ✅ **全功能**<br>`ScreenCaptureKit` 免驱动内录 + VideoToolbox | 超级屏自适应、`⌘ → Ctrl` 智能映射、录制排除防窥窗口 + `CGEventTap` 物理锁 |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~835 KB) | ✅ **前台主控**<br>VideoToolbox 硬解 + 触控板/直点 | 👁️ **ReplayKit 仅观看投屏** | 内嵌 ReplayKit 广播扩展与本机回环桥接，支持 Sideloadly / AltStore / SideStore / Xcode 签装 |
@@ -118,7 +119,7 @@
 
 ## 系统架构与网络演进蓝图
 
-### A. 当前已实现架构（`BoBo6.2` · `v7.1.0`）
+### A. 当前已实现架构（`BoBo6.2` · `v7.2.0`）
 
 ```mermaid
 flowchart LR
@@ -175,8 +176,8 @@ flowchart TB
 4. **连接质量下降时，动态调整码率和帧率**：根据实时 RTT、抖动与丢包自适应调节码率与帧率（Windows 已于 `v7.0.3–v7.0.4` 实现 `UDP+FEC/NACK` 与 12s 基线 ABR，后续将打通自建协调/中继层并推广至全端）。
 
 > **个人自用 & 开源社区跨网 / BYO-VPS 说明（现阶段 vs 演进）**
-> - **v7.1.0 开箱跨网 + BYO-VPS**：Windows 端已直接内嵌 **纯 Go `tsnet` 免安装 Tailscale 用户态引擎**（两台设备装好 BoBo 后，在客户端内点击「一键登录账号」登录个人 Tailscale 即可跨网发现与 P2P/DERP 加密直连，**零虚拟网卡 / 零代理冲突**），同时可与「连接线路」中内置的 **自建兜底中转面板**（12 台 VPS `IP:端口` 测速与失败自动接管）及系统 Tailscale `Peer Relay`（`< 55 ms` 保持高帧率）配合使用。
-> - **V7.2+ / V8 演进目标**：推出可一键自部署的轻量开源 **连接协调服务 + TURN / UDP Relay + `TCP/TLS 443` 回退**，届时四端将无需借助任何外部账号体系即可直接完成自建 VPS 原生打洞与 UDP 中继调度。
+> - **v7.2.0 已完整实现多中转动态调度 & 开箱跨网**：Windows 端已直接内嵌 **纯 Go `tsnet` 免安装 Tailscale 用户态引擎**（客户端内点击「一键登录账号」即用，**零虚拟网卡 / 零代理冲突**），同时在「自建兜底中转面板」全面实现 **多节点并发 RTT 延迟自动优选、基于 [`tools/bobo-relay`](tools/bobo-relay/README.md)（CPU / 并发会话 / 带宽）的服务器负载动态调度、连控顺序故障转移（60s 熔断退避）及会话内过载无感切换**。
+> - **V8 演进目标**：推出可一键自部署的轻量开源 **统一协调信令服务 + 原生 STUN/ICE 打洞 + BYO-VPS `UDP Relay (TURN)` + `TCP/TLS 443` 回退**，覆盖四端全原生打洞与中继调度。
 
 ---
 
@@ -250,9 +251,9 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**已验证测试覆盖（`v7.1.0`）**
-- **Windows 本地测试全绿**：`BoBoCore.dll` 原生内核自检 **10/10**（含编码器、D3D11、WASAPI 与物理输入锁；无交互会话采集自动回退合成帧）、纯 Go `native/bobo-tsnet` 单元测试 **7/7**（含 `--self-test` 及实机进程鉴权/状态/`/logout`/`/shutdown` 生命周期校验）、托管 `BoBo远程.exe --self-test` **136/136**（含协议 Golden Vectors、UDP FEC/NACK、ABR、防窥状态机、`BoBoRelayStore`、`BoBoEmbeddedTailnet` JSON/SOCKS5 回环校验）、`BoBoSetup --self-test` **7/7**、UI/自绘下拉框/中转/内置跨网卡片与侧边栏冒烟 **69/69**、防窥帘幕独立线程冒烟 **12/12**。
-- **GitHub Actions 四端流水线**：Windows x64、Android（单测 + APK）、macOS（`swift test` + Universal 2 DMG）、iOS（IPA）与 `SHA256SUMS.txt` 全自动校验打包发布（内置 Tailscale OAuth 浏览器首次登录及实际公网跨运营商长时串流需在真实交互桌面与网络环境下完成）。
+**已验证测试覆盖（`v7.2.0`）**
+- **Windows 本地测试全绿**：`BoBoCore.dll` 原生内核自检 **10/10**（含编码器、D3D11、WASAPI 与物理输入锁；无交互会话采集自动回退合成帧）、纯 Go `native/bobo-tsnet` 单元测试 **7/7**（含 `--self-test` 及实机鉴权生命周期）、纯 Go 自建中转服务端 `tools/bobo-relay` 单元测试 **3/3**（含盲转发计数、并发饱和 `accepting=false` 与优雅排水）、托管 `BoBo远程.exe --self-test` **142/142**（含 Golden Vectors、UDP FEC/NACK、ABR、防窥状态机、`BoBoRelayStore` v1/v2、`BoBoRelayScheduler` 并发负载排序与 `BoBoEmbeddedTailnet` 回环校验）、`BoBoSetup --self-test` **7/7**、UI/自绘下拉框/动态中转面板/内置跨网卡片与侧边栏冒烟 **73/73**、防窥帘幕独立线程冒烟 **12/12**。
+- **GitHub Actions 四端流水线**：Windows x64（含 `tools/bobo-relay` 与 `native/bobo-tsnet` Go 单测）、Android（单测 + APK）、macOS（`swift test` + Universal 2 DMG）、iOS（IPA）与 `SHA256SUMS.txt` 全自动校验打包发布（内置 Tailscale 浏览器 OAuth 首次授权及实际公网跨运营商长时串流需在真实交互桌面与多台 VPS 环境下实测）。
 
 ---
 
@@ -263,7 +264,8 @@ bash apple/scripts/package-ios-ipa.sh
 | [`protocol/`](protocol/BOBO6-SPEC.md) | 权威跨端规范 [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) 与 C#/Kotlin/Swift 一致性基准 [`golden-vectors.json`](protocol/golden-vectors.json) |
 | [`native/bobo-core/`](native/bobo-core/build-core.ps1) | Windows C++17 内嵌原生核：DXGI/GDI 采集、硬件光标、MF H.264 编解码、D3D11 渲染、WASAPI 音频、超级屏与物理输入锁 |
 | [`native/bobo-tsnet/`](native/bobo-tsnet/build-tsnet.ps1) | Windows 纯 Go 用户态内置 Tailscale 跨网引擎（`CGO_ENABLED=0` `tsnet` · Tailnet-only 鉴权 SOCKS5 + `:49810` 转发 + Win32 Job 监管） |
-| [`src/`](src/MainForm.cs) | Windows C# 5 / WinForms 主程序：冰川浅蓝自绘 UI（`RemoteTheme` / `StyledChoiceBox` / `UiTransition` / `CrossNetSidebarCard`）、串流窗、控制中心、悬浮球、新手引导、独立线程防窥幕布及 `Backend/`（协议、宿主、加密 UDP+FEC/NACK 与 ABR、`BoBoEmbeddedTailnet`、自定义中转存储 `BoBoRelayStore`、线路识别、自动更新、DDC/CI 调亮与 136 项自检） |
+| [`src/`](src/MainForm.cs) | Windows C# 5 / WinForms 主程序：冰川浅蓝自绘 UI（`RemoteTheme` / `StyledChoiceBox` / `UiTransition` / `CrossNetSidebarCard`）、串流窗（支持热切换中转）、控制中心、悬浮球、新手引导、独立线程防窥幕布及 `Backend/`（协议、宿主、加密 UDP+FEC/NACK 与 ABR、`BoBoEmbeddedTailnet`、`BoBoRelayStore`、`BoBoRelayScheduler`、线路识别、自动更新与 142 项自检） |
+| [`tools/bobo-relay/`](tools/bobo-relay/README.md) | 零依赖纯 Go 自建 VPS 盲中转与实时 `/bobo-relay/health` 服务器负载上报服务端（支持 Linux CPU / 会话 / 带宽采集与优雅排水） |
 | [`installer/BoBoSetup.cs`](installer/BoBoSetup.cs) | Windows 零依赖单文件安装、静默增量升级与安全卸载向导 |
 | `android/` | Android 原生应用（Kotlin + Compose）：MediaCodec 硬解、MediaProjection + 无障碍免 Root 被控与协议单测 |
 | `apple/` | `BoBoAppleCore` 纯 Swift 核心包（含 XCTest）、macOS SwiftUI 应用与 iOS App + ReplayKit Broadcast Extension |
@@ -293,9 +295,11 @@ BoBo-Remote/
 │   ├── OnboardingTour.cs                    # 7 步双层 ClearType 聚光灯新手引导
 │   ├── RemoteTheme.cs & UiTransition.cs     # 冰川浅蓝自绘控件（含 StyledChoiceBox）、双色矢量图标与平滑动画
 │   └── Backend/                             # BoBoProtocol / BoBoIdentity / BoBoHostServer / BoBoStreamClient /
-│                                            # BoBoEmbeddedTailnet / BoBoUdpTransport / BoBoConnectionRoute / BoBoRelayStore /
-│                                            # Tailscale / NativeStreamStats / ConnectionTelemetry / PrivacyDisplayDimmer /
-│                                            # AppUpdater / SelfTest
+│                                            # BoBoEmbeddedTailnet / BoBoUdpTransport / BoBoConnectionRoute /
+│                                            # BoBoRelayStore / BoBoRelayScheduler / Tailscale / NativeStreamStats /
+│                                            # ConnectionTelemetry / PrivacyDisplayDimmer / AppUpdater / SelfTest
+├── tools/
+│   └── bobo-relay/                          # 开源纯 Go BYO-VPS 盲中转与 /bobo-relay/health 负载上报服务端
 ├── installer/
 │   └── BoBoSetup.cs                         # Windows 图形化安装 / 静默升级 / 卸载向导
 ├── android/
@@ -338,7 +342,8 @@ BoBo-Remote/
 | **V6.0 – V6.2** | 进程内嵌 C++17 `BoBoCore.dll`（零外置第三方引擎）、`BoBo6.2` 统一跨端协议、物理级输入锁防窥、**Windows / Android / macOS / iOS 四端正式发布** | ✅ 已完成 |
 | **V7.0 (至 v7.0.5)** | 超级屏 v2、主机尺寸光标、Windows 加密 `UDP+FEC/NACK`（分组交错 FEC + 选择性 NACK）与 12s 基线 ABR、独立线程防窥幕布（抗输入法闪弹）、自绘下拉控件与 **客户端内建自建 VPS 兜底中转配置与测速** | ✅ 已完成 |
 | **V7.1 (`v7.1.0`)** | **内置纯 Go `tsnet` 免安装 Tailscale 用户态跨网引擎**（客户端一键浏览器登录、无 TUN 驱动零 VPN 冲突、Tailnet-only 鉴权 SOCKS5 + `49810` TLS 透传与侧边栏状态卡片） | ✅ 已完成 |
-| **V7.2+ / V8** | 开源自部署连接协调服务（设备注册/认证/信令）、原生 STUN/ICE P2P 打洞 + 自建 VPS `UDP Relay (TURN)` 兜底 + `TCP/TLS 443` 备用穿透、跨端 UDP+FEC/NACK 与 HEVC/H.265 协商、Linux 客户端探索 | 🚧 规划 / 演进中 |
+| **V7.2 (`v7.2.0`)** | **多中转延迟自动优选 & 服务器负载动态调度**：[`BoBoRelayScheduler`](src/Backend/BoBoRelayScheduler.cs) 并发测速评分、顺序故障转移、会话内过载热切换与开源纯 Go [`tools/bobo-relay`](tools/bobo-relay/README.md) 服务端 | ✅ 已完成 |
+| **V8** | 开源自部署连接协调服务（设备注册/认证/信令）、原生 STUN/ICE P2P 打洞 + 自建 VPS `UDP Relay (TURN)` 兜底 + `TCP/TLS 443` 备用穿透、跨端 UDP+FEC/NACK 与 HEVC/H.265 协商、Linux 客户端探索 | 🚧 规划 / 演进中 |
 
 ---
 

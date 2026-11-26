@@ -232,6 +232,8 @@ namespace DualRemote
                 connectionRouteChoice.DropDownWidth = (int)Math.Round(300f * scale);
             if (customRelayChoice != null)
                 customRelayChoice.DropDownWidth = (int)Math.Round(340f * scale);
+            if (customRelayModeChoice != null)
+                customRelayModeChoice.DropDownWidth = (int)Math.Round(290f * scale);
             if (settingsDefaultProfileCombo != null)
                 settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(380f * scale);
             if (settingsHostDisconnectActionCombo != null) settingsHostDisconnectActionCombo.DropDownWidth = DevicePixels(180);
@@ -2254,22 +2256,9 @@ namespace DualRemote
             string rawTarget = SelectedHost();
             if (string.IsNullOrWhiteSpace(rawTarget)
                 && SelectedConnectionRoute == BoBoRoutePreference.CustomRelayFallback
-                && customRelayStore != null && customRelayStore.ActiveRelay != null)
+                && customRelayStore != null && customRelayStore.Relays.Count > 0)
             {
-                BoBoCustomRelay activeRelay = customRelayStore.ActiveRelay;
-                discover.Enabled = false;
-                SetStatus("正在探测自建兜底中转「" + activeRelay.DisplayLabel + "」连通性…", Theme.PillTone.Info);
-                try
-                {
-                    Tuple<bool, double, string> probe = await BoBoRelayStore.ProbeRelayAsync(
-                        activeRelay.Host, activeRelay.Port, 3500, System.Threading.CancellationToken.None);
-                    if (!IsDisposed)
-                        SetStatus(probe.Item3, probe.Item1 ? Theme.PillTone.Success : Theme.PillTone.Alert);
-                }
-                finally
-                {
-                    if (!IsDisposed) discover.Enabled = true;
-                }
+                await ProbeAndSelectBestCustomRelayAsync();
                 return;
             }
 

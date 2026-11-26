@@ -11,12 +11,38 @@ using System.Threading.Tasks;
 
 namespace DualRemote
 {
+    internal enum BoBoRelaySelectionMode
+    {
+        Manual = 0,
+        LowestLatency = 1,
+        DynamicLoadBalanced = 2
+    }
+
     internal sealed class BoBoCustomRelay
     {
         internal string Id = "";
         internal string Name = "";
         internal string Host = "";
         internal int Port = BoBoProtocol.DefaultTcpPort;
+        internal string HealthUrl = "";
+        internal int Weight = 100;
+
+        // Runtime scheduling & telemetry state (not serialized)
+        internal long LastProbeUtcTicks;
+        internal bool LastReachable;
+        internal double LastRttMs;
+        internal bool HasServerLoad;
+        internal double LastServerLoad;
+        internal double LastCpuPct;
+        internal int LastActiveSessions;
+        internal int LastMaxSessions;
+        internal double LastBandwidthMbps;
+        internal double LastMaxBandwidthMbps;
+        internal bool LastAccepting = true;
+        internal string LastRegion = "";
+        internal double LastScore = double.PositiveInfinity;
+        internal int ConsecutiveFailures;
+        internal long LastFailureUtcTicks;
 
         internal string EndpointText
         {
@@ -42,14 +68,33 @@ namespace DualRemote
             }
         }
 
+        internal string DisplayLabelWithTelemetry
+        {
+            get
+            {
+                string baseLabel = DisplayLabel;
+                if (LastProbeUtcTicks <= 0) return baseLabel;
+                if (!LastReachable) return baseLabel + " · 不可达";
+                string rttTag = Math.Max(1, (int)Math.Round(LastRttMs)).ToString(CultureInfo.InvariantCulture) + "ms";
+                if (!LastAccepting) return baseLabel + " · " + rttTag + " · 维护中";
+                if (HasServerLoad)
+                {
+                    int pct = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, LastServerLoad)) * 100.0);
+                    string loadTag = pct >= 85 ? ("过载" + pct + "%") : ("负载" + pct + "%");
+                    return baseLabel + " · " + rttTag + " · " + loadTag;
+                }
+                return baseLabel + " · " + rttTag;
+            }
+        }
+
         public override string ToString()
         {
-            return DisplayLabel;
+            return DisplayLabelWithTelemetry;
         }
     }
 
     /// <summary>
-    /// 用户自定义兜底中转（自建 VPS / 转发入口）本地存储：
+    /// 用户自定义兜底中转（自建 VPS / 转发入口）本地存储与动态调度配置：
     /// 位置：%LOCALAPPDATA%\双端远程\relays.txt
     /// </summary>
     internal sealed class BoBoRelayStore
@@ -63,6 +108,7 @@ namespace DualRemote
 
         internal readonly List<BoBoCustomRelay> Relays = new List<BoBoCustomRelay>();
         internal string ActiveRelayId = "";
+        internal BoBoRelaySelectionMode SelectionMode = BoBoRelaySelectionMode.DynamicLoadBalanced;
 
         internal BoBoCustomRelay ActiveRelay
         {
@@ -79,6 +125,83 @@ namespace DualRemote
                 }
                 return Relays[0];
             }
+        }
+
+        internal static string FormatHostForUrl(string host)
+        {
+            string h = (host ?? "").Trim();
+            if (h.IndexOf(':') >= 0 && !h.StartsWith("[", StringComparison.Ordinal))
+                return "[" + h + "]";
+            return h;
+        }
+
+        internal static bool TryParseHealthUrl(string raw, string relayHost, out string normalized, out string error)
+        {
+            normalized = "";
+            error = null;
+            string text = (raw ?? "").Trim();
+            if (text.Length == 0) return true;
+            if (text.Length > 300)
+            {
+                error = "负载监控接口地址过长。";
+                return false;
+            }
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+                if (char.IsControl(ch) || char.IsWhiteSpace(ch))
+                {
+                    error = "负载监控接口地址不能包含空格或控制字符。";
+                    return false;
+                }
+            }
+
+            if (text.StartsWith(":", StringComparison.Ordinal))
+            {
+                string portText = text.Substring(1);
+                int hp;
+                if (portText.Length == 0 || !int.TryParse(portText, NumberStyles.None, CultureInfo.InvariantCulture, out hp)
+                    || hp < 1 || hp > 65535)
+                {
+                    error = "负载监控简写端口必须在 1–65535 之间（如 :49811）。";
+                    return false;
+                }
+                string safeHost = (relayHost ?? "").Trim();
+                if (safeHost.Length == 0)
+                {
+                    error = "使用 :端口 简写时需先填写有效的中转节点地址。";
+                    return false;
+                }
+                normalized = "http://" + FormatHostForUrl(safeHost) + ":" + hp.ToString(CultureInfo.InvariantCulture) + "/bobo-relay/health";
+                return true;
+            }
+
+            int purePort;
+            if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out purePort)
+                && purePort >= 1 && purePort <= 65535 && !string.IsNullOrEmpty(relayHost))
+            {
+                normalized = "http://" + FormatHostForUrl(relayHost) + ":" + purePort.ToString(CultureInfo.InvariantCulture) + "/bobo-relay/health";
+                return true;
+            }
+
+            if (!text.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !text.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "负载监控地址需使用 http:// 或 https:// 开头，或简写为 :端口（如 :49811）。";
+                return false;
+            }
+
+            Uri uri;
+            if (!Uri.TryCreate(text, UriKind.Absolute, out uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+                || string.IsNullOrEmpty(uri.Host))
+            {
+                error = "负载监控 URL 格式不正确。";
+                return false;
+            }
+
+            normalized = uri.AbsoluteUri;
+            return true;
         }
 
         internal static bool TryParseEndpoint(string raw, out string host, out int port, out string error)
@@ -178,12 +301,22 @@ namespace DualRemote
 
         internal bool TryAddOrUpdate(string rawName, string rawEndpoint, out BoBoCustomRelay saved, out string error)
         {
+            return TryAddOrUpdate(rawName, rawEndpoint, "", 100, out saved, out error);
+        }
+
+        internal bool TryAddOrUpdate(string rawName, string rawEndpoint, string rawHealthUrl, int weight, out BoBoCustomRelay saved, out string error)
+        {
             saved = null;
             string host;
             int port;
             if (!TryParseEndpoint(rawEndpoint, out host, out port, out error))
                 return false;
 
+            string cleanHealthUrl;
+            if (!TryParseHealthUrl(rawHealthUrl, host, out cleanHealthUrl, out error))
+                return false;
+
+            int safeWeight = Math.Max(1, Math.Min(100, weight));
             string safeName = SanitizeName(rawName, host);
             for (int i = 0; i < Relays.Count; i++)
             {
@@ -191,6 +324,10 @@ namespace DualRemote
                 if (string.Equals(existing.Host, host, StringComparison.OrdinalIgnoreCase) && existing.Port == port)
                 {
                     existing.Name = safeName;
+                    existing.HealthUrl = cleanHealthUrl;
+                    existing.Weight = safeWeight;
+                    existing.ConsecutiveFailures = 0;
+                    existing.LastFailureUtcTicks = 0;
                     ActiveRelayId = existing.Id;
                     saved = existing;
                     return true;
@@ -208,11 +345,36 @@ namespace DualRemote
                 Id = "relay_" + Guid.NewGuid().ToString("N").Substring(0, 8),
                 Name = safeName,
                 Host = host,
-                Port = port
+                Port = port,
+                HealthUrl = cleanHealthUrl,
+                Weight = safeWeight
             };
             Relays.Insert(0, saved);
             ActiveRelayId = saved.Id;
             return true;
+        }
+
+        internal void RecordConnectOutcome(string relayId, bool succeeded)
+        {
+            if (string.IsNullOrEmpty(relayId)) return;
+            for (int i = 0; i < Relays.Count; i++)
+            {
+                BoBoCustomRelay r = Relays[i];
+                if (!string.Equals(r.Id, relayId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (succeeded)
+                {
+                    r.ConsecutiveFailures = 0;
+                    r.LastFailureUtcTicks = 0;
+                    r.LastReachable = true;
+                }
+                else
+                {
+                    r.ConsecutiveFailures = Math.Min(20, r.ConsecutiveFailures + 1);
+                    r.LastFailureUtcTicks = DateTime.UtcNow.Ticks;
+                    r.LastReachable = false;
+                }
+                return;
+            }
         }
 
         internal bool RemoveById(string id)
@@ -248,13 +410,21 @@ namespace DualRemote
         internal string Serialize()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("v1");
+            sb.AppendLine("v2");
+            sb.AppendLine("mode=" + ((int)SelectionMode).ToString(CultureInfo.InvariantCulture));
             BoBoCustomRelay active = ActiveRelay;
             sb.AppendLine("active=" + (active != null ? active.Id : ""));
             for (int i = 0; i < Relays.Count; i++)
             {
                 BoBoCustomRelay r = Relays[i];
-                sb.AppendLine("relay=" + r.Id + "\t" + SanitizeName(r.Name, r.Host) + "\t" + r.Host + "\t" + r.Port.ToString(CultureInfo.InvariantCulture));
+                string safeHealth = (r.HealthUrl ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim();
+                int safeWeight = Math.Max(1, Math.Min(100, r.Weight));
+                sb.AppendLine("relay=" + r.Id
+                    + "\t" + SanitizeName(r.Name, r.Host)
+                    + "\t" + r.Host
+                    + "\t" + r.Port.ToString(CultureInfo.InvariantCulture)
+                    + "\t" + safeHealth
+                    + "\t" + safeWeight.ToString(CultureInfo.InvariantCulture));
             }
             return sb.ToString();
         }
@@ -269,7 +439,18 @@ namespace DualRemote
             for (int i = 0; i < lines.Length; i++)
             {
                 string line = lines[i].Trim();
-                if (line.Length == 0 || line == "v1") continue;
+                if (line.Length == 0 || line == "v1" || line == "v2") continue;
+                if (line.StartsWith("mode=", StringComparison.Ordinal))
+                {
+                    int modeInt;
+                    if (int.TryParse(line.Substring(5).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out modeInt)
+                        && modeInt >= (int)BoBoRelaySelectionMode.Manual
+                        && modeInt <= (int)BoBoRelaySelectionMode.DynamicLoadBalanced)
+                    {
+                        store.SelectionMode = (BoBoRelaySelectionMode)modeInt;
+                    }
+                    continue;
+                }
                 if (line.StartsWith("active=", StringComparison.Ordinal))
                 {
                     requestedActive = line.Substring(7).Trim();
@@ -292,6 +473,23 @@ namespace DualRemote
                 if (cleanHost == null) continue;
                 if (string.IsNullOrEmpty(id)) id = "relay_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
+                string healthUrl = "";
+                if (parts.Length >= 5)
+                {
+                    string hNorm;
+                    string hErr;
+                    if (TryParseHealthUrl(parts[4].Trim(), cleanHost, out hNorm, out hErr))
+                        healthUrl = hNorm;
+                }
+
+                int weight = 100;
+                if (parts.Length >= 6)
+                {
+                    int parsedWeight;
+                    if (int.TryParse(parts[5].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedWeight))
+                        weight = Math.Max(1, Math.Min(100, parsedWeight));
+                }
+
                 bool dup = false;
                 for (int k = 0; k < store.Relays.Count; k++)
                 {
@@ -308,7 +506,9 @@ namespace DualRemote
                     Id = id,
                     Name = SanitizeName(name, cleanHost),
                     Host = cleanHost,
-                    Port = port
+                    Port = port,
+                    HealthUrl = healthUrl,
+                    Weight = weight
                 });
             }
 

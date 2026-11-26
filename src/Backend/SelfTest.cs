@@ -1474,6 +1474,161 @@ namespace DualRemote
                 "count=" + tsPeers.Count);
 
             RunEmbeddedSocks5SelfTest();
+            RunRelaySchedulerSelfTest();
+        }
+
+        private static void RunRelaySchedulerSelfTest()
+        {
+            string hUrl;
+            string hErr;
+            bool hShortOk = BoBoRelayStore.TryParseHealthUrl(":49811", "203.0.113.10", out hUrl, out hErr)
+                && hUrl == "http://203.0.113.10:49811/bobo-relay/health";
+            bool hV6Ok = BoBoRelayStore.TryParseHealthUrl(":50444", "2001:db8::9", out hUrl, out hErr)
+                && hUrl == "http://[2001:db8::9]:50444/bobo-relay/health";
+            bool hBadOk = !BoBoRelayStore.TryParseHealthUrl("ftp://203.0.113.10/health", "203.0.113.10", out hUrl, out hErr);
+            Check("中转负载接口解析：支持 :端口 简写（含 IPv6）并拒绝非法协议",
+                hShortOk && hV6Ok && hBadOk, hErr ?? "ok");
+
+            var storeV2 = new BoBoRelayStore();
+            storeV2.SelectionMode = BoBoRelaySelectionMode.LowestLatency;
+            BoBoCustomRelay rA, rB;
+            bool v2Add = storeV2.TryAddOrUpdate("华北节点", "203.0.113.10:49810", ":49811", 90, out rA, out hErr)
+                && storeV2.TryAddOrUpdate("华南节点", "203.0.113.20:49810", "http://203.0.113.20:5000/bobo-relay/health", 75, out rB, out hErr);
+            BoBoRelayStore parsedV2 = BoBoRelayStore.Parse(storeV2.Serialize());
+            bool v2RoundTrip = parsedV2.SelectionMode == BoBoRelaySelectionMode.LowestLatency
+                && parsedV2.Relays.Count == 2
+                && parsedV2.Relays[1].HealthUrl == "http://203.0.113.10:49811/bobo-relay/health"
+                && parsedV2.Relays[1].Weight == 90
+                && parsedV2.Relays[0].Weight == 75;
+            BoBoRelayStore parsedV1 = BoBoRelayStore.Parse("v1\nactive=legacy1\nrelay=legacy1\t旧节点\t203.0.113.30\t49810\n");
+            bool v1Compat = parsedV1.SelectionMode == BoBoRelaySelectionMode.DynamicLoadBalanced
+                && parsedV1.Relays.Count == 1
+                && parsedV1.Relays[0].Weight == 100
+                && parsedV1.Relays[0].HealthUrl == "";
+            Check("自建中转存储 v2：调度策略/健康接口/权重往返序列化与 v1 向后兼容",
+                v2Add && v2RoundTrip && v1Compat, hErr ?? "ok");
+
+            bool ok, accepting;
+            double load, cpuPct, bwMbps, maxBwMbps;
+            int actSess, maxSess;
+            string region;
+            bool healthParsed = BoBoRelayScheduler.ParseHealthJson(
+                "{\"ok\":true,\"accepting\":true,\"load\":0.38,\"cpuPct\":24.5,\"activeSessions\":4,\"maxSessions\":64,\"bandwidthMbps\":18.2,\"maxBandwidthMbps\":200,\"region\":\"cn-north\"}",
+                out ok, out accepting, out load, out cpuPct, out actSess, out maxSess, out bwMbps, out maxBwMbps, out region);
+            bool derivedParsed = BoBoRelayScheduler.ParseHealthJson(
+                "{\"ok\":true,\"accepting\":false,\"cpuPct\":90,\"activeSessions\":32,\"maxSessions\":32}",
+                out ok, out accepting, out load, out cpuPct, out actSess, out maxSess, out bwMbps, out maxBwMbps, out region);
+            Check("中转负载 JSON 解析：显式 load 与推导饱和/维护状态准确解析",
+                healthParsed && derivedParsed && !accepting && Math.Abs(load - 1.0) < 0.01 && !BoBoRelayScheduler.ParseHealthJson("{bad", out ok, out accepting, out load, out cpuPct, out actSess, out maxSess, out bwMbps, out maxBwMbps, out region),
+                "load=" + load + " accepting=" + accepting);
+
+            long nowTicks = DateTime.UtcNow.Ticks;
+            var relayLow = new BoBoCustomRelay { Id = "low", Host = "127.0.0.1", Port = 49810, Weight = 100 };
+            var relayBusy = new BoBoCustomRelay { Id = "busy", Host = "127.0.0.1", Port = 49820, Weight = 100 };
+            var snapLow = new BoBoRelayProbeSnapshot { Relay = relayLow, Reachable = true, Accepting = true, RttMs = 28.0, HasServerLoad = true, ServerLoad = 0.15 };
+            var snapBusy = new BoBoRelayProbeSnapshot { Relay = relayBusy, Reachable = true, Accepting = true, RttMs = 15.0, HasServerLoad = true, ServerLoad = 0.92 };
+            double sLowDyn = BoBoRelayScheduler.ComputeScore(relayLow, snapLow, BoBoRelaySelectionMode.DynamicLoadBalanced, nowTicks);
+            double sBusyDyn = BoBoRelayScheduler.ComputeScore(relayBusy, snapBusy, BoBoRelaySelectionMode.DynamicLoadBalanced, nowTicks);
+            double sLowRtt = BoBoRelayScheduler.ComputeScore(relayLow, snapLow, BoBoRelaySelectionMode.LowestLatency, nowTicks);
+            double sBusyRtt = BoBoRelayScheduler.ComputeScore(relayBusy, snapBusy, BoBoRelaySelectionMode.LowestLatency, nowTicks);
+            snapLow.Score = sLowDyn;
+            snapBusy.Score = sBusyDyn;
+            bool migrateOverload = BoBoRelayScheduler.ShouldMigrateActiveRelay(snapBusy, snapLow, BoBoRelaySelectionMode.DynamicLoadBalanced)
+                && !BoBoRelayScheduler.ShouldMigrateActiveRelay(snapBusy, snapLow, BoBoRelaySelectionMode.Manual);
+            Check("中转智能调度评分：延迟优先选低 RTT、动态调度避开高负载且过载可触发迁移",
+                sBusyRtt < sLowRtt && sLowDyn < sBusyDyn && migrateOverload,
+                "rtt(" + Math.Round(sBusyRtt) + "<" + Math.Round(sLowRtt) + ") dyn(" + Math.Round(sLowDyn) + "<" + Math.Round(sBusyDyn) + ")");
+
+            // Live loopback concurrent probe + ranking verification
+            var tcpBusy = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            var tcpGood = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            var httpBusy = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            var httpGood = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            tcpBusy.Start();
+            tcpGood.Start();
+            httpBusy.Start();
+            httpGood.Start();
+            try
+            {
+                int tbPort = ((System.Net.IPEndPoint)tcpBusy.LocalEndpoint).Port;
+                int tgPort = ((System.Net.IPEndPoint)tcpGood.LocalEndpoint).Port;
+                int hbPort = ((System.Net.IPEndPoint)httpBusy.LocalEndpoint).Port;
+                int hgPort = ((System.Net.IPEndPoint)httpGood.LocalEndpoint).Port;
+
+                System.Threading.Tasks.Task hTaskBusy = ServeSingleHttpJsonAsync(httpBusy, "{\"ok\":true,\"accepting\":true,\"load\":0.94,\"cpuPct\":91,\"activeSessions\":60,\"maxSessions\":64}");
+                System.Threading.Tasks.Task hTaskGood = ServeSingleHttpJsonAsync(httpGood, "{\"ok\":true,\"accepting\":true,\"load\":0.12,\"cpuPct\":10,\"activeSessions\":2,\"maxSessions\":64}");
+                System.Threading.Tasks.Task tAcceptBusy = AcceptAndCloseOnceAsync(tcpBusy);
+                System.Threading.Tasks.Task tAcceptGood = AcceptAndCloseOnceAsync(tcpGood);
+
+                var liveStore = new BoBoRelayStore { SelectionMode = BoBoRelaySelectionMode.DynamicLoadBalanced };
+                BoBoCustomRelay rBusyLive, rGoodLive;
+                liveStore.TryAddOrUpdate("高负载节点", "127.0.0.1:" + tbPort, "http://127.0.0.1:" + hbPort + "/bobo-relay/health", 100, out rBusyLive, out hErr);
+                liveStore.TryAddOrUpdate("空闲优选节点", "127.0.0.1:" + tgPort, "http://127.0.0.1:" + hgPort + "/bobo-relay/health", 100, out rGoodLive, out hErr);
+
+                List<BoBoRelayProbeSnapshot> ranked = BoBoRelayScheduler.ProbeAndRankAllAsync(liveStore, 2500, System.Threading.CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                try { System.Threading.Tasks.Task.WaitAll(new[] { hTaskBusy, hTaskGood, tAcceptBusy, tAcceptGood }, 1000); } catch { }
+
+                Check("多中转并发探测排序：高负载(0.94) 自动让位给低负载优选节点(0.12)",
+                    ranked.Count == 2 && ranked[0].Reachable && ranked[1].Reachable
+                    && ranked[0].Relay.Id == rGoodLive.Id && Math.Abs(ranked[0].ServerLoad - 0.12) < 0.01
+                    && ranked[1].Relay.Id == rBusyLive.Id && Math.Abs(ranked[1].ServerLoad - 0.94) < 0.01,
+                    ranked.Count > 0 ? ranked[0].Summary : "empty");
+
+                var schedRoute = BoBoConnectionRoute.CreateScheduledCustomRelay(
+                    System.Net.IPAddress.Loopback, null, ranked[0].RttMs, ranked[0].Relay,
+                    BoBoRelaySelectionMode.DynamicLoadBalanced, ranked[0].HasServerLoad, ranked[0].ServerLoad, ranked[0].Accepting);
+                Check("中转调度路由标签：正确展示动态优选与实时负载百分比",
+                    schedRoute.Label.IndexOf("动态优选", StringComparison.Ordinal) >= 0
+                    && schedRoute.Label.IndexOf("负载 12%", StringComparison.Ordinal) >= 0
+                    && !schedRoute.PreferWeakNetworkProfile,
+                    schedRoute.Label);
+            }
+            finally
+            {
+                try { tcpBusy.Stop(); } catch { }
+                try { tcpGood.Stop(); } catch { }
+                try { httpBusy.Stop(); } catch { }
+                try { httpGood.Stop(); } catch { }
+            }
+        }
+
+        private static System.Threading.Tasks.Task AcceptAndCloseOnceAsync(System.Net.Sockets.TcpListener listener)
+        {
+            return System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    using (System.Net.Sockets.TcpClient c = listener.AcceptTcpClient()) { }
+                }
+                catch { }
+            });
+        }
+
+        private static System.Threading.Tasks.Task ServeSingleHttpJsonAsync(System.Net.Sockets.TcpListener listener, string jsonBody)
+        {
+            return System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    using (System.Net.Sockets.TcpClient c = listener.AcceptTcpClient())
+                    using (System.Net.Sockets.NetworkStream s = c.GetStream())
+                    {
+                        s.ReadTimeout = 2000;
+                        s.WriteTimeout = 2000;
+                        byte[] reqBuf = new byte[1024];
+                        try { s.Read(reqBuf, 0, reqBuf.Length); } catch { }
+                        byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
+                        string header = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: "
+                            + bodyBytes.Length + "\r\nConnection: close\r\n\r\n";
+                        byte[] hdrBytes = Encoding.ASCII.GetBytes(header);
+                        s.Write(hdrBytes, 0, hdrBytes.Length);
+                        s.Write(bodyBytes, 0, bodyBytes.Length);
+                        s.Flush();
+                    }
+                }
+                catch { }
+            });
         }
 
         private static void RunEmbeddedSocks5SelfTest()

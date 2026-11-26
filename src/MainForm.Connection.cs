@@ -42,11 +42,14 @@ namespace DualRemote
         private Button customRelayToggleBtn;
         private Control customRelayPanel;
         private TableLayoutPanel customRelayPanelLayout;
+        private ComboBox customRelayModeChoice;
+        private Button customRelayAutoSelectBtn;
         private ComboBox customRelayChoice;
         private Button customRelayTestBtn;
         private Button customRelayDeleteBtn;
         private TextBox customRelayNameInput;
         private TextBox customRelayEndpointInput;
+        private TextBox customRelayHealthInput;
         private Button customRelayAddBtn;
         private Label customRelayStatusLabel;
         private int customRelaySpacerRowIndex = -1;
@@ -88,10 +91,23 @@ namespace DualRemote
                     break;
                 case BoBoRoutePreference.CustomRelayFallback:
                     BoBoCustomRelay activeRelay = customRelayStore != null ? customRelayStore.ActiveRelay : null;
+                    BoBoRelaySelectionMode selMode = customRelayStore != null
+                        ? customRelayStore.SelectionMode
+                        : BoBoRelaySelectionMode.DynamicLoadBalanced;
                     if (activeRelay != null)
                     {
                         connectionRouteHint.ForeColor = Theme.Muted;
-                        connectionRouteHint.Text = "直连优先；未通时自动切换至兜底中转「" + activeRelay.DisplayLabel + "」（端到端 TLS 1.2）。";
+                        if (customRelayStore != null && customRelayStore.Relays.Count > 1 && selMode != BoBoRelaySelectionMode.Manual)
+                        {
+                            string schedDesc = selMode == BoBoRelaySelectionMode.LowestLatency
+                                ? "按最低延迟自动择优"
+                                : "按延迟+服务器负载动态调度";
+                            connectionRouteHint.Text = "直连优先；未通时在 " + customRelayStore.Relays.Count + " 个节点中" + schedDesc + "（当前：" + activeRelay.DisplayLabel + "）。";
+                        }
+                        else
+                        {
+                            connectionRouteHint.Text = "直连优先；未通时自动切换至兜底中转「" + activeRelay.DisplayLabel + "」（端到端 TLS 1.2）。";
+                        }
                     }
                     else
                     {
@@ -136,7 +152,49 @@ namespace DualRemote
             Theme.FillColumn(grid);
             customRelayPanelLayout = grid;
 
-            // Row 0: Saved fallback relay selector + Test + Delete
+            // Row 0: Scheduling strategy + Auto-select best button
+            var modeRow = Theme.Grid(5);
+            Theme.FixedColumn(modeRow, 64);
+            Theme.FixedColumn(modeRow, 8);
+            Theme.FillColumn(modeRow);
+            Theme.FixedColumn(modeRow, 8);
+            Theme.FixedColumn(modeRow, 102);
+
+            customRelayModeChoice = Theme.Choice("中转调度策略", false);
+            customRelayModeChoice.Items.AddRange(new object[]
+            {
+                "手动固定所选节点",
+                "延迟优先（自动选最低 RTT）",
+                "智能动态调度（延迟 + 服务器负载）"
+            });
+            customRelayModeChoice.DropDownWidth = 290;
+            customRelayModeChoice.SelectedIndexChanged += delegate
+            {
+                if (suppressRouteUiEvents || customRelayStore == null) return;
+                int idx = Math.Max(0, Math.Min(2, customRelayModeChoice.SelectedIndex));
+                customRelayStore.SelectionMode = (BoBoRelaySelectionMode)idx;
+                SaveCustomRelayStoreSafely();
+                UpdateCustomRelayButtonsState();
+                ShowConnectionRouteHint(activeConnectionRoute);
+                if (customRelayStore.SelectionMode == BoBoRelaySelectionMode.Manual)
+                    SetCustomRelayStatus("已设为手动固定节点（故障时仍可顺序兜底）。", Theme.Muted);
+                else if (customRelayStore.SelectionMode == BoBoRelaySelectionMode.LowestLatency)
+                    SetCustomRelayStatus("已设为延迟优先：连控时并发测速并自动选择最低延迟节点。", Theme.Accent);
+                else
+                    SetCustomRelayStatus("已设为智能动态调度：综合 RTT 延迟与服务器负载优选，过载自动切换。", Theme.Accent);
+            };
+
+            customRelayAutoSelectBtn = Theme.Action("智能优选", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Bolt);
+            customRelayAutoSelectBtn.Click += async delegate { await ProbeAndSelectBestCustomRelayAsync(); };
+
+            Theme.Row(modeRow, 36,
+                Theme.Text("调度策略", Theme.TextSize.Small, Theme.Muted), null,
+                Theme.WrapInput(customRelayModeChoice), null,
+                customRelayAutoSelectBtn);
+            Theme.Row(grid, 36, modeRow);
+            Theme.Row(grid, 8);
+
+            // Row 1: Saved fallback relay selector + Test + Delete
             var selectRow = Theme.Grid(7);
             Theme.FixedColumn(selectRow, 64);
             Theme.FixedColumn(selectRow, 8);
@@ -217,10 +275,33 @@ namespace DualRemote
                 Theme.WrapInput(customRelayEndpointInput), null,
                 customRelayAddBtn);
             Theme.Row(grid, 36, addRow);
+            Theme.Row(grid, 8);
+
+            // Row 3: Optional health/load endpoint for bobo-relay
+            var healthRow = Theme.Grid(3);
+            Theme.FixedColumn(healthRow, 64);
+            Theme.FixedColumn(healthRow, 8);
+            Theme.FillColumn(healthRow);
+
+            customRelayHealthInput = Theme.InputBox("负载监控接口", "");
+            customRelayHealthInput.MaxLength = 300;
+            Theme.Cue(customRelayHealthInput, "负载接口（可选）：如 :49811 或 http://IP:49811/bobo-relay/health，留空自动探测端口+1");
+            customRelayHealthInput.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.KeyCode == Keys.Enter)
+                {
+                    args.SuppressKeyPress = true;
+                    AddCustomRelayFromInputs();
+                }
+            };
+            Theme.Row(healthRow, 34,
+                Theme.Text("负载接口", Theme.TextSize.Small, Theme.Muted), null,
+                Theme.WrapInput(customRelayHealthInput));
+            Theme.Row(grid, 34, healthRow);
             Theme.Row(grid, 6);
 
             customRelayStatusLabel = Theme.Text(
-                "支持自建 VPS 端口转发 / 域名入口与 Tailscale Peer Relay，直连不通时自动经此节点兜底。",
+                "支持多节点并发测速、bobo-relay 服务器实时负载动态优选与过载自动切换。",
                 Theme.TextSize.Small, Theme.Muted);
             customRelayStatusLabel.AutoEllipsis = true;
             Theme.Row(grid, 22, customRelayStatusLabel);
@@ -288,6 +369,13 @@ namespace DualRemote
             suppressRouteUiEvents = true;
             try
             {
+                if (customRelayModeChoice != null && customRelayStore != null)
+                {
+                    int mIdx = Math.Max(0, Math.Min(customRelayModeChoice.Items.Count - 1, (int)customRelayStore.SelectionMode));
+                    if (customRelayModeChoice.SelectedIndex != mIdx)
+                        customRelayModeChoice.SelectedIndex = mIdx;
+                }
+
                 customRelayChoice.BeginUpdate();
                 customRelayChoice.Items.Clear();
                 if (customRelayStore != null && customRelayStore.Relays.Count > 0)
@@ -328,7 +416,10 @@ namespace DualRemote
 
         private void UpdateCustomRelayButtonsState()
         {
+            bool hasAny = customRelayStore != null && customRelayStore.Relays.Count > 0;
             bool hasRelay = customRelayStore != null && customRelayStore.ActiveRelay != null;
+            if (customRelayAutoSelectBtn != null) customRelayAutoSelectBtn.Enabled = hasAny && !customRelayProbeBusy;
+            if (customRelayModeChoice != null) customRelayModeChoice.Enabled = !customRelayProbeBusy;
             if (customRelayTestBtn != null) customRelayTestBtn.Enabled = hasRelay && !customRelayProbeBusy;
             if (customRelayDeleteBtn != null) customRelayDeleteBtn.Enabled = hasRelay && !customRelayProbeBusy;
         }
@@ -377,10 +468,11 @@ namespace DualRemote
             if (customRelayStore == null || customRelayEndpointInput == null) return;
             string name = customRelayNameInput != null ? customRelayNameInput.Text : "";
             string endpoint = customRelayEndpointInput.Text ?? "";
+            string healthUrl = customRelayHealthInput != null ? customRelayHealthInput.Text : "";
 
             BoBoCustomRelay saved;
             string error;
-            if (!customRelayStore.TryAddOrUpdate(name, endpoint, out saved, out error))
+            if (!customRelayStore.TryAddOrUpdate(name, endpoint, healthUrl, 100, out saved, out error))
             {
                 SetCustomRelayStatus(error, Theme.Alert);
                 customRelayEndpointInput.Focus();
@@ -390,6 +482,7 @@ namespace DualRemote
             SaveCustomRelayStoreSafely();
             if (customRelayNameInput != null) customRelayNameInput.Text = "";
             customRelayEndpointInput.Text = "";
+            if (customRelayHealthInput != null) customRelayHealthInput.Text = "";
             SyncCustomRelayUi();
 
             if (connectionRouteChoice != null && SelectedConnectionRoute != BoBoRoutePreference.CustomRelayFallback)
@@ -403,7 +496,7 @@ namespace DualRemote
 
             ShowConnectionRouteHint(activeConnectionRoute);
             UpdateAssistConnectButtons();
-            SetCustomRelayStatus("已保存兜底中转「" + saved.DisplayLabel + "」，直连未通时将自动走此节点。", Theme.Success);
+            SetCustomRelayStatus("已保存兜底中转「" + saved.DisplayLabel + "」，可点上方「智能优选」一键测速排序。", Theme.Success);
             SetStatus("已添加自建兜底中转：" + saved.DisplayLabel + "。", Theme.PillTone.Success);
         }
 
@@ -431,14 +524,77 @@ namespace DualRemote
 
             customRelayProbeBusy = true;
             UpdateCustomRelayButtonsState();
-            SetCustomRelayStatus("正在探测兜底中转「" + relay.DisplayLabel + "」的 TCP 连通性与往返延迟…", Theme.Accent);
+            SetCustomRelayStatus("正在探测「" + relay.DisplayLabel + "」的 TCP 延迟与服务器负载…", Theme.Accent);
             try
             {
-                Tuple<bool, double, string> res = await BoBoRelayStore.ProbeRelayAsync(
-                    relay.Host, relay.Port, 3500, CancellationToken.None);
+                BoBoRelayProbeSnapshot snap = await BoBoRelayScheduler.ProbeRelayWithTelemetryAsync(
+                    relay, 3500, 900, customRelayStore.SelectionMode, CancellationToken.None);
                 if (IsDisposed) return;
-                SetCustomRelayStatus(res.Item3, res.Item1 ? Theme.Success : Theme.Alert);
-                SetStatus(res.Item3, res.Item1 ? Theme.PillTone.Success : Theme.PillTone.Alert);
+                SyncCustomRelayUi();
+                Theme.PillTone tone = !snap.Reachable ? Theme.PillTone.Alert
+                    : (!snap.Accepting || (snap.HasServerLoad && snap.ServerLoad >= 0.85)) ? Theme.PillTone.Warning
+                    : Theme.PillTone.Success;
+                Color statusColor = !snap.Reachable ? Theme.Alert
+                    : (!snap.Accepting || (snap.HasServerLoad && snap.ServerLoad >= 0.85)) ? Theme.Warning
+                    : Theme.Success;
+                SetCustomRelayStatus(snap.Summary, statusColor);
+                SetStatus(snap.Summary, tone);
+                ShowConnectionRouteHint(activeConnectionRoute);
+            }
+            finally
+            {
+                customRelayProbeBusy = false;
+                if (!IsDisposed) UpdateCustomRelayButtonsState();
+            }
+        }
+
+        private async Task ProbeAndSelectBestCustomRelayAsync()
+        {
+            if (customRelayProbeBusy || customRelayStore == null || customRelayStore.Relays.Count == 0) return;
+            customRelayProbeBusy = true;
+            UpdateCustomRelayButtonsState();
+            int total = customRelayStore.Relays.Count;
+            SetCustomRelayStatus("正在并发探测全部 " + total + " 个自建中转节点的延迟与实时负载…", Theme.Accent);
+            SetStatus("正在并发评估 " + total + " 个自建中转节点的 RTT 与负载…", Theme.PillTone.Info);
+            try
+            {
+                System.Collections.Generic.List<BoBoRelayProbeSnapshot> ranked =
+                    await BoBoRelayScheduler.ProbeAndRankAllAsync(customRelayStore, 3000, CancellationToken.None);
+                if (IsDisposed) return;
+
+                BoBoRelayProbeSnapshot best = null;
+                for (int i = 0; i < ranked.Count; i++)
+                {
+                    if (ranked[i].Reachable)
+                    {
+                        best = ranked[i];
+                        break;
+                    }
+                }
+
+                if (best != null && best.Relay != null)
+                {
+                    customRelayStore.SelectById(best.Relay.Id);
+                    SaveCustomRelayStoreSafely();
+                    SyncCustomRelayUi();
+                    ShowConnectionRouteHint(activeConnectionRoute);
+                    UpdateAssistConnectButtons();
+
+                    string modeTag = customRelayStore.SelectionMode == BoBoRelaySelectionMode.LowestLatency
+                        ? "延迟优选"
+                        : customRelayStore.SelectionMode == BoBoRelaySelectionMode.Manual ? "手动" : "动态优选";
+                    string msg = "已从 " + ranked.Count + " 节点" + modeTag + "：" + best.Summary;
+                    Theme.PillTone tone = !best.Accepting ? Theme.PillTone.Warning : Theme.PillTone.Success;
+                    SetCustomRelayStatus(msg, !best.Accepting ? Theme.Warning : Theme.Success);
+                    SetStatus(msg, tone);
+                }
+                else
+                {
+                    SyncCustomRelayUi();
+                    string failMsg = "全部 " + ranked.Count + " 个自建中转节点均暂不可达，请检查 VPS 防火墙或 bobo-relay 运行状态。";
+                    SetCustomRelayStatus(failMsg, Theme.Alert);
+                    SetStatus(failMsg, Theme.PillTone.Alert);
+                }
             }
             finally
             {
@@ -450,27 +606,144 @@ namespace DualRemote
         private void TrackSessionRoute(NativeStreamForm session, BoBoConnectionRoute route)
         {
             session.ConnectionRouteLabelProvider = delegate { return route == null ? "" : route.Label; };
-            if (route == null || !route.IsTailnet) return;
-            var timer = new System.Windows.Forms.Timer { Interval = 10000 };
-            bool refreshing = false;
-            timer.Tick += async delegate
+            if (route == null) return;
+
+            if (route.IsTailnet)
             {
-                if (refreshing || IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
-                refreshing = true;
-                try
+                var timer = new System.Windows.Forms.Timer { Interval = 10000 };
+                bool refreshing = false;
+                timer.Tick += async delegate
                 {
-                    LinkProbeResult result = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2200));
-                    if (!IsDisposed && !session.IsDisposed && activeNativeStreamForm == session)
+                    if (refreshing || IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+                    refreshing = true;
+                    try
                     {
-                        route.UpdateTailnetPath(result.LastPong);
-                        ShowConnectionRouteHint(route);
+                        LinkProbeResult result = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2200));
+                        if (!IsDisposed && !session.IsDisposed && activeNativeStreamForm == session)
+                        {
+                            route.UpdateTailnetPath(result.LastPong);
+                            ShowConnectionRouteHint(route);
+                        }
                     }
-                }
-                catch { }
-                finally { refreshing = false; }
-            };
-            session.Disposed += delegate { timer.Dispose(); };
-            timer.Start();
+                    catch { }
+                    finally { refreshing = false; }
+                };
+                session.Disposed += delegate { timer.Dispose(); };
+                timer.Start();
+                return;
+            }
+
+            if (route.Kind == BoBoRouteKind.CustomRelay
+                && customRelayStore != null
+                && customRelayStore.Relays.Count >= 2
+                && customRelayStore.SelectionMode != BoBoRelaySelectionMode.Manual)
+            {
+                var relayTimer = new System.Windows.Forms.Timer { Interval = 15000 };
+                bool checking = false;
+                int degradeStrikes = 0;
+                long lastMigrationUtcTicks = DateTime.UtcNow.Ticks;
+                relayTimer.Tick += async delegate
+                {
+                    if (checking || IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+                    if (customRelayStore == null || customRelayStore.Relays.Count < 2 || customRelayStore.SelectionMode == BoBoRelaySelectionMode.Manual)
+                        return;
+
+                    checking = true;
+                    try
+                    {
+                        BoBoCustomRelay active = null;
+                        for (int i = 0; i < customRelayStore.Relays.Count; i++)
+                        {
+                            if (string.Equals(customRelayStore.Relays[i].Id, route.CustomRelayId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                active = customRelayStore.Relays[i];
+                                break;
+                            }
+                        }
+                        if (active == null) active = customRelayStore.ActiveRelay;
+                        if (active == null) return;
+
+                        BoBoRelayProbeSnapshot curSnap = await BoBoRelayScheduler.ProbeRelayWithTelemetryAsync(
+                            active, 2500, 800, customRelayStore.SelectionMode, CancellationToken.None);
+                        if (IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+
+                        route.UpdateCustomRelayMetrics(curSnap.RttMs, curSnap.HasServerLoad, curSnap.ServerLoad, curSnap.Accepting);
+                        ShowConnectionRouteHint(route);
+
+                        bool hardTrigger = !curSnap.Reachable || !curSnap.Accepting;
+                        bool softTrigger = (curSnap.HasServerLoad && curSnap.ServerLoad >= 0.85) || curSnap.RttMs >= 130.0;
+                        if (hardTrigger)
+                            degradeStrikes = 2;
+                        else if (softTrigger)
+                            degradeStrikes++;
+                        else
+                            degradeStrikes = 0;
+
+                        if (degradeStrikes < 2) return;
+                        if ((DateTime.UtcNow.Ticks - lastMigrationUtcTicks) < TimeSpan.FromSeconds(45).Ticks) return;
+
+                        System.Collections.Generic.List<BoBoRelayProbeSnapshot> ranked =
+                            await BoBoRelayScheduler.ProbeAndRankAllAsync(customRelayStore, 2500, CancellationToken.None);
+                        if (IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+
+                        BoBoRelayProbeSnapshot best = null;
+                        for (int i = 0; i < ranked.Count; i++)
+                        {
+                            BoBoRelayProbeSnapshot cand = ranked[i];
+                            if (cand.Relay == null || string.Equals(cand.Relay.Id, active.Id, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            if (BoBoRelayScheduler.ShouldMigrateActiveRelay(curSnap, cand, customRelayStore.SelectionMode))
+                            {
+                                best = cand;
+                                break;
+                            }
+                        }
+                        if (best == null || best.Relay == null) return;
+
+                        BoBoHostProbeResult hp = null;
+                        try
+                        {
+                            hp = await BoBoStreamClient.ProbeHostAsync(
+                                best.Relay.Host, best.Relay.Port, BoBoIdentityStore.Default, 3000, CancellationToken.None);
+                        }
+                        catch { }
+                        if (IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+
+                        bool hpOk = hp != null && hp.Reachable && hp.IsBoBoHost && hp.AllowIncoming;
+                        customRelayStore.RecordConnectOutcome(best.Relay.Id, hpOk);
+                        if (!hpOk) return;
+
+                        lastMigrationUtcTicks = DateTime.UtcNow.Ticks;
+                        degradeStrikes = 0;
+                        customRelayStore.SelectById(best.Relay.Id);
+                        SaveCustomRelayStoreSafely();
+                        SyncCustomRelayUi();
+
+                        route.SwitchCustomRelay(
+                            hp.ConnectedAddress ?? route.RemoteAddress,
+                            best.RttMs,
+                            best.Relay,
+                            customRelayStore.SelectionMode,
+                            best.HasServerLoad,
+                            best.ServerLoad,
+                            best.Accepting);
+                        clientPairPort = best.Relay.Port;
+                        clientPairHost = best.Relay.Host;
+                        ShowConnectionRouteHint(route);
+
+                        string reason = "原中转「" + active.DisplayLabel + "」"
+                            + (!curSnap.Reachable ? "连接中断" : !curSnap.Accepting ? "进入维护" : "负载或延迟偏高")
+                            + "，已动态切换至 " + best.Summary;
+                        SetCustomRelayStatus(reason, Theme.Accent);
+                        SetStatus(reason, Theme.PillTone.Info);
+                        await session.SwitchEndpointAsync(best.Relay.Host, best.Relay.Port, reason);
+                    }
+                    catch { }
+                    finally { checking = false; }
+                };
+                session.Disposed += delegate { relayTimer.Dispose(); };
+                relayTimer.Start();
+            }
         }
 
         private Control BuildClientPairPanel()
@@ -662,6 +935,8 @@ namespace DualRemote
 
             BoBoHostProbeResult probe = null;
             bool usedCustomRelayFallback = directToRelayOnly;
+            BoBoRelayProbeSnapshot selectedRelaySnap = null;
+            BoBoCustomRelay selectedRelay = null;
 
             if (!directToRelayOnly)
             {
@@ -689,38 +964,103 @@ namespace DualRemote
                         return;
                     }
                     usedCustomRelayFallback = true;
-                    SetStatus("直连未通，正在通过自建兜底中转「" + activeRelay.DisplayLabel + "」尝试连接…", Theme.PillTone.Info);
-                    SetCustomRelayStatus("直连未通，已自动切至「" + activeRelay.DisplayLabel + "」进行兜底建链…", Theme.Accent);
+                    SetStatus("直连未通，正在评估自建兜底中转节点延迟与负载…", Theme.PillTone.Info);
                 }
             }
             else
             {
-                SetStatus("正在通过自建兜底中转「" + activeRelay.DisplayLabel + "」建立 BoBo 加密连接…", Theme.PillTone.Info);
+                SetStatus("正在通过自建兜底中转建立 BoBo 加密连接…", Theme.PillTone.Info);
             }
 
             if (usedCustomRelayFallback)
             {
-                try
-                {
-                    probe = await BoBoStreamClient.ProbeHostAsync(
-                        activeRelay.Host, activeRelay.Port, BoBoIdentityStore.Default, 4500, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    probe = new BoBoHostProbeResult { Error = "通过自建中转探测失败：" + ex.Message };
-                }
-                if (IsDisposed || request != connectRequestGeneration) return;
+                var candidates = new System.Collections.Generic.List<BoBoRelayProbeSnapshot>();
+                BoBoRelaySelectionMode selMode = customRelayStore != null
+                    ? customRelayStore.SelectionMode
+                    : BoBoRelaySelectionMode.DynamicLoadBalanced;
 
-                if (!probe.Reachable || !probe.IsBoBoHost)
+                if (customRelayStore != null && (selMode != BoBoRelaySelectionMode.Manual || customRelayStore.Relays.Count > 1))
                 {
-                    string relayErr = string.IsNullOrEmpty(probe.Error)
-                        ? ("自建兜底中转「" + activeRelay.DisplayLabel + "」未连通 BoBo 服务端，请检查 VPS 端口转发与被控端状态。")
-                        : ("自建兜底中转「" + activeRelay.DisplayLabel + "」未连通：" + probe.Error);
+                    SetCustomRelayStatus("正在并发探测 " + customRelayStore.Relays.Count + " 个自建中转节点的延迟与负载…", Theme.Accent);
+                    System.Collections.Generic.List<BoBoRelayProbeSnapshot> ranked =
+                        await BoBoRelayScheduler.ProbeAndRankAllAsync(customRelayStore, 2500, CancellationToken.None);
+                    if (IsDisposed || request != connectRequestGeneration) return;
+                    SyncCustomRelayUi();
+                    for (int i = 0; i < ranked.Count; i++)
+                    {
+                        if (ranked[i].Reachable) candidates.Add(ranked[i]);
+                    }
+                    if (candidates.Count == 0 && ranked.Count > 0)
+                        candidates.Add(ranked[0]);
+                }
+
+                if (candidates.Count == 0 && activeRelay != null)
+                {
+                    candidates.Add(new BoBoRelayProbeSnapshot
+                    {
+                        Relay = activeRelay,
+                        Reachable = true,
+                        Accepting = true
+                    });
+                }
+
+                BoBoHostProbeResult chosenProbe = null;
+                string lastProbeErr = "";
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    BoBoRelayProbeSnapshot cand = candidates[i];
+                    if (cand.Relay == null) continue;
+                    SetStatus("正在经中转节点「" + cand.Relay.DisplayLabel + "」探测远端 BoBo 宿主…", Theme.PillTone.Info);
+                    BoBoHostProbeResult candProbe;
+                    try
+                    {
+                        candProbe = await BoBoStreamClient.ProbeHostAsync(
+                            cand.Relay.Host, cand.Relay.Port, BoBoIdentityStore.Default, 4500, CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        candProbe = new BoBoHostProbeResult { Error = "通过自建中转探测失败：" + ex.Message };
+                    }
+                    if (IsDisposed || request != connectRequestGeneration) return;
+
+                    bool candOk = candProbe.Reachable && candProbe.IsBoBoHost;
+                    if (customRelayStore != null) customRelayStore.RecordConnectOutcome(cand.Relay.Id, candOk);
+                    if (candOk)
+                    {
+                        selectedRelaySnap = cand;
+                        selectedRelay = cand.Relay;
+                        chosenProbe = candProbe;
+                        break;
+                    }
+
+                    lastProbeErr = candProbe.Error;
+                    if (i + 1 < candidates.Count)
+                        SetCustomRelayStatus("中转「" + cand.Relay.DisplayLabel + "」未就绪，自动切换下一备选节点…", Theme.Warning);
+                }
+
+                if (chosenProbe == null || selectedRelay == null)
+                {
+                    BoBoCustomRelay labelRelay = (candidates.Count > 0 && candidates[0].Relay != null) ? candidates[0].Relay : activeRelay;
+                    string relayLabel = labelRelay != null ? labelRelay.DisplayLabel : "自建中转";
+                    string relayErr = string.IsNullOrEmpty(lastProbeErr)
+                        ? ("自建兜底中转「" + relayLabel + "」等候选节点均未连通 BoBo 服务端，请检查 VPS 端口转发与被控端状态。")
+                        : ("自建兜底中转「" + relayLabel + "」未连通：" + lastProbeErr);
                     SetCustomRelayStatus(relayErr, Theme.Alert);
                     SetStatus(relayErr, Theme.PillTone.Alert);
                     deviceBanner.Set(relayErr, Theme.PillTone.Alert);
                     return;
                 }
+
+                probe = chosenProbe;
+                if (customRelayStore != null)
+                {
+                    if (selMode != BoBoRelaySelectionMode.Manual)
+                        customRelayStore.SelectById(selectedRelay.Id);
+                    SaveCustomRelayStoreSafely();
+                    SyncCustomRelayUi();
+                }
+                if (!string.IsNullOrEmpty(selectedRelaySnap.Summary))
+                    SetCustomRelayStatus("已选用中转：" + selectedRelaySnap.Summary, Theme.Success);
             }
 
             if (!probe.Reachable || !probe.IsBoBoHost)
@@ -746,13 +1086,26 @@ namespace DualRemote
 
             BoBoConnectionRoute route;
             string effectiveHost;
-            if (usedCustomRelayFallback)
+            if (usedCustomRelayFallback && selectedRelay != null)
             {
-                route = BoBoConnectionRoute.CreateCustomRelay(
-                    probe.ConnectedAddress, probe.LocalAddress, probe.HandshakeRttMs,
-                    activeRelay.Port, activeRelay.Name, activeRelay.EndpointText);
-                effectiveHost = activeRelay.Host;
-                clientPairPort = activeRelay.Port;
+                BoBoRelaySelectionMode selMode = customRelayStore != null
+                    ? customRelayStore.SelectionMode
+                    : BoBoRelaySelectionMode.Manual;
+                double effectiveRtt = (selectedRelaySnap != null && selectedRelaySnap.RttMs > 0.1)
+                    ? selectedRelaySnap.RttMs
+                    : probe.HandshakeRttMs;
+                route = BoBoConnectionRoute.CreateScheduledCustomRelay(
+                    probe.ConnectedAddress,
+                    probe.LocalAddress,
+                    effectiveRtt,
+                    selectedRelay,
+                    selMode,
+                    selectedRelaySnap != null && selectedRelaySnap.HasServerLoad,
+                    selectedRelaySnap != null ? selectedRelaySnap.ServerLoad : 0.0,
+                    selectedRelaySnap == null || selectedRelaySnap.Accepting);
+                effectiveHost = selectedRelay.Host;
+                clientPairPort = selectedRelay.Port;
+                clientPairDisplayInput = selectedRelay.EndpointText;
             }
             else
             {
