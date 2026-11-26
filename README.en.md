@@ -25,7 +25,7 @@
 
 **Four native apps share one protocol. Windows ships a single executable.**
 
-**BoBo Remote v7.0.4** hardens UDP transport and desktop stability: eliminates startup double-IDR and in-flight keyframe PLI storms, adds packet-reorder margin and allocation-free NACK recovery polling, avoids wasted NACK retry counts when retransmit budget is reached, spaces redundant discrete UDP inputs reliably, keeps privacy cursor masking thread-affine with safe curtain teardown, and fixes `Ctrl+Alt` cursor mode sync and UI transition disposal races. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
+**BoBo Remote v7.0.5** upgrades both the **Route Selector** UI and self-hosted VPS fallback workflow: a custom glacier-blue dropdown (`StyledChoiceBox`) eliminates Win32 `#0078D7` highlight flashes across non-editable selectors, and a new **Direct-First + Self-Hosted Relay Fallback** route opens an inline **Custom Fallback Relay** panel where users can add, select, delete, TCP-probe, and persist their own VPS fallback endpoints with automatic end-to-end TLS 1.2 fallback when direct connection fails. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
 
 The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices auto-discover on the LAN and connect over TLS 1.2, prioritize P2P direct links across networks (Tailscale `100.x.y.z` or reachable IPv6), and support self-hosted VPS relay fallback (currently via Tailscale Peer Relay / custom DERP, evolving toward native TURN UDP Relay). Windows-to-Windows sessions also negotiate an encrypted `UDP 49811` (`UDP+FEC/NACK`) channel.
 
@@ -59,7 +59,7 @@ The Windows executable embeds the compressed C++17 media and input core, `BoBoCo
 
 ## Architecture &amp; Network Transport Design
 
-### A. Shipped Architecture &amp; Unified Protocol (`BoBo6.2` · `v7.0.4`)
+### A. Shipped Architecture &amp; Unified Protocol (`BoBo6.2` · `v7.0.5`)
 
 ```mermaid
 flowchart LR
@@ -121,7 +121,7 @@ flowchart TB
 
 > **Open-Source Bring-Your-Own VPS (BYO-VPS) Model**
 > - Both personal deployments and open-source users follow **P2P Direct Priority + Self-Hosted VPS Relay Fallback**: instead of relying on an official hosted server cluster, anyone can spin up a lightweight regional/BGP VPS as their own private fallback node for predictable cost and full privacy ownership.
-> - **What works today (`v7.0.4`)**: Deploy your VPS as a **Tailscale Peer Relay or custom DERP node**. BoBo Remote detects `LAN Direct`, `Tailscale P2P Direct`, `Tailscale Peer Relay`, and `DERP`, and preserves high-bitrate/high-FPS streaming whenever a fast `peer-relay` measures `< 55 ms`. Once the open-source Connection Coordinator, `TURN / UDP Relay`, and `TCP/TLS 443` fallback land, external mesh tools become optional.
+> - **What works today (`v7.0.5`)**: Choose **Direct First + Self-Hosted Relay Fallback** directly inside the Route dropdown to add, save, delete, and TCP-probe your own VPS endpoints (`host[:port]`) with automatic TLS 1.2 fallback when direct peering fails; or deploy your VPS as a **Tailscale Peer Relay / custom DERP node** (with high-bitrate/FPS preserved when `< 55 ms`). Once the open-source Connection Coordinator, `TURN / UDP Relay`, and `TCP/TLS 443` fallback land, external mesh tools become optional.
 
 ## Key Features
 
@@ -237,7 +237,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-For `v7.0.4`, local Windows checks used direct compiler invocations: **10/10 native self-tests, 128/128 managed `--self-test` checks, 7/7 installer checks, 49/49 UI/animation/icon smoke checks, and 12/12 privacy curtain thread checks passed** (`RemoteSigned` blocked normal `.ps1` execution in that shell). GitHub Actions CI &amp; Release workflows automatically build and test Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA); interactive real-world WAN and cross-device QA continue alongside each release.
+For `v7.0.5`, local Windows checks used direct compiler invocations: **10/10 native self-tests, 130/130 managed `--self-test` checks, 7/7 installer checks, 56/56 UI/dropdown/relay/animation/icon smoke checks, and 12/12 privacy curtain thread checks passed** (`RemoteSigned` blocked normal `.ps1` execution in that shell). GitHub Actions CI &amp; Release workflows automatically build and test Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA).
 
 The release workflow builds all four packages from the same existing `vMAJOR.MINOR.PATCH` tag. After all four builds succeed, it verifies the six packages and `SHA256SUMS.txt` on a draft before publishing. [Release workflow](.github/workflows/release.yml)
 
@@ -276,7 +276,7 @@ The release workflow builds all four packages from the same existing `vMAJOR.MIN
 | **V6.0** | Full in-process kernel unification (embedded C++17 `BoBoCore.dll` + `BOBO6` TLS 1.2 + mandatory dual-end 4-digit pairing), zero external engines | ✅ Done |
 | **V6.1** | Host native cursor compositing, Super Display zero-black-bar mode, native physical input lock (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) &amp; hardened privacy shield | ✅ Done |
 | **V6.2** | `BoBo6.2` cross-platform protocol + 3-language Golden Vectors + **Windows / Android / macOS / iOS four-platform release** &amp; parallel CI/Release | ✅ Done |
-| **V7.0 (v7.0.0–v7.0.4)** | Super Display v2 viewport negotiation, host-sized cursor, fast `peer-relay` recognition, smooth animations &amp; crisp icons, dedicated-thread privacy curtain, Windows encrypted `UDP+FEC/NACK` &amp; 12s-baseline ABR | ✅ Done |
+| **V7.0 (v7.0.0–v7.0.5)** | Super Display v2 viewport negotiation, host-sized cursor, fast `peer-relay` detection, custom glacier-blue dropdowns &amp; Direct-First + BYO-VPS Fallback Relay UI, threaded privacy curtain, Windows encrypted `UDP+FEC/NACK` &amp; 12s-baseline ABR | ✅ Done |
 | **Next-Gen Architecture (V7.1+ / V8)** | Open-source self-hostable Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` fallback + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK &amp; HEVC/H.265 negotiation, Linux client exploration | 🚧 Planned / Evolving |
 
 ## Star History

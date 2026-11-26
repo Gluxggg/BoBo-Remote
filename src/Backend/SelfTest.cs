@@ -1375,6 +1375,50 @@ namespace DualRemote
                 !BoBoConnectionRoute.HasSamePrefix(subnetAddress, System.Net.IPAddress.Parse("192.168.42.45"), 25) &&
                 BoBoConnectionRoute.HasSamePrefix(System.Net.IPAddress.Parse("fd01:23::1"), System.Net.IPAddress.Parse("fd01:23::2"), 64), "");
 
+            string rHost;
+            int rPort;
+            string rErr;
+            bool epOk = BoBoRelayStore.TryParseEndpoint("203.0.113.10", out rHost, out rPort, out rErr)
+                && rHost == "203.0.113.10" && rPort == BoBoProtocol.DefaultTcpPort;
+            bool epPortOk = BoBoRelayStore.TryParseEndpoint("relay.example.com:443", out rHost, out rPort, out rErr)
+                && rHost == "relay.example.com" && rPort == 443;
+            bool epV6Ok = BoBoRelayStore.TryParseEndpoint("[2001:db8::9]:50443", out rHost, out rPort, out rErr)
+                && rHost == "2001:db8::9" && rPort == 50443;
+            bool epRejectOk = !BoBoRelayStore.TryParseEndpoint("", out rHost, out rPort, out rErr)
+                && !BoBoRelayStore.TryParseEndpoint("https://203.0.113.10:443", out rHost, out rPort, out rErr)
+                && !BoBoRelayStore.TryParseEndpoint("203.0.113.10:70000", out rHost, out rPort, out rErr)
+                && !BoBoRelayStore.TryParseEndpoint("bad host:443", out rHost, out rPort, out rErr)
+                && !BoBoRelayStore.TryParseEndpoint("-bad.example.com", out rHost, out rPort, out rErr);
+            var relayStore = new BoBoRelayStore();
+            BoBoCustomRelay relayOne, relayTwo, relayDup;
+            bool addOk = relayStore.TryAddOrUpdate("华北 BGP", "203.0.113.10:443", out relayOne, out rErr)
+                && relayStore.TryAddOrUpdate("华东备用", "relay.example.com", out relayTwo, out rErr)
+                && relayStore.TryAddOrUpdate("华北 BGP-改", "203.0.113.10:443", out relayDup, out rErr)
+                && relayStore.Relays.Count == 2
+                && relayDup.Id == relayOne.Id
+                && relayStore.ActiveRelay != null && relayStore.ActiveRelay.Id == relayOne.Id;
+            BoBoRelayStore parsedRelayStore = BoBoRelayStore.Parse(relayStore.Serialize());
+            bool roundTripOk = parsedRelayStore.Relays.Count == 2
+                && parsedRelayStore.ActiveRelay != null
+                && parsedRelayStore.ActiveRelay.Host == "203.0.113.10"
+                && parsedRelayStore.ActiveRelay.Port == 443
+                && parsedRelayStore.ActiveRelay.Name == "华北 BGP-改"
+                && parsedRelayStore.RemoveById(relayOne.Id)
+                && parsedRelayStore.Relays.Count == 1;
+            Check("自建兜底中转存储：地址解析、去重、序列化往返与删除校验",
+                epOk && epPortOk && epV6Ok && epRejectOk && addOk && roundTripOk, rErr ?? "ok");
+
+            BoBoConnectionRoute fastCustomRelay = BoBoConnectionRoute.CreateCustomRelay(
+                System.Net.IPAddress.Parse("203.0.113.10"), null, 22.0, 443, "华北 BGP", "203.0.113.10:443");
+            BoBoConnectionRoute slowCustomRelay = BoBoConnectionRoute.CreateCustomRelay(
+                System.Net.IPAddress.Parse("203.0.113.10"), null, 95.0, 49810, "海外兜底", "203.0.113.10:49810");
+            Check("自建兜底中转线路：不误判为 Tailnet、保留端口且按 RTT 判定弱网",
+                fastCustomRelay.Kind == BoBoRouteKind.CustomRelay && !fastCustomRelay.IsTailnet
+                && fastCustomRelay.TargetPort == 443 && !fastCustomRelay.PreferWeakNetworkProfile
+                && fastCustomRelay.Label == "自建兜底中转 · 华北 BGP"
+                && slowCustomRelay.Kind == BoBoRouteKind.CustomRelay && slowCustomRelay.PreferWeakNetworkProfile,
+                fastCustomRelay.Label);
+
             int videoWidth, videoHeight;
             BoBoHostServer.FitDesktopStream(1920, 1080, 2880, 1800, long.MaxValue, out videoWidth, out videoHeight);
             bool fitOriginal = videoWidth == 1920 && videoHeight == 1080;

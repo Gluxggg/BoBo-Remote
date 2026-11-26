@@ -563,17 +563,305 @@ namespace DualRemote
 
         internal static ComboBox Choice(string name, bool editable)
         {
+            if (!editable)
+            {
+                return new StyledChoiceBox
+                {
+                    AccessibleName = name
+                };
+            }
             return new ComboBox
             {
                 AccessibleName = name,
                 Dock = DockStyle.None,
-                DropDownStyle = editable ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList,
+                DropDownStyle = ComboBoxStyle.DropDown,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Paper,
                 ForeColor = Ink,
                 Font = BodyFont,
                 Margin = Padding.Empty
             };
+        }
+
+        internal sealed class StyledChoiceBox : ComboBox
+        {
+            private bool hovered;
+
+            internal StyledChoiceBox()
+            {
+                Dock = DockStyle.None;
+                DropDownStyle = ComboBoxStyle.DropDownList;
+                FlatStyle = FlatStyle.Flat;
+                DrawMode = DrawMode.OwnerDrawVariable;
+                IntegralHeight = false;
+                MaxDropDownItems = 10;
+                BackColor = Paper;
+                ForeColor = Ink;
+                Font = BodyFont;
+                Cursor = Cursors.Hand;
+                Margin = Padding.Empty;
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                UpdateClosedItemHeight();
+            }
+
+            protected override void OnFontChanged(EventArgs e)
+            {
+                base.OnFontChanged(e);
+                UpdateClosedItemHeight();
+            }
+
+            private void UpdateClosedItemHeight()
+            {
+                if (!IsHandleCreated) return;
+                float scale = GetDpiScale(this);
+                int desired = Math.Max(18, Math.Min(36, (int)Math.Round(22f * scale)));
+                try { ItemHeight = desired; } catch { }
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hovered = true;
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hovered = false;
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnGotFocus(EventArgs e)
+            {
+                Invalidate();
+                base.OnGotFocus(e);
+            }
+
+            protected override void OnLostFocus(EventArgs e)
+            {
+                Invalidate();
+                base.OnLostFocus(e);
+            }
+
+            protected override void OnDropDown(EventArgs e)
+            {
+                Invalidate();
+                base.OnDropDown(e);
+            }
+
+            protected override void OnDropDownClosed(EventArgs e)
+            {
+                Invalidate();
+                base.OnDropDownClosed(e);
+            }
+
+            protected override void OnSelectedIndexChanged(EventArgs e)
+            {
+                Invalidate();
+                base.OnSelectedIndexChanged(e);
+            }
+
+            protected override void OnEnabledChanged(EventArgs e)
+            {
+                BackColor = Enabled ? Paper : SurfaceSubtle;
+                ForeColor = Enabled ? Ink : Muted;
+                Invalidate();
+                if (Parent != null) Parent.Invalidate();
+                base.OnEnabledChanged(e);
+            }
+
+            protected override void OnTextChanged(EventArgs e)
+            {
+                Invalidate();
+                base.OnTextChanged(e);
+            }
+
+            protected override void OnMeasureItem(MeasureItemEventArgs e)
+            {
+                base.OnMeasureItem(e);
+                float scale = GetDpiScale(this);
+                e.ItemHeight = Math.Max(26, (int)Math.Round(32f * scale));
+            }
+
+            protected override void OnDrawItem(DrawItemEventArgs e)
+            {
+                if ((e.State & DrawItemState.ComboBoxEdit) != 0)
+                {
+                    PaintClosedFace(e.Graphics, e.Bounds);
+                    return;
+                }
+                if (e.Index < 0 || e.Index >= Items.Count) return;
+
+                Graphics g = e.Graphics;
+                bool highContrast = SystemInformation.HighContrast;
+                bool hot = (e.State & DrawItemState.Selected) != 0 || (e.State & DrawItemState.HotLight) != 0;
+                bool isCurrent = e.Index == SelectedIndex;
+                float scale = Math.Max(1f, g.DpiX / 96f);
+
+                Color rowBg = highContrast ? SystemColors.Window : Paper;
+                FillBg(g, e.Bounds, rowBg);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                if (hot)
+                {
+                    if (highContrast)
+                    {
+                        FillBg(g, e.Bounds, SystemColors.Highlight);
+                    }
+                    else
+                    {
+                        var pill = new RectangleF(
+                            e.Bounds.X + 4f * scale,
+                            e.Bounds.Y + 2f * scale,
+                            Math.Max(8f, e.Bounds.Width - 8f * scale),
+                            Math.Max(8f, e.Bounds.Height - 4f * scale));
+                        Surface(g, pill, 5f * scale, AccentLight, AccentBorder, 1f);
+                    }
+                }
+
+                if (isCurrent && !highContrast)
+                {
+                    float barW = Math.Max(2.5f, 2.5f * scale);
+                    float barH = Math.Min(e.Bounds.Height - 10f * scale, 16f * scale);
+                    if (barH >= 6f)
+                    {
+                        Surface(g,
+                            new RectangleF(e.Bounds.X + 7f * scale, e.Bounds.Y + (e.Bounds.Height - barH) * 0.5f, barW, barH),
+                            barW * 0.5f, Accent, Color.Transparent);
+                    }
+                }
+
+                int leftPad = (int)Math.Round(15f * scale);
+                int rightReserve = isCurrent ? (int)Math.Round(26f * scale) : (int)Math.Round(10f * scale);
+                var textRect = new Rectangle(
+                    e.Bounds.X + leftPad,
+                    e.Bounds.Y,
+                    Math.Max(8, e.Bounds.Width - leftPad - rightReserve),
+                    e.Bounds.Height);
+                Color fg = highContrast
+                    ? (hot ? SystemColors.HighlightText : SystemColors.WindowText)
+                    : (isCurrent ? Accent : Ink);
+                string text = GetItemText(Items[e.Index]);
+                TextRenderer.DrawText(g, text, (isCurrent && !highContrast) ? LabelBoldFont : Font, textRect, fg,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                if (isCurrent)
+                {
+                    float checkSize = (float)Math.Round(13f * scale);
+                    var checkRect = new RectangleF(
+                        e.Bounds.Right - 10f * scale - checkSize,
+                        e.Bounds.Y + (e.Bounds.Height - checkSize) * 0.5f,
+                        checkSize,
+                        checkSize);
+                    DrawGlyph(g, Glyph.Check, checkRect, highContrast && hot ? SystemColors.HighlightText : Accent);
+                }
+            }
+
+            internal void PaintClosedFace(Graphics g, Rectangle bounds)
+            {
+                if (g == null || bounds.Width <= 0 || bounds.Height <= 0) return;
+                bool highContrast = SystemInformation.HighContrast;
+                Color bg = highContrast ? SystemColors.Window : (Enabled ? Paper : SurfaceSubtle);
+                FillBg(g, bounds, bg);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                float scale = Math.Max(1f, g.DpiX / 96f);
+                int leftPad = Math.Max(4, (int)Math.Round(4f * scale));
+                int rightPad = Math.Max(6, (int)Math.Round(6f * scale));
+                float chevSize = (float)Math.Round(13f * scale);
+                int chevReserve = (int)Math.Ceiling(chevSize + rightPad + 4f * scale);
+
+                var textRect = new Rectangle(
+                    bounds.X + leftPad,
+                    bounds.Y,
+                    Math.Max(8, bounds.Width - leftPad - chevReserve),
+                    bounds.Height);
+                string display = (SelectedIndex >= 0 && SelectedIndex < Items.Count)
+                    ? GetItemText(Items[SelectedIndex])
+                    : (Text ?? "");
+                Color fg = highContrast
+                    ? (Enabled ? SystemColors.WindowText : SystemColors.GrayText)
+                    : (Enabled ? Ink : Muted);
+                TextRenderer.DrawText(g, display, Font, textRect, fg,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                Color chevColor = highContrast
+                    ? (Enabled ? SystemColors.WindowText : SystemColors.GrayText)
+                    : (Enabled ? ((hovered || DroppedDown || Focused) ? Accent : Muted) : StrokeStrong);
+                var chevRect = new RectangleF(
+                    bounds.Right - rightPad - chevSize,
+                    bounds.Y + (bounds.Height - chevSize) * 0.5f,
+                    chevSize,
+                    chevSize);
+                DrawGlyph(g, DroppedDown ? Glyph.ChevronUp : Glyph.ChevronDown, chevRect, chevColor);
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                const int WmPaint = 0x000F;
+                const int WmEraseBkgnd = 0x0014;
+                if (m.Msg == WmEraseBkgnd)
+                {
+                    m.Result = (IntPtr)1;
+                    return;
+                }
+                if (m.Msg == WmPaint)
+                {
+                    var ps = new PaintStruct();
+                    IntPtr hdc = BeginPaint(Handle, out ps);
+                    try
+                    {
+                        if (hdc != IntPtr.Zero && Width > 0 && Height > 0)
+                        {
+                            using (Graphics g = Graphics.FromHdc(hdc))
+                            using (BufferedGraphics buf = BufferedGraphicsManager.Current.Allocate(g, ClientRectangle))
+                            {
+                                PaintClosedFace(buf.Graphics, ClientRectangle);
+                                buf.Render(g);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        EndPaint(Handle, ref ps);
+                    }
+                    m.Result = IntPtr.Zero;
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct PaintStruct
+            {
+                public IntPtr hdc;
+                public bool fErase;
+                public int rcLeft;
+                public int rcTop;
+                public int rcRight;
+                public int rcBottom;
+                public bool fRestore;
+                public bool fIncUpdate;
+                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+                public byte[] rgbReserved;
+            }
+
+            [DllImport("user32.dll")]
+            private static extern IntPtr BeginPaint(IntPtr hWnd, out PaintStruct lpPaint);
+
+            [DllImport("user32.dll")]
+            private static extern bool EndPaint(IntPtr hWnd, ref PaintStruct lpPaint);
         }
 
         internal static TextBox InputBox(string name, string text)
@@ -602,6 +890,7 @@ namespace DualRemote
             private readonly Panel comboClip;
             private bool focused;
             private bool hovered;
+            private bool dropped;
 
             internal InputShell(Control inner)
             {
@@ -611,14 +900,27 @@ namespace DualRemote
                 BackColor = Paper;
                 DoubleBuffered = true;
                 ResizeRedraw = true;
-                inner.BackColor = Paper;
+                inner.BackColor = inner.Enabled ? Paper : SurfaceSubtle;
                 inner.GotFocus += delegate { focused = true; Invalidate(); };
                 inner.LostFocus += delegate { focused = false; Invalidate(); };
                 inner.MouseEnter += delegate { hovered = true; Invalidate(); };
                 inner.MouseLeave += delegate { hovered = false; Invalidate(); };
-                if (inner is ComboBox)
+                inner.EnabledChanged += delegate
                 {
-                    // Clip off the native 1px flat square border of WinForms ComboBox so only our crisp rounded shell shows
+                    inner.BackColor = inner.Enabled ? Paper : SurfaceSubtle;
+                    Invalidate();
+                };
+                var styledChoice = inner as StyledChoiceBox;
+                if (styledChoice != null)
+                {
+                    Cursor = Cursors.Hand;
+                    styledChoice.DropDown += delegate { dropped = true; Invalidate(); };
+                    styledChoice.DropDownClosed += delegate { dropped = false; Invalidate(); };
+                    Controls.Add(inner);
+                }
+                else if (inner is ComboBox)
+                {
+                    // Clip off the native 1px flat square border of editable WinForms ComboBox so only our crisp rounded shell shows
                     comboClip = new Panel { BackColor = Paper, Margin = Padding.Empty, Padding = Padding.Empty };
                     comboClip.Controls.Add(inner);
                     Controls.Add(comboClip);
@@ -646,7 +948,13 @@ namespace DualRemote
             protected override void OnClick(EventArgs e)
             {
                 base.OnClick(e);
-                if (inner != null && inner.CanFocus) inner.Focus();
+                if (inner != null && inner.CanFocus)
+                {
+                    inner.Focus();
+                    var choice = inner as StyledChoiceBox;
+                    if (choice != null && choice.Enabled)
+                        choice.DroppedDown = !choice.DroppedDown;
+                }
             }
 
             protected override void OnLayout(LayoutEventArgs levent)
@@ -660,7 +968,16 @@ namespace DualRemote
                 int h = tb != null ? tb.PreferredHeight : inner.Height;
                 if (h <= 0) h = inner.PreferredSize.Height;
                 if (h <= 0) h = Math.Max(18, (int)Math.Round(20 * scale));
-                if (comboClip != null)
+                if (inner is StyledChoiceBox)
+                {
+                    int clipPadX = Math.Max(6, (int)Math.Round(6 * scale));
+                    int choiceW = Math.Max(16, ClientSize.Width - clipPadX * 2);
+                    int prefH = inner.PreferredSize.Height;
+                    int choiceH = Math.Max(18, Math.Min(ClientSize.Height - 4, prefH > 0 ? prefH : h));
+                    int choiceY = Math.Max(2, (ClientSize.Height - choiceH) / 2);
+                    inner.Bounds = new Rectangle(clipPadX, choiceY, choiceW, choiceH);
+                }
+                else if (comboClip != null)
                 {
                     int clipPadX = Math.Max(6, (int)Math.Round(6 * scale));
                     int clipW = Math.Max(16, ClientSize.Width - clipPadX * 2);
@@ -683,8 +1000,10 @@ namespace DualRemote
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = e.Graphics.DpiX / 96f;
-                Color border = focused ? Accent : hovered ? AccentBorder : StrokeStrong;
-                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, Paper, border, focused ? 1.4f : 1f);
+                bool disabled = inner != null && !inner.Enabled;
+                Color fill = disabled ? SurfaceSubtle : Paper;
+                Color border = disabled ? Stroke : (focused || dropped) ? Accent : hovered ? AccentBorder : StrokeStrong;
+                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, fill, border, (focused || dropped) ? 1.4f : 1f);
             }
         }
 

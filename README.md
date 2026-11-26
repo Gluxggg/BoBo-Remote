@@ -25,7 +25,7 @@
 
 **四端原生应用使用统一协议，Windows 主程序采用单文件封装。**
 
-**BoBo Remote v7.0.4** 重点修复并加固了底层传输与交互稳定性：消除 UDP 建链双关键帧风暴与关键帧在途误发 PLI、收紧 1~2 包乱序 NACK 防误触与零分配恢复轮询、修复 NACK 重传配额耗尽时的重试计数损耗、规范离散输入冗余间隔与防窥指针线程亲和，以及修复 `Ctrl+Alt` 释放鼠标和控件动画释放竞态。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
+**BoBo Remote v7.0.5** 对远程协助的 **「连接线路」** 与自建中转能力进行了体验与功能双重升级：新增自绘冰川浅蓝下拉控件（`StyledChoiceBox`），彻底消除 Win32 原生 `#0078D7` 高亮蓝块与生硬灰色箭头；并在「连接线路」新增 **「直连优先 + 自建中转兜底」** 选项与可折叠 **「自建兜底中转」** 面板，支持在客户端内直接添加、选择、删除及 TCP 测速多台自建 VPS 节点，直连不通时自动无缝切换至指定 VPS 入口完成端到端 TLS 1.2 配对与串流。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
 
 Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll`。设备可在局域网内自动发现并建立 TLS 1.2 连接，跨网默认优先走 P2P 端到端直连（Tailscale `100.x.y.z` / 可达 IPv6），同时支持自备 VPS 部署私有中转兜底（Peer Relay / 自建 DERP 或规划中的原生 TURN UDP Relay）；Windows 对 Windows 还支持 `UDP 49811` 加密 `UDP+FEC/NACK` 抗丢包通道。
 
@@ -59,7 +59,7 @@ Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll
 
 ## 系统架构与网络传输设计
 
-### A. 当前已实现架构与统一协议（`BoBo6.2` · `v7.0.4`）
+### A. 当前已实现架构与统一协议（`BoBo6.2` · `v7.0.5`）
 
 ```mermaid
 flowchart LR
@@ -121,7 +121,7 @@ flowchart TB
 
 > **开源自建 VPS 兜底说明（BYO VPS）**
 > - 本项目自用及开源社区均采用 **「P2P 优先 + 自购 VPS 中转兜底」** 模式：不依赖任何官方托管中心服务器，每位开源用户都可以自备一台轻量国内 / 就近 BGP VPS 作为私有中转兜底，兼顾数据私密、自主可控与最低成本。
-> - **现阶段（`v7.0.4`）立即可用的自建 VPS 方案**：目前可将自购 VPS 部署为 **Tailscale Peer Relay 或自建 DERP 节点**；BoBo Remote 已内置链路识别（`局域网直连`、`Tailscale P2P 直连`、`Tailscale 节点中继 (peer-relay)`、`DERP 中继`），且当自建 `peer-relay` 延迟 `< 55 ms` 时自动保留高清高帧率策略，不会误判降档。待下一代开源连接协调服务与 `TURN / UDP Relay / TLS 443` 落地后，即可脱离第三方组网工具实现纯原生自托管中继。
+> - **现阶段（`v7.0.5`）立即可用的自建 VPS 方案**：客户端「连接线路」现已内置 **「直连优先 + 自建中转兜底」** 选项与内联「自建兜底中转」管理面板，可直接录入自购 VPS 的转发入口（如 `IP:端口` / `域名:443`）并做 TCP 测速，直连超时自动切换兜底；同时可将 VPS 部署为 **Tailscale Peer Relay 或自建 DERP 节点**（`< 55 ms` 高速中继保留高清高帧率）。待下一代开源连接协调服务与 `TURN / UDP Relay / TLS 443` 落地后，即可脱离第三方组网工具实现纯原生 P2P + TURN 调度。
 
 ## 核心亮点
 
@@ -237,7 +237,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-`v7.0.4` 已通过 Windows 本地直接编译与自动化自检：**原生内核自检 10/10、托管 `--self-test` 128/128、安装器自检 7/7、UI/动画/图标冒烟 49/49 及防窥帘幕线程冒烟 12/12 全部通过**（本机 PowerShell `RemoteSigned` 策略下需直接调用编译器/可执行文件）；GitHub Actions 四端 CI / Release 流水线已完成 Windows x64、Android（单测 + APK）、macOS（`swift test` + Universal 2 DMG）与 iOS（未签 IPA）全自动构建与校验，跨网双机实况拉流持续随版本迭代实测调优。
+`v7.0.5` 已通过 Windows 本地直接编译与自动化自检：**原生内核自检 10/10、托管 `--self-test` 130/130、安装器自检 7/7、UI/下拉/中转布局/动画/图标冒烟 56/56 及防窥帘幕线程冒烟 12/12 全部通过**（本机 PowerShell `RemoteSigned` 策略下需直接调用编译器/可执行文件）；GitHub Actions 四端 CI / Release 流水线自动完成 Windows x64、Android（单测 + APK）、macOS（`swift test` + Universal 2 DMG）与 iOS（未签 IPA）全平台构建与校验。
 
 发版工作流从同一个已存在的 `vMAJOR.MINOR.PATCH` 标签构建四端。四端完成后，工作流核验草稿中的六个安装产物和 `SHA256SUMS.txt`，随后发布。 [Release 工作流](.github/workflows/release.yml)
 
@@ -317,7 +317,7 @@ BoBo-Remote/
 | **V6.0** | 全内核进程内一体化重构（内嵌 C++17 `BoBoCore.dll` + `BOBO6` TLS 1.2 协议 + 强制双端显式 4 位配对），零外置独立内核 | ✅ 已完成 |
 | **V6.1** | 远端原生光标合成、超级屏无黑边自适应缩放、原生物理键鼠锁（`WH_MOUSE_LL` + `WH_KEYBOARD_LL`）与安全防窥加固 | ✅ 已完成 |
 | **V6.2** | `BoBo6.2` 跨平台权威协议 + Golden Vectors 三语言自检 + **Windows / Android / macOS / iOS 四端互通正式发布**与并行 CI/Release | ✅ 已完成 |
-| **V7.0 (v7.0.0–v7.0.4)** | 超级屏 v2 视口协商、主机尺寸光标、高速 `peer-relay` 线路识别、微动画与多分辨率锐利图标、独立线程防窥幕布、Windows 加密 `UDP+FEC/NACK` 抗丢包与 12s 基线 ABR | ✅ 已完成 |
+| **V7.0 (v7.0.0–v7.0.5)** | 超级屏 v2 视口协商、主机尺寸光标、高速 `peer-relay` 识别、冰川浅蓝自绘下拉框与中转 UI、直连优先 + 自建 VPS 兜底中转管理、独立线程防窥幕布、Windows 加密 `UDP+FEC/NACK` 与 12s 基线 ABR | ✅ 已完成 |
 | **下一代架构（V7.1+ / V8）** | 开源可自部署连接协调服务（设备注册/认证/信令）、原生 STUN/ICE P2P 打洞 + 自建 VPS `UDP Relay (TURN)` 兜底 + `TCP/TLS 443` 备用穿透、跨端 UDP+FEC/NACK 与 HEVC/H.265 协商、Linux 客户端探索 | 🚧 演进 / 规划中 |
 
 ## Star History

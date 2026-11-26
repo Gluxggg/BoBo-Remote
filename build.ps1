@@ -32,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.0.4' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.0.5' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
 $BuildDir       = Join-Path $Root '.cache\build'
 $StageRoot      = Join-Path $BuildDir 'clean-stage'

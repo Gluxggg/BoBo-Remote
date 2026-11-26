@@ -1528,6 +1528,7 @@ namespace DualRemote
             minimizeToTray = false;
             autoCheckUpdates = true;
             defaultQuality = AutoQualityProfile;
+            preferredConnectionRoute = BoBoRoutePreference.Auto;
 
             try
             {
@@ -1555,6 +1556,11 @@ namespace DualRemote
                     if (lines.Length > 19 && int.TryParse(lines[19], out op) && op >= 50 && op <= 100)
                         miniWindowOpacity = op;
                     allowIncomingControl = ReadFlag(lines, 20, true);
+                    int routePref;
+                    if (lines.Length > 21 && int.TryParse(lines[21], out routePref)
+                        && routePref >= (int)BoBoRoutePreference.Auto
+                        && routePref <= (int)BoBoRoutePreference.CustomRelayFallback)
+                        preferredConnectionRoute = (BoBoRoutePreference)routePref;
                 }
                 else
                 {
@@ -1603,7 +1609,8 @@ namespace DualRemote
                     WriteFlag(showFloatBallInWindowed),
                     WriteFlag(sendSystemShortcuts),
                     miniWindowOpacity.ToString(),
-                    WriteFlag(allowIncomingControl)
+                    WriteFlag(allowIncomingControl),
+                    ((int)preferredConnectionRoute).ToString()
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }

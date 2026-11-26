@@ -6,15 +6,17 @@ namespace DualRemote
 {
     internal enum BoBoRoutePreference
     {
-        Auto,
-        LanOnly,
-        Tailnet
+        Auto = 0,
+        LanOnly = 1,
+        Tailnet = 2,
+        CustomRelayFallback = 3
     }
 
     internal enum BoBoRouteKind
     {
         Address,
         Lan,
+        CustomRelay,
         TailnetUnknown,
         TailnetDirect,
         TailnetDerp,
@@ -27,15 +29,28 @@ namespace DualRemote
         internal readonly double InitialRttMs;
         internal double LatestPathRttMs { get; private set; }
         internal BoBoRouteKind Kind { get; private set; }
+        internal int TargetPort { get; private set; }
+        internal string CustomRelayName { get; private set; }
+        internal string CustomRelayEndpoint { get; private set; }
 
-        internal bool IsTailnet { get { return Kind >= BoBoRouteKind.TailnetUnknown; } }
+        internal bool IsTailnet
+        {
+            get
+            {
+                return Kind == BoBoRouteKind.TailnetUnknown
+                    || Kind == BoBoRouteKind.TailnetDirect
+                    || Kind == BoBoRouteKind.TailnetDerp
+                    || Kind == BoBoRouteKind.TailnetPeerRelay;
+            }
+        }
+
         internal bool PreferWeakNetworkProfile
         {
             get
             {
                 double effectiveRtt = LatestPathRttMs > 0.1 ? LatestPathRttMs : InitialRttMs;
                 return effectiveRtt >= 75 || Kind == BoBoRouteKind.TailnetDerp ||
-                    (Kind == BoBoRouteKind.TailnetPeerRelay && effectiveRtt >= 55);
+                    ((Kind == BoBoRouteKind.TailnetPeerRelay || Kind == BoBoRouteKind.CustomRelay) && effectiveRtt >= 55);
             }
         }
 
@@ -46,6 +61,10 @@ namespace DualRemote
                 switch (Kind)
                 {
                     case BoBoRouteKind.Lan: return "局域网直连";
+                    case BoBoRouteKind.CustomRelay:
+                        if (!string.IsNullOrEmpty(CustomRelayName)) return "自建兜底中转 · " + CustomRelayName;
+                        if (!string.IsNullOrEmpty(CustomRelayEndpoint)) return "自建兜底中转 · " + CustomRelayEndpoint;
+                        return "自建兜底中转";
                     case BoBoRouteKind.TailnetDirect: return "Tailscale P2P 直连";
                     case BoBoRouteKind.TailnetDerp: return "Tailscale DERP 中继";
                     case BoBoRouteKind.TailnetPeerRelay: return "Tailscale 节点中继";
@@ -60,11 +79,25 @@ namespace DualRemote
             RemoteAddress = NormalizeAddress(remote);
             InitialRttMs = rttMs;
             LatestPathRttMs = rttMs;
+            TargetPort = BoBoProtocol.DefaultTcpPort;
+            CustomRelayName = "";
+            CustomRelayEndpoint = "";
             if (RemoteAddress == null) return;
             if (Tailscale.IsTailnetAddress(RemoteAddress.ToString()))
                 Kind = BoBoRouteKind.TailnetUnknown;
             else if (IsOnLocalSubnet(RemoteAddress, local))
                 Kind = BoBoRouteKind.Lan;
+        }
+
+        internal static BoBoConnectionRoute CreateCustomRelay(
+            IPAddress remote, IPAddress local, double rttMs, int port, string relayName, string relayEndpoint)
+        {
+            var route = new BoBoConnectionRoute(remote, local, rttMs);
+            route.Kind = BoBoRouteKind.CustomRelay;
+            route.TargetPort = port > 0 && port <= 65535 ? port : BoBoProtocol.DefaultTcpPort;
+            route.CustomRelayName = (relayName ?? "").Trim();
+            route.CustomRelayEndpoint = (relayEndpoint ?? "").Trim();
+            return route;
         }
 
         internal void UpdateTailnetPath(PingPong pong)

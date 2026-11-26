@@ -103,6 +103,7 @@ namespace DualRemote
         };
 
         private readonly RecentStore recent;
+        private readonly BoBoRelayStore customRelayStore;
         private readonly PrivacyWallpaperConfig privacyConfig;
         private readonly PrivacyCurtainManager privacyCurtain;
         private readonly PrivacyGuardState privacyGuard = new PrivacyGuardState();
@@ -170,6 +171,7 @@ namespace DualRemote
             catch { }
 
             recent = RecentStore.Load();
+            customRelayStore = BoBoRelayStore.Load();
             privacyConfig = PrivacyWallpaperConfig.Load();
             streamModeBadge.AlignRight = true;
             remoteId.MaxLength = 64;
@@ -226,6 +228,10 @@ namespace DualRemote
         {
             float scale = CurrentDpiScale();
             quality.DropDownWidth = (int)Math.Round(400f * scale);
+            if (connectionRouteChoice != null)
+                connectionRouteChoice.DropDownWidth = (int)Math.Round(300f * scale);
+            if (customRelayChoice != null)
+                customRelayChoice.DropDownWidth = (int)Math.Round(340f * scale);
             if (settingsDefaultProfileCombo != null)
                 settingsDefaultProfileCombo.DropDownWidth = (int)Math.Round(380f * scale);
             if (settingsHostDisconnectActionCombo != null) settingsHostDisconnectActionCombo.DropDownWidth = DevicePixels(180);
@@ -237,6 +243,7 @@ namespace DualRemote
                 if (vp != null) vp.SuspendResponsiveLayout = false;
             }
             SyncNavigationSectionVisibility();
+            SetCustomRelayPanelExpanded(customRelayPanelExpanded);
             SelectAssistMode(activeAssistMode);
             RecalculateDevicesDeskHeight();
             RecalculateFavoritesDeskHeight();
@@ -955,21 +962,49 @@ namespace DualRemote
             Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
 
-            var routeRow = Theme.Grid(3);
+            assistStreamPanelLayout = panel;
+            var routeRow = Theme.Grid(5);
             Theme.FixedColumn(routeRow, 72);
             Theme.FixedColumn(routeRow, 8);
             Theme.FillColumn(routeRow);
+            Theme.FixedColumn(routeRow, 14);
+            Theme.FixedColumn(routeRow, 92);
+
             connectionRouteChoice = Theme.Choice("连接线路", false);
-            connectionRouteChoice.Items.AddRange(new object[] { "自动选择", "局域网直连", "跨网 · Tailscale（优先 P2P）" });
-            connectionRouteChoice.SelectedIndex = (int)BoBoRoutePreference.Auto;
+            connectionRouteChoice.Items.AddRange(new object[]
+            {
+                "自动选择（局域网 / P2P 优先）",
+                "局域网直连",
+                "跨网 · Tailscale（优先 P2P）",
+                "直连优先 + 自建中转兜底"
+            });
+            connectionRouteChoice.DropDownWidth = 300;
+            suppressRouteUiEvents = true;
+            int initialRouteIdx = Math.Max(0, Math.Min(connectionRouteChoice.Items.Count - 1, (int)preferredConnectionRoute));
+            connectionRouteChoice.SelectedIndex = initialRouteIdx;
+            suppressRouteUiEvents = false;
+
             connectionRouteHint = Theme.Text("", Theme.TextSize.Small, Theme.Muted);
             connectionRouteHint.AutoEllipsis = true;
-            connectionRouteChoice.SelectedIndexChanged += delegate { ShowConnectionRouteHint(activeConnectionRoute); };
+            customRelayToggleBtn = Theme.Action("自建中转", Theme.ButtonStyle.Link, Theme.Glyph.Sliders);
+            customRelayToggleBtn.Click += delegate { ToggleCustomRelayPanel(); };
+
+            connectionRouteChoice.SelectedIndexChanged += delegate { HandleConnectionRouteSelectionChanged(); };
             streamHost.TextChanged += delegate { ShowConnectionRouteHint(activeConnectionRoute); };
-            Theme.Row(routeRow, 38, Theme.Text("连接线路", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(connectionRouteChoice));
+            Theme.Row(routeRow, 38, Theme.Text("连接线路", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(connectionRouteChoice), null, customRelayToggleBtn);
             Theme.Row(panel, 38, routeRow);
-            Theme.Row(panel, 24, connectionRouteHint);
+            Theme.Row(panel, 4);
+            Theme.Row(panel, 22, connectionRouteHint);
+
+            customRelaySpacerRowIndex = panel.RowCount;
+            customRelayPanelExpanded = preferredConnectionRoute == BoBoRoutePreference.CustomRelayFallback;
+            Theme.Row(panel, customRelayPanelExpanded ? 8 : 0);
+            customRelayPanel = BuildCustomRelayPanel();
+            customRelayPanel.Visible = customRelayPanelExpanded;
+            customRelayRowIndex = panel.RowCount;
+            Theme.Row(panel, customRelayPanelExpanded ? MeasureCustomRelayPanelHeight() : 0, customRelayPanel);
             Theme.Row(panel, 8);
+            SyncCustomRelayUi();
             ShowConnectionRouteHint(null);
 
             // Responsive quality selector + hint row
@@ -1068,7 +1103,9 @@ namespace DualRemote
                     streamConnectBtn.Text = "连接";
                     Theme.ChangeStyle(streamConnectBtn, Theme.ButtonStyle.Primary);
                     Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.Arrow);
-                    streamConnectBtn.Enabled = !string.IsNullOrWhiteSpace(streamHost.Text);
+                    bool canConnectWithRelayFallback = SelectedConnectionRoute == BoBoRoutePreference.CustomRelayFallback
+                        && customRelayStore != null && customRelayStore.ActiveRelay != null;
+                    streamConnectBtn.Enabled = !string.IsNullOrWhiteSpace(streamHost.Text) || canConnectWithRelayFallback;
                 }
             }
             if (rustDeskConnectBtn != null)
@@ -1513,10 +1550,14 @@ namespace DualRemote
         {
             string displayName = string.IsNullOrEmpty(clientPairHostName) ? host : clientPairHostName;
             string modeTag = profile.Height + "p" + profile.Fps + " · D3D11VA";
+            int targetPort = (route != null && route.TargetPort > 0 && route.TargetPort <= 65535)
+                ? route.TargetPort
+                : BoBoProtocol.DefaultTcpPort;
 
             if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
             {
-                if (string.Equals(activeNativeStreamForm.Host, host, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(activeNativeStreamForm.Host, host, StringComparison.OrdinalIgnoreCase)
+                    && activeNativeStreamForm.TargetPort == targetPort)
                 {
                     if (activeNativeStreamForm.WindowState == FormWindowState.Minimized)
                         activeNativeStreamForm.WindowState = FormWindowState.Normal;
@@ -1547,7 +1588,9 @@ namespace DualRemote
                 hideFloatBallInFullscreen,
                 showFloatBallInWindowed,
                 sendSystemShortcuts,
-                miniWindowOpacity);
+                miniWindowOpacity,
+                true,
+                targetPort);
 
             nativeForm.LocalPrivacyActiveProvider = delegate { return privacyCurtain.IsActive; };
 
@@ -1731,7 +1774,10 @@ namespace DualRemote
             string note = "正在连接 " + displayName + " · " + routeLabel + " · " + profile.Height + "p / " + profile.Fps + " 帧";
             ConnectionTelemetry.RecordSubmitted("NativeV5", host, profile.Width,
                 profile.Height, profile.Fps, profile.BitrateKbps, false, true, note);
-            recent.RememberMoonlightHost(host);
+            string rememberHost = (route != null && route.Kind == BoBoRouteKind.CustomRelay && !string.IsNullOrEmpty(clientPairDisplayInput))
+                ? clientPairDisplayInput
+                : host;
+            recent.RememberMoonlightHost(rememberHost);
             Remember(streamHost, recent.MoonlightHosts, note, Theme.PillTone.Info);
 
             nativeForm.Show();
@@ -1985,7 +2031,7 @@ namespace DualRemote
                     activeStreamToolbar.PauseWatchingForRestart();
                 if (!IsDisposed)
                 {
-                    await StartStreamAsync(target);
+                    await StartStreamAsync(target, activeConnectionRoute);
                 }
             }
             catch (Exception ex)
@@ -2027,6 +2073,8 @@ namespace DualRemote
             NativeStreamForm nativeForm = activeNativeStreamForm;
             bool hadNative = nativeForm != null && !nativeForm.IsDisposed;
             activeNativeStreamForm = null;
+            activeConnectionRoute = null;
+            ShowConnectionRouteHint(null);
             activeStreamPid = 0;
             activeStreamHost = "";
             Engines.ReleaseCursorClip();
@@ -2196,8 +2244,30 @@ namespace DualRemote
 
         private async Task ProbeLink()
         {
+            string rawTarget = SelectedHost();
+            if (string.IsNullOrWhiteSpace(rawTarget)
+                && SelectedConnectionRoute == BoBoRoutePreference.CustomRelayFallback
+                && customRelayStore != null && customRelayStore.ActiveRelay != null)
+            {
+                BoBoCustomRelay activeRelay = customRelayStore.ActiveRelay;
+                discover.Enabled = false;
+                SetStatus("正在探测自建兜底中转「" + activeRelay.DisplayLabel + "」连通性…", Theme.PillTone.Info);
+                try
+                {
+                    Tuple<bool, double, string> probe = await BoBoRelayStore.ProbeRelayAsync(
+                        activeRelay.Host, activeRelay.Port, 3500, System.Threading.CancellationToken.None);
+                    if (!IsDisposed)
+                        SetStatus(probe.Item3, probe.Item1 ? Theme.PillTone.Success : Theme.PillTone.Alert);
+                }
+                finally
+                {
+                    if (!IsDisposed) discover.Enabled = true;
+                }
+                return;
+            }
+
             string error;
-            string target = Engines.NormalizeHost(SelectedHost(), out error);
+            string target = Engines.NormalizeHost(rawTarget, out error);
             if (target == null)
             {
                 SetStatus(error, Theme.PillTone.Warning);

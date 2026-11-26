@@ -129,6 +129,7 @@ namespace DualRemote
         internal Func<string> ConnectionRouteLabelProvider { get; set; }
 
         internal string Host { get { return host; } }
+        internal int TargetPort { get { return targetPort; } }
         internal string HostDisplayName { get { return hostDisplayName; } }
         internal bool IsWindowedMode { get { return windowedMode; } }
         internal bool IsFreeMouseMode { get { return freeMouseMode; } }
@@ -170,9 +171,11 @@ namespace DualRemote
             bool showFloatBallInWindowed = false,
             bool sendSystemShortcuts = false,
             int miniOpacity = 100,
-            bool superDisplay = true)
+            bool superDisplay = true,
+            int port = BoBoProtocol.DefaultTcpPort)
         {
             this.host = host ?? "";
+            this.targetPort = port > 0 && port <= 65535 ? port : BoBoProtocol.DefaultTcpPort;
             this.hostDisplayName = string.IsNullOrEmpty(hostDisplayName) ? this.host : hostDisplayName;
             this.currentWidth = width > 0 ? width : 1920;
             this.currentHeight = height > 0 ? height : 1080;
