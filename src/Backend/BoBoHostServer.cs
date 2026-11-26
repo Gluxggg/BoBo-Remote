@@ -1765,12 +1765,28 @@ namespace DualRemote
             internal void Deactivate()
             {
                 activated = false;
+                Volatile.Write(ref recentLossPct, 0.0);
+                Interlocked.Exchange(ref lastPliTicks, 0);
                 lock (videoQueueGate)
                 {
                     videoQueue.Clear();
                     dropUntilKeyframe = false;
                 }
                 if (retransmitCache != null) retransmitCache.Clear();
+            }
+
+            private bool HasRetransmitBudget(long nowTicks)
+            {
+                lock (rtxBudgetGate)
+                {
+                    if (rtxWindowStartTicks == 0 ||
+                        ((nowTicks - rtxWindowStartTicks) * 1000.0 / Stopwatch.Frequency) >= RetransmitWindowMs)
+                    {
+                        rtxWindowStartTicks = nowTicks;
+                        rtxSentInWindow = 0;
+                    }
+                    return rtxSentInWindow < MaxRetransmitShardsPerWindow;
+                }
             }
 
             private bool TryConsumeRetransmitBudget(long nowTicks)
@@ -1806,6 +1822,7 @@ namespace DualRemote
                     SendSealed(BoBoUdpPacketType.HelloAck, plain, 0, plain.Length, sender);
                     if (first && onRequestKeyframe != null)
                     {
+                        Interlocked.Exchange(ref lastPliTicks, Stopwatch.GetTimestamp());
                         try { onRequestKeyframe(); } catch { }
                     }
                     return;
@@ -1838,6 +1855,7 @@ namespace DualRemote
                         long nowTicks = Stopwatch.GetTimestamp();
                         for (int i = 0; i < requests.Count && IsActivated; i++)
                         {
+                            if (!HasRetransmitBudget(nowTicks)) break;
                             BoBoUdpNackRequest req = requests[i];
                             byte[] shard = retransmitCache.TryGetForRetransmit(req.FrameId, req.ShardIdx, nowTicks);
                             if (shard != null)
@@ -1910,7 +1928,7 @@ namespace DualRemote
                             TimestampMs = tsMs,
                             EnqueuedTicks = now
                         });
-                        videoWake.Set();
+                        try { videoWake.Set(); } catch (ObjectDisposedException) { }
                     }
                 }
 
@@ -1934,7 +1952,10 @@ namespace DualRemote
                     {
                         if (disposed) break;
                         if (videoQueue.Count > 0) frame = videoQueue.Dequeue();
-                        else videoWake.Reset();
+                        else
+                        {
+                            try { videoWake.Reset(); } catch (ObjectDisposedException) { break; }
+                        }
                     }
 
                     if (frame == null)
@@ -2012,15 +2033,19 @@ namespace DualRemote
                 lock (videoQueueGate) { videoQueue.Clear(); }
                 if (retransmitCache != null) retransmitCache.Clear();
                 try { videoWake.Set(); } catch { }
+                bool pacerExited = (videoPacerThread == null || !videoPacerThread.IsAlive);
                 try
                 {
-                    if (videoPacerThread != null && videoPacerThread.IsAlive && Thread.CurrentThread != videoPacerThread)
+                    if (!pacerExited && Thread.CurrentThread != videoPacerThread)
                     {
-                        videoPacerThread.Join(300);
+                        pacerExited = videoPacerThread.Join(400);
                     }
                 }
                 catch { }
-                try { videoWake.Dispose(); } catch { }
+                if (pacerExited)
+                {
+                    try { videoWake.Dispose(); } catch { }
+                }
                 crypto.Dispose();
             }
         }

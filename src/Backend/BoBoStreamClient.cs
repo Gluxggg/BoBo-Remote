@@ -152,6 +152,7 @@ namespace DualRemote
         private bool hasRedundantAbsMove;
         private BoBoInputPacket redundantAbsMove;
         private int udpDiscreteRedundantScheduled;
+        private long udpDiscreteRedundantDueTicks;
         private double latestJitterMs;
         private double prevUdpRttMs;
         private int lastCursorSeq;
@@ -1044,6 +1045,7 @@ namespace DualRemote
                 sock.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
             var readyFrames = new List<BoBoReassembledVideoFrame>(4);
             var nackRequests = new List<BoBoUdpNackRequest>(16);
+            long lastRecoveryPollTicks = 0;
 
             // Bind ephemeral port before ReceiveFrom (send happens immediately in heartbeat loop, but binding avoids WSAEINVAL)
             try
@@ -1065,8 +1067,10 @@ namespace DualRemote
                     {
                         if (udpActive && (assembler.HasPendingBuckets || assembler.IsAwaitingKeyframe))
                         {
+                            long pollNow = Stopwatch.GetTimestamp();
+                            lastRecoveryPollTicks = pollNow;
                             bool pollPli;
-                            assembler.PollRecovery(Stopwatch.GetTimestamp(), latestRttMs, nackRequests, out pollPli);
+                            assembler.PollRecovery(pollNow, latestRttMs, nackRequests, out pollPli);
                             if (nackRequests.Count > 0) SendUdpNacks(uc, crypto, nackRequests);
                             if (pollPli) SendUdpFeedback(uc, crypto, assembler, true);
                         }
@@ -1084,20 +1088,25 @@ namespace DualRemote
                     long rxNow = Stopwatch.GetTimestamp();
                     Interlocked.Exchange(ref lastUdpRxTicks, rxNow);
                     Interlocked.Exchange(ref lastRxTicks, rxNow);
-                    assembler.RecordReceivedUdpSeq(seq);
 
                     if (ptype == BoBoUdpPacketType.HelloAck)
                     {
                         if (rxNow >= Interlocked.Read(ref udpFallbackSuppressUntilTicks))
                         {
-                            if (!udpActive) assembler.ResetForRecovery();
+                            if (!udpActive)
+                            {
+                                assembler.ResetForRecovery(rxNow);
+                                lastRecoveryPollTicks = rxNow;
+                            }
                             udpActive = true;
+                            assembler.RecordReceivedUdpSeq(seq);
                         }
                         continue;
                     }
 
                     // Do not let straggling VideoShard / Pong packets silently re-activate UDP after TRANSPORT_FALLBACK!
                     if (!udpActive) continue;
+                    assembler.RecordReceivedUdpSeq(seq);
 
                     if (ptype == BoBoUdpPacketType.VideoShard)
                     {
@@ -1119,8 +1128,16 @@ namespace DualRemote
                         bool pollPli = false;
                         if (assembler.HasPendingBuckets)
                         {
-                            assembler.PollRecovery(Stopwatch.GetTimestamp(), latestRttMs, nackRequests, out pollPli);
-                            if (nackRequests.Count > 0) SendUdpNacks(uc, crypto, nackRequests);
+                            bool isParityShard = plain != null && plain.Length > 12 && (plain[12] & BoBoUdpFec.FlagParity) != 0;
+                            double sincePollMs = lastRecoveryPollTicks == 0
+                                ? 100.0
+                                : ((rxNow - lastRecoveryPollTicks) * 1000.0 / Stopwatch.Frequency);
+                            if (isParityShard || sincePollMs >= 6.0)
+                            {
+                                lastRecoveryPollTicks = rxNow;
+                                assembler.PollRecovery(rxNow, latestRttMs, nackRequests, out pollPli);
+                                if (nackRequests.Count > 0) SendUdpNacks(uc, crypto, nackRequests);
+                            }
                         }
                         if (needPli || pollPli)
                         {
@@ -1214,6 +1231,8 @@ namespace DualRemote
                                 Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * 2.5));
                             udpActive = false;
                             latestPacketLossPct = 0.0;
+                            latestJitterMs = 0.0;
+                            prevUdpRttMs = 0.0;
                             tick = 1;
                             var fb = new Dictionary<string, object>();
                             fb["type"] = "TRANSPORT_FALLBACK";
@@ -1284,7 +1303,14 @@ namespace DualRemote
         {
             udpActive = false;
             udpNackNegotiated = false;
+            hasDeferredUdpAbsMove = false;
+            deferredUdpRelDx = 0;
+            deferredUdpRelDy = 0;
             hasRedundantAbsMove = false;
+            udpDiscreteRedundantDueTicks = 0;
+            latestJitterMs = 0.0;
+            prevUdpRttMs = 0.0;
+            latestPacketLossPct = 0.0;
             if (udpClient != null) { try { udpClient.Close(); } catch { } udpClient = null; }
             if (udpCrypto != null) { try { udpCrypto.Dispose(); } catch { } udpCrypto = null; }
             udpRemoteEp = null;
@@ -1292,86 +1318,135 @@ namespace DualRemote
             udpInputCodec = null;
         }
 
-        private void ScheduleUdpMoveTailFlush()
+        private void ScheduleUdpMoveTailFlush(UdpClient expectedUc)
         {
-            if (Interlocked.CompareExchange(ref udpMoveFlushScheduled, 1, 0) != 0) return;
+            if (expectedUc == null || Interlocked.CompareExchange(ref udpMoveFlushScheduled, 1, 0) != 0) return;
             Task.Run(async delegate
             {
-                try { await Task.Delay(5).ConfigureAwait(false); } catch { }
-                Interlocked.Exchange(ref udpMoveFlushScheduled, 0);
-                if (!connected || !udpActive) return;
-
-                bool sendAbs = false;
-                BoBoInputPacket absPkt = new BoBoInputPacket();
-                int relDx = 0;
-                int relDy = 0;
-                UdpClient uc;
-                BoBoUdpCrypto cr;
-                BoBoUdpInputCodec codec;
-                IPEndPoint ep;
-                lock (udpGate)
+                try
                 {
-                    uc = udpClient;
-                    cr = udpCrypto;
-                    codec = udpInputCodec;
-                    ep = udpRemoteEp;
-                    if (hasDeferredUdpAbsMove)
+                    try { await Task.Delay(5).ConfigureAwait(false); } catch { }
+                    if (!connected || !udpActive) return;
+
+                    bool sendAbs = false;
+                    BoBoInputPacket absPkt = new BoBoInputPacket();
+                    int relDx = 0;
+                    int relDy = 0;
+                    UdpClient uc;
+                    BoBoUdpCrypto cr;
+                    BoBoUdpInputCodec codec;
+                    IPEndPoint ep;
+                    lock (udpGate)
                     {
-                        sendAbs = true;
-                        absPkt = deferredUdpAbsMove;
-                        hasDeferredUdpAbsMove = false;
+                        if (udpClient != expectedUc) return;
+                        uc = udpClient;
+                        cr = udpCrypto;
+                        codec = udpInputCodec;
+                        ep = udpRemoteEp;
+                        if (hasDeferredUdpAbsMove)
+                        {
+                            sendAbs = true;
+                            absPkt = deferredUdpAbsMove;
+                            hasDeferredUdpAbsMove = false;
+                        }
+                        if (deferredUdpRelDx != 0 || deferredUdpRelDy != 0)
+                        {
+                            relDx = deferredUdpRelDx;
+                            relDy = deferredUdpRelDy;
+                            deferredUdpRelDx = 0;
+                            deferredUdpRelDy = 0;
+                        }
                     }
-                    if (deferredUdpRelDx != 0 || deferredUdpRelDy != 0)
+                    if ((sendAbs || relDx != 0 || relDy != 0) && uc != null && cr != null && codec != null && ep != null)
                     {
-                        relDx = deferredUdpRelDx;
-                        relDy = deferredUdpRelDy;
-                        deferredUdpRelDx = 0;
-                        deferredUdpRelDy = 0;
+                        short cdx = (short)Math.Max(-32767, Math.Min(32767, relDx));
+                        short cdy = (short)Math.Max(-32767, Math.Min(32767, relDy));
+                        Interlocked.Exchange(ref lastUdpMoveSentTicks, Stopwatch.GetTimestamp());
+                        byte[] p = codec.BuildPacket(sendAbs, absPkt, cdx != 0 || cdy != 0, cdx, cdy, null);
+                        SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, p, ep);
                     }
                 }
-                if ((sendAbs || relDx != 0 || relDy != 0) && uc != null && cr != null && codec != null && ep != null)
+                finally
                 {
-                    short cdx = (short)Math.Max(-32767, Math.Min(32767, relDx));
-                    short cdy = (short)Math.Max(-32767, Math.Min(32767, relDy));
-                    Interlocked.Exchange(ref lastUdpMoveSentTicks, Stopwatch.GetTimestamp());
-                    byte[] p = codec.BuildPacket(sendAbs, absPkt, cdx != 0 || cdy != 0, cdx, cdy, null);
-                    SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, p, ep);
+                    Interlocked.Exchange(ref udpMoveFlushScheduled, 0);
                 }
             });
         }
 
-        private void ScheduleUdpDiscreteRedundantSend()
+        private void ScheduleUdpDiscreteRedundantSend(UdpClient expectedUc)
         {
-            if (Interlocked.CompareExchange(ref udpDiscreteRedundantScheduled, 1, 0) != 0) return;
+            if (expectedUc == null || Interlocked.CompareExchange(ref udpDiscreteRedundantScheduled, 1, 0) != 0) return;
             Task.Run(async delegate
             {
-                try { await Task.Delay(10).ConfigureAwait(false); } catch { }
-                Interlocked.Exchange(ref udpDiscreteRedundantScheduled, 0);
-                if (!connected || !udpActive) return;
-
-                bool sendAbs = false;
-                BoBoInputPacket absPkt = new BoBoInputPacket();
-                UdpClient uc;
-                BoBoUdpCrypto cr;
-                BoBoUdpInputCodec codec;
-                IPEndPoint ep;
-                lock (udpGate)
+                try
                 {
-                    uc = udpClient;
-                    cr = udpCrypto;
-                    codec = udpInputCodec;
-                    ep = udpRemoteEp;
-                    if (hasRedundantAbsMove)
+                    while (connected && udpActive)
                     {
-                        sendAbs = true;
-                        absPkt = redundantAbsMove;
-                        hasRedundantAbsMove = false;
+                        long due;
+                        lock (udpGate)
+                        {
+                            if (udpClient != expectedUc) return;
+                            due = udpDiscreteRedundantDueTicks;
+                        }
+                        if (due == 0) return;
+
+                        double remMs = (due - Stopwatch.GetTimestamp()) * 1000.0 / Stopwatch.Frequency;
+                        if (remMs >= 1.0)
+                        {
+                            int delayMs = Math.Max(1, Math.Min(15, (int)Math.Ceiling(remMs)));
+                            await Task.Delay(delayMs).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        bool sendAbs = false;
+                        BoBoInputPacket absPkt = new BoBoInputPacket();
+                        UdpClient uc;
+                        BoBoUdpCrypto cr;
+                        BoBoUdpInputCodec codec;
+                        IPEndPoint ep;
+                        bool readyToSend;
+                        lock (udpGate)
+                        {
+                            if (udpClient != expectedUc) return;
+                            if (udpDiscreteRedundantDueTicks > due) continue;
+
+                            uc = udpClient;
+                            cr = udpCrypto;
+                            codec = udpInputCodec;
+                            ep = udpRemoteEp;
+                            if (hasRedundantAbsMove)
+                            {
+                                sendAbs = true;
+                                absPkt = redundantAbsMove;
+                                hasRedundantAbsMove = false;
+                            }
+                            udpDiscreteRedundantDueTicks = 0;
+                            readyToSend = (uc != null && cr != null && codec != null && ep != null);
+                        }
+
+                        if (readyToSend && connected && udpActive)
+                        {
+                            byte[] redPkt = codec.BuildPacket(sendAbs, absPkt, false, 0, 0, null);
+                            SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, redPkt, ep);
+                        }
+                        return;
                     }
                 }
-                if (uc != null && cr != null && codec != null && ep != null)
+                catch { }
+                finally
                 {
-                    byte[] redPkt = codec.BuildPacket(sendAbs, absPkt, false, 0, 0, null);
-                    SendUdpRaw(uc, cr, BoBoUdpPacketType.Input, redPkt, ep);
+                    Interlocked.Exchange(ref udpDiscreteRedundantScheduled, 0);
+                    long pendingDue = 0;
+                    UdpClient curUc = null;
+                    lock (udpGate)
+                    {
+                        curUc = udpClient;
+                        pendingDue = udpDiscreteRedundantDueTicks;
+                    }
+                    if (pendingDue != 0 && curUc == expectedUc && connected && udpActive)
+                    {
+                        ScheduleUdpDiscreteRedundantSend(expectedUc);
+                    }
                 }
             });
         }
@@ -1408,7 +1483,7 @@ namespace DualRemote
                                 hasDeferredUdpAbsMove = true;
                                 deferredUdpAbsMove = pkt;
                             }
-                            ScheduleUdpMoveTailFlush();
+                            ScheduleUdpMoveTailFlush(uc);
                             return;
                         }
                         lock (udpGate) { hasRedundantAbsMove = false; hasDeferredUdpAbsMove = false; }
@@ -1430,7 +1505,7 @@ namespace DualRemote
                                 deferredUdpRelDx += pkt.A;
                                 deferredUdpRelDy += pkt.B;
                             }
-                            ScheduleUdpMoveTailFlush();
+                            ScheduleUdpMoveTailFlush(uc);
                             return;
                         }
                         int totDx, totDy;
@@ -1478,12 +1553,18 @@ namespace DualRemote
                     {
                         // Spaced 10ms redundant copy for burst loss on Wi-Fi / WAN links:
                         // carries seq-deduplicated discrete events and only replays abs if no newer move intervened.
+                        long dueTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 10L / 1000L);
                         lock (udpGate)
                         {
-                            hasRedundantAbsMove = flushAbs;
-                            redundantAbsMove = absToFlush;
+                            if (flushAbs)
+                            {
+                                hasRedundantAbsMove = true;
+                                redundantAbsMove = absToFlush;
+                            }
+                            if (dueTicks > udpDiscreteRedundantDueTicks)
+                                udpDiscreteRedundantDueTicks = dueTicks;
                         }
-                        ScheduleUdpDiscreteRedundantSend();
+                        ScheduleUdpDiscreteRedundantSend(uc);
                     }
                     return;
                 }
@@ -1791,47 +1872,64 @@ namespace DualRemote
 
         private async Task DrainSendQueueAsync()
         {
-            while (true)
+            bool cleanExit = false;
+            try
             {
-                PendingSend item = null;
-                lock (sendLoopGate)
+                while (true)
                 {
-                    if (!sendQueue.TryDequeue(out item))
+                    PendingSend item = null;
+                    lock (sendLoopGate)
                     {
-                        while (item == null && pendingMoveKind != 0)
+                        if (!sendQueue.TryDequeue(out item))
                         {
-                            item = TakePendingMoveLocked();
-                        }
-                        if (item == null)
-                        {
-                            sendLoopRunning = false;
-                            return;
+                            while (item == null && pendingMoveKind != 0)
+                            {
+                                item = TakePendingMoveLocked();
+                            }
+                            if (item == null)
+                            {
+                                sendLoopRunning = false;
+                                cleanExit = true;
+                                return;
+                            }
                         }
                     }
-                }
 
-                SslStream s = ssl;
-                CancellationTokenSource curCts = cts;
-                CancellationToken ct = curCts != null ? curCts.Token : CancellationToken.None;
-                if (s == null || ct.IsCancellationRequested)
-                {
-                    try { item.CancelReg.Dispose(); } catch { }
-                    if (item.Completion != null) item.Completion.TrySetResult(false);
-                    continue;
-                }
+                    SslStream s = ssl;
+                    CancellationTokenSource curCts = cts;
+                    CancellationToken ct = CancellationToken.None;
+                    if (curCts != null)
+                    {
+                        try { ct = curCts.Token; }
+                        catch (ObjectDisposedException) { ct = new CancellationToken(true); }
+                    }
+                    if (s == null || ct.IsCancellationRequested)
+                    {
+                        try { item.CancelReg.Dispose(); } catch { }
+                        if (item.Completion != null) item.Completion.TrySetResult(false);
+                        continue;
+                    }
 
-                try
-                {
-                    await BoBoProtocol.WriteFrameAsync(s, item.Type, item.Flags, item.Payload, 0, item.Payload.Length, ct).ConfigureAwait(false);
-                    if (item.Completion != null) item.Completion.TrySetResult(true);
+                    try
+                    {
+                        await BoBoProtocol.WriteFrameAsync(s, item.Type, item.Flags, item.Payload, 0, item.Payload.Length, ct).ConfigureAwait(false);
+                        if (item.Completion != null) item.Completion.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (item.Completion != null) item.Completion.TrySetException(ex);
+                    }
+                    finally
+                    {
+                        try { item.CancelReg.Dispose(); } catch { }
+                    }
                 }
-                catch (Exception ex)
+            }
+            finally
+            {
+                if (!cleanExit)
                 {
-                    if (item.Completion != null) item.Completion.TrySetException(ex);
-                }
-                finally
-                {
-                    try { item.CancelReg.Dispose(); } catch { }
+                    lock (sendLoopGate) { sendLoopRunning = false; }
                 }
             }
         }

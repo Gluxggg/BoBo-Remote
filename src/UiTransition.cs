@@ -29,7 +29,15 @@ namespace DualRemote
             Value = target = initial;
             owner.VisibleChanged += delegate { if (!owner.Visible) Finish(); };
             owner.HandleDestroyed += delegate { Finish(); };
-            owner.Disposed += delegate { if (timer != null) timer.Dispose(); };
+            owner.Disposed += delegate
+            {
+                if (timer != null)
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                    timer = null;
+                }
+            };
         }
 
         internal float Value { get; private set; }
@@ -68,6 +76,11 @@ namespace DualRemote
 
         private void Advance(object sender, EventArgs e)
         {
+            if (owner.IsDisposed || owner.Disposing)
+            {
+                Finish();
+                return;
+            }
             double elapsed = (Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency;
             float remaining = 1f - Math.Min(1f, (float)(elapsed / duration));
             Value = target + (start - target) * remaining * remaining * remaining;

@@ -1239,6 +1239,62 @@ namespace DualRemote
                 tailPli2 && tailAsm.DroppedIncompleteFrames == 1,
                 "nacks=" + tailReqs.Count + " pli2=" + tailPli2 + " dropped=" + tailAsm.DroppedIncompleteFrames);
 
+            // 2e. Startup / re-activation grace & in-flight keyframe PLI suppression + loss baseline reset
+            long tStartGrace = Stopwatch.GetTimestamp();
+            var graceAsm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            graceAsm.RecordReceivedUdpSeq(1);
+            graceAsm.RecordReceivedUdpSeq(25);
+            graceAsm.RefreshLossWindow(tStartGrace + Stopwatch.Frequency * 2);
+            double preResetLoss = graceAsm.LatestLossPct;
+            graceAsm.ResetForRecovery(tStartGrace);
+            bool resetClearedLoss = (preResetLoss > 0.0 && graceAsm.LatestLossPct == 0.0);
+            var graceNacks = new List<BoBoUdpNackRequest>();
+            bool gracePliEarly;
+            graceAsm.PollRecovery(tStartGrace + Stopwatch.Frequency * 15 / 1000, 20.0, graceNacks, out gracePliEarly);
+
+            byte[] kfPayload = new byte[2600]; // 3 data shards
+            List<byte[]> kfShards = BoBoUdpFec.BuildVideoShards(1u, 100u, 1280, 720, true, kfPayload, 0.0, false, true);
+            byte[] pfPayload = new byte[600];  // 1 data shard P-frame
+            List<byte[]> pfShards = BoBoUdpFec.BuildVideoShards(2u, 116u, 1280, 720, false, pfPayload, 0.0, false, true);
+            var graceBatch = new List<BoBoReassembledVideoFrame>();
+            bool kfFeedPli, pfWhileKfInFlightPli;
+            graceAsm.ProcessShardBatch(kfShards[0], 20.0, graceBatch, out kfFeedPli);
+            graceAsm.ProcessShardBatch(pfShards[0], 20.0, graceBatch, out pfWhileKfInFlightPli);
+
+            var fallbackPliAsm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            fallbackPliAsm.ResetForRecovery(tStartGrace);
+            bool gracePliLate;
+            fallbackPliAsm.PollRecovery(tStartGrace + Stopwatch.Frequency * 320 / 1000, 20.0, graceNacks, out gracePliLate);
+            Check("UDP 起流防抖：首帧宽限期与关键帧重组中不误触双 IDR，超时仍触发兜底 PLI",
+                resetClearedLoss && !gracePliEarly && !kfFeedPli && !pfWhileKfInFlightPli && gracePliLate,
+                "resetLoss=" + resetClearedLoss + " earlyPli=" + gracePliEarly +
+                " pDuringKfPli=" + pfWhileKfInFlightPli + " latePli=" + gracePliLate);
+
+            // 2f. Reorder margin before triggering selective NACK (interleaved & multi-shard P-frame)
+            byte[] reorderPayload = new byte[5 * BoBoUdpFec.MaxShardPayloadBytes + 100]; // 6 data shards
+            List<byte[]> rInterleaved = BoBoUdpFec.BuildVideoShards(50u, 500u, 1920, 1080, false, reorderPayload, 0.9, true, true);
+            var rAsm1 = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var rBatch1 = new List<BoBoReassembledVideoFrame>();
+            bool rDummyPli;
+            rAsm1.ProcessShardBatch(rInterleaved[2], 25.0, rBatch1, out rDummyPli);
+            var rNacks1 = new List<BoBoUdpNackRequest>();
+            rAsm1.PollRecovery(Stopwatch.GetTimestamp(), 25.0, rNacks1, out rDummyPli);
+
+            byte[] fourShardPayload = new byte[3 * BoBoUdpFec.MaxShardPayloadBytes + 200]; // 4 data shards
+            List<byte[]> rPlain = BoBoUdpFec.BuildVideoShards(51u, 516u, 1920, 1080, false, fourShardPayload, 0.0, false, true);
+            var rAsm2 = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var rBatch2 = new List<BoBoReassembledVideoFrame>();
+            rAsm2.ProcessShardBatch(rPlain[3], 25.0, rBatch2, out rDummyPli);
+            var rNacks2Early = new List<BoBoUdpNackRequest>();
+            var rNacks2Idle = new List<BoBoUdpNackRequest>();
+            bool rPli2Early, rPli2Idle;
+            long tR2 = Stopwatch.GetTimestamp();
+            rAsm2.PollRecovery(tR2, 25.0, rNacks2Early, out rPli2Early);
+            rAsm2.PollRecovery(tR2 + Stopwatch.Frequency * 12 / 1000, 25.0, rNacks2Idle, out rPli2Idle);
+            Check("UDP 乱序容忍：轻度 1~2 包乱序不误发 NACK，真超时仍正常补发",
+                rNacks1.Count == 0 && rNacks2Early.Count == 0 && !rPli2Early && rNacks2Idle.Count == 3 && !rPli2Idle,
+                "n1=" + rNacks1.Count + " n2Early=" + rNacks2Early.Count + " n2Idle=" + rNacks2Idle.Count);
+
             // 3. Reliable UDP input piggyback, deduplication & non-duplicated relative mouse delta on redundant discrete copy
             var inTx = new BoBoUdpInputCodec();
             var inRx = new BoBoUdpInputCodec();

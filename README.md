@@ -25,7 +25,7 @@
 
 **四端原生应用使用统一协议，Windows 主程序采用单文件封装。**
 
-**BoBo Remote v7.0.3** 升级了 Windows 加密 UDP 弱网传输，加入分片级选择性 NACK 与 XOR FEC 协同、静帧尾包超时检测、12 秒基线自适应码率重校准，以及 HUD 抖动与纠错统计。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
+**BoBo Remote v7.0.4** 重点修复并加固了底层传输与交互稳定性：消除 UDP 建链双关键帧风暴与关键帧在途误发 PLI、收紧 1~2 包乱序 NACK 防误触与零分配恢复轮询、修复 NACK 重传配额耗尽时的重试计数损耗、规范离散输入冗余间隔与防窥指针线程亲和，以及修复 `Ctrl+Alt` 释放鼠标和控件动画释放竞态。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
 
 Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll`。设备可在局域网内自动发现并建立 TLS 连接，也可通过 Tailscale 等组网工具跨网连接。
 

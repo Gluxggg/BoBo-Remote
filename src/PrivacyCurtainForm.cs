@@ -97,13 +97,13 @@ namespace DualRemote
             int screenCount = 0;
             try
             {
-                // WinEvent callbacks run on the registering thread, so keep the live curtain
-                // and its event hooks together and independent of the main form's message pump.
+                // Keep Magnification cursor masking on the persistent UI thread while
+                // keeping the live curtain windows and WinEvent hooks on their own STA thread.
+                if (!preview) cursorMasked = BoBoCoreInterop.SetPrivacyCursorMask(true);
                 if (!preview) windowThread = new CurtainWindowThread();
                 InvokeOnWindowThread(delegate
                 {
                     ReloadImage();
-                    if (!preview) cursorMasked = BoBoCoreInterop.SetPrivacyCursorMask(true);
                     windows.AddRange(CreateCurtainWindows(screens, true));
                     callbackAnchor = windows[0];
                     active = true;
@@ -194,17 +194,15 @@ namespace DualRemote
             {
                 InvokeOnWindowThread(StopCurtainWindows);
             }
+            catch { }
             finally
             {
                 CurtainWindowThread thread = windowThread;
                 windowThread = null;
-                try { if (thread != null) thread.Dispose(); }
-                finally
-                {
-                    RestoreCursorMask();
-                    try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
-                    try { PrivacyDisplayDimmer.RestoreAllAsync(); } catch { }
-                }
+                try { if (thread != null) thread.Dispose(); } catch { }
+                try { RestoreCursorMask(); } catch { }
+                try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
+                try { PrivacyDisplayDimmer.RestoreAllAsync(); } catch { }
             }
             RaiseStateChanged();
 
@@ -212,6 +210,13 @@ namespace DualRemote
             {
                 try { LockWorkStation(); } catch { }
             }
+        }
+
+        internal bool SetLocalInputBlock(bool enable)
+        {
+            if (currentConfig != null) currentConfig.BlockLocalInput = enable;
+            if (!active || previewMode || disposed) return false;
+            return BoBoCoreInterop.SetPrivacyInputBlock(enable, enable ? (Action)OnNativeLocalEscapeTriggered : null);
         }
 
         private void InvokeOnWindowThread(Action action)
@@ -434,11 +439,10 @@ namespace DualRemote
         private void RebuildCurtainWindowsForDisplayChange()
         {
             if (!active || disposed) return;
-            if (!previewMode) BoBoCoreInterop.SetPrivacyCursorMask(true);
             Screen[] screens = Screen.AllScreens;
             if (screens.Length == 0) return;
 
-            // Install the new coverage before releasing the previous windows or cursor mask.
+            // Install the new coverage before releasing the previous windows.
             List<PrivacyCurtainWindow> replacement;
             try { replacement = CreateCurtainWindows(screens, false); }
             catch { return; }
@@ -450,8 +454,22 @@ namespace DualRemote
             if (!previewMode)
             {
                 EnsureAllWindowsTopMostNoActivate();
-                BoBoCoreInterop.SetPrivacyCursorMask(true);
+                ReassertCursorMaskOnUiThread();
             }
+        }
+
+        private void ReassertCursorMaskOnUiThread()
+        {
+            if (previewMode || !active || disposed) return;
+            if (windowThread == null)
+            {
+                BoBoCoreInterop.SetPrivacyCursorMask(true);
+                return;
+            }
+            TryPost(owner, delegate
+            {
+                if (active && !previewMode && !disposed) BoBoCoreInterop.SetPrivacyCursorMask(true);
+            });
         }
 
         private void OnDisplaySettingsChanged(object sender, EventArgs e)
@@ -525,6 +543,7 @@ namespace DualRemote
         {
             private readonly Thread thread;
             private readonly Control dispatcher;
+            private volatile bool exited;
 
             internal CurtainWindowThread()
             {
@@ -542,7 +561,11 @@ namespace DualRemote
                     }
                     catch (Exception error)
                     {
-                        if (!started.TrySetException(error)) throw;
+                        started.TrySetException(error);
+                    }
+                    finally
+                    {
+                        exited = true;
                     }
                 }) { IsBackground = true, Name = "BoBo Privacy Curtain" };
                 thread.SetApartmentState(ApartmentState.STA);
@@ -552,13 +575,29 @@ namespace DualRemote
 
             internal void Invoke(Action action)
             {
-                dispatcher.Invoke(action);
+                if (action == null || exited || dispatcher.IsDisposed || !dispatcher.IsHandleCreated) return;
+                try
+                {
+                    dispatcher.Invoke(action);
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
             }
 
             public void Dispose()
             {
-                if (dispatcher.IsHandleCreated) dispatcher.Invoke(new Action(Application.ExitThread));
-                thread.Join();
+                try
+                {
+                    if (!exited && !dispatcher.IsDisposed && dispatcher.IsHandleCreated)
+                        dispatcher.BeginInvoke(new Action(Application.ExitThread));
+                }
+                catch { }
+                try
+                {
+                    if (thread.IsAlive && Thread.CurrentThread != thread)
+                        thread.Join(2000);
+                }
+                catch { }
             }
         }
     }

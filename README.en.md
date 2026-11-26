@@ -25,7 +25,7 @@
 
 **Four native apps share one protocol. Windows ships a single executable.**
 
-**BoBo Remote v7.0.3** upgrades Windows encrypted UDP weak-network transport with hybrid XOR FEC + selective NACK recovery, static-frame tail-loss detection, 12-second rolling ABR baseline recalibration, and jitter/recovery HUD stats. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
+**BoBo Remote v7.0.4** hardens UDP transport and desktop stability: eliminates startup double-IDR and in-flight keyframe PLI storms, adds packet-reorder margin and allocation-free NACK recovery polling, avoids wasted NACK retry counts when retransmit budget is reached, spaces redundant discrete UDP inputs reliably, keeps privacy cursor masking thread-affine with safe curtain teardown, and fixes `Ctrl+Alt` cursor mode sync and UI transition disposal races. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
 
 The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices discover each other on the LAN and connect over TLS. They can also connect across networks using Tailscale or a reachable IPv6 address.
 

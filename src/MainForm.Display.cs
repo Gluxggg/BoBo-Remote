@@ -71,7 +71,7 @@ namespace DualRemote
                 SavePrivacyConfig();
                 if (privacyCurtain.IsActive && !privacyCurtain.IsPreview)
                 {
-                    BoBoCoreInterop.SetPrivacyInputBlock(blockInputSwitch.Checked, delegate { BeginInvoke(new Action(delegate { TogglePrivacyCurtain(true, false); })); });
+                    privacyCurtain.SetLocalInputBlock(blockInputSwitch.Checked);
                 }
                 ShowDisplayBanner(blockInputSwitch.Checked
                     ? "已开启物理键鼠锁定：防窥期间旁人无法点击任务栏、开始菜单或右键刷新（仅放行远控与 Ctrl+Alt+Shift+P）。"

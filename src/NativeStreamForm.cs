@@ -1399,6 +1399,9 @@ namespace DualRemote
                     case 1: // ReleaseMouse (Ctrl+Alt solo tap)
                         freeMouseMode = true;
                         mouseMode = ControlMouseMode.Free;
+                        Engines.ReleaseCursorClip();
+                        BoBoStreamClient scRel = streamClient;
+                        if (scRel != null && scRel.IsConnected) scRel.SendSetCursorMode(false);
                         RefreshTopBarVisuals();
                         if (MouseModeChanged != null) { try { MouseModeChanged(true); } catch { } }
                         RaiseToolbarHotkey();

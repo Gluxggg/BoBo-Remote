@@ -10,7 +10,7 @@
 param(
     [string] $OutputDirectory = 'ci-out',
     [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
-    [string] $ReleaseVersion = '7.0.3'
+    [string] $ReleaseVersion = '7.0.4'
 )
 
 $ErrorActionPreference = 'Stop'

@@ -1326,7 +1326,8 @@ namespace DualRemote
                 else if (IsOverSlider(e.Location))
                 {
                     bool thumbHit = Math.Abs(e.X - SliderThumbX(volumePosition.Value)) <= S(9);
-                    sliderDragOffset = thumbHit ? e.X - SliderThumbX(EffectiveVolume / 100f) : 0;
+                    if (thumbHit) volumePosition.MoveTo(volumePosition.Value, 0);
+                    sliderDragOffset = thumbHit ? e.X - SliderThumbX(volumePosition.Value) : 0;
                     draggingSlider = true;
                     Capture = true;
                     UpdateSliderHover(e.Location);

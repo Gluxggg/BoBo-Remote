@@ -733,11 +733,17 @@ namespace DualRemote
         }
 
         private const double BaseOutOfOrderGraceMs = 48.0;
+        private static readonly Comparison<FrameBucket> BucketFrameIdComparison = delegate(FrameBucket a, FrameBucket c)
+        {
+            return unchecked((int)(a.FrameId - c.FrameId));
+        };
         private readonly object gate = new object();
         private readonly Dictionary<uint, FrameBucket> buckets = new Dictionary<uint, FrameBucket>();
+        private readonly List<FrameBucket> scratchOrdered = new List<FrameBucket>(12);
         private uint lastDeliveredFrameId;
         private bool hasDeliveredFrame;
         private bool awaitingKeyframe;
+        private long awaitingKeyframeSinceTicks;
         private long gapFirstSeenTicks;
         private long lastPliTicks;
         private int fecRecoveredPackets;
@@ -765,11 +771,24 @@ namespace DualRemote
 
         internal void ResetForRecovery()
         {
+            ResetForRecovery(Stopwatch.GetTimestamp());
+        }
+
+        internal void ResetForRecovery(long nowTicks)
+        {
             lock (gate)
             {
                 buckets.Clear();
                 gapFirstSeenTicks = 0;
                 awaitingKeyframe = true;
+                awaitingKeyframeSinceTicks = nowTicks;
+                lastPliTicks = 0;
+                hasSeqBaseline = false;
+                highestSeq = 0;
+                windowReceived = 0;
+                windowExpected = 0;
+                windowStartTicks = nowTicks;
+                latestLossPct = 0.0;
             }
         }
 
@@ -880,7 +899,10 @@ namespace DualRemote
                 }
                 if (awaitingKeyframe && !isKey)
                 {
-                    needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                    if (!HasPendingKeyframeBucketLocked() && HasExceededKeyframeStartupGraceLocked(baseRtt, nowTicks))
+                    {
+                        needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                    }
                     return;
                 }
 
@@ -904,7 +926,7 @@ namespace DualRemote
                         LastShardTicks = nowTicks
                     };
                     buckets[frameId] = b;
-                    PruneStaleBucketsLocked(frameId, baseRtt, ref needPli);
+                    PruneStaleBucketsLocked(frameId, baseRtt, nowTicks, ref needPli);
                 }
 
                 if (!b.IsComplete)
@@ -995,6 +1017,7 @@ namespace DualRemote
                             buckets.Clear();
                             gapFirstSeenTicks = 0;
                             awaitingKeyframe = true;
+                            awaitingKeyframeSinceTicks = nowTicks;
                             needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
                         }
                     }
@@ -1019,155 +1042,165 @@ namespace DualRemote
                 if (hasSeqBaseline) EvaluateLossWindowLocked(nowTicks);
                 if (buckets.Count == 0)
                 {
-                    if (awaitingKeyframe) needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                    if (awaitingKeyframe && HasExceededKeyframeStartupGraceLocked(baseRtt, nowTicks))
+                    {
+                        needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                    }
                     return;
                 }
 
-                var ordered = new List<FrameBucket>(buckets.Values);
-                ordered.Sort(delegate(FrameBucket a, FrameBucket c)
+                scratchOrdered.Clear();
+                try
                 {
-                    return unchecked((int)(a.FrameId - c.FrameId));
-                });
-                uint highestSeenFrameId = ordered[ordered.Count - 1].FrameId;
+                    foreach (FrameBucket fb in buckets.Values) scratchOrdered.Add(fb);
+                    scratchOrdered.Sort(BucketFrameIdComparison);
+                    uint highestSeenFrameId = scratchOrdered[scratchOrdered.Count - 1].FrameId;
 
-                int addedNacks = 0;
-                if (NackEnabled && outNacks != null)
-                {
-                    for (int bi = 0; bi < ordered.Count && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; bi++)
+                    int addedNacks = 0;
+                    if (NackEnabled && outNacks != null)
                     {
-                        FrameBucket b = ordered[bi];
-                        if (b.IsComplete) continue;
-                        if (awaitingKeyframe && !b.IsKeyframe) continue;
-                        bool rttEligible = b.IsKeyframe ? (baseRtt <= 240.0) : (baseRtt <= 160.0);
-                        if (!rttEligible) continue;
-
-                        double ageMs = (nowTicks - b.CreatedTicks) * 1000.0 / Stopwatch.Frequency;
-                        if (!b.IsKeyframe && ageMs >= nackGraceMs * 0.85) continue;
-
-                        double idleMs = (nowTicks - b.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
-                        bool hasNewerFrame = b.FrameId != highestSeenFrameId;
-                        int maxRetries = b.IsKeyframe ? 3 : 2;
-                        double retryIntervalMs = Math.Max(22.0, Math.Min(110.0, baseRtt * 1.15 + 8.0));
-
-                        int groupCount = b.ParityCount > 0 ? b.ParityCount : 1;
-                        for (int g = 0; g < groupCount && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; g++)
+                        for (int bi = 0; bi < scratchOrdered.Count && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; bi++)
                         {
-                            int start = (b.ParityCount > 0 && b.InterleavedFec) ? g : (b.ParityCount > 0 ? g * b.GroupSize : 0);
-                            int step = (b.ParityCount > 0 && b.InterleavedFec) ? b.ParityCount : 1;
-                            int end = (b.ParityCount > 0 && b.InterleavedFec)
-                                ? b.DataCount
-                                : (b.ParityCount > 0 ? Math.Min(b.DataCount, start + b.GroupSize) : b.DataCount);
-                            if (step <= 0) continue;
+                            FrameBucket b = scratchOrdered[bi];
+                            if (b.IsComplete) continue;
+                            if (awaitingKeyframe && !b.IsKeyframe) continue;
+                            bool rttEligible = b.IsKeyframe ? (baseRtt <= 240.0) : (baseRtt <= 160.0);
+                            if (!rttEligible) continue;
 
-                            int missingCount = 0;
-                            int firstMissing = -1;
-                            int lastMissing = -1;
-                            for (int idx = start; idx < end; idx += step)
+                            double ageMs = (nowTicks - b.CreatedTicks) * 1000.0 / Stopwatch.Frequency;
+                            if (!b.IsKeyframe && ageMs >= nackGraceMs * 0.85) continue;
+
+                            double idleMs = (nowTicks - b.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
+                            bool hasNewerFrame = b.FrameId != highestSeenFrameId;
+                            int maxRetries = b.IsKeyframe ? 3 : 2;
+                            double retryIntervalMs = Math.Max(22.0, Math.Min(110.0, baseRtt * 1.15 + 8.0));
+
+                            int groupCount = b.ParityCount > 0 ? b.ParityCount : 1;
+                            for (int g = 0; g < groupCount && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; g++)
                             {
-                                if (b.DataShards[idx] == null)
+                                int start = (b.ParityCount > 0 && b.InterleavedFec) ? g : (b.ParityCount > 0 ? g * b.GroupSize : 0);
+                                int step = (b.ParityCount > 0 && b.InterleavedFec) ? b.ParityCount : 1;
+                                int end = (b.ParityCount > 0 && b.InterleavedFec)
+                                    ? b.DataCount
+                                    : (b.ParityCount > 0 ? Math.Min(b.DataCount, start + b.GroupSize) : b.DataCount);
+                                if (step <= 0) continue;
+
+                                int missingCount = 0;
+                                int firstMissing = -1;
+                                int lastMissing = -1;
+                                for (int idx = start; idx < end; idx += step)
                                 {
-                                    if (firstMissing < 0) firstMissing = idx;
-                                    lastMissing = idx;
-                                    missingCount++;
+                                    if (b.DataShards[idx] == null)
+                                    {
+                                        if (firstMissing < 0) firstMissing = idx;
+                                        lastMissing = idx;
+                                        missingCount++;
+                                    }
                                 }
-                            }
-                            if (missingCount == 0) continue;
+                                if (missingCount == 0) continue;
 
-                            bool groupEligible;
-                            if (missingCount >= 2)
-                            {
-                                groupEligible = hasNewerFrame || b.AnyParitySeen || idleMs >= 8.0 || b.HighestDataIdxSeen > lastMissing;
-                            }
-                            else if (b.ParityCount == 0)
-                            {
-                                groupEligible = hasNewerFrame || idleMs >= 10.0 || b.HighestDataIdxSeen > firstMissing;
-                            }
-                            else
-                            {
-                                groupEligible = hasNewerFrame || idleMs >= 14.0;
-                            }
-                            if (!groupEligible) continue;
-
-                            if (b.NackSentTicks == null)
-                            {
-                                b.NackSentTicks = new long[b.DataCount];
-                                b.NackRetries = new byte[b.DataCount];
-                            }
-
-                            for (int idx = start; idx < end && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; idx += step)
-                            {
-                                if (b.DataShards[idx] != null) continue;
-                                if (b.NackRetries[idx] >= maxRetries) continue;
-                                long prevSent = b.NackSentTicks[idx];
-                                double sinceSentMs = prevSent == 0 ? double.MaxValue : (nowTicks - prevSent) * 1000.0 / Stopwatch.Frequency;
-                                if (prevSent == 0 || sinceSentMs >= retryIntervalMs)
+                                bool groupEligible;
+                                if (missingCount >= 2)
                                 {
-                                    b.NackSentTicks[idx] = nowTicks;
-                                    b.NackRetries[idx]++;
-                                    b.HasActiveNack = true;
-                                    outNacks.Add(new BoBoUdpNackRequest { FrameId = b.FrameId, ShardIdx = (ushort)idx });
-                                    addedNacks++;
+                                    groupEligible = hasNewerFrame || b.AnyParitySeen || idleMs >= 8.0 || b.HighestDataIdxSeen >= lastMissing + 3;
+                                }
+                                else if (b.ParityCount == 0)
+                                {
+                                    groupEligible = hasNewerFrame || idleMs >= 10.0 || b.HighestDataIdxSeen >= firstMissing + 3;
+                                }
+                                else
+                                {
+                                    groupEligible = hasNewerFrame || idleMs >= 14.0;
+                                }
+                                if (!groupEligible) continue;
+
+                                if (b.NackSentTicks == null)
+                                {
+                                    b.NackSentTicks = new long[b.DataCount];
+                                    b.NackRetries = new byte[b.DataCount];
+                                }
+
+                                for (int idx = start; idx < end && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; idx += step)
+                                {
+                                    if (b.DataShards[idx] != null) continue;
+                                    if (b.NackRetries[idx] >= maxRetries) continue;
+                                    long prevSent = b.NackSentTicks[idx];
+                                    double sinceSentMs = prevSent == 0 ? double.MaxValue : (nowTicks - prevSent) * 1000.0 / Stopwatch.Frequency;
+                                    if (prevSent == 0 || sinceSentMs >= retryIntervalMs)
+                                    {
+                                        b.NackSentTicks[idx] = nowTicks;
+                                        b.NackRetries[idx]++;
+                                        b.HasActiveNack = true;
+                                        outNacks.Add(new BoBoUdpNackRequest { FrameId = b.FrameId, ShardIdx = (ushort)idx });
+                                        addedNacks++;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if (addedNacks > 0) Interlocked.Add(ref nackRequestsSent, addedNacks);
+                    if (addedNacks > 0) Interlocked.Add(ref nackRequestsSent, addedNacks);
 
-                if (hasDeliveredFrame && !awaitingKeyframe)
-                {
-                    bool hasCompletedFutureFrame = false;
-                    uint maxCompleteFuture = lastDeliveredFrameId;
-                    foreach (KeyValuePair<uint, FrameBucket> kv in buckets)
+                    if (hasDeliveredFrame && !awaitingKeyframe)
                     {
-                        if (kv.Value.IsComplete && unchecked((int)(kv.Key - lastDeliveredFrameId)) > 1)
+                        bool hasCompletedFutureFrame = false;
+                        uint maxCompleteFuture = lastDeliveredFrameId;
+                        foreach (KeyValuePair<uint, FrameBucket> kv in buckets)
                         {
-                            hasCompletedFutureFrame = true;
-                            if (unchecked((int)(kv.Key - maxCompleteFuture)) > 0)
-                                maxCompleteFuture = kv.Key;
+                            if (kv.Value.IsComplete && unchecked((int)(kv.Key - lastDeliveredFrameId)) > 1)
+                            {
+                                hasCompletedFutureFrame = true;
+                                if (unchecked((int)(kv.Key - maxCompleteFuture)) > 0)
+                                    maxCompleteFuture = kv.Key;
+                            }
+                        }
+
+                        if (hasCompletedFutureFrame)
+                        {
+                            if (gapFirstSeenTicks == 0) gapFirstSeenTicks = nowTicks;
+                            double waitMs = (nowTicks - gapFirstSeenTicks) * 1000.0 / Stopwatch.Frequency;
+                            int aheadFrames = unchecked((int)(maxCompleteFuture - lastDeliveredFrameId));
+                            if (waitMs >= nackGraceMs || aheadFrames >= maxAhead)
+                            {
+                                Interlocked.Increment(ref droppedIncompleteFrames);
+                                buckets.Clear();
+                                gapFirstSeenTicks = 0;
+                                awaitingKeyframe = true;
+                                awaitingKeyframeSinceTicks = nowTicks;
+                                needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                                return;
+                            }
                         }
                     }
 
-                    if (hasCompletedFutureFrame)
+                    FrameBucket head = null;
+                    for (int i = 0; i < scratchOrdered.Count; i++)
                     {
-                        if (gapFirstSeenTicks == 0) gapFirstSeenTicks = nowTicks;
-                        double waitMs = (nowTicks - gapFirstSeenTicks) * 1000.0 / Stopwatch.Frequency;
-                        int aheadFrames = unchecked((int)(maxCompleteFuture - lastDeliveredFrameId));
-                        if (waitMs >= nackGraceMs || aheadFrames >= maxAhead)
+                        if (!scratchOrdered[i].IsComplete)
+                        {
+                            head = scratchOrdered[i];
+                            break;
+                        }
+                    }
+                    if (head != null && (!awaitingKeyframe || head.IsKeyframe))
+                    {
+                        double headIdleMs = (nowTicks - head.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
+                        double tailLimitMs = head.IsKeyframe
+                            ? Math.Max(260.0, Math.Min(450.0, baseRtt * 2.6 + 80.0))
+                            : Math.Max(180.0, nackGraceMs + 40.0);
+                        if (headIdleMs >= tailLimitMs)
                         {
                             Interlocked.Increment(ref droppedIncompleteFrames);
                             buckets.Clear();
                             gapFirstSeenTicks = 0;
                             awaitingKeyframe = true;
+                            awaitingKeyframeSinceTicks = nowTicks;
                             needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
-                            return;
                         }
                     }
                 }
-
-                FrameBucket head = null;
-                for (int i = 0; i < ordered.Count; i++)
+                finally
                 {
-                    if (!ordered[i].IsComplete)
-                    {
-                        head = ordered[i];
-                        break;
-                    }
-                }
-                if (head != null && (!awaitingKeyframe || head.IsKeyframe))
-                {
-                    double headIdleMs = (nowTicks - head.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
-                    double tailLimitMs = head.IsKeyframe
-                        ? Math.Max(260.0, Math.Min(450.0, baseRtt * 2.6 + 80.0))
-                        : Math.Max(180.0, nackGraceMs + 40.0);
-                    if (headIdleMs >= tailLimitMs)
-                    {
-                        Interlocked.Increment(ref droppedIncompleteFrames);
-                        buckets.Clear();
-                        gapFirstSeenTicks = 0;
-                        awaitingKeyframe = true;
-                        needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
-                    }
+                    scratchOrdered.Clear();
                 }
             }
         }
@@ -1207,7 +1240,11 @@ namespace DualRemote
                 });
                 lastDeliveredFrameId = fid;
                 hasDeliveredFrame = true;
-                if (cur.IsKeyframe) awaitingKeyframe = false;
+                if (cur.IsKeyframe)
+                {
+                    awaitingKeyframe = false;
+                    awaitingKeyframeSinceTicks = 0;
+                }
                 RemoveOlderBucketsLocked(fid);
                 buckets.Remove(fid);
                 gapFirstSeenTicks = 0;
@@ -1271,7 +1308,23 @@ namespace DualRemote
             Interlocked.Increment(ref fecRecoveredPackets);
         }
 
-        private void PruneStaleBucketsLocked(uint newestFrameId, double currentRttMs, ref bool needPli)
+        private bool HasPendingKeyframeBucketLocked()
+        {
+            foreach (FrameBucket b in buckets.Values)
+            {
+                if (b.IsKeyframe && !b.IsComplete) return true;
+            }
+            return false;
+        }
+
+        private bool HasExceededKeyframeStartupGraceLocked(double baseRtt, long nowTicks)
+        {
+            if (awaitingKeyframeSinceTicks == 0) return true;
+            double graceMs = Math.Max(260.0, Math.Min(900.0, baseRtt * 2.5 + 120.0));
+            return ((nowTicks - awaitingKeyframeSinceTicks) * 1000.0 / Stopwatch.Frequency) >= graceMs;
+        }
+
+        private void PruneStaleBucketsLocked(uint newestFrameId, double currentRttMs, long nowTicks, ref bool needPli)
         {
             if (buckets.Count <= 8) return;
             var toRemove = new List<uint>();
@@ -1289,7 +1342,8 @@ namespace DualRemote
                 if (!awaitingKeyframe)
                 {
                     awaitingKeyframe = true;
-                    needPli = ShouldTriggerPliLocked(currentRttMs);
+                    awaitingKeyframeSinceTicks = nowTicks;
+                    needPli = ShouldTriggerPliLocked(currentRttMs, nowTicks);
                 }
             }
         }
@@ -1303,11 +1357,6 @@ namespace DualRemote
                 if (unchecked((int)(kv.Key - upToFrameId)) < 0) toRemove.Add(kv.Key);
             }
             for (int i = 0; i < toRemove.Count; i++) buckets.Remove(toRemove[i]);
-        }
-
-        private bool ShouldTriggerPliLocked(double currentRttMs)
-        {
-            return ShouldTriggerPliLocked(currentRttMs, Stopwatch.GetTimestamp());
         }
 
         private bool ShouldTriggerPliLocked(double currentRttMs, long now)
