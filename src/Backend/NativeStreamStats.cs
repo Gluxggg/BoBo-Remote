@@ -7,7 +7,11 @@ namespace DualRemote
         internal double DecodeMs;
         internal double RenderMs;
         internal double RttMs;
+        internal double JitterMs;
         internal double PacketLossPct;
+        internal int FecRecoveredPackets;
+        internal int NackRecoveredPackets;
+        internal int DroppedIncompleteFrames;
         internal int BitrateKbps;
         internal int Width;
         internal int Height;

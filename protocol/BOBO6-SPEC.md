@@ -145,8 +145,8 @@ Host → Client:
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `nativeLocalCursor`, `initialRttMs`，支持交错 FEC 时发送 `udpInterleavedFec: true`） |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3 可选：`udpPort`, `udpSessionId`, `udpKey`） |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `nativeLocalCursor`, `initialRttMs`，支持交错 FEC 时发送 `udpInterleavedFec: true`，支持选择性 NACK 时发送 `udpNack: true`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpNack`） |
 | `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps` |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |
 | `SET_CURSOR_MODE` / `CURSOR_MODE_STATE` | C ↔ H | `composite` / `hostCursorComposited` |
@@ -163,6 +163,8 @@ Host → Client:
 Windows 被控端可以在 `HELLO_ACK` 中声明 `superDisplayVersion: 2`。支持此版本的 Windows 控制端在 `START_STREAM` 中回传版本，`clientWidth` / `clientHeight` 表示视频区域的实际像素大小，`fullscreen` 表示当前是否全屏。调整窗口后用 `SET_SUPER_DISPLAY` 更新这三个字段，并发送递增的 `displayRequestId`。全屏时可以临时切换当前被控显示器的模式。窗口模式使用原桌面比例调整串流尺寸。
 
 协商后的 `STREAM_STARTED`、`RECONFIGURED` 和 `SUPER_DISPLAY_STATE` 中，`width` / `height` 表示串流尺寸，`desktopWidth` / `desktopHeight` 表示被控显示器模式，`desktopModeChanged` 表示当前会话是否临时更改了该模式。`superDisplayNativeMatch`（更新回执中为 `nativeMatch`）要求桌面像素尺寸与视频区域完全一致。回执携带 `clientWidth`、`clientHeight` 和 `displayRequestId`。未协商版本的旧客户端仍收到原格式，`SUPER_DISPLAY_STATE.width` / `height` 对它们表示桌面尺寸。
+
+Windows 端在 `START_STREAM` 与 `STREAM_STARTED` 协商 `udpNack: true` 后，加密 UDP 通道支持分片级选择性重传：客户端通过报文类型 `10 (Nack)` 发送 `[uint16 LE count]` 与最多 48 条 `[uint32 LE frameId][uint16 LE shardIdx]` 请求补发；被控端在 18 帧 / 2 MiB 环形缓存与限速预算内补发原数据分片，并在分片标志位附加 `0x08`（重传标记）。
 
 ---
 

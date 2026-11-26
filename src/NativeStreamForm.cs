@@ -1368,6 +1368,10 @@ namespace DualRemote
                 int liveBps = sc.ActiveBitrateKbps > 0 ? sc.ActiveBitrateKbps : currentBitrateKbps;
                 NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, liveBps);
                 stats.PacketLossPct = sc.LatestPacketLossPct;
+                stats.JitterMs = sc.LatestJitterMs;
+                stats.FecRecoveredPackets = sc.UdpFecRecoveredPackets;
+                stats.NackRecoveredPackets = sc.UdpNackRecoveredPackets;
+                stats.DroppedIncompleteFrames = sc.UdpDroppedFrames;
                 stats.Transport = GetConnectionPath(sc);
                 lastRttMs = stats.RttMs;
                 if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
@@ -2064,7 +2068,7 @@ namespace DualRemote
                 StartPosition = FormStartPosition.Manual;
                 BackColor = Theme.OverlaySurface;
                 Opacity = 0.86;
-                Size = new Size(370, 54);
+                ApplyHudSize();
                 DoubleBuffered = true;
             }
 
@@ -2080,19 +2084,36 @@ namespace DualRemote
                 }
             }
 
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                ApplyHudSize();
+            }
+
+            private void ApplyHudSize()
+            {
+                float scale = Theme.GetDpiScale(this);
+                Size = new Size((int)Math.Round(460 * scale), (int)Math.Round(56 * scale));
+            }
+
             internal void UpdateStats(NativeStreamStats s, string modeTag)
             {
                 if (s == null || IsDisposed) return;
                 double mbps = s.BitrateKbps / 1000.0;
                 string tr = s.Transport ?? "";
+                bool isUdp = tr.IndexOf("UDP", StringComparison.OrdinalIgnoreCase) >= 0;
                 line1 = string.Format(CultureInfo.InvariantCulture,
                     "{0:F1} FPS | {1}x{2} | {3} | {4}",
                     s.Fps, s.Width, s.Height,
                     tr,
                     string.IsNullOrEmpty(s.Decoder) ? "D3D11VA" : s.Decoder);
-                line2 = string.Format(CultureInfo.InvariantCulture,
-                    "解码 {0:F1}ms · RTT {1:F0}ms · 丢包 {2:F1}% · {3:F1} Mbps",
-                    s.DecodeMs, s.RttMs, s.PacketLossPct, mbps);
+                line2 = isUdp
+                    ? string.Format(CultureInfo.InvariantCulture,
+                        "解码 {0:F1}ms · RTT {1:F0}ms(±{2:F0}) · 丢包 {3:F1}% · 纠错 F{4}/N{5} · {6:F1} Mbps",
+                        s.DecodeMs, s.RttMs, s.JitterMs, s.PacketLossPct, s.FecRecoveredPackets, s.NackRecoveredPackets, mbps)
+                    : string.Format(CultureInfo.InvariantCulture,
+                        "解码 {0:F1}ms · RTT {1:F0}ms · 丢包 {2:F1}% · {3:F1} Mbps",
+                        s.DecodeMs, s.RttMs, s.PacketLossPct, mbps);
                 Invalidate();
             }
 
@@ -2100,17 +2121,23 @@ namespace DualRemote
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                float scale = Theme.GetDpiScale(this);
                 using (var bg = new SolidBrush(Theme.OverlaySurface))
                     g.FillRectangle(bg, ClientRectangle);
                 using (var pen = new Pen(Color.FromArgb(64, Theme.OverlayMuted), 1f))
                     g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+                int padX = (int)Math.Round(10 * scale);
+                int line1Y = (int)Math.Round(6 * scale);
+                int line2Y = (int)Math.Round(29 * scale);
+                int textW = Math.Max(40, Width - padX * 2);
+                const TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
                 using (var f1 = new Font("Consolas", 9f, FontStyle.Bold))
-                using (var f2 = new Font("Microsoft YaHei UI", 8f, FontStyle.Regular))
-                using (var b1 = new SolidBrush(Theme.OverlayInk))
-                using (var b2 = new SolidBrush(Theme.OverlayMuted))
+                using (var f2 = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular))
                 {
-                    g.DrawString(line1, f1, b1, 10, 7);
-                    g.DrawString(line2, f2, b2, 10, 28);
+                    TextRenderer.DrawText(g, line1, f1, new Rectangle(padX, line1Y, textW, (int)Math.Round(20 * scale)), Theme.OverlayInk, flags);
+                    TextRenderer.DrawText(g, line2, f2, new Rectangle(padX, line2Y, textW, (int)Math.Round(20 * scale)), Theme.OverlayMuted, flags);
                 }
             }
         }

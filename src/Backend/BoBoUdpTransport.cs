@@ -19,7 +19,8 @@ namespace DualRemote
         Ping = 6,
         Pong = 7,
         CursorShape = 8,
-        Feedback = 9
+        Feedback = 9,
+        Nack = 10
     }
 
     /// <summary>
@@ -375,6 +376,10 @@ namespace DualRemote
         internal const int MaxShardPayloadBytes = 1140;
         internal const int ShardHeaderBytes = 19;
         internal const int MaxDataShardsPerFrame = 4096;
+        internal const byte FlagKeyframe = 1;
+        internal const byte FlagParity = 2;
+        internal const byte FlagInterleaved = 4;
+        internal const byte FlagRetransmit = 8;
 
         internal static List<byte[]> BuildVideoShards(
             uint frameId,
@@ -384,7 +389,8 @@ namespace DualRemote
             bool isKeyframe,
             byte[] h264Data,
             double recentLossPct,
-            bool interleavedFec = false)
+            bool interleavedFec = false,
+            bool nackEnabled = false)
         {
             var shards = new List<byte[]>();
             if (h264Data == null || h264Data.Length == 0) return shards;
@@ -396,7 +402,7 @@ namespace DualRemote
             // Choose adaptive XOR FEC group size:
             // - Keyframes / lossy links (>1.5% loss): stronger FEC (groupSize = 2..3)
             // - Tiny 1-shard P-frames: add 1 parity duplicate only when loss > 0.4%
-            // - Normal P-frames: lightweight FEC (groupSize = 4..6)
+            // - Normal P-frames: when NACK is active on clean links (<0.3% loss), use lighter FEC (groupSize = 8)
             int groupSize;
             bool emitFec;
             if (isKeyframe)
@@ -419,6 +425,11 @@ namespace DualRemote
                 groupSize = 3;
                 emitFec = true;
             }
+            else if (nackEnabled && recentLossPct < 0.3)
+            {
+                groupSize = 8;
+                emitFec = true;
+            }
             else
             {
                 groupSize = 5;
@@ -434,7 +445,7 @@ namespace DualRemote
 
             // Flag 0x04 selects stride-interleaved parity for clients that negotiated it.
             bool useInterleavedFec = interleavedFec && parityCount > 0;
-            byte dataFlags = (byte)((isKeyframe ? 1 : 0) | (useInterleavedFec ? 4 : 0));
+            byte dataFlags = (byte)((isKeyframe ? FlagKeyframe : 0) | (useInterleavedFec ? FlagInterleaved : 0));
             for (int i = 0; i < dataCount; i++)
             {
                 int off = i * MaxShardPayloadBytes;
@@ -446,7 +457,7 @@ namespace DualRemote
                 shards.Add(pkt);
             }
 
-            byte parityFlags = (byte)(dataFlags | 2);
+            byte parityFlags = (byte)(dataFlags | FlagParity);
             for (int g = 0; g < parityCount; g++)
             {
                 int start = useInterleavedFec ? g : g * groupSize;
@@ -500,6 +511,184 @@ namespace DualRemote
         }
     }
 
+    internal struct BoBoUdpNackRequest
+    {
+        internal uint FrameId;
+        internal ushort ShardIdx;
+    }
+
+    internal static class BoBoUdpNackCodec
+    {
+        internal const int MaxEntriesPerPacket = 48;
+
+        internal static byte[] Encode(List<BoBoUdpNackRequest> requests)
+        {
+            if (requests == null || requests.Count == 0) return null;
+            int count = Math.Min(requests.Count, MaxEntriesPerPacket);
+            byte[] buf = new byte[2 + count * 6];
+            BoBoUdpCrypto.WriteUInt16LE(buf, 0, (ushort)count);
+            int pos = 2;
+            for (int i = 0; i < count; i++)
+            {
+                BoBoUdpNackRequest req = requests[i];
+                BoBoUdpCrypto.WriteUInt32LE(buf, pos, req.FrameId);
+                BoBoUdpCrypto.WriteUInt16LE(buf, pos + 4, req.ShardIdx);
+                pos += 6;
+            }
+            return buf;
+        }
+
+        internal static List<BoBoUdpNackRequest> Decode(byte[] payload)
+        {
+            var result = new List<BoBoUdpNackRequest>();
+            if (payload == null || payload.Length < 2) return result;
+            int declared = BoBoUdpCrypto.ReadUInt16LE(payload, 0);
+            if (declared <= 0 || 2L + (long)declared * 6L > payload.Length) return result;
+
+            int count = Math.Min(declared, MaxEntriesPerPacket);
+            result.Capacity = count;
+            int pos = 2;
+            for (int i = 0; i < count; i++)
+            {
+                result.Add(new BoBoUdpNackRequest
+                {
+                    FrameId = BoBoUdpCrypto.ReadUInt32LE(payload, pos),
+                    ShardIdx = BoBoUdpCrypto.ReadUInt16LE(payload, pos + 4)
+                });
+                pos += 6;
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// 主机端短时视频分片重传环形缓存（最多保留 18 帧 / 2 MiB，供选择性 NACK 在 1-RTT 内精准补发）。
+    /// </summary>
+    internal sealed class BoBoUdpRetransmitCache
+    {
+        internal const int MaxCachedFrames = 18;
+        internal const int MaxCachedBytes = 2 * 1024 * 1024;
+
+        private sealed class CachedFrame
+        {
+            internal uint FrameId;
+            internal byte[][] Shards;
+            internal long[] LastSentTicks;
+            internal byte[] RetryCounts;
+            internal int ByteCount;
+        }
+
+        private readonly object gate = new object();
+        private readonly Queue<uint> order = new Queue<uint>(MaxCachedFrames + 2);
+        private readonly Dictionary<uint, CachedFrame> frames = new Dictionary<uint, CachedFrame>(MaxCachedFrames + 2);
+        private int totalBytes;
+
+        internal void StoreFrame(uint frameId, List<byte[]> shards)
+        {
+            if (shards == null || shards.Count == 0) return;
+
+            int dataCount = 0;
+            for (int i = 0; i < shards.Count; i++)
+            {
+                byte[] s = shards[i];
+                if (s != null && s.Length >= BoBoUdpFec.ShardHeaderBytes && (s[12] & BoBoUdpFec.FlagParity) == 0)
+                {
+                    dataCount = BoBoUdpCrypto.ReadUInt16LE(s, 15);
+                    break;
+                }
+            }
+            if (dataCount <= 0 || dataCount > BoBoUdpFec.MaxDataShardsPerFrame) return;
+
+            var stored = new byte[dataCount][];
+            int frameBytes = 0;
+            for (int i = 0; i < shards.Count; i++)
+            {
+                byte[] s = shards[i];
+                if (s == null || s.Length < BoBoUdpFec.ShardHeaderBytes) continue;
+                if ((s[12] & BoBoUdpFec.FlagParity) != 0) continue;
+                int idx = BoBoUdpCrypto.ReadUInt16LE(s, 13);
+                if (idx >= 0 && idx < dataCount && stored[idx] == null)
+                {
+                    stored[idx] = s;
+                    frameBytes += s.Length;
+                }
+            }
+            if (frameBytes <= 0 || frameBytes > MaxCachedBytes) return;
+
+            var entry = new CachedFrame
+            {
+                FrameId = frameId,
+                Shards = stored,
+                LastSentTicks = new long[dataCount],
+                RetryCounts = new byte[dataCount],
+                ByteCount = frameBytes
+            };
+
+            lock (gate)
+            {
+                CachedFrame existing;
+                if (frames.TryGetValue(frameId, out existing))
+                {
+                    totalBytes -= existing.ByteCount;
+                    frames.Remove(frameId);
+                }
+
+                frames[frameId] = entry;
+                order.Enqueue(frameId);
+                totalBytes += frameBytes;
+
+                while (order.Count > 0 && (frames.Count > MaxCachedFrames || totalBytes > MaxCachedBytes))
+                {
+                    uint oldestId = order.Dequeue();
+                    CachedFrame oldest;
+                    if (frames.TryGetValue(oldestId, out oldest) && !object.ReferenceEquals(oldest, entry))
+                    {
+                        frames.Remove(oldestId);
+                        totalBytes -= oldest.ByteCount;
+                    }
+                }
+            }
+        }
+
+        internal byte[] TryGetForRetransmit(uint frameId, ushort shardIdx, long nowTicks, double minCooldownMs = 20.0, int maxRetriesPerShard = 2)
+        {
+            lock (gate)
+            {
+                CachedFrame entry;
+                if (!frames.TryGetValue(frameId, out entry)) return null;
+                if (shardIdx >= entry.Shards.Length) return null;
+                byte[] src = entry.Shards[shardIdx];
+                if (src == null || src.Length < BoBoUdpFec.ShardHeaderBytes) return null;
+                if (entry.RetryCounts[shardIdx] >= maxRetriesPerShard) return null;
+
+                long prevTicks = entry.LastSentTicks[shardIdx];
+                if (prevTicks != 0)
+                {
+                    double elapsedMs = (nowTicks - prevTicks) * 1000.0 / Stopwatch.Frequency;
+                    if (elapsedMs < minCooldownMs) return null;
+                }
+
+                entry.LastSentTicks[shardIdx] = nowTicks;
+                entry.RetryCounts[shardIdx]++;
+
+                byte[] copy = new byte[src.Length];
+                Buffer.BlockCopy(src, 0, copy, 0, src.Length);
+                copy[12] |= BoBoUdpFec.FlagRetransmit;
+                return copy;
+            }
+        }
+
+        internal void Clear()
+        {
+            lock (gate)
+            {
+                frames.Clear();
+                order.Clear();
+                totalBytes = 0;
+            }
+        }
+    }
+
     internal struct BoBoReassembledVideoFrame
     {
         internal uint FrameId;
@@ -511,9 +700,9 @@ namespace DualRemote
     }
 
     /// <summary>
-    /// 客户端零阻塞 UDP 视频重组与 XOR FEC 即时修复器：
-    /// - 维护最近 4 帧重组槽，单组丢 1 包 0ms 恢复；
-    /// - 出现不可恢复丢帧时立即置 awaitingKeyframe 并触发防抖 PLI，杜绝花屏拖影；
+    /// 客户端零阻塞 UDP 视频重组与 XOR FEC + 选择性 NACK 协同修复器：
+    /// - 维护最近 8 帧重组槽，单组丢 1 包 0ms 恢复，突发多包丢帧通过精准 NACK 1-RTT 补发；
+    /// - 不可恢复断链与静帧尾包超时时自动触发防抖 PLI，杜绝花屏与长久僵死；
     /// - 基于 UDP 序列号间隔精确统计滑动窗口丢包率（供 HUD 与 ABR 实时使用）。
     /// </summary>
     internal sealed class BoBoUdpVideoAssembler
@@ -532,7 +721,13 @@ namespace DualRemote
             internal byte[][] DataShards;
             internal byte[][] ParityShards;
             internal int ReceivedDataCount;
+            internal int HighestDataIdxSeen = -1;
+            internal bool AnyParitySeen;
             internal long CreatedTicks;
+            internal long LastShardTicks;
+            internal long[] NackSentTicks;
+            internal byte[] NackRetries;
+            internal bool HasActiveNack;
             internal bool IsComplete;
             internal byte[] AssembledData;
         }
@@ -546,6 +741,8 @@ namespace DualRemote
         private long gapFirstSeenTicks;
         private long lastPliTicks;
         private int fecRecoveredPackets;
+        private int nackRecoveredPackets;
+        private int nackRequestsSent;
         private int droppedIncompleteFrames;
 
         // Rolling sequence-gap packet loss estimator
@@ -556,10 +753,25 @@ namespace DualRemote
         private long windowStartTicks = Stopwatch.GetTimestamp();
         private double latestLossPct;
 
+        internal bool NackEnabled { get; set; }
         internal double LatestLossPct { get { lock (gate) { return latestLossPct; } } }
         internal int FecRecoveredPackets { get { return Volatile.Read(ref fecRecoveredPackets); } }
+        internal int NackRecoveredPackets { get { return Volatile.Read(ref nackRecoveredPackets); } }
+        internal int NackRequestsSent { get { return Volatile.Read(ref nackRequestsSent); } }
         internal int DroppedIncompleteFrames { get { return Volatile.Read(ref droppedIncompleteFrames); } }
+        internal bool HasPendingBuckets { get { lock (gate) { return buckets.Count > 0; } } }
+        internal bool IsAwaitingKeyframe { get { lock (gate) { return awaitingKeyframe; } } }
         internal uint LastDeliveredFrameId { get { lock (gate) { return lastDeliveredFrameId; } } }
+
+        internal void ResetForRecovery()
+        {
+            lock (gate)
+            {
+                buckets.Clear();
+                gapFirstSeenTicks = 0;
+                awaitingKeyframe = true;
+            }
+        }
 
         internal void RecordReceivedUdpSeq(uint seq)
         {
@@ -598,7 +810,7 @@ namespace DualRemote
         private void EvaluateLossWindowLocked(long now)
         {
             double elapsedSec = (now - windowStartTicks) / (double)Stopwatch.Frequency;
-            if (elapsedSec >= 2.0 || (elapsedSec >= 1.1 && windowExpected >= 6))
+            if (elapsedSec >= 1.5 || (elapsedSec >= 0.75 && windowExpected >= 6))
             {
                 int lost = windowExpected - windowReceived;
                 if (lost < 0) lost = 0;
@@ -639,9 +851,10 @@ namespace DualRemote
             int width = BoBoUdpCrypto.ReadUInt16LE(payload, 8);
             int height = BoBoUdpCrypto.ReadUInt16LE(payload, 10);
             byte flags = payload[12];
-            bool isKey = (flags & 1) != 0;
-            bool isParity = (flags & 2) != 0;
-            bool interleaved = (flags & 4) != 0;
+            bool isKey = (flags & BoBoUdpFec.FlagKeyframe) != 0;
+            bool isParity = (flags & BoBoUdpFec.FlagParity) != 0;
+            bool interleaved = (flags & BoBoUdpFec.FlagInterleaved) != 0;
+            bool isRetransmit = (flags & BoBoUdpFec.FlagRetransmit) != 0;
             int shardIdx = BoBoUdpCrypto.ReadUInt16LE(payload, 13);
             int dataCount = BoBoUdpCrypto.ReadUInt16LE(payload, 15);
             int groupSize = payload[17];
@@ -652,7 +865,12 @@ namespace DualRemote
             if (bodyLen <= 0 || bodyLen > BoBoUdpFec.MaxShardPayloadBytes + 2) return;
 
             long nowTicks = Stopwatch.GetTimestamp();
-            double jitterGraceMs = Math.Max(BaseOutOfOrderGraceMs, Math.Min(120.0, currentRttMs * 0.9));
+            double baseRtt = (currentRttMs > 0.1 && currentRttMs < 8000.0) ? currentRttMs : 20.0;
+            double jitterGraceMs = Math.Max(BaseOutOfOrderGraceMs, Math.Min(120.0, baseRtt * 0.9));
+            double effectiveGraceMs = NackEnabled
+                ? Math.Max(jitterGraceMs, Math.Min(220.0, baseRtt * 1.8 + 30.0))
+                : jitterGraceMs;
+            int maxAhead = NackEnabled ? 8 : 6;
 
             lock (gate)
             {
@@ -662,7 +880,7 @@ namespace DualRemote
                 }
                 if (awaitingKeyframe && !isKey)
                 {
-                    needPli = ShouldTriggerPliLocked(currentRttMs);
+                    needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
                     return;
                 }
 
@@ -682,32 +900,40 @@ namespace DualRemote
                         InterleavedFec = interleaved,
                         DataShards = new byte[dataCount][],
                         ParityShards = parityCount > 0 ? new byte[parityCount][] : null,
-                        CreatedTicks = nowTicks
+                        CreatedTicks = nowTicks,
+                        LastShardTicks = nowTicks
                     };
                     buckets[frameId] = b;
-                    PruneStaleBucketsLocked(frameId, currentRttMs, ref needPli);
+                    PruneStaleBucketsLocked(frameId, baseRtt, ref needPli);
                 }
 
                 if (!b.IsComplete)
                 {
+                    b.LastShardTicks = nowTicks;
                     byte[] slice = new byte[bodyLen];
                     Buffer.BlockCopy(payload, BoBoUdpFec.ShardHeaderBytes, slice, 0, bodyLen);
 
                     int affectedGroup = -1;
                     if (!isParity)
                     {
-                        if (shardIdx < b.DataCount && b.DataShards[shardIdx] == null)
+                        if (shardIdx < b.DataCount)
                         {
-                            b.DataShards[shardIdx] = slice;
-                            b.ReceivedDataCount++;
-                            if (b.ParityCount > 0)
+                            if (shardIdx > b.HighestDataIdxSeen) b.HighestDataIdxSeen = shardIdx;
+                            if (b.DataShards[shardIdx] == null)
                             {
-                                affectedGroup = b.InterleavedFec ? (shardIdx % b.ParityCount) : (shardIdx / b.GroupSize);
+                                b.DataShards[shardIdx] = slice;
+                                b.ReceivedDataCount++;
+                                if (isRetransmit) Interlocked.Increment(ref nackRecoveredPackets);
+                                if (b.ParityCount > 0)
+                                {
+                                    affectedGroup = b.InterleavedFec ? (shardIdx % b.ParityCount) : (shardIdx / b.GroupSize);
+                                }
                             }
                         }
                     }
                     else
                     {
+                        b.AnyParitySeen = true;
                         if (b.ParityShards != null && shardIdx < b.ParityShards.Length && b.ParityShards[shardIdx] == null)
                         {
                             b.ParityShards[shardIdx] = slice;
@@ -742,7 +968,7 @@ namespace DualRemote
                 }
 
                 // 3. Out-of-order later frame completed while an older frame is still in flight:
-                // hold briefly (adaptive jitterGraceMs) so Wi-Fi/campus jitter & FEC parity can arrive before declaring a gap!
+                // hold briefly (adaptive jitterGraceMs / nackGraceMs) so jitter, FEC parity & NACKs can arrive before declaring a gap!
                 if (hasDeliveredFrame && !awaitingKeyframe)
                 {
                     bool hasCompletedFutureFrame = false;
@@ -762,15 +988,185 @@ namespace DualRemote
                         if (gapFirstSeenTicks == 0) gapFirstSeenTicks = nowTicks;
                         double waitMs = (nowTicks - gapFirstSeenTicks) * 1000.0 / Stopwatch.Frequency;
                         int aheadFrames = unchecked((int)(maxCompleteFuture - lastDeliveredFrameId));
-                        if (waitMs >= jitterGraceMs || aheadFrames >= 6)
+                        if (waitMs >= effectiveGraceMs || aheadFrames >= maxAhead)
                         {
-                            // Prior P-frame truly vanished beyond jitter grace -> drop broken chain & request single debounced PLI
+                            // Prior P-frame truly vanished beyond grace -> drop broken chain & request single debounced PLI
                             Interlocked.Increment(ref droppedIncompleteFrames);
                             buckets.Clear();
                             gapFirstSeenTicks = 0;
                             awaitingKeyframe = true;
-                            needPli = ShouldTriggerPliLocked(currentRttMs);
+                            needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
                         }
+                    }
+                }
+            }
+        }
+
+        internal void PollRecovery(long nowTicks, double currentRttMs, List<BoBoUdpNackRequest> outNacks, out bool needPli)
+        {
+            needPli = false;
+            if (outNacks != null) outNacks.Clear();
+
+            double baseRtt = (currentRttMs > 0.1 && currentRttMs < 8000.0) ? currentRttMs : 20.0;
+            double jitterGraceMs = Math.Max(BaseOutOfOrderGraceMs, Math.Min(120.0, baseRtt * 0.9));
+            double nackGraceMs = NackEnabled
+                ? Math.Max(jitterGraceMs, Math.Min(220.0, baseRtt * 1.8 + 30.0))
+                : jitterGraceMs;
+            int maxAhead = NackEnabled ? 8 : 6;
+
+            lock (gate)
+            {
+                if (hasSeqBaseline) EvaluateLossWindowLocked(nowTicks);
+                if (buckets.Count == 0)
+                {
+                    if (awaitingKeyframe) needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                    return;
+                }
+
+                var ordered = new List<FrameBucket>(buckets.Values);
+                ordered.Sort(delegate(FrameBucket a, FrameBucket c)
+                {
+                    return unchecked((int)(a.FrameId - c.FrameId));
+                });
+                uint highestSeenFrameId = ordered[ordered.Count - 1].FrameId;
+
+                int addedNacks = 0;
+                if (NackEnabled && outNacks != null)
+                {
+                    for (int bi = 0; bi < ordered.Count && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; bi++)
+                    {
+                        FrameBucket b = ordered[bi];
+                        if (b.IsComplete) continue;
+                        if (awaitingKeyframe && !b.IsKeyframe) continue;
+                        bool rttEligible = b.IsKeyframe ? (baseRtt <= 240.0) : (baseRtt <= 160.0);
+                        if (!rttEligible) continue;
+
+                        double ageMs = (nowTicks - b.CreatedTicks) * 1000.0 / Stopwatch.Frequency;
+                        if (!b.IsKeyframe && ageMs >= nackGraceMs * 0.85) continue;
+
+                        double idleMs = (nowTicks - b.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
+                        bool hasNewerFrame = b.FrameId != highestSeenFrameId;
+                        int maxRetries = b.IsKeyframe ? 3 : 2;
+                        double retryIntervalMs = Math.Max(22.0, Math.Min(110.0, baseRtt * 1.15 + 8.0));
+
+                        int groupCount = b.ParityCount > 0 ? b.ParityCount : 1;
+                        for (int g = 0; g < groupCount && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; g++)
+                        {
+                            int start = (b.ParityCount > 0 && b.InterleavedFec) ? g : (b.ParityCount > 0 ? g * b.GroupSize : 0);
+                            int step = (b.ParityCount > 0 && b.InterleavedFec) ? b.ParityCount : 1;
+                            int end = (b.ParityCount > 0 && b.InterleavedFec)
+                                ? b.DataCount
+                                : (b.ParityCount > 0 ? Math.Min(b.DataCount, start + b.GroupSize) : b.DataCount);
+                            if (step <= 0) continue;
+
+                            int missingCount = 0;
+                            int firstMissing = -1;
+                            int lastMissing = -1;
+                            for (int idx = start; idx < end; idx += step)
+                            {
+                                if (b.DataShards[idx] == null)
+                                {
+                                    if (firstMissing < 0) firstMissing = idx;
+                                    lastMissing = idx;
+                                    missingCount++;
+                                }
+                            }
+                            if (missingCount == 0) continue;
+
+                            bool groupEligible;
+                            if (missingCount >= 2)
+                            {
+                                groupEligible = hasNewerFrame || b.AnyParitySeen || idleMs >= 8.0 || b.HighestDataIdxSeen > lastMissing;
+                            }
+                            else if (b.ParityCount == 0)
+                            {
+                                groupEligible = hasNewerFrame || idleMs >= 10.0 || b.HighestDataIdxSeen > firstMissing;
+                            }
+                            else
+                            {
+                                groupEligible = hasNewerFrame || idleMs >= 14.0;
+                            }
+                            if (!groupEligible) continue;
+
+                            if (b.NackSentTicks == null)
+                            {
+                                b.NackSentTicks = new long[b.DataCount];
+                                b.NackRetries = new byte[b.DataCount];
+                            }
+
+                            for (int idx = start; idx < end && outNacks.Count < BoBoUdpNackCodec.MaxEntriesPerPacket; idx += step)
+                            {
+                                if (b.DataShards[idx] != null) continue;
+                                if (b.NackRetries[idx] >= maxRetries) continue;
+                                long prevSent = b.NackSentTicks[idx];
+                                double sinceSentMs = prevSent == 0 ? double.MaxValue : (nowTicks - prevSent) * 1000.0 / Stopwatch.Frequency;
+                                if (prevSent == 0 || sinceSentMs >= retryIntervalMs)
+                                {
+                                    b.NackSentTicks[idx] = nowTicks;
+                                    b.NackRetries[idx]++;
+                                    b.HasActiveNack = true;
+                                    outNacks.Add(new BoBoUdpNackRequest { FrameId = b.FrameId, ShardIdx = (ushort)idx });
+                                    addedNacks++;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (addedNacks > 0) Interlocked.Add(ref nackRequestsSent, addedNacks);
+
+                if (hasDeliveredFrame && !awaitingKeyframe)
+                {
+                    bool hasCompletedFutureFrame = false;
+                    uint maxCompleteFuture = lastDeliveredFrameId;
+                    foreach (KeyValuePair<uint, FrameBucket> kv in buckets)
+                    {
+                        if (kv.Value.IsComplete && unchecked((int)(kv.Key - lastDeliveredFrameId)) > 1)
+                        {
+                            hasCompletedFutureFrame = true;
+                            if (unchecked((int)(kv.Key - maxCompleteFuture)) > 0)
+                                maxCompleteFuture = kv.Key;
+                        }
+                    }
+
+                    if (hasCompletedFutureFrame)
+                    {
+                        if (gapFirstSeenTicks == 0) gapFirstSeenTicks = nowTicks;
+                        double waitMs = (nowTicks - gapFirstSeenTicks) * 1000.0 / Stopwatch.Frequency;
+                        int aheadFrames = unchecked((int)(maxCompleteFuture - lastDeliveredFrameId));
+                        if (waitMs >= nackGraceMs || aheadFrames >= maxAhead)
+                        {
+                            Interlocked.Increment(ref droppedIncompleteFrames);
+                            buckets.Clear();
+                            gapFirstSeenTicks = 0;
+                            awaitingKeyframe = true;
+                            needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
+                            return;
+                        }
+                    }
+                }
+
+                FrameBucket head = null;
+                for (int i = 0; i < ordered.Count; i++)
+                {
+                    if (!ordered[i].IsComplete)
+                    {
+                        head = ordered[i];
+                        break;
+                    }
+                }
+                if (head != null && (!awaitingKeyframe || head.IsKeyframe))
+                {
+                    double headIdleMs = (nowTicks - head.LastShardTicks) * 1000.0 / Stopwatch.Frequency;
+                    double tailLimitMs = head.IsKeyframe
+                        ? Math.Max(260.0, Math.Min(450.0, baseRtt * 2.6 + 80.0))
+                        : Math.Max(180.0, nackGraceMs + 40.0);
+                    if (headIdleMs >= tailLimitMs)
+                    {
+                        Interlocked.Increment(ref droppedIncompleteFrames);
+                        buckets.Clear();
+                        gapFirstSeenTicks = 0;
+                        awaitingKeyframe = true;
+                        needPli = ShouldTriggerPliLocked(baseRtt, nowTicks);
                     }
                 }
             }
@@ -911,7 +1307,11 @@ namespace DualRemote
 
         private bool ShouldTriggerPliLocked(double currentRttMs)
         {
-            long now = Stopwatch.GetTimestamp();
+            return ShouldTriggerPliLocked(currentRttMs, Stopwatch.GetTimestamp());
+        }
+
+        private bool ShouldTriggerPliLocked(double currentRttMs, long now)
+        {
             double ms = (now - lastPliTicks) * 1000.0 / Stopwatch.Frequency;
             double cooldownMs = Math.Max(500.0, Math.Min(1200.0, currentRttMs * 4.0));
             if (lastPliTicks == 0 || ms >= cooldownMs)
@@ -925,11 +1325,12 @@ namespace DualRemote
 
     /// <summary>
     /// 实时自研拥塞控制与自适应码率/帧率控制器（GCC / AIMD 思路，兼容 UDP 与 TCP+TLS 双通道）：
-    /// - 结合 RTT 队列延迟（currentRtt - minRtt）、丢包率与发送背压事件，毫秒级乘性降码率，彻底杜绝校园网/Wi-Fi 缓冲膨胀；
-    /// - 网络空闲稳定后平缓加性回升至目标码率与帧率，全程通过 ICodecAPI 热生效，零重启无黑屏。
+    /// - 结合滚动 12 秒基线队列延迟（currentRtt - minRtt）、抖动（EWMA Jitter）、丢包率与发送背压事件，毫秒级乘性降码率；
+    /// - 网络空闲稳定且低抖动后平缓加性回升至目标码率与帧率，全程通过 ICodecAPI 热生效，零重启无黑屏。
     /// </summary>
     internal sealed class BoBoAdaptiveBitrateController
     {
+        private const double MinRttWindowSec = 6.0;
         private readonly object gate = new object();
         private readonly bool isLanLink;
         private bool enabled;
@@ -938,7 +1339,12 @@ namespace DualRemote
         private int currentBitrateKbps;
         private int currentFps;
         private double minRttMs = -1.0;
+        private double currentBucketMinRtt = -1.0;
+        private double prevBucketMinRtt = -1.0;
+        private long rttBucketStartTicks;
         private double smoothedRttMs = -1.0;
+        private double prevRttMs = -1.0;
+        private double rttJitterMs;
         private double smoothedLossPct;
         private long lastDecreaseTicks;
         private long lastIncreaseTicks;
@@ -971,15 +1377,20 @@ namespace DualRemote
             if (initialRttMs > 0.1)
             {
                 minRttMs = initialRttMs;
+                currentBucketMinRtt = initialRttMs;
                 smoothedRttMs = initialRttMs;
+                prevRttMs = initialRttMs;
             }
             long now = Stopwatch.GetTimestamp();
             lastIncreaseTicks = now;
+            rttBucketStartTicks = now;
         }
 
         internal int CurrentBitrateKbps { get { lock (gate) { return currentBitrateKbps; } } }
         internal int CurrentFps { get { lock (gate) { return currentFps; } } }
         internal bool AutoEnabled { get { lock (gate) { return enabled; } } }
+        internal double LatestJitterMs { get { lock (gate) { return rttJitterMs; } } }
+        internal double CurrentBaselineRttMs { get { lock (gate) { return minRttMs; } } }
 
         internal void UpdateTarget(bool autoEnabled, int newTargetBitrateKbps, int newTargetFps)
         {
@@ -1034,17 +1445,51 @@ namespace DualRemote
 
         internal bool OnTelemetry(double rttMs, double lossPct, out int newBitrateKbps, out int newFps)
         {
+            return OnTelemetry(rttMs, lossPct, Stopwatch.GetTimestamp(), out newBitrateKbps, out newFps);
+        }
+
+        internal bool OnTelemetry(double rttMs, double lossPct, long nowTicks, out int newBitrateKbps, out int newFps)
+        {
             lock (gate)
             {
                 newBitrateKbps = currentBitrateKbps;
                 newFps = currentFps;
                 if (!enabled) return false;
 
-                long now = Stopwatch.GetTimestamp();
+                long now = nowTicks;
+                if (rttBucketStartTicks == 0) rttBucketStartTicks = now;
+                double bucketElapsedSec = (now - rttBucketStartTicks) / (double)Stopwatch.Frequency;
+                if (bucketElapsedSec >= MinRttWindowSec)
+                {
+                    if (bucketElapsedSec >= MinRttWindowSec * 2.0)
+                    {
+                        prevBucketMinRtt = -1.0;
+                    }
+                    else
+                    {
+                        prevBucketMinRtt = currentBucketMinRtt;
+                    }
+                    currentBucketMinRtt = -1.0;
+                    rttBucketStartTicks = now;
+                }
+
                 if (rttMs > 0.1 && rttMs < 8000.0)
                 {
-                    if (minRttMs < 0 || rttMs < minRttMs) minRttMs = rttMs;
-                    else minRttMs = minRttMs * 0.995 + rttMs * 0.005; // Slowly track route shifts
+                    if (prevRttMs > 0.1)
+                    {
+                        double delta = Math.Abs(rttMs - prevRttMs);
+                        rttJitterMs = rttJitterMs * 0.75 + delta * 0.25;
+                    }
+                    prevRttMs = rttMs;
+                    if (currentBucketMinRtt < 0 || rttMs < currentBucketMinRtt) currentBucketMinRtt = rttMs;
+
+                    if (currentBucketMinRtt > 0 && prevBucketMinRtt > 0)
+                        minRttMs = Math.Min(currentBucketMinRtt, prevBucketMinRtt);
+                    else if (currentBucketMinRtt > 0)
+                        minRttMs = currentBucketMinRtt;
+                    else if (prevBucketMinRtt > 0)
+                        minRttMs = prevBucketMinRtt;
+
                     smoothedRttMs = (smoothedRttMs < 0) ? rttMs : (smoothedRttMs * 0.65 + rttMs * 0.35);
                 }
                 if (lossPct >= 0.0 && lossPct <= 100.0)
@@ -1055,7 +1500,7 @@ namespace DualRemote
                 double queueDelayMs = (minRttMs > 0 && smoothedRttMs > minRttMs) ? (smoothedRttMs - minRttMs) : 0.0;
                 bool changed = false;
 
-                if (lossPct >= 4.0 || queueDelayMs >= 120.0)
+                if (lossPct >= 4.0 || queueDelayMs >= 110.0)
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 750.0)
                     {
@@ -1069,7 +1514,7 @@ namespace DualRemote
                         lastIncreaseTicks = now;
                     }
                 }
-                else if (lossPct >= 1.5 || queueDelayMs >= 65.0)
+                else if (lossPct >= 1.5 || queueDelayMs >= 55.0)
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 950.0)
                     {
@@ -1083,7 +1528,7 @@ namespace DualRemote
                         lastIncreaseTicks = now;
                     }
                 }
-                else if (smoothedLossPct < 0.5 && queueDelayMs < 30.0)
+                else if (smoothedLossPct < 0.5 && queueDelayMs < 30.0 && rttJitterMs < 35.0)
                 {
                     int maxBps = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, 14000);
                     if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= 2000.0)
@@ -1113,7 +1558,7 @@ namespace DualRemote
                 else
                 {
                     lowBitrateSinceTicks = 0;
-                    if (currentBitrateKbps >= 3600 && currentFps < maxFps && smoothedLossPct < 0.5 && queueDelayMs < 30.0)
+                    if (currentBitrateKbps >= 3600 && currentFps < maxFps && smoothedLossPct < 0.5 && queueDelayMs < 30.0 && rttJitterMs < 35.0)
                     {
                         currentFps = maxFps;
                         changed = true;

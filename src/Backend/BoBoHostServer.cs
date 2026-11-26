@@ -882,6 +882,7 @@ namespace DualRemote
                             bool requestPrivacy = BoBoProtocol.GetBool(msg, "requestPrivacy", false);
                             bool reqUdp = BoBoProtocol.GetBool(msg, "udpTransport", false);
                             bool interleavedFec = BoBoProtocol.GetBool(msg, "udpInterleavedFec", false);
+                            bool udpNack = BoBoProtocol.GetBool(msg, "udpNack", false);
                             bool clientNativeCursor = BoBoProtocol.GetBool(msg, "nativeLocalCursor", false);
                             bool cursorMetrics = BoBoProtocol.GetBool(msg, "cursorMetrics", false);
                             bool clientFreeMouse = BoBoProtocol.GetBool(msg, "freeMouse", true);
@@ -968,6 +969,7 @@ namespace DualRemote
                                     mediaUdp,
                                     startBps,
                                     interleavedFec,
+                                    udpNack,
                                     delegate
                                     {
                                         Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
@@ -1168,6 +1170,7 @@ namespace DualRemote
                                 started["udpPort"] = boundUdpPort;
                                 started["udpSessionId"] = (long)udpSid;
                                 started["udpKey"] = Convert.ToBase64String(udpKeyBytes);
+                                started["udpNack"] = udpNack;
                             }
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
                             continue;
@@ -1685,6 +1688,8 @@ namespace DualRemote
                 internal long EnqueuedTicks;
             }
 
+            private const int MaxRetransmitShardsPerWindow = 24;
+            private const double RetransmitWindowMs = 50.0;
             private readonly BoBoUdpCrypto crypto;
             private readonly UdpClient udp;
             private readonly BoBoUdpInputCodec inputCodec = new BoBoUdpInputCodec();
@@ -1694,6 +1699,11 @@ namespace DualRemote
             private readonly Action<double, double> onTelemetry;
             private readonly Action onPacerBackpressure;
             private readonly bool interleavedFec;
+            private readonly bool nackEnabled;
+            private readonly BoBoUdpRetransmitCache retransmitCache;
+            private readonly object rtxBudgetGate = new object();
+            private long rtxWindowStartTicks;
+            private int rtxSentInWindow;
             private readonly object sendGate = new object();
             private readonly object videoQueueGate = new object();
             private readonly Queue<QueuedVideoFrame> videoQueue = new Queue<QueuedVideoFrame>(4);
@@ -1716,6 +1726,7 @@ namespace DualRemote
                 UdpClient sharedUdp,
                 int initialBitrateKbps,
                 bool interleavedFec,
+                bool nackEnabled,
                 Action activityHandler,
                 Action<BoBoInputPacket> inputHandler,
                 Action keyframeHandler,
@@ -1731,6 +1742,8 @@ namespace DualRemote
                 onTelemetry = telemetryHandler;
                 onPacerBackpressure = backpressureHandler;
                 this.interleavedFec = interleavedFec;
+                this.nackEnabled = nackEnabled;
+                if (nackEnabled) retransmitCache = new BoBoUdpRetransmitCache();
 
                 videoPacerThread = new Thread(VideoPacerLoop)
                 {
@@ -1756,6 +1769,23 @@ namespace DualRemote
                 {
                     videoQueue.Clear();
                     dropUntilKeyframe = false;
+                }
+                if (retransmitCache != null) retransmitCache.Clear();
+            }
+
+            private bool TryConsumeRetransmitBudget(long nowTicks)
+            {
+                lock (rtxBudgetGate)
+                {
+                    if (rtxWindowStartTicks == 0 ||
+                        ((nowTicks - rtxWindowStartTicks) * 1000.0 / Stopwatch.Frequency) >= RetransmitWindowMs)
+                    {
+                        rtxWindowStartTicks = nowTicks;
+                        rtxSentInWindow = 0;
+                    }
+                    if (rtxSentInWindow >= MaxRetransmitShardsPerWindow) return false;
+                    rtxSentInWindow++;
+                    return true;
                 }
             }
 
@@ -1797,6 +1827,26 @@ namespace DualRemote
                 if (ptype == BoBoUdpPacketType.Ping)
                 {
                     SendSealed(BoBoUdpPacketType.Pong, plain, 0, plain.Length, sender);
+                    return;
+                }
+
+                if (ptype == BoBoUdpPacketType.Nack && nackEnabled && retransmitCache != null && plain != null)
+                {
+                    List<BoBoUdpNackRequest> requests = BoBoUdpNackCodec.Decode(plain);
+                    if (requests.Count > 0)
+                    {
+                        long nowTicks = Stopwatch.GetTimestamp();
+                        for (int i = 0; i < requests.Count && IsActivated; i++)
+                        {
+                            BoBoUdpNackRequest req = requests[i];
+                            byte[] shard = retransmitCache.TryGetForRetransmit(req.FrameId, req.ShardIdx, nowTicks);
+                            if (shard != null)
+                            {
+                                if (!TryConsumeRetransmitBudget(nowTicks)) break;
+                                SendSealed(BoBoUdpPacketType.VideoShard, shard, 0, shard.Length, sender);
+                            }
+                        }
+                    }
                     return;
                 }
 
@@ -1899,7 +1949,8 @@ namespace DualRemote
                     uint fid = unchecked((uint)Interlocked.Increment(ref nextFrameId));
                     List<byte[]> shards = BoBoUdpFec.BuildVideoShards(
                         fid, frame.TimestampMs, frame.Width, frame.Height, frame.IsKey, frame.H264,
-                        Volatile.Read(ref recentLossPct), interleavedFec);
+                        Volatile.Read(ref recentLossPct), interleavedFec, nackEnabled);
+                    if (retransmitCache != null) retransmitCache.StoreFrame(fid, shards);
                     double ticksPerByte = Stopwatch.Frequency / (pacingBitrateKbps * 1.45 * 125.0);
                     long burstTicks = (long)(burstAllowanceBytes * ticksPerByte);
                     for (int i = 0; i < shards.Count && IsActivated; i++)
@@ -1959,6 +2010,7 @@ namespace DualRemote
                 disposed = true;
                 activated = false;
                 lock (videoQueueGate) { videoQueue.Clear(); }
+                if (retransmitCache != null) retransmitCache.Clear();
                 try { videoWake.Set(); } catch { }
                 try
                 {

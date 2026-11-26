@@ -825,11 +825,11 @@ namespace DualRemote
                             connRes.Item1 && gotFrame && sessionStarted && sessionRequestedPrivacy,
                             "conn=" + connRes.Item2 + " frames=" + authClient.VideoFramesReceived + " priv=" + sessionRequestedPrivacy);
 
-                        // Wait briefly for UDP+FEC fast-path punch to complete on localhost
+                        // Wait briefly for UDP+FEC/NACK fast-path punch to complete on localhost
                         for (int uw = 0; uw < 30 && !authClient.IsUdpActive; uw++) System.Threading.Thread.Sleep(30);
-                        Check("V6.3 低延迟加密 UDP+FEC 通道：握手后自动无感升级 UDP 零队头阻塞传输",
-                            authClient.IsUdpActive && authClient.ActiveTransportLabel == "UDP+FEC",
-                            "udpActive=" + authClient.IsUdpActive + " transport=" + authClient.ActiveTransportLabel + " udpPort=" + server.ListeningUdpPort);
+                        Check("V6.3 低延迟加密 UDP+FEC/NACK 通道：握手后自动无感升级 UDP 零队头阻塞传输",
+                            authClient.IsUdpActive && authClient.IsUdpNackActive && authClient.ActiveTransportLabel == "UDP+FEC/NACK",
+                            "udpActive=" + authClient.IsUdpActive + " nack=" + authClient.IsUdpNackActive + " transport=" + authClient.ActiveTransportLabel + " udpPort=" + server.ListeningUdpPort);
 
                         Check("V6.3 零延迟本地光标模式：自由鼠标模式下关闭主机合成以启用零拷贝 GPU 采集与 0ms 本机指针",
                             !authClient.HostCursorComposited,
@@ -1158,6 +1158,87 @@ namespace DualRemote
                 peakLoss > 0.0 && lossAssembler.LatestLossPct == 0.0,
                 "peak=" + peakLoss + " afterIdle=" + lossAssembler.LatestLossPct);
 
+            // 2b. NACK Codec round-trip, 48-entry cap, and malformed payload rejection
+            var rawNacks = new List<BoBoUdpNackRequest>();
+            for (int i = 0; i < 60; i++)
+                rawNacks.Add(new BoBoUdpNackRequest { FrameId = (uint)(100 + i), ShardIdx = (ushort)(i % 13) });
+            byte[] encodedNack = BoBoUdpNackCodec.Encode(rawNacks);
+            List<BoBoUdpNackRequest> decodedNack = BoBoUdpNackCodec.Decode(encodedNack);
+            bool nackRoundTripOk = encodedNack != null && encodedNack.Length == 2 + BoBoUdpNackCodec.MaxEntriesPerPacket * 6 &&
+                decodedNack.Count == BoBoUdpNackCodec.MaxEntriesPerPacket &&
+                decodedNack[0].FrameId == 100u && decodedNack[0].ShardIdx == 0 &&
+                decodedNack[47].FrameId == 147u && decodedNack[47].ShardIdx == (ushort)(47 % 13) &&
+                BoBoUdpNackCodec.Encode(new List<BoBoUdpNackRequest>()) == null &&
+                BoBoUdpNackCodec.Decode(null).Count == 0 &&
+                BoBoUdpNackCodec.Decode(new byte[] { 1 }).Count == 0 &&
+                BoBoUdpNackCodec.Decode(new byte[] { 0, 0 }).Count == 0 &&
+                BoBoUdpNackCodec.Decode(new byte[] { 2, 0, 1, 0, 0, 0, 0, 0 }).Count == 0;
+            Check("NACK 编码器：往返校验、单包 48 条上限与畸形载荷拦截",
+                nackRoundTripOk, "decoded=" + decodedNack.Count);
+
+            // 2c. Hybrid FEC + Selective NACK burst recovery + RetransmitCache cooldown
+            byte[] burstNackPayload = new byte[5 * BoBoUdpFec.MaxShardPayloadBytes + 123];
+            for (int i = 0; i < burstNackPayload.Length; i++) burstNackPayload[i] = (byte)((i * 29 + 7) & 0xFF);
+            List<byte[]> nackShards = BoBoUdpFec.BuildVideoShards(10u, 200u, 1920, 1080, false, burstNackPayload, 0.0, false, true);
+            var rtxCache = new BoBoUdpRetransmitCache();
+            rtxCache.StoreFrame(10u, nackShards);
+            var hybridAsm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var hybridBatch = new List<BoBoReassembledVideoFrame>();
+            bool hybridPli = false;
+            for (int i = 0; i < nackShards.Count; i++)
+            {
+                bool isP = (nackShards[i][12] & BoBoUdpFec.FlagParity) != 0;
+                int sIdx = BoBoUdpCrypto.ReadUInt16LE(nackShards[i], 13);
+                if (!isP && (sIdx == 1 || sIdx == 2)) continue; // Two drops inside the same FEC group
+                bool p;
+                hybridAsm.ProcessShardBatch(nackShards[i], 30.0, hybridBatch, out p);
+                hybridPli |= p;
+            }
+            var nackReqList = new List<BoBoUdpNackRequest>();
+            bool pollPli1;
+            long nackPollTicks = Stopwatch.GetTimestamp();
+            hybridAsm.PollRecovery(nackPollTicks, 30.0, nackReqList, out pollPli1);
+            byte[] rtx1 = rtxCache.TryGetForRetransmit(10u, 1, nackPollTicks);
+            byte[] rtx2 = rtxCache.TryGetForRetransmit(10u, 2, nackPollTicks);
+            byte[] rtxCooldown = rtxCache.TryGetForRetransmit(10u, 1, nackPollTicks + Stopwatch.Frequency * 5 / 1000);
+            if (rtx1 != null) { bool p; hybridAsm.ProcessShardBatch(rtx1, 30.0, hybridBatch, out p); hybridPli |= p; }
+            if (rtx2 != null) { bool p; hybridAsm.ProcessShardBatch(rtx2, 30.0, hybridBatch, out p); hybridPli |= p; }
+            bool hybridRecovered = !hybridPli && !pollPli1 && nackReqList.Count == 2 &&
+                nackReqList[0].FrameId == 10u && nackReqList[0].ShardIdx == 1 &&
+                nackReqList[1].FrameId == 10u && nackReqList[1].ShardIdx == 2 &&
+                rtx1 != null && rtx2 != null && (rtx1[12] & BoBoUdpFec.FlagRetransmit) != 0 && rtxCooldown == null &&
+                hybridBatch.Count == 1 && hybridBatch[0].H264Data.SequenceEqual(burstNackPayload) &&
+                hybridAsm.NackRecoveredPackets >= 1 && hybridAsm.FecRecoveredPackets >= 1 &&
+                hybridAsm.DroppedIncompleteFrames == 0;
+            Check("FEC+NACK 协同：同组双包突发丢包精确补发恢复且零 PLI 零重编",
+                hybridRecovered,
+                "reqs=" + nackReqList.Count + " nackRec=" + hybridAsm.NackRecoveredPackets +
+                " fecRec=" + hybridAsm.FecRecoveredPackets + " dropped=" + hybridAsm.DroppedIncompleteFrames);
+
+            // 2d. Static VFR tail-loss NACK trigger & PLI escalation
+            var tailAsm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var tailBatch = new List<BoBoReassembledVideoFrame>();
+            byte[] tailF1 = new byte[600];
+            List<byte[]> tailS1 = BoBoUdpFec.BuildVideoShards(1u, 100u, 1280, 720, true, tailF1, 0.0, false, true);
+            bool tailDummyPli;
+            tailAsm.ProcessShardBatch(tailS1[0], 20.0, tailBatch, out tailDummyPli);
+            byte[] tailF2 = new byte[2500];
+            List<byte[]> tailS2 = BoBoUdpFec.BuildVideoShards(2u, 116u, 1280, 720, false, tailF2, 0.0, false, true);
+            tailBatch.Clear();
+            tailAsm.ProcessShardBatch(tailS2[0], 20.0, tailBatch, out tailDummyPli); // Only shard 0 arrives; tail shards 1..2 + parity dropped
+            long tTail = Stopwatch.GetTimestamp();
+            var tailReqs = new List<BoBoUdpNackRequest>();
+            bool tailPli1;
+            tailAsm.PollRecovery(tTail + Stopwatch.Frequency * 12 / 1000, 20.0, tailReqs, out tailPli1);
+            var tailReqs2 = new List<BoBoUdpNackRequest>();
+            bool tailPli2;
+            tailAsm.PollRecovery(tTail + Stopwatch.Frequency * 240 / 1000, 20.0, tailReqs2, out tailPli2);
+            Check("静帧尾包超时检测：先发 NACK 补发请求，超时后升级防抖 PLI",
+                tailBatch.Count == 0 && !tailPli1 && tailReqs.Count == 2 &&
+                tailReqs[0].ShardIdx == 1 && tailReqs[1].ShardIdx == 2 &&
+                tailPli2 && tailAsm.DroppedIncompleteFrames == 1,
+                "nacks=" + tailReqs.Count + " pli2=" + tailPli2 + " dropped=" + tailAsm.DroppedIncompleteFrames);
+
             // 3. Reliable UDP input piggyback, deduplication & non-duplicated relative mouse delta on redundant discrete copy
             var inTx = new BoBoUdpInputCodec();
             var inRx = new BoBoUdpInputCodec();
@@ -1190,6 +1271,27 @@ namespace DualRemote
                 lan.CurrentBitrateKbps == 22000 && lan.CurrentFps == 90,
                 "start=" + startBps + " backoff=" + bps1 + "kbps/" + fps1 + "fps");
 
+            var abrShift = new BoBoAdaptiveBitrateController(true, 14000, 60, 15.0, false);
+            long shiftT0 = Stopwatch.GetTimestamp();
+            int sBps, sFps;
+            abrShift.OnTelemetry(75.0, 0.0, shiftT0 + (long)(Stopwatch.Frequency * 6.1), out sBps, out sFps);
+            abrShift.OnTelemetry(75.0, 0.0, shiftT0 + (long)(Stopwatch.Frequency * 12.2), out sBps, out sFps);
+            abrShift.OnTelemetry(75.0, 0.0, shiftT0 + (long)(Stopwatch.Frequency * 14.3), out sBps, out sFps);
+            abrShift.OnTelemetry(75.0, 0.0, shiftT0 + (long)(Stopwatch.Frequency * 16.4), out sBps, out sFps);
+            abrShift.OnTelemetry(75.0, 0.0, shiftT0 + (long)(Stopwatch.Frequency * 18.6), out sBps, out sFps);
+
+            var abrJitter = new BoBoAdaptiveBitrateController(true, 14000, 60, 40.0, false);
+            long jT0 = Stopwatch.GetTimestamp();
+            int jBps, jFps;
+            abrJitter.OnTelemetry(220.0, 0.0, jT0 + (long)(Stopwatch.Frequency * 2.1), out jBps, out jFps);
+            abrJitter.OnTelemetry(40.0, 0.0, jT0 + (long)(Stopwatch.Frequency * 2.5), out jBps, out jFps);
+            abrJitter.OnTelemetry(220.0, 0.0, jT0 + (long)(Stopwatch.Frequency * 4.6), out jBps, out jFps);
+            Check("自适应码率：12 秒基线重校准与高抖动抑制误升码率",
+                abrShift.CurrentBaselineRttMs >= 70.0 && abrShift.CurrentBitrateKbps > 4500 &&
+                abrJitter.LatestJitterMs >= 35.0 && abrJitter.CurrentBitrateKbps <= 4500,
+                "shiftBase=" + abrShift.CurrentBaselineRttMs + " shiftBps=" + abrShift.CurrentBitrateKbps +
+                " jitter=" + Math.Round(abrJitter.LatestJitterMs, 1) + " jBps=" + abrJitter.CurrentBitrateKbps);
+
             Check("本地网段识别：私网与回环地址可用局域网档位，Tailscale 使用跨网档位",
                 BoBoProtocol.IsPrivateLanIp("192.168.1.20") && BoBoProtocol.IsPrivateLanIp("10.0.0.1") &&
                 BoBoProtocol.IsPrivateLanIp("::ffff:172.16.0.1") && BoBoProtocol.IsPrivateLanIp("127.0.0.1") &&
@@ -1201,11 +1303,15 @@ namespace DualRemote
             bool directRoute = testedRoute.Kind == BoBoRouteKind.TailnetDirect && !testedRoute.PreferWeakNetworkProfile;
             testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via DERP(tok) in 72ms")[0]);
             bool relayRoute = testedRoute.Kind == BoBoRouteKind.TailnetDerp && testedRoute.PreferWeakNetworkProfile;
+            testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via peer-relay(bj) in 24ms")[0]);
+            bool fastPeerRelay = testedRoute.Kind == BoBoRouteKind.TailnetPeerRelay && !testedRoute.PreferWeakNetworkProfile &&
+                testedRoute.LatestPathRttMs == 24.0;
             testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via peer-relay(example) in 68ms")[0]);
             bool peerRelayRoute = testedRoute.Kind == BoBoRouteKind.TailnetPeerRelay && testedRoute.PreferWeakNetworkProfile;
             testedRoute.UpdateTailnetPath(null);
-            Check("串流线路：P2P、DERP、节点中继和未确认路径分别显示",
-                unknownRoute && directRoute && relayRoute && peerRelayRoute && testedRoute.Kind == BoBoRouteKind.TailnetUnknown, testedRoute.Label);
+            Check("串流线路：P2P、DERP、高速/慢速节点中继和未确认路径分别识别",
+                unknownRoute && directRoute && relayRoute && fastPeerRelay && peerRelayRoute &&
+                testedRoute.Kind == BoBoRouteKind.TailnetUnknown, testedRoute.Label);
 
             var subnetAddress = System.Net.IPAddress.Parse("192.168.42.129");
             Check("同网段识别：按实际掩码区分局域网候选地址",

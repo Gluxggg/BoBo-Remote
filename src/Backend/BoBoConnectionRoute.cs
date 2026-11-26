@@ -25,12 +25,18 @@ namespace DualRemote
     {
         internal readonly IPAddress RemoteAddress;
         internal readonly double InitialRttMs;
+        internal double LatestPathRttMs { get; private set; }
         internal BoBoRouteKind Kind { get; private set; }
 
         internal bool IsTailnet { get { return Kind >= BoBoRouteKind.TailnetUnknown; } }
         internal bool PreferWeakNetworkProfile
         {
-            get { return InitialRttMs >= 75 || Kind == BoBoRouteKind.TailnetDerp || Kind == BoBoRouteKind.TailnetPeerRelay; }
+            get
+            {
+                double effectiveRtt = LatestPathRttMs > 0.1 ? LatestPathRttMs : InitialRttMs;
+                return effectiveRtt >= 75 || Kind == BoBoRouteKind.TailnetDerp ||
+                    (Kind == BoBoRouteKind.TailnetPeerRelay && effectiveRtt >= 55);
+            }
         }
 
         internal string Label
@@ -53,6 +59,7 @@ namespace DualRemote
         {
             RemoteAddress = NormalizeAddress(remote);
             InitialRttMs = rttMs;
+            LatestPathRttMs = rttMs;
             if (RemoteAddress == null) return;
             if (Tailscale.IsTailnetAddress(RemoteAddress.ToString()))
                 Kind = BoBoRouteKind.TailnetUnknown;
@@ -64,7 +71,12 @@ namespace DualRemote
         {
             if (!IsTailnet) return;
             Kind = BoBoRouteKind.TailnetUnknown;
-            if (pong == null) return;
+            if (pong == null)
+            {
+                LatestPathRttMs = InitialRttMs;
+                return;
+            }
+            if (pong.LatencyMs > 0.0) LatestPathRttMs = pong.LatencyMs;
             if (pong.Direct) Kind = BoBoRouteKind.TailnetDirect;
             else if (pong.Route.StartsWith("DERP(", StringComparison.OrdinalIgnoreCase)) Kind = BoBoRouteKind.TailnetDerp;
             else if (pong.Route.StartsWith("peer-relay(", StringComparison.OrdinalIgnoreCase)) Kind = BoBoRouteKind.TailnetPeerRelay;

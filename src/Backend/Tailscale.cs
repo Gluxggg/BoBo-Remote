@@ -49,6 +49,7 @@ namespace DualRemote
     {
         internal string Route = "";
         internal string Latency = "";
+        internal double LatencyMs;
         internal bool Direct;
     }
 
@@ -90,7 +91,7 @@ namespace DualRemote
         internal const int DefaultProbeTimeoutMs = 8000;
 
         private static readonly Regex PongRegex = new Regex(
-            @"pong from .*?\(([^)]*)\)(?:, [^)]*)? via (.+?) in ([0-9.]+)(ms|s)",
+            @"pong from .*?\(([^)]*)\)(?:, [^)]*)? via (.+?) in ([0-9.]+)(µs|us|ms|s)",
             RegexOptions.CultureInvariant);
 
         internal static string ExePath
@@ -341,13 +342,22 @@ namespace DualRemote
                 pong.Route = match.Groups[2].Value.Trim();
                 string number = match.Groups[3].Value;
                 string unit = match.Groups[4].Value;
+                double value = Convert.ToDouble(number, System.Globalization.CultureInfo.InvariantCulture);
                 if (unit == "s")
                 {
-                    double milliseconds = Convert.ToDouble(number, System.Globalization.CultureInfo.InvariantCulture) * 1000.0;
+                    double milliseconds = value * 1000.0;
+                    pong.LatencyMs = milliseconds;
                     pong.Latency = Math.Round(milliseconds) + "ms";
+                }
+                else if (unit == "us" || unit == "µs")
+                {
+                    double milliseconds = value / 1000.0;
+                    pong.LatencyMs = milliseconds;
+                    pong.Latency = milliseconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "ms";
                 }
                 else
                 {
+                    pong.LatencyMs = value;
                     pong.Latency = number + "ms";
                 }
                 pong.Direct = IsDirectRoute(pong.Route);
