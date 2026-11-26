@@ -5,7 +5,8 @@
 <h1 align="center">BoBo Remote</h1>
 
 <p align="center">
-  <strong>Open-Source, Account-Free, P2P-First Remote Desktop with Bring-Your-Own VPS Relay Fallback Across Windows, Android, macOS &amp; iOS</strong>
+  <strong>Open-source, zero-account, P2P-first four-platform remote desktop with self-hosted BYO-VPS relay fallback</strong><br />
+  <sub>Windows · Android · macOS · iOS / iPadOS · Unified BoBo6.2 Protocol · MIT License</sub>
 </p>
 
 <p align="center">
@@ -23,47 +24,101 @@
 
 ---
 
-**Four native apps share one protocol. Windows ships a single executable.**
+**BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no official cloud accounts**, **no vendor signaling servers**, and **bundles zero third-party remote desktop engine binaries**.
 
-**BoBo Remote v7.0.5** upgrades both the **Route Selector** UI and self-hosted VPS fallback workflow: a custom glacier-blue dropdown (`StyledChoiceBox`) eliminates Win32 `#0078D7` highlight flashes across non-editable selectors, and a new **Direct-First + Self-Hosted Relay Fallback** route opens an inline **Custom Fallback Relay** panel where users can add, select, delete, TCP-probe, and persist their own VPS fallback endpoints with automatic end-to-end TLS 1.2 fallback when direct connection fails. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
+### At a Glance
 
-The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices auto-discover on the LAN and connect over TLS 1.2, prioritize P2P direct links across networks (Tailscale `100.x.y.z` or reachable IPv6), and support self-hosted VPS relay fallback (currently via Tailscale Peer Relay / custom DERP, evolving toward native TURN UDP Relay). Windows-to-Windows sessions also negotiate an encrypted `UDP 49811` (`UDP+FEC/NACK`) channel.
-
----
+- **User-Owned Networking**: Instant LAN discovery (`UDP 49812`), **P2P-first** cross-network connectivity (Tailscale `100.x.y.z` / reachable IPv6), and built-in client management & TCP probing for your own **self-hosted VPS fallback relays** — relay nodes never see plaintext video, audio, or input.
+- **True Four-Platform Native Interop**: One deterministic protocol and shared cross-language [test vectors (`protocol/golden-vectors.json`)](protocol/golden-vectors.json) power Windows, Android, macOS, and iOS with zero paywalled resolutions or frame rates.
+- **Ultra-Lightweight Footprint**: Windows ships as a **~634 KB portable ZIP** (**~922 KB GUI installer**) containing a single `BoBo远程.exe` with the GZip-compressed C++17 hardware media/input core (`BoBoCore.dll`) loaded strictly in-process.
+- **Weak-Network Resilience & Physical Privacy**: Windows-to-Windows sessions upgrade to `AES-128-CTR + HMAC-SHA256` encrypted `UDP+FEC/NACK` with 12s-baseline ABR; controlled hosts feature a dedicated-thread privacy curtain and native low-level physical input locks.
 
 <p align="center">
-  <img src="assets/screenshot-devices.png" alt="BoBo Remote Windows glacier ice-blue dashboard preview" width="900" />
+  <a href="#why-bobo-remote">Comparison</a> ·
+  <a href="#six-core-highlights">Six Highlights</a> ·
+  <a href="#four-platform-matrix--release-sizes">Four-Platform Matrix</a> ·
+  <a href="#architecture--network-roadmap">Architecture</a> ·
+  <a href="#ui-previews">Previews</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#building-from-source--verification">Build & Checks</a> ·
+  <a href="#project-structure">Structure</a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot-devices.png" alt="BoBo Remote Windows glacier-blue dashboard preview" width="900" />
 </p>
 
 ---
 
-## Four-Platform Capability Matrix
-
-| Platform | OS Requirement | Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
-| --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`<br>`BoBoRemote-Portable-x64.zip` | ✅ **Full**<br>Includes Android nav bar &amp; iOS screen viewing | ✅ **Full**<br>DXGI/GDI + Media Foundation H.264 HW encode + WASAPI audio | Single-file all-in-one EXE, Super Display zero-black-bar scaling, native host cursor compositing, physical input-locking privacy shield, in-app SHA-256 auto-updater |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` | ✅ **Full**<br>MediaCodec zero-copy HW decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection H.264 stream + AccessibilityService touch | Trackpad &amp; direct-touch modes, edge-dockable floating ball, Control Center, PC shortcut keyboard bar, Bluetooth keyboard → Windows VK mapping, mobile nav controls |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (Universal 2) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy render | ✅ **Full**<br>`ScreenCaptureKit` (driverless system audio) + VideoToolbox HW encode | Super Display scaling, smart `⌘ → Ctrl` mapping, privacy curtain excluded from capture + `CGEventTap` physical input lock |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` | **Foreground controller**<br>VideoToolbox HW decode + trackpad/direct touch | 👁️ **ReplayKit view-only sharing** | ReplayKit Broadcast Extension and local loopback bridge. Sign and install via Sideloadly, AltStore, SideStore, or Xcode |
-
-> See [**Cross-Platform Installation &amp; Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md) for step-by-step setup and permission instructions.
-
 ## Why BoBo Remote?
 
-| Commercial Remote Desktop Suites | BoBo Remote v7 |
-| --- | --- |
-| Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No official accounts, no forced relays, BYO-VPS fallback** — LAN discovery &amp; P2P direct first; self-host your own VPS as a private relay fallback with zero vendor lock-in or telemetry |
-| High FPS, resolution scaling, privacy screens, and mobile access paywalled | **MIT-licensed V6/V7 source** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
-| Background system services &amp; kernel drivers keep running after closing the app | **Explicit pairing and device authentication**. Use a 4-digit PIN to pair. Reconnect with certificate pinning and an RSA proof |
-| Superficial privacy overlays still let bystanders click the taskbar or type | **Physical-grade host privacy shield** — `WDA_EXCLUDEFROMCAPTURE` curtain + native `WH_MOUSE_LL`/`WH_KEYBOARD_LL` (or `CGEventTap`) input blocker + optional safe DDC/CI backlight dimming |
+| Dimension | Commercial Remote Desktop Suites | BoBo Remote |
+| --- | --- | --- |
+| **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No official accounts, no central directory, zero telemetry**: config & keys stay local; cross-network uses P2P or your own VPS relay |
+| **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: HW codecs, Super Display, privacy shield, and 2 GiB file transfer out of the box |
+| **Footprint & Background Services** | Tens to hundreds of MB, multiple external processes, always-on background services | **~634 KB Windows single-file package** with in-process `BoBoCore.dll`; closing the app immediately stops port `49810` and unhooks filters |
+| **Routing & BYO-VPS Freedom** | Fixed vendor relay clusters | **4 route modes + inline custom VPS manager**: Automatic, LAN Direct, Tailscale, and **Direct-First + Self-Hosted Relay Fallback** with TCP latency probing |
+| **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + physical-grade privacy**: TLS 1.2 leaf-cert SHA-256 TOFU + RSA proofs + 4-digit brute-force-protected PIN + `WDA_EXCLUDEFROMCAPTURE` + low-level input locks |
 
-## Architecture &amp; Network Transport Design
+---
 
-### A. Shipped Architecture &amp; Unified Protocol (`BoBo6.2` · `v7.0.5`)
+## Six Core Highlights
+
+### 1. Ground-Up `BoBo6.2` Binary Protocol & Cross-Language Parity
+- [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines a **9-byte little-endian frame header** across six payload types (`ControlJson`, `VideoH264`, `AudioAdpcm`, `InputEvent`, `FileChunk`, `CursorShape`), spanning Windows mouse/keyboard, multi-touch pointers (`kind=7`), and mobile OS navigation actions (`kind=8`: Back / Home / Recents / Notifications / Lock / Volume / Power).
+- All four clients implement **zero-dependency** crypto/framing stacks (C# `.NET 4.8`, Kotlin, and pure-Swift DER RSA-2048 X.509/PKCS#12) validated against shared [`protocol/golden-vectors.json`](protocol/golden-vectors.json).
+
+### 2. P2P First + Self-Hosted VPS Relay Fallback + Weak-Network Transport
+- **Route Selector & Inline Custom Fallback Relay Panel ([`BoBoRelayStore`](src/Backend/BoBoRelayStore.cs))**:
+  - Persists four route strategies: **Automatic (LAN / P2P First)**, **LAN Direct**, **Cross-Network · Tailscale (P2P First)**, and **Direct First + Self-Hosted Relay Fallback**.
+  - Users can add, switch, delete, and **TCP-probe** up to 12 custom VPS relay endpoints (`IP:port`, `domain:443`, `[IPv6]:port`, default `49810`) right inside the Assist page.
+  - Under fallback mode, BoBo Remote **always probes the direct target first** (zero relay bandwidth when reachable); if direct peering fails or times out, it seamlessly falls back to the selected VPS endpoint for end-to-end TLS 1.2 pairing and custom-port streaming, preserving high-bitrate/FPS profiles when fast relays measure `< 55 ms`.
+- **Windows-to-Windows Encrypted `UDP+FEC/NACK` (`UDP 49811`)**:
+  - Cross-platform sessions run over `TCP+TLS 49810`; Windows peers auto-negotiate an **`AES-128-CTR + HMAC-SHA256`** encrypted UDP channel with **grouped/interleaved `XOR FEC`**, **selective shard `NACK`** (18-frame / 2 MiB retransmit ring buffer & rate budget, 3-shard reorder margin), static-frame tail-loss detection, 10 ms-spaced discrete input redundancy, **12-second rolling-baseline ABR**, and automatic seamless fallback to `TCP+TLS` after `> 3.5s` UDP silence.
+
+### 3. Ultra-Light In-Process Native Core & Hardware Acceleration Everywhere
+- **Windows (C# WinForms + embedded C++17 `BoBoCore.dll`)**: Full HW pipeline loaded in-process — **DXGI Desktop Duplication** (automatic GDI fallback) → **Media Foundation HW H.264 encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48 kHz stereo IMA-ADPCM audio**.
+- **Android (Kotlin + Jetpack Compose)**: Zero-copy `MediaCodec` decoding as controller; **rootless host** via `MediaProjection` + `AccessibilityService` touch injection, complete with a PC shortcut bar, Bluetooth keyboard Windows `VK_*` mapping, and mobile navigation controls.
+- **macOS (SwiftUI + `BoBoAppleCore`)**: Driverless `ScreenCaptureKit` video + system audio capture, VideoToolbox HW encode/decode, `CGEventTap` physical input locking, and smart `⌘ → Ctrl` key mapping, shipped as a **Universal 2** Intel + Apple Silicon DMG.
+- **iOS / iPadOS (SwiftUI + ReplayKit)**: Foreground controller with VideoToolbox decode and trackpad/direct-touch modes; view-only screen broadcasting via embedded `BoBoBroadcastExtension` ReplayKit extension + local loopback bridge.
+
+### 4. Refined Desktop Controls & Custom Glacier-Blue UI
+- **Super Display v2 & Host-Sized Cursor**: Adapts cleanly to client viewport aspect ratios, dynamically switching host display modes in fullscreen (including enabled Windows virtual displays) and restoring the original mode on exit. Free mouse mirrors host pointer size and shape; tapping `Ctrl + Alt` in locked mode immediately frees the cursor and restores zero-latency local cursor mode.
+- **Unified Control Center & 4-Edge Dockable Floating Ball**: Shared real-time cascading menu across windowed header and fullscreen edge-snapping square ball — multi-monitor switching, quality/FPS hot-swap, always-on-top mini window with opacity slider, jump-free volume slider, live HUD telemetry (`RTT ± Jitter`, loss %, `F/N` FEC/NACK counts), clipboard text send, and screenshots.
+- **Custom Owner-Drawn Theme (`RemoteTheme` & `UiTransition`)**: Custom glacier-blue `StyledChoiceBox` replaces Win32 `#0078D7` blue dropdown highlights across selectors, paired with smooth hover/slider transitions, pixel-aligned window glyphs, multi-size tray ICOs, and a 7-step dual-layer ClearType onboarding tour.
+
+### 5. Physical-Grade Host Privacy Shield (Windows & macOS)
+- **Dedicated STA Curtain Thread (`CurtainWindowThread`)**: Windows isolates the `WDA_EXCLUDEFROMCAPTURE` curtain and `SetWinEventHook` on its own STA thread to instantly reclaim topmost z-order when IME popups or overlays appear without flashing desktop pixels, while keeping `Magnification.dll` cursor masking on the persistent UI thread. macOS excludes privacy curtains via `ScreenCaptureKit`.
+- **Hardware Input Blocking (Enabled by Default)**: Native `WH_MOUSE_LL` + `WH_KEYBOARD_LL` (Windows) and `CGEventTap` (macOS) block physical input at the host machine while allowing authenticated remote events and the emergency escape chord (`Ctrl+Alt+Shift+P` / `⌘+⌥+⇧+P`).
+- **Opt-In Safe DDC/CI Backlight Dimming (Disabled by Default)**: Uses `dxva2.dll` to adjust backlight (`VCP 0x10`) on non-HDR monitors only — never contrast or RGB gains — with crash-safe persistent brightness restoration and Windows unlock anti-flap protection.
+
+### 6. Zero-Trust Endpoint Authentication & 2 GiB File Transfer
+- **RSA-2048 TOFU & Asymmetric Proofs**: Every client generates a local RSA-2048 X.509 cert and deterministic 9-digit device code; controllers pin the host leaf certificate `SHA-256` directly from the TLS 1.2 handshake (rejecting drift), while hosts verify the controller's `clientCertDer` and `RSA-SHA256` signature.
+- **Brute-Force-Hardened 4-Digit Pairing**: First-time pairing requires a single-use 4-digit PIN (`HMAC-SHA256` constant-time verified, 120s TTL, invalidated after 5 consecutive failures + 500 ms delay).
+- **Encrypted File Transfer**: Built-in chunked transfer over the TLS 1.2 channel supporting files up to **2 GiB** with cross-platform filename sanitization and mandatory **SHA-256** verification.
+
+---
+
+## Four-Platform Matrix & Release Sizes
+
+| Platform | OS Requirement | `v7.0.5` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| --- | --- | --- | --- | --- | --- |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~922 KB)<br>`BoBoRemote-Portable-x64.zip` (~634 KB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264 + WASAPI | In-process `BoBoCore.dll`, `UDP+FEC/NACK`, BYO-VPS relay manager, Super Display, privacy shield, in-app updater |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>MediaCodec zero-copy decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection + Accessibility touch | Trackpad/direct touch, floating ball, Control Center, PC shortcut bar, Bluetooth VK map |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | Super Display, `⌘ → Ctrl` mapping, capture-excluded curtain + `CGEventTap` input lock |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~835 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | Embedded ReplayKit Broadcast Extension + local loopback bridge; sign via Sideloadly / AltStore / SideStore / Xcode |
+
+> Full permission & multi-platform setup instructions live in [**Cross-Platform Installation & Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md).
+
+---
+
+## Architecture & Network Roadmap
+
+### A. Shipped Architecture (`BoBo6.2` · `v7.0.5`)
 
 ```mermaid
 flowchart LR
-  subgraph CLIENTS["Four Native Clients (Controller + Host Built In)"]
+  subgraph CLIENTS["Four Native Clients (Controller + Protocol Stack Built In)"]
     direction TB
     WIN["Windows x64 · C# WinForms + Embedded C++17 BoBoCore.dll"]
     AND["Android · Kotlin + Jetpack Compose + MediaCodec"]
@@ -71,18 +126,18 @@ flowchart LR
     IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
   end
 
-  subgraph PROTO["BoBo6.2 Wire Protocol &amp; Encrypted Transport"]
+  subgraph PROTO["BoBo6.2 Wire Protocol & Encrypted Transport"]
     direction TB
     DISC["UDP 49812 · LAN Discovery (PROBE / HELLO / BYE)"]
-    TLS["TCP 49810 · Mandatory TLS 1.2+ Control &amp; Fallback Media (RSA-2048 TOFU)"]
-    AUTH["RSA Challenge Proof and 4-Digit Temporary PIN"]
+    TLS["TCP 49810 (or Custom Relay Port) · TLS 1.2+ & RSA-2048 TOFU"]
+    AUTH["RSA Challenge Signature + 4-Digit Temporary PIN (HMAC-SHA256)"]
     FRAMES["6 TCP Frames: ControlJson · VideoH264 · AudioAdpcm · InputEvent · FileChunk · CursorShape"]
-    UDP["UDP 49811 (Windows Peers) · AES-128-CTR+HMAC · Interleaved XOR FEC + Selective NACK + ABR"]
+    UDP["UDP 49811 (Windows Peers) · AES-128-CTR+HMAC · Interleaved XOR FEC + Selective NACK + 12s ABR"]
     DISC --> TLS --> AUTH --> FRAMES
     AUTH --> UDP
   end
 
-  NET["Direct LAN / IPv6 / Tailscale (P2P Direct · Self-Hosted VPS Peer Relay / DERP)"]
+  NET["Direct LAN / Public IPv6 / Tailscale (P2P · DERP · Peer Relay) / BYO-VPS Fallback Relay"]
 
   WIN <--> PROTO
   AND <--> PROTO
@@ -91,18 +146,14 @@ flowchart LR
   PROTO <--> NET
 ```
 
-- **Single Authoritative Spec**: [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines the 9-byte little-endian frame header (`ControlJson`, `VideoH264`, `AudioAdpcm`, `InputEvent`, `FileChunk`, `CursorShape`), deterministic 9-digit device code derivation, 4-digit `HMAC-SHA256` pairing proof, H.264 Annex-B video frames, 48kHz stereo IMA-ADPCM audio, mouse/keyboard/multi-touch/mobile-nav input packets, and chunked file transfers.
-- The CI workflow runs the shared C#, Kotlin, and Swift [test vectors (`protocol/golden-vectors.json`)](protocol/golden-vectors.json) and TLS loopback checks.
-- **Windows-to-Windows Encrypted `UDP+FEC/NACK` (`UDP 49811`)**: Cross-platform sessions use `TCP+TLS 49810`, while two Windows peers automatically upgrade to `AES-128-CTR + HMAC-SHA256` encrypted UDP featuring grouped/interleaved `XOR FEC`, selective shard `NACK` (`packetType=10`, 18-frame / 2 MiB retransmit cache &amp; budget cap, 3-shard reorder margin), static-frame tail-loss detection, 10ms-spaced discrete input redundancy, 12-second rolling-baseline ABR, and automatic fallback to `TCP+TLS` after >3.5s UDP silence.
-
-### B. Next-Generation Network Architecture &amp; BYO-VPS Relay Fallback (Planned)
+### B. Next-Generation Network Architecture & BYO-VPS Relay Fallback (Planned)
 
 ```mermaid
 flowchart TB
   CLIENT["Controller Client · Windows / Android / macOS / iOS"]
   COORD["Connection Coordinator · Device Registration / Auth / Signaling / Negotiation"]
-  P2P["Priority · P2P Direct · STUN / ICE (Zero Relay Cost)"]
-  RELAY["Fallback · UDP Relay · TURN / Self-Hosted VPS Relay (Higher Success Rate)"]
+  P2P["Priority · P2P Direct · STUN / ICE (Zero Relay Bandwidth Cost)"]
+  RELAY["Fallback · UDP Relay · TURN / Self-Hosted VPS Relay (Symmetric NAT Resilience)"]
   HOST["Controlled Host · Windows / Android / macOS / iOS"]
 
   CLIENT --> COORD
@@ -115,169 +166,172 @@ flowchart TB
 **Network Transport Policy**
 
 1. **Try P2P first**: Attempt direct STUN / ICE hole punching to minimize latency and keep relay bandwidth near zero.
-2. **Fall back to UDP Relay if P2P fails**: Seamlessly route through a user-hosted TURN / UDP Relay VPS node so symmetric NAT and cross-ISP links still connect reliably.
-3. **Provide a `TCP/TLS 443` fallback when UDP is blocked**: Keep connectivity alive inside restrictive campus or corporate firewalls where UDP is filtered.
-4. **Adapt bitrate and FPS when link quality drops**: Continuously tune bitrate and frame rate from live RTT, jitter, and loss telemetry (Windows already ships rolling-baseline ABR and `UDP+FEC/NACK` in `v7.0.3–v7.0.4`, ready to integrate with the native coordinator/relay layer and extend across platforms).
+2. **Fall back to UDP Relay if P2P fails**: Seamlessly route through a user-hosted TURN / UDP Relay VPS node across symmetric NATs and cross-ISP bottlenecks.
+3. **Provide a `TCP/TLS 443` fallback when UDP is blocked**: Keep connectivity alive inside restrictive campus or corporate firewalls.
+4. **Adapt bitrate and FPS when link quality drops**: Continuously tune bitrate and FPS from live RTT, jitter, and loss telemetry (Windows already ships `UDP+FEC/NACK` and 12s-baseline ABR in `v7.0.3–v7.0.4`, ready to extend across platforms and integrate with the coordinator layer).
 
-> **Open-Source Bring-Your-Own VPS (BYO-VPS) Model**
-> - Both personal deployments and open-source users follow **P2P Direct Priority + Self-Hosted VPS Relay Fallback**: instead of relying on an official hosted server cluster, anyone can spin up a lightweight regional/BGP VPS as their own private fallback node for predictable cost and full privacy ownership.
-> - **What works today (`v7.0.5`)**: Choose **Direct First + Self-Hosted Relay Fallback** directly inside the Route dropdown to add, save, delete, and TCP-probe your own VPS endpoints (`host[:port]`) with automatic TLS 1.2 fallback when direct peering fails; or deploy your VPS as a **Tailscale Peer Relay / custom DERP node** (with high-bitrate/FPS preserved when `< 55 ms`). Once the open-source Connection Coordinator, `TURN / UDP Relay`, and `TCP/TLS 443` fallback land, external mesh tools become optional.
+> **Personal & Open-Source BYO-VPS Status**
+> - **Available Today (`v7.0.5`)**: The Windows Route dropdown includes **Direct First + Self-Hosted Relay Fallback** with an inline custom relay panel (save up to 12 VPS `host[:port]` endpoints, run TCP latency probes, and fall back automatically over end-to-end TLS 1.2 + RSA TOFU), alongside native recognition of **Tailscale Peer Relay** (`< 55 ms` preserves high-bitrate streaming) and custom DERP nodes.
+> - **Next-Gen Goal (`V7.1+ / V8`)**: Ship a lightweight self-hostable **Connection Coordinator + TURN / UDP Relay + `TCP/TLS 443` fallback** so all four platforms can punch NATs and fail over to user-owned VPS nodes without external mesh software.
 
-## Key Features
+---
 
-### 1. In-Process Windows Media and Input Core
-- `BoBo远程.exe` embeds the GZip-compressed C++17 `BoBoCore.dll` and loads it in process.
-- Full hardware-accelerated pipeline: **DXGI Desktop Duplication** (with automatic GDI fallback) → **Media Foundation H.264 HW encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48kHz audio**.
-
-### 2. Adaptive Display, Cursor &amp; Weak-Network Transport
-
-- **Super Display** fits the stream to the viewport while preserving the desktop aspect ratio. Fullscreen sessions can use a matching mode supported by the host display, and the original mode is restored on exit. The display menu also lists virtual displays already enabled in Windows.
-- **Free mouse** uses the host pointer size and shape inside the remote viewport, then returns to the local pointer outside it. Tap `Ctrl + Alt` to release the mouse in locked mode and automatically switch the host back to zero-latency local cursor mode (`SET_CURSOR_MODE(false)`).
-- **Route &amp; `UDP+FEC/NACK`**: Connection options include Automatic, LAN Direct, and Tailscale; the live HUD displays FPS, resolution, detected route &amp; transport, decode time, `RTT ± Jitter`, packet loss %, `F/N` FEC/NACK recovery counts, and live bitrate.
-
-### 3. Unified Control Center &amp; Edge-Dockable Floating Ball
-- Shared real-time menu accessible from both the window header and a draggable, edge-snapping square floating ball, enhanced with `UiTransition` animations, pixel-aligned caption glyphs, and crisp multi-size tray icons:
-  - **Display &amp; Super Display**: Multi-monitor switching, resolution follow local/host, DPI scale, Super Display toggle;
-  - **Quality &amp; Frame Rate**: Auto / 30M / 14M / 8M presets, 30 / 60 / 90 / 144 fps targets, and Weak-Network anti-loss preset;
-  - **Window &amp; Mini-Mode**: Fullscreen toggle, always-on-top mini window with adjustable opacity;
-  - **Audio &amp; Security**: Jump-free volume slider, host mute-while-connected (auto-restored), lock host on disconnect, one-click remote privacy shield;
-  - **Peripherals &amp; Tools**: System shortcut passthrough, mouse mode switch, `Ctrl+Alt+Del` injection, clipboard text send, screenshot capture, live network HUD, and instant disconnect.
-
-### 4. Host Privacy Shield (Windows and macOS)
-
-- **Automatic privacy curtain** covers physical displays when enabled. On Windows, the live curtain windows and `SetWinEventHook` run on a dedicated STA thread (`CurtainWindowThread`) using `WDA_EXCLUDEFROMCAPTURE` and immediately reassert Z-order when IME popups appear, while `Magnification.dll` cursor masking stays on the persistent UI thread for reliable teardown and display-change handling (actual masking depends on Windows and display drivers). macOS uses ScreenCaptureKit window exclusion.
-- **Physical Keyboard &amp; Mouse Lock (On by Default)**: Native `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks on Windows and `CGEventTap` on macOS block local bystanders from clicking the taskbar or typing, allowing only signed BoBo remote input and the emergency exit hotkey.
-- **Optional Safe DDC/CI Backlight Dimming (Off by Default)**: Uses `dxva2.dll` to adjust **only** backlight brightness (`VCP 0x10`) on non-HDR displays — never touching contrast, color temperature, or RGB gains — with crash-safe persistent restoration and read-back verification.
-- **Lock-Screen Guard State Machine**: Optional auto-lock when dismissing privacy, with post-unlock debounce to prevent unintended re-triggering.
-
-### 5. Mandatory Dual-End Auth &amp; Built-In File Transfer
-- Pairing on all four platforms requires updated apps on both ends. The controller pins the SHA-256 fingerprint of the host’s RSA-2048 certificate from the TLS handshake. The host verifies the controller’s RSA challenge signature. A changed host fingerprint stops reconnection.
-- First-time pairing also validates the four-digit PIN. The PIN lasts 120 seconds and expires after successful use or five failed attempts.
-- Chunked transfers support files up to 2 GiB each. The receiving endpoint verifies the SHA-256 digest before confirming delivery.
-
-## UI Preview
+## UI Previews
 
 <p align="center">
   <img src="assets/screenshot-onboarding.png" alt="7-step ClearType spotlight onboarding tour" width="450" />
-  <img src="assets/screenshot-privacy-display.png" alt="Privacy shield and display settings page" width="450" />
+  <img src="assets/screenshot-privacy-display.png" alt="Privacy & Display configuration" width="450" />
 </p>
 
 <details>
-<summary>View fullscreen host privacy wallpaper curtain preview</summary>
+<summary>Click to view the host-side fullscreen privacy curtain rendering</summary>
 <p align="center">
-  <img src="assets/screenshot-privacy-wallpaper.png" alt="Fullscreen host privacy wallpaper preview" width="760" />
+  <img src="assets/screenshot-privacy-wallpaper.png" alt="Host fullscreen privacy wallpaper rendering" width="760" />
 </p>
 </details>
 
+---
+
 ## Quick Start
 
-Download the package for your platform from [**GitHub Releases (latest)**](https://github.com/Gluxggg/BoBo-Remote/releases/latest):
+Download the artifact for your platform from [**GitHub Releases (latest)**](https://github.com/Gluxggg/BoBo-Remote/releases/latest) and verify hashes with `SHA256SUMS.txt`:
 
-### Windows (x64)
-1. Download **`BoBoRemote-Setup-x64.exe`** (or portable **`BoBoRemote-Portable-x64.zip`**).
-2. Double-click to install to `%LOCALAPPDATA%\BoBoRemote` (no admin required; creates Desktop/Start Menu shortcuts and Apps &amp; Features uninstaller; upgrades preserve trusted pairings).
-3. Future updates can be installed in one click directly inside the app with `SHA256SUMS.txt` verification.
+- **Windows 10 / 11 x64**: Run **`BoBoRemote-Setup-x64.exe`** (installs to `%LOCALAPPDATA%\BoBoRemote`, no admin rights needed, preserves pairings/relays on upgrade, includes in-app SHA-256 updater) or unzip **`BoBoRemote-Portable-x64.zip`**. Allow inbound Windows Firewall access on hosts.
+- **Android 8.0+**: Install **`BoBoRemote-Android.apk`**. Controlling requires zero permissions; for rootless host mode, enable **Screen Capture** and **BoBo Remote Accessibility Touch Service**.
+- **macOS 13.0+**: Open **`BoBoRemote-macOS.dmg`** (Universal 2) and drag `BoBoRemote.app` into `Applications`; grant **Screen & System Audio Recording** and **Accessibility** when hosting.
+- **iOS / iPadOS 16.0+**: Sideload **`BoBoRemote-iOS-Unsigned.ipa`** via [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode, trust the developer certificate, and allow **Local Network** access.
 
-### Android (8.0+)
-1. Download and install **`BoBoRemote-Android.apk`**.
-2. **As Controller**: Ready out of the box with zero special permissions.
-3. **As Rootless Host**: Open the Host tab, grant **Screen Capture**, and enable the **BoBo Remote Accessibility Service** in Android Settings.
+### 3-Step First Connection
+1. **Establish Reachability**: Keep peers on the same LAN (`UDP 49812` discovery), connect over [Tailscale](https://tailscale.com/) (`100.x.y.z`) / reachable IPv6, or choose **Direct First + Self-Hosted Relay Fallback** in Windows and add your VPS endpoint.
+2. **Generate a 4-Digit PIN**: On the host, open BoBo Remote, enable incoming control, and generate a **4-digit temporary pairing PIN** (valid 120s).
+3. **Pair & Connect**: Select the discovered host or enter its address/9-digit code on the controller to complete one-time TOFU pairing; future reconnects verify pinned certificates automatically.
 
-### macOS (13.0+)
-1. Open **`BoBoRemote-macOS.dmg`** (Universal 2 for Apple silicon and Intel) and drag `BoBoRemote.app` into `Applications`.
-2. To allow incoming control, grant **Screen &amp; System Audio Recording** and **Accessibility** through the system permission prompts.
-
-### iOS / iPadOS (16.0+)
-1. Download **`BoBoRemote-iOS-Unsigned.ipa`** (includes the main app + ReplayKit Broadcast Extension).
-2. Sideload for free using [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode; trust your certificate under **Settings → General → VPN &amp; Device Management** and allow **Local Network** access.
-3. Keep BoBo Remote in the foreground while controlling or viewing a session. To share the device’s screen, start the **BoBo Broadcast Extension** in the Screen Share tab and pair from the viewing device.
-
-### Connecting in 3 Steps (Any Platform Pair)
-1. **Network**: Place both devices on the same LAN (auto-discovered via `UDP 49812`), connect directly over reachable IPv6, or sign both into [Tailscale](https://tailscale.com/) for `100.x.y.z` (P2P direct first, with optional self-hosted VPS `Peer Relay` / custom DERP fallback).
-2. **Generate PIN**: Open BoBo Remote on the **host** and generate a **4-digit temporary pairing code** (valid 120s).
-3. **Pair and connect.** Select the discovered host or enter its IP, then enter the PIN. Subsequent connections use the saved certificate trust.
-
-Use the release’s `SHA256SUMS.txt` to check downloaded packages. When hosting on Windows, follow the firewall prompts to allow incoming connections on the network you use.
-
-## Keyboard Shortcuts
+### Keyboard Shortcuts
 
 | Shortcut | Platform | Action |
 | --- | --- | --- |
-| `Ctrl + Alt` (tap) | Windows | Instantly release locked mouse &amp; reveal floating controls |
+| `Ctrl + Alt` (tap) | Windows | Release locked mouse and summon floating controls |
 | `Ctrl + Alt + F` | Windows | Toggle fullscreen / windowed mode |
 | `Ctrl + Alt + U` | Windows | Toggle always-on-top mini window |
-| `Ctrl + Alt + G` | Windows | Hide / restore floating ball in fullscreen |
-| `Ctrl + Alt + M` | Windows | Toggle mouse mode (Free / Locked) |
-| `Ctrl + Alt + →` | Windows | Switch to next remote monitor |
+| `Ctrl + Alt + G` | Windows | Hide / show fullscreen floating ball |
+| `Ctrl + Alt + M` | Windows | Toggle Free / Locked mouse mode |
+| `Ctrl + Alt + →` | Windows | Cycle next remote monitor |
 | `Ctrl + Alt + Shift + B` | Windows | Open / toggle Control Center |
-| `Ctrl + Alt + Shift + Q` | Windows | Disconnect remote session immediately |
-| `Ctrl + Alt + Shift + P` | Windows | Host emergency exit from privacy shield |
-| `⌘ + ⌥ + ⇧ + P` | macOS | Host emergency exit from privacy shield |
+| `Ctrl + Alt + Shift + Q` | Windows | Disconnect active remote session |
+| `Ctrl + Alt + Shift + P` | Windows | Emergency exit host privacy curtain |
+| `⌘ + ⌥ + ⇧ + P` | macOS | Emergency exit host privacy shield |
 
-## Build From Source &amp; Self-Tests
+---
 
-Run the checks for your target platform from the repository root. [CI workflow](.github/workflows/ci.yml)
+## Building from Source & Verification
+
+Run platform builds from the repository root ([CI workflow](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)):
 
 ```powershell
-# Windows x64 (MSVC Build Tools, Windows SDK, and the .NET Framework compiler)
-.\ci\build.ps1
-.\build.ps1
+# Windows x64 (requires MSVC Build Tools, Windows SDK, and .NET 4.8 csc.exe)
+.\ci\build.ps1        # Builds BoBoCore.dll.gz + BoBoRemote.exe + Setup and runs self-tests
+.\build.ps1           # Assembles portable ZIP, light update ZIP, and GUI installer
 ```
 
 ```bash
 # Android APK (JDK 17, Android SDK 34, Gradle 8.7)
 (cd android && gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace)
 
-# Apple shared core and macOS Universal 2 DMG (macOS and Xcode)
+# Apple shared core tests & macOS Universal 2 DMG (macOS, Xcode)
 (cd apple/BoBoAppleCore && swift test -v)
 bash apple/scripts/package-macos-dmg.sh
 
-# iOS / iPadOS unsigned IPA (macOS, Xcode, and XcodeGen)
+# iOS / iPadOS unsigned IPA (macOS, Xcode, XcodeGen)
 if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-For `v7.0.5`, local Windows checks used direct compiler invocations: **10/10 native self-tests, 130/130 managed `--self-test` checks, 7/7 installer checks, 56/56 UI/dropdown/relay/animation/icon smoke checks, and 12/12 privacy curtain thread checks passed** (`RemoteSigned` blocked normal `.ps1` execution in that shell). GitHub Actions CI &amp; Release workflows automatically build and test Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA).
+**Verified Test Coverage (`v7.0.5`)**
+- **Local Windows suite**: **10/10** native `BoBoCore.dll` self-tests (encoder, D3D11, WASAPI, physical input blocker; capture falls back to synthetic NV12 in non-interactive sessions), **130/130** managed `--self-test` checks (protocol Golden Vectors, UDP FEC/NACK, ABR, privacy guard state machine, `BoBoRelayStore` & custom relay routing), **7/7** installer self-tests, **56/56** UI/dropdown/relay/animation/icon smoke checks, and **12/12** threaded privacy curtain checks passed.
+- **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows build Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA) and verify all 6 release artifacts against `SHA256SUMS.txt`. (End-to-end WAN throughput over custom VPS nodes remains dependent on user ISP peering and VPS bandwidth.)
 
-The release workflow builds all four packages from the same existing `vMAJOR.MINOR.PATCH` tag. After all four builds succeed, it verifies the six packages and `SHA256SUMS.txt` on a draft before publishing. [Release workflow](.github/workflows/release.yml)
+---
 
 ## Project Structure
 
 | Path | Responsibility |
 | --- | --- |
-| `protocol/` | Authoritative wire spec [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) &amp; cross-language test suite [`golden-vectors.json`](protocol/golden-vectors.json) |
-| `native/bobo-core/` | Windows C++17 native engine (`BoBoCore.dll`): DXGI/GDI capture, cursor compositing, MF H.264 encode/decode, D3D11 Flip-Model render, WASAPI audio, Super Display &amp; input blocker |
-| `src/` | Windows C# 5 / WinForms app: glacier-blue UI, `UiTransition` animations, native stream window, Control Center, floating ball, 7-step onboarding, threaded privacy curtain &amp; `Backend/` (protocol, host server, encrypted UDP+FEC/NACK &amp; ABR, route detection, auto-updater, DDC/CI dimmer, self-tests) |
-| `installer/` | Zero-dependency Windows GUI installer / silent updater / uninstaller (`BoBoSetup.cs`) |
-| `android/` | Native Android app (Kotlin + Jetpack Compose): zero third-party crypto deps, MediaCodec HW codecs, rootless MediaProjection + Accessibility host &amp; unit tests |
-| `apple/BoBoAppleCore/` | Pure Swift shared core (zero third-party deps): protocol, pure Swift DER RSA-2048 X.509/PKCS#12, TLS 1.2, VideoToolbox decode, audio player &amp; XCTest |
-| `apple/BoBoRemoteMac/` | Native macOS SwiftUI app (ScreenCaptureKit + CGEventTap + privacy shield) |
-| `apple/BoBoRemoteiOS/` | Native iOS / iPadOS app + `BoBoBroadcastExtension` ReplayKit extension (XcodeGen) |
-| `docs/` | Cross-platform setup &amp; troubleshooting guide [`CROSS-PLATFORM-GUIDE.md`](docs/CROSS-PLATFORM-GUIDE.md) |
-| `ci/` &amp; `.github/workflows/` | Parallel four-platform CI (`ci.yml`) and automated Release pipeline (`release.yml`) |
+| [`protocol/`](protocol/BOBO6-SPEC.md) | Authoritative [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) spec and cross-language [`golden-vectors.json`](protocol/golden-vectors.json) |
+| [`native/bobo-core/`](native/bobo-core/build-core.ps1) | Windows C++17 in-process core (`BoBoCore.dll`): DXGI/GDI capture, cursor compositing, MF H.264 codecs, D3D11 render, WASAPI audio, Super Display & hardware input lock |
+| [`src/`](src/MainForm.cs) | Windows C# 5 / WinForms client: glacier-blue UI (`RemoteTheme` / `StyledChoiceBox` / `UiTransition`), stream window, Control Center, floating ball, 7-step onboarding, threaded privacy curtain & `Backend/` (`BoBoRelayStore`, `BoBoUdpTransport`, `BoBoConnectionRoute`, `AppUpdater`, `SelfTest`) |
+| [`installer/BoBoSetup.cs`](installer/BoBoSetup.cs) | Zero-dependency Windows GUI installer, silent updater, and uninstaller |
+| `android/` | Native Android client (Kotlin + Compose): MediaCodec decode, rootless MediaProjection + Accessibility host, and unit tests |
+| `apple/` | Pure Swift `BoBoAppleCore` (with XCTest), macOS SwiftUI app, and iOS app + ReplayKit Broadcast Extension |
+| [`docs/`](docs/CROSS-PLATFORM-GUIDE.md) | [`CROSS-PLATFORM-GUIDE.md`](docs/CROSS-PLATFORM-GUIDE.md) cross-platform permissions and troubleshooting guide |
+| [`.github/workflows/`](.github/workflows/release.yml) | Parallel 4-platform CI (`ci.yml`) and tag-triggered Release pipeline (`release.yml`) |
 
-## Security, Privacy &amp; Honest Boundaries
+<details>
+<summary>Expand full repository tree</summary>
 
-- **No official accounts, self-owned routing &amp; minimal local state**: Zero sign-in, zero vendor device directory, and zero forced third-party relays or telemetry. When using a self-hosted VPS relay fallback, you own the VPS completely, and TLS 1.2 / encrypted UDP keys are derived and verified strictly on the two endpoints — relay nodes cannot inspect media or input payloads. Local config and pinned peer fingerprints stay on device (`%LOCALAPPDATA%\双端远程\` on Windows).
-- **Explicit dual-end runtime consent**: Closing BoBo Remote on the host immediately stops port `49810` and unhooks all input filters — no hidden background services.
-- **Safe DDC/CI dimming boundary**: Disabled by default; when enabled, strictly adjusts backlight brightness (`VCP 0x10`) on non-HDR monitors only — never contrast or RGB gains — with persistent crash-safe restoration.
-- **Platform boundaries**:
-  - **iOS / iPadOS** viewing and control require the app in the foreground. Screen sharing uses ReplayKit in `view_only` mode. The extension waits for the app to acknowledge each frame before sending the next. The bridge pauses when the app goes into the background and resumes when it returns to the foreground.
-  - **Display &amp; FPS limits**: Privacy screen exclusion relies on `WDA_EXCLUDEFROMCAPTURE` (Windows) and ScreenCaptureKit window exclusion (macOS); 90/144 fps requires matching display refresh rate, encoder, and client decode capabilities.
-  - **Unsigned personal builds**: First-time installs may trigger Windows SmartScreen, macOS Gatekeeper, or require free iOS sideloading.
+```text
+BoBo-Remote/
+├── protocol/
+│   ├── BOBO6-SPEC.md                        # Authoritative BoBo6.2 binary wire & signaling spec
+│   └── golden-vectors.json                  # Byte-exact C# / Kotlin / Swift test vectors
+├── native/
+│   └── bobo-core/                           # Windows C++17 embedded native core (BoBoCore.dll)
+│       ├── build-core.ps1
+│       └── src/                             # bobo_core / screen_capture / mf_encoder / wasapi_loopback / ima_adpcm
+├── src/
+│   ├── MainForm*.cs                         # Main window, Devices, Assist & BYO-VPS relay UI, Privacy, Settings
+│   ├── NativeStreamForm.cs                  # Embedded stream window, Super Display, cursor, HUD & mobile nav bar
+│   ├── StreamControlCenter.cs & StreamToolbarOverlay.cs
+│   ├── PrivacyCurtainForm.cs                # Dedicated STA privacy curtain thread & WinEvent z-order lock
+│   ├── OnboardingTour.cs                    # 7-step ClearType spotlight onboarding tour
+│   ├── RemoteTheme.cs & UiTransition.cs     # Custom glacier-blue controls (StyledChoiceBox), icons & animations
+│   └── Backend/                             # BoBoProtocol / BoBoIdentity / BoBoHostServer / BoBoStreamClient /
+│                                            # BoBoUdpTransport / BoBoConnectionRoute / BoBoRelayStore / Tailscale /
+│                                            # NativeStreamStats / ConnectionTelemetry / PrivacyDisplayDimmer /
+│                                            # AppUpdater / SelfTest
+├── installer/
+│   └── BoBoSetup.cs                         # Windows GUI installer / silent updater / uninstaller
+├── android/
+│   └── app/src/main/java/com/bobo/remote/   # protocol / network / media / input / ui (Kotlin + Compose)
+├── apple/
+│   ├── BoBoAppleCore/                       # Pure Swift core package + Golden Vectors XCTest
+│   ├── BoBoRemoteMac/                       # macOS SwiftUI app (ScreenCaptureKit + CGEventTap + shield)
+│   ├── BoBoRemoteiOS/                       # iOS / iPadOS app + ReplayKit Broadcast Extension
+│   └── scripts/                             # package-macos-dmg.sh / package-ios-ipa.sh
+├── docs/
+│   └── CROSS-PLATFORM-GUIDE.md              # Cross-platform installation, permissions & troubleshooting
+├── ci/
+│   ├── build.ps1 & release-package.ps1      # Windows CI compilation & release assembly scripts
+├── build.ps1                                # Windows single-file all-in-one packager
+└── .github/workflows/                       # ci.yml & release.yml
+```
+
+</details>
+
+---
+
+## Security, Privacy & Honest Boundaries
+
+- **Minimal Local State & Blind Relays**: No vendor sign-in or cloud device directory. Even when routing through your own VPS relay fallback, session keys remain strictly end-to-end on the two endpoints — relay hosts cannot decrypt streams or input. Local settings, custom relay lists (`relays.txt`), and trusted fingerprints reside in `%LOCALAPPDATA%\双端远程\` on Windows.
+- **No Hidden Background Daemons**: Exiting BoBo Remote immediately closes port `49810` and releases all hooks.
+- **Safe DDC/CI Dimming Boundary**: Disabled by default; when enabled, adjusts backlight (`VCP 0x10`) on non-HDR displays only and restores brightness on recovery.
+- **OS & Signing Constraints**:
+  - **iOS / iPadOS**: Controller & viewer require foreground execution; host mode uses ReplayKit (`view_only`) paused when backgrounded.
+  - **Privacy Shield & High FPS**: Depends on Windows `WDA_EXCLUDEFROMCAPTURE` / macOS ScreenCaptureKit exclusion and display/codec support for 90/144 fps.
+  - **Unsigned Personal Builds**: First-time installs may trigger Windows SmartScreen, macOS Gatekeeper, or require free iOS sideloading.
+
+---
 
 ## Roadmap
 
-| Version | Milestone | Status |
+| Phase | Milestones | Status |
 | --- | --- | --- |
-| **V1 – V3** | Zero-SDK WinForms launcher, LAN/Tailscale workflow, privacy wallpaper &amp; lock-screen guard | ✅ Done |
-| **V4** | Glacier ice-blue UI, tuxedo cat icon, 7-step ClearType onboarding, GUI installer &amp; in-app auto-updater | ✅ Done |
-| **V5** | Embedded native stream window, Control Center, edge-dockable floating ball &amp; `Ctrl+Alt` instant mouse release | ✅ Done |
-| **V6.0** | Full in-process kernel unification (embedded C++17 `BoBoCore.dll` + `BOBO6` TLS 1.2 + mandatory dual-end 4-digit pairing), zero external engines | ✅ Done |
-| **V6.1** | Host native cursor compositing, Super Display zero-black-bar mode, native physical input lock (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) &amp; hardened privacy shield | ✅ Done |
-| **V6.2** | `BoBo6.2` cross-platform protocol + 3-language Golden Vectors + **Windows / Android / macOS / iOS four-platform release** &amp; parallel CI/Release | ✅ Done |
-| **V7.0 (v7.0.0–v7.0.5)** | Super Display v2 viewport negotiation, host-sized cursor, fast `peer-relay` detection, custom glacier-blue dropdowns &amp; Direct-First + BYO-VPS Fallback Relay UI, threaded privacy curtain, Windows encrypted `UDP+FEC/NACK` &amp; 12s-baseline ABR | ✅ Done |
-| **Next-Gen Architecture (V7.1+ / V8)** | Open-source self-hostable Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` fallback + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK &amp; HEVC/H.265 negotiation, Linux client exploration | 🚧 Planned / Evolving |
+| **V1 – V4** | Minimal WinForms glacier-blue UI, 7-step onboarding, privacy curtain & lock-screen guard, GUI installer & SHA-256 auto-updater | ✅ Done |
+| **V5** | Embedded native stream window, Control Center cascading menus, 4-edge dockable floating ball, `Ctrl+Alt` instant mouse release | ✅ Done |
+| **V6.0 – V6.2** | In-process C++17 `BoBoCore.dll` (zero external engines), `BoBo6.2` unified wire spec, physical input-lock privacy shield, **4-platform Windows / Android / macOS / iOS release** | ✅ Done |
+| **V7.0 (through v7.0.5)** | Super Display v2, host-sized cursor, Windows encrypted `UDP+FEC/NACK` (interleaved XOR FEC + selective NACK) & 12s ABR, dedicated curtain thread (anti-IME flash), custom dropdowns & **inline BYO-VPS relay manager + TCP prober** | ✅ Done |
+| **V7.1+ / V8** | Self-hostable open-source Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK & HEVC negotiation, Linux exploration | 🚧 Planned / Evolving |
+
+---
 
 ## Star History
 
@@ -291,16 +345,11 @@ The release workflow builds all four packages from the same existing `vMAJOR.MIN
   </a>
 </p>
 
-## Contributing
+## Contributing & License
 
-Issues and pull requests are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and ensure the build and Golden Vectors test suites pass for the platforms you touch.
-
-## License
-
-All V6.x / V7.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is licensed under the [**MIT License**](LICENSE). Official V6.x / V7.x release binaries **do not bundle any external third-party remote desktop engines**.
-
-The archive preserves V5 player sources and GPL-3.0 `moonlight-common-c`, the original third-party notices and checksums, and the historical Sunshine scripts. The current Windows app has removed the legacy engine UI, launch code, and embedded script resources. [Third-party records](THIRD-PARTY.md) · [NOTICE](NOTICE.md) · [V5 plan archive](docs/V5-NATIVE-STREAM-PLAN.md)
+- **Contributing**: Pull requests and issues are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) and verify platform builds & Golden Vectors tests pass before submitting.
+- **MIT License**: All V6.x / V7.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is open-source under [**MIT License**](LICENSE), and official release artifacts **do not bundle any external third-party remote desktop engines**. Legacy V5 GPL-3.0 `moonlight-common-c` archives and notices remain documented at [THIRD-PARTY.md](THIRD-PARTY.md), [NOTICE.md](NOTICE.md), and [V5-NATIVE-STREAM-PLAN.md](docs/V5-NATIVE-STREAM-PLAN.md).
 
 ---
 
-<p align="center"><sub>Built for private, low-latency remote control across all your devices · BoBo Remote</sub></p>
+<p align="center"><sub>Built for private, zero-account, low-latency remote control across all your devices · BoBo Remote</sub></p>
