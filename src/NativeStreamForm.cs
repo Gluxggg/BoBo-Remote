@@ -50,11 +50,16 @@ namespace DualRemote
         private bool autoBitrate = true;
         private bool trueColor;
         private bool hdrEnabled;
-        private bool safeRelayMode;
-        private bool aspectFit = true;
-        private int scaleMode = 2; // 2=超级屏全屏自适应无黑边（默认开启，彻底消除 16:10 笔记本上下黑边）
-        private bool superDisplayMode = true;
-        private bool superDisplayNativeMatch;
+        private int scaleMode = 1;
+        private bool superDisplayMode;
+        private bool lastSuperDisplayRequestEnabled;
+        private int displayRequestId;
+        private Size lastRequestedViewport;
+        private bool lastRequestedFullscreen;
+        private Size actualStreamSize;
+        private BoBoDisplayState displayState;
+        private readonly System.Windows.Forms.Timer superDisplayResizeTimer;
+        private bool showDisplayResult;
         private bool miniWindowMode;
         private int miniWindowOpacity = 100;
         private int volumePercent = 100;
@@ -121,6 +126,7 @@ namespace DualRemote
         internal event Action SessionEnded;
 
         internal Func<bool> LocalPrivacyActiveProvider;
+        internal Func<string> ConnectionRouteLabelProvider { get; set; }
 
         internal string Host { get { return host; } }
         internal string HostDisplayName { get { return hostDisplayName; } }
@@ -163,7 +169,8 @@ namespace DualRemote
             bool hideFloatBallInFullscreen = false,
             bool showFloatBallInWindowed = false,
             bool sendSystemShortcuts = false,
-            int miniOpacity = 100)
+            int miniOpacity = 100,
+            bool superDisplay = true)
         {
             this.host = host ?? "";
             this.hostDisplayName = string.IsNullOrEmpty(hostDisplayName) ? this.host : hostDisplayName;
@@ -186,10 +193,17 @@ namespace DualRemote
             this.showFloatBallInWindowed = showFloatBallInWindowed;
             this.sendSystemShortcuts = sendSystemShortcuts;
             this.miniWindowOpacity = Math.Max(50, Math.Min(100, miniOpacity));
+            superDisplayMode = superDisplay;
+            superDisplayResizeTimer = new System.Windows.Forms.Timer { Interval = 350 };
+            superDisplayResizeTimer.Tick += delegate
+            {
+                superDisplayResizeTimer.Stop();
+                SendViewportIfChanged();
+            };
 
             Text = BuildWindowTitle();
             if (appIcon != null) Icon = appIcon;
-            BackColor = Color.FromArgb(14, 21, 32);
+            BackColor = Theme.VideoBackdrop;
             KeyPreview = true;
             DoubleBuffered = true;
             StartPosition = FormStartPosition.Manual;
@@ -199,19 +213,19 @@ namespace DualRemote
 
             videoHost = new Panel();
             videoHost.Dock = DockStyle.Fill;
-            videoHost.BackColor = Color.FromArgb(14, 21, 32);
+            videoHost.BackColor = Theme.VideoBackdrop;
             videoHost.SizeChanged += delegate { SyncChildViewportSize(); };
             Controls.Add(videoHost);
 
-            // UU远程风格浅灰精简顶栏（窗口模式常驻于画面正上方，提供「控制中心」按钮 + 静音 + 红色退出远控）
+            // 窗口模式的远控顶栏
             nativeTopBar = new Panel();
             nativeTopBar.Dock = DockStyle.Top;
             nativeTopBar.Height = barH;
-            nativeTopBar.BackColor = Color.FromArgb(236, 240, 246);
+            nativeTopBar.BackColor = Theme.ChromeBg;
             nativeTopBar.Padding = new Padding((int)Math.Round(12 * dpi), (int)Math.Round(5 * dpi), (int)Math.Round(10 * dpi), (int)Math.Round(5 * dpi));
             nativeTopBar.Paint += delegate(object s, PaintEventArgs e)
             {
-                using (var pen = new Pen(Color.FromArgb(212, 220, 232), 1f))
+                using (var pen = new Pen(Theme.Divider, 1f))
                     e.Graphics.DrawLine(pen, 0, nativeTopBar.Height - 1, nativeTopBar.Width, nativeTopBar.Height - 1);
             };
 
@@ -242,13 +256,13 @@ namespace DualRemote
                 AutoSize = true,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Font = new Font("Microsoft YaHei UI", 9.2f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(24, 33, 47),
+                ForeColor = Theme.Ink,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0, (int)Math.Round(6 * dpi), (int)Math.Round(10 * dpi), 0)
             };
             leftFlow.Controls.Add(topBarTitleLabel);
 
-            topBarMousePillBtn = CreateTopBarButton("🔒 锁鼠 · 按 Ctrl+Alt 释放", Color.FromArgb(254, 243, 199), Color.FromArgb(146, 64, 14), dpi);
+            topBarMousePillBtn = CreateTopBarButton("锁鼠 · 按 Ctrl+Alt 释放", Theme.ButtonStyle.WarningSoft, Theme.Glyph.Lock, dpi);
             topBarMousePillBtn.Visible = false;
             topBarMousePillBtn.Click += delegate { ApplyMouseModeSelection(ControlMouseMode.Free, true); };
             leftFlow.Controls.Add(topBarMousePillBtn);
@@ -264,7 +278,7 @@ namespace DualRemote
                 Padding = Padding.Empty
             };
 
-            topBarMuteBtn = CreateTopBarButton("🔊", Color.FromArgb(226, 232, 240), Color.FromArgb(30, 41, 59), dpi);
+            topBarMuteBtn = CreateTopBarButton("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Volume, dpi);
             topBarMuteBtn.Width = (int)Math.Round(34 * dpi);
             topBarMuteBtn.Click += delegate
             {
@@ -283,10 +297,10 @@ namespace DualRemote
                 RefreshTopBarVisuals();
             };
 
-            topBarControlCenterBtn = CreateTopBarButton("⚙ 控制中心", Color.FromArgb(216, 223, 234), Color.FromArgb(20, 29, 44), dpi);
+            topBarControlCenterBtn = CreateTopBarButton("控制中心", Theme.ButtonStyle.Chip, Theme.Glyph.Sliders, dpi);
             topBarControlCenterBtn.Click += delegate { ToggleTopBarControlCenter(); };
 
-            topBarExitBtn = CreateTopBarButton("退出远控", Color.FromArgb(220, 38, 38), Color.White, dpi);
+            topBarExitBtn = CreateTopBarButton("退出远控", Theme.ButtonStyle.DangerSoft, Theme.Glyph.Exit, dpi);
             topBarExitBtn.Click += delegate { DisconnectAndClose(true); };
 
             topBarActions.Controls.Add(topBarMuteBtn);
@@ -301,7 +315,7 @@ namespace DualRemote
             {
                 Dock = DockStyle.Top,
                 Height = Math.Max(32, (int)Math.Round(34 * dpi)),
-                BackColor = Color.FromArgb(24, 34, 52),
+                BackColor = Theme.ChromeBg,
                 Padding = new Padding((int)Math.Round(10 * dpi), (int)Math.Round(3 * dpi), (int)Math.Round(10 * dpi), (int)Math.Round(3 * dpi)),
                 Visible = false
             };
@@ -314,9 +328,9 @@ namespace DualRemote
                 Margin = Padding.Empty,
                 Padding = Padding.Empty
             };
-            Action<string, int> addMobBtn = delegate(string label, int navAct)
+            Action<string, Theme.Glyph, int> addMobBtn = delegate(string label, Theme.Glyph glyph, int navAct)
             {
-                Button mb = CreateTopBarButton(label, Color.FromArgb(41, 56, 82), Color.FromArgb(236, 242, 252), dpi);
+                Button mb = CreateTopBarButton(label, Theme.ButtonStyle.IconGhost, glyph, dpi);
                 mb.Height = Math.Max(24, (int)Math.Round(26 * dpi));
                 mb.MinimumSize = new Size(0, mb.Height);
                 mb.Click += delegate
@@ -327,13 +341,13 @@ namespace DualRemote
                 };
                 mobileNavFlow.Controls.Add(mb);
             };
-            addMobBtn("◀ 返回", BoBoProtocol.MobileNavBack);
-            addMobBtn("● 主页", BoBoProtocol.MobileNavHome);
-            addMobBtn("▢ 多任务", BoBoProtocol.MobileNavRecents);
-            addMobBtn("🔔 通知栏", BoBoProtocol.MobileNavNotifications);
-            addMobBtn("🔊 音量+", BoBoProtocol.MobileNavVolumeUp);
-            addMobBtn("🔉 音量-", BoBoProtocol.MobileNavVolumeDown);
-            addMobBtn("🔒 锁屏", BoBoProtocol.MobileNavLock);
+            addMobBtn("返回", Theme.Glyph.None, BoBoProtocol.MobileNavBack);
+            addMobBtn("主页", Theme.Glyph.None, BoBoProtocol.MobileNavHome);
+            addMobBtn("多任务", Theme.Glyph.Restore, BoBoProtocol.MobileNavRecents);
+            addMobBtn("通知栏", Theme.Glyph.Bell, BoBoProtocol.MobileNavNotifications);
+            addMobBtn("音量+", Theme.Glyph.Plus, BoBoProtocol.MobileNavVolumeUp);
+            addMobBtn("音量-", Theme.Glyph.Minus, BoBoProtocol.MobileNavVolumeDown);
+            addMobBtn("锁屏", Theme.Glyph.Lock, BoBoProtocol.MobileNavLock);
             mobileNavBar.Controls.Add(mobileNavFlow);
             Controls.Add(mobileNavBar);
 
@@ -368,6 +382,7 @@ namespace DualRemote
 
             Move += delegate
             {
+                QueueViewportUpdate();
                 UpdateHudPosition();
                 if (BoundsMoved != null) { try { BoundsMoved(); } catch { } }
             };
@@ -431,6 +446,7 @@ namespace DualRemote
 
             FormClosed += delegate
             {
+                superDisplayResizeTimer.Dispose();
                 Engines.ReleaseCursorClip();
                 if (SessionEnded != null)
                 {
@@ -439,34 +455,27 @@ namespace DualRemote
             };
         }
 
-        private static Button CreateTopBarButton(string text, Color bgColor, Color fgColor, float dpi)
+        private static Button CreateTopBarButton(string text, Theme.ButtonStyle style, Theme.Glyph glyph, float dpi)
         {
-            var btn = new Button
-            {
-                Text = text,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Height = Math.Max(26, (int)Math.Round(28 * dpi)),
-                MinimumSize = new Size(0, Math.Max(26, (int)Math.Round(28 * dpi))),
-                Padding = new Padding((int)Math.Round(9 * dpi), 0, (int)Math.Round(9 * dpi), 0),
-                Margin = new Padding((int)Math.Round(6 * dpi), (int)Math.Round(1 * dpi), 0, 0),
-                Font = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Bold),
-                ForeColor = fgColor,
-                BackColor = bgColor,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                TabStop = false
-            };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.FlatAppearance.MouseOverBackColor = ControlPaint.Dark(bgColor, 0.06f);
+            var btn = Theme.Action(text, style, glyph);
+            int height = Math.Max(26, (int)Math.Round(28 * dpi));
+            // The native Button measurement sees the caption, so include room for the painted glyph in its padding.
+            int horizontalPadding = (int)Math.Round((glyph == Theme.Glyph.None ? 8 : 17) * dpi);
+            btn.Dock = DockStyle.None;
+            btn.Font = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Bold);
+            btn.AutoSize = !string.IsNullOrEmpty(text);
+            btn.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            btn.Size = new Size(btn.Width, height);
+            btn.MinimumSize = new Size(0, height);
+            btn.Padding = new Padding(horizontalPadding, 0, horizontalPadding, 0);
+            btn.Margin = new Padding((int)Math.Round(6 * dpi), (int)Math.Round(dpi), 0, 0);
+            btn.TabStop = false;
             return btn;
         }
 
         internal StreamControlCenterModel BuildControlCenterModel()
         {
-            Screen scr = Screen.FromControl(this);
-            if (scr == null) scr = Screen.PrimaryScreen;
-            Rectangle sb = scr.Bounds;
+            Size viewport = GetPhysicalVideoViewport();
 
             string displayLabel = "显示屏 1 (" + hostDisplayName + ")";
             if (remoteMonitors != null && remoteMonitors.Count > 0)
@@ -480,8 +489,11 @@ namespace DualRemote
             {
                 HostDisplayName = hostDisplayName,
                 DisplayDeviceName = displayLabel,
-                LocalDisplayWidth = sb.Width,
-                LocalDisplayHeight = sb.Height,
+                RemoteMonitors = remoteMonitors,
+                SelectedMonitorIndex = activeMonitorIndex,
+                OnSelectMonitor = SwitchRemoteDisplay,
+                LocalDisplayWidth = viewport.Width > 0 ? viewport.Width : currentWidth,
+                LocalDisplayHeight = viewport.Height > 0 ? viewport.Height : currentHeight,
                 HostNativeWidth = hostNativeWidth > 0 ? hostNativeWidth : currentWidth,
                 HostNativeHeight = hostNativeHeight > 0 ? hostNativeHeight : currentHeight,
                 CurrentWidth = currentWidth,
@@ -493,11 +505,11 @@ namespace DualRemote
                 Fps = currentFps,
                 TrueColor = trueColor,
                 HdrEnabled = hdrEnabled,
-                SafeRelayMode = safeRelayMode,
                 AspectFit = scaleMode != 0,
                 ScaleMode = scaleMode,
                 SuperDisplayActive = superDisplayMode,
-                SuperDisplayNativeMatch = superDisplayNativeMatch,
+                SuperDisplayStatus = GetSuperDisplayStatus(),
+                ConnectionRoute = GetConnectionPath(streamClient),
                 MiniWindowMode = miniWindowMode,
                 MiniWindowOpacity = miniWindowOpacity,
                 IsFullscreen = !windowedMode && !miniWindowMode,
@@ -519,6 +531,7 @@ namespace DualRemote
                 OnSelectResolution = async delegate(int w, int h, ControlResolutionMode mode)
                 {
                     resolutionMode = mode;
+                    SetSuperDisplayMode(false, false);
                     string tag = h + "p" + currentFps + " · D3D11VA";
                     ShowToastHint("正在切换分辨率至 " + w + " × " + h + "…");
                     await SwitchQualityAsync(w, h, currentFps, currentBitrateKbps, tag);
@@ -537,7 +550,6 @@ namespace DualRemote
                 OnSelectBitrate = async delegate(int kbps, bool isAuto)
                 {
                     autoBitrate = isAuto;
-                    safeRelayMode = false;
                     string label = isAuto ? "自动高清" : ((kbps / 1000) + " Mbps");
                     ShowToastHint("正在切换画质码率至 " + label + "…");
                     await SwitchQualityAsync(currentWidth, currentHeight, currentFps, kbps, currentHeight + "p" + currentFps + " · " + label);
@@ -561,18 +573,16 @@ namespace DualRemote
                     ShowToastHint(on ? "已开启 HDR 优先传输" : "已关闭 HDR 传输");
                     await SwitchQualityAsync(currentWidth, currentHeight, currentFps, currentBitrateKbps, currentModeTag);
                 },
-                OnToggleSafeRelay = async delegate(bool on)
+                OnSelectWeakNetwork = async delegate
                 {
-                    safeRelayMode = on;
-                    int nextBitrate = on ? Math.Min(currentBitrateKbps, 6000) : Math.Max(currentBitrateKbps, 12000);
-                    int nextFps = on ? Math.Min(currentFps, 60) : currentFps;
-                    ShowToastHint(on ? "已开启弱网抗卡顿中转保护（6 Mbps 抗丢包流畅模式）" : "已恢复标准直连画质策略");
-                    await SwitchQualityAsync(currentWidth, currentHeight, nextFps, nextBitrate, on ? "抗卡顿流畅模式" : (currentHeight + "p" + nextFps + " · D3D11VA"));
+                    autoBitrate = true;
+                    ShowToastHint("已选择弱网抗丢包画质 · 720p / 30 帧");
+                    await SwitchQualityAsync(1280, 720, 30, 3500, "弱网抗丢包 · 720p30");
                 },
 
                 OnSelectAspectFit = delegate(bool fit)
                 {
-                    ApplyScaleModeSelection(fit ? 2 : 0);
+                    ApplyScaleModeSelection(fit ? 1 : 0);
                 },
                 OnSelectScaleMode = delegate(int mode)
                 {
@@ -709,12 +719,12 @@ namespace DualRemote
                 SafeUiInvoke(delegate
                 {
                     if (topBarControlCenterBtn != null && !topBarControlCenterBtn.IsDisposed)
-                        topBarControlCenterBtn.BackColor = Color.FromArgb(216, 223, 234);
+                        Theme.Highlight(topBarControlCenterBtn, false);
                 });
             });
-            topBarControlCenterBtn.BackColor = Color.FromArgb(192, 202, 218);
             Rectangle btnScreen = topBarControlCenterBtn.RectangleToScreen(topBarControlCenterBtn.ClientRectangle);
             topBarMenuSession.ShowAt(new Point(btnScreen.Left - 140, btnScreen.Bottom + 6), btnScreen, this);
+            Theme.Highlight(topBarControlCenterBtn, topBarMenuSession.IsOpen);
         }
 
         private void CloseTopBarControlCenter()
@@ -729,53 +739,51 @@ namespace DualRemote
 
         private void ToggleSuperDisplayMode()
         {
-            superDisplayMode = !superDisplayMode;
-            Screen scr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
-            Rectangle sb = scr != null ? scr.Bounds : new Rectangle(0, 0, 1920, 1080);
+            SetSuperDisplayMode(!superDisplayMode, true);
+        }
 
-            if (superDisplayMode)
+        private void SetSuperDisplayMode(bool enabled, bool showHint)
+        {
+            if (superDisplayMode == enabled) return;
+            superDisplayMode = enabled;
+            if (enabled)
             {
-                scaleMode = 2;
-                aspectFit = true;
-                BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                if (nc != null) nc.SetScaleMode(2);
-                BoBoStreamClient sc = streamClient;
-                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(true, sb.Width, sb.Height);
-                ShowToastHint("已开启超级屏模式：全屏自适应消除上下黑边");
-            }
-            else
-            {
-                superDisplayNativeMatch = false;
                 scaleMode = 1;
-                aspectFit = true;
-                BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                if (nc != null) nc.SetScaleMode(1);
-                BoBoStreamClient sc = streamClient;
-                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(false, sb.Width, sb.Height);
-                ShowToastHint("已退出超级屏模式：恢复被控端原生画面比例");
+                if (nativeClient != null) nativeClient.SetScaleMode(scaleMode);
             }
+            showDisplayResult = showHint && enabled;
+            SendViewportIfChanged();
+            if (showHint)
+                ShowToastHint(enabled ? GetSuperDisplayStatus() : "已关闭超级屏，恢复原串流分辨率设置");
+        }
+
+        private string GetSuperDisplayStatus()
+        {
+            if (!superDisplayMode) return "按画面区域自适应，全屏时可临时调整被控端分辨率";
+            BoBoStreamClient client = streamClient;
+            if (!remoteSessionConnected || client == null) return "连接后自动适配画面";
+            if (!client.SupportsSuperDisplayViewport) return "对方暂不支持超级屏分辨率协商，当前使用等比显示";
+            if (displayState == null || displayState.RequestId != displayRequestId || !displayState.Active)
+                return "正在适配当前画面区域…";
+
+            string desktop = displayState.DesktopWidth > 0 && displayState.DesktopHeight > 0
+                ? displayState.DesktopWidth + " × " + displayState.DesktopHeight : "原分辨率";
+            string stream = actualStreamSize.IsEmpty ? "" : " · 串流 " + actualStreamSize.Width + " × " + actualStreamSize.Height;
+            if (displayState.NativeMatch) return "被控端分辨率已匹配 " + desktop + stream;
+            if (displayState.DesktopModeChanged) return "被控端调整为 " + desktop + "，按比例显示" + stream;
+            return "保留被控端 " + desktop + "，按比例显示" + stream;
         }
 
         private void ApplyScaleModeSelection(int mode)
         {
-            if (mode < 0 || mode > 2) mode = 2;
+            if (mode < 0 || mode > 2) mode = 1;
+            SetSuperDisplayMode(false, false);
             scaleMode = mode;
-            aspectFit = mode != 0;
-            bool wantSuper = (mode == 2);
-            if (superDisplayMode != wantSuper)
-            {
-                superDisplayMode = wantSuper;
-                if (!wantSuper) superDisplayNativeMatch = false;
-                Screen scr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
-                Rectangle sb = scr != null ? scr.Bounds : new Rectangle(0, 0, 1920, 1080);
-                BoBoStreamClient sc = streamClient;
-                if (sc != null && sc.IsConnected) sc.SendSetSuperDisplay(wantSuper, sb.Width, sb.Height);
-            }
             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
             if (nc != null) nc.SetScaleMode(mode);
-            if (mode == 2) ShowToastHint("窗口画面：全屏自适应（超级屏无黑边）");
-            else if (mode == 1) ShowToastHint("窗口画面：等比居中缩放（保留原生比例）");
-            else ShowToastHint("窗口画面：实际大小 1:1 像素点对点");
+            if (mode == 2) ShowToastHint("窗口画面：拉伸铺满");
+            else if (mode == 1) ShowToastHint("窗口画面：等比居中缩放");
+            else ShowToastHint("窗口画面：视频像素 1:1 显示");
         }
 
         private void HandleToggleFullscreenRequest()
@@ -857,16 +865,23 @@ namespace DualRemote
                 ShowToastHint("被控端当前仅有 1 块活跃显示器");
                 return;
             }
-            activeMonitorIndex = (activeMonitorIndex + 1) % remoteMonitors.Count;
-            BoBoMonitorDescriptor m = remoteMonitors[activeMonitorIndex];
+            SwitchRemoteDisplay((activeMonitorIndex + 1) % remoteMonitors.Count);
+        }
+
+        private void SwitchRemoteDisplay(int index)
+        {
+            BoBoStreamClient sc = streamClient;
+            if (sc == null || !sc.IsConnected || remoteMonitors == null || index < 0 || index >= remoteMonitors.Count || index == activeMonitorIndex) return;
+            activeMonitorIndex = index;
+            BoBoMonitorDescriptor m = remoteMonitors[index];
             if (m.Width > 0 && m.Height > 0)
             {
                 hostNativeWidth = m.Width;
                 hostNativeHeight = m.Height;
             }
-            sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps);
+            sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps, autoBitrate);
             RefreshTopBarVisuals();
-            ShowToastHint("已无缝切换至显示屏 " + (activeMonitorIndex + 1) + "（" + m.Name + "）");
+            ShowToastHint("正在切换至显示屏 " + (activeMonitorIndex + 1) + "（" + m.Name + "）");
         }
 
         private void ApplyMouseModeSelection(ControlMouseMode mode, bool showHint)
@@ -1153,7 +1168,7 @@ namespace DualRemote
                 nativeClient = nc;
             }
 
-            nc.Resize(Math.Max(16, videoHost.ClientSize.Width), Math.Max(16, videoHost.ClientSize.Height));
+            SyncChildViewportSize();
             nc.SetScaleMode(scaleMode);
             nc.SetViewOnly(mouseMode == ControlMouseMode.ViewOnly);
             nc.SetSysKeys(sendSystemShortcuts);
@@ -1162,33 +1177,22 @@ namespace DualRemote
             client.StreamStarted += delegate(List<BoBoMonitorDescriptor> mons, int w, int h, int fps)
             {
                 if (gen != sessionGeneration) return;
-                if (mons != null && mons.Count > 0)
-                {
-                    remoteMonitors = mons;
-                    int idx = Math.Max(0, Math.Min(activeMonitorIndex, mons.Count - 1));
-                    hostNativeWidth = mons[idx].Width;
-                    hostNativeHeight = mons[idx].Height;
-                }
-                remoteSessionConnected = true;
                 string remotePlat = client.RemotePlatform ?? BoBoProtocol.PlatformWindows;
                 string remoteCtrlMode = client.RemoteHostControlMode ?? BoBoProtocol.ControlModeFull;
-                bool isMobileRemote = string.Equals(remotePlat, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(remotePlat, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)
-                    || (h > w && w > 0);
                 bool isViewOnlyRemote = string.Equals(remoteCtrlMode, BoBoProtocol.ControlModeViewOnly, StringComparison.OrdinalIgnoreCase);
 
                 SafeUiInvoke(delegate
                 {
                     if (gen != sessionGeneration || IsDisposed) return;
-                    statusOverlay.SetOverlayVisible(false);
-                    if (isMobileRemote)
+                    if (mons != null && mons.Count > 0)
                     {
-                        superDisplayMode = false;
-                        scaleMode = 1; // 等比居中，避免竖屏手机画面被拉伸变形
-                        aspectFit = true;
-                        BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
-                        if (curNc != null) curNc.SetScaleMode(1);
+                        remoteMonitors = mons;
+                        int idx = Math.Max(0, Math.Min(activeMonitorIndex, mons.Count - 1));
+                        hostNativeWidth = mons[idx].Width;
+                        hostNativeHeight = mons[idx].Height;
                     }
+                    actualStreamSize = new Size(w, h);
+                    statusOverlay.SetOverlayVisible(false);
                     if (mobileNavBar != null && !mobileNavBar.IsDisposed)
                     {
                         mobileNavBar.Visible = string.Equals(remotePlat, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase);
@@ -1197,7 +1201,9 @@ namespace DualRemote
                     {
                         ApplyMouseModeSelection(ControlMouseMode.ViewOnly, false);
                     }
+                    remoteSessionConnected = true;
                     SyncChildViewportSize();
+                    SendViewportIfChanged();
                     FocusChildViewport();
                     StartStatsPollingTimer();
                     if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
@@ -1236,26 +1242,21 @@ namespace DualRemote
                 remotePrivacyActive = active;
             };
 
-            client.SuperDisplayStateChanged += delegate(bool active, bool nativeMatch, int w, int h)
+            client.DisplayStateChanged += delegate(BoBoDisplayState state)
             {
-                if (gen != sessionGeneration) return;
-                string rp = client.RemotePlatform ?? BoBoProtocol.PlatformWindows;
-                bool mobilePortrait = string.Equals(rp, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(rp, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)
-                    || (h > w && w > 0);
-                if (mobilePortrait) active = false;
-                superDisplayMode = active;
-                superDisplayNativeMatch = nativeMatch;
-                if (w > 0 && h > 0)
+                SafeUiInvoke(delegate
                 {
-                    currentWidth = w;
-                    currentHeight = h;
-                }
-                int targetScale = active ? 2 : (scaleMode == 0 ? 0 : 1);
-                scaleMode = targetScale;
-                aspectFit = targetScale != 0;
-                BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
-                if (curNc != null) curNc.SetScaleMode(targetScale);
+                    if (gen != sessionGeneration || IsDisposed) return;
+                    if (state.RequestId != displayRequestId || (state.MonitorIndex >= 0 && state.MonitorIndex != activeMonitorIndex)) return;
+                    if (state.StreamWidth > 0 && state.StreamHeight > 0)
+                        actualStreamSize = new Size(state.StreamWidth, state.StreamHeight);
+                    displayState = state;
+                    if (showDisplayResult && superDisplayMode && state.Active)
+                    {
+                        showDisplayResult = false;
+                        ShowToastHint(GetSuperDisplayStatus());
+                    }
+                });
             };
 
             client.StreamError += delegate(string code, string emsg)
@@ -1282,9 +1283,12 @@ namespace DualRemote
                 });
             };
 
-            Screen localScr = Screen.FromControl(this) ?? Screen.PrimaryScreen;
-            Rectangle localBounds = localScr != null ? localScr.Bounds : new Rectangle(0, 0, 1920, 1080);
-
+            lastRequestedViewport = GetPhysicalVideoViewport();
+            lastRequestedFullscreen = !windowedMode && !miniWindowMode;
+            lastSuperDisplayRequestEnabled = superDisplayMode && CanAdaptViewport(lastRequestedViewport);
+            displayRequestId = 0;
+            displayState = null;
+            actualStreamSize = Size.Empty;
             var startOpts = new BoBoStreamStartOptions
             {
                 Host = host,
@@ -1298,9 +1302,10 @@ namespace DualRemote
                 FreeMouse = freeMouseMode,
                 MuteHostAudio = !hostAudio,
                 RequestPrivacy = autoRemotePrivacyOnConnect,
-                SuperDisplay = superDisplayMode,
-                ClientWidth = localBounds.Width,
-                ClientHeight = localBounds.Height
+                SuperDisplay = lastSuperDisplayRequestEnabled,
+                ClientWidth = lastRequestedViewport.Width,
+                ClientHeight = lastRequestedViewport.Height,
+                ClientFullscreen = lastRequestedFullscreen
             };
 
             Tuple<bool, string, string> connRes;
@@ -1343,6 +1348,13 @@ namespace DualRemote
             }
         }
 
+        private string GetConnectionPath(BoBoStreamClient client)
+        {
+            if (client == null || !remoteSessionConnected) return "";
+            string route = ConnectionRouteLabelProvider != null ? ConnectionRouteLabelProvider() : "";
+            return string.IsNullOrEmpty(route) ? client.ActiveTransportLabel : route + " · " + client.ActiveTransportLabel;
+        }
+
         private void StartStatsPollingTimer()
         {
             if (statsTimer != null) return;
@@ -1356,7 +1368,7 @@ namespace DualRemote
                 int liveBps = sc.ActiveBitrateKbps > 0 ? sc.ActiveBitrateKbps : currentBitrateKbps;
                 NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, liveBps);
                 stats.PacketLossPct = sc.LatestPacketLossPct;
-                stats.Transport = sc.ActiveTransportLabel;
+                stats.Transport = GetConnectionPath(sc);
                 lastRttMs = stats.RttMs;
                 if (hudVisible && hudOverlay != null && !hudOverlay.IsDisposed)
                 {
@@ -1419,6 +1431,7 @@ namespace DualRemote
 
         private void StopCurrentPlayerAndCancelCts(bool cancelRemoteHost)
         {
+            superDisplayResizeTimer.Stop();
             if (statsTimer != null)
             {
                 try { statsTimer.Stop(); statsTimer.Dispose(); } catch { }
@@ -1495,7 +1508,70 @@ namespace DualRemote
             int h = Math.Max(16, videoHost.ClientSize.Height);
             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
             if (nc != null) nc.Resize(w, h);
+            QueueViewportUpdate();
         }
+
+        private void QueueViewportUpdate()
+        {
+            if (!remoteSessionConnected || !superDisplayMode || streamClient == null || !streamClient.SupportsSuperDisplayViewport)
+                return;
+            superDisplayResizeTimer.Stop();
+            superDisplayResizeTimer.Start();
+        }
+
+        private void SendViewportIfChanged()
+        {
+            BoBoStreamClient client = streamClient;
+            if (!remoteSessionConnected || client == null || !client.IsConnected || !client.SupportsSuperDisplayViewport)
+                return;
+            Size viewport = GetPhysicalVideoViewport();
+            bool fullscreen = !windowedMode && !miniWindowMode;
+            bool enable = superDisplayMode && CanAdaptViewport(viewport);
+            if (superDisplayMode && !enable && (fullscreen || !lastRequestedFullscreen)) return;
+            if (lastSuperDisplayRequestEnabled == enable &&
+                (!enable || (viewport == lastRequestedViewport && fullscreen == lastRequestedFullscreen))) return;
+            lastSuperDisplayRequestEnabled = enable;
+            lastRequestedViewport = viewport;
+            lastRequestedFullscreen = fullscreen;
+            client.SendSetSuperDisplay(enable, viewport.Width, viewport.Height, fullscreen, ++displayRequestId);
+        }
+
+        private static bool CanAdaptViewport(Size viewport)
+        {
+            return viewport.Width >= 320 && viewport.Width <= 16384 && viewport.Height >= 240 && viewport.Height <= 16384;
+        }
+
+        private Size GetPhysicalVideoViewport()
+        {
+            if (!videoHost.IsHandleCreated || WindowState == FormWindowState.Minimized) return Size.Empty;
+            // Ask for physical screen coordinates even if the app is system-DPI aware and the window is on a secondary monitor.
+            IntPtr oldContext = IntPtr.Zero;
+            try { oldContext = SetThreadDpiAwarenessContext(new IntPtr(-3)); }
+            catch (EntryPointNotFoundException) { }
+            try
+            {
+                NativeRect rect;
+                if (oldContext != IntPtr.Zero && GetWindowRect(videoHost.Handle, out rect))
+                    return new Size(rect.Right - rect.Left, rect.Bottom - rect.Top);
+                return videoHost.ClientSize;
+            }
+            finally
+            {
+                if (oldContext != IntPtr.Zero) SetThreadDpiAwarenessContext(oldContext);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            internal int Left, Top, Right, Bottom;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr window, out NativeRect rect);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
         private void FocusChildViewport()
         {
@@ -1561,22 +1637,27 @@ namespace DualRemote
                 }
                 if (topBarMuteBtn != null)
                 {
-                    topBarMuteBtn.Text = (audioMuted || volumePercent <= 0) ? "🔇" : "🔊";
+                    bool muted = audioMuted || volumePercent <= 0;
+                    Theme.ChangeGlyph(topBarMuteBtn, muted ? Theme.Glyph.VolumeOff : Theme.Glyph.Volume);
+                    Theme.Highlight(topBarMuteBtn, muted);
+                    topBarMuteBtn.AccessibleName = muted ? "取消静音" : "静音";
                 }
                 if (topBarMousePillBtn != null)
                 {
                     if (mouseMode == ControlMouseMode.Locked)
                     {
-                        topBarMousePillBtn.Text = "🔒 锁鼠 · 按 Ctrl+Alt 释放";
-                        topBarMousePillBtn.BackColor = Color.FromArgb(254, 243, 199);
-                        topBarMousePillBtn.ForeColor = Color.FromArgb(146, 64, 14);
+                        topBarMousePillBtn.Text = "锁鼠 · 按 Ctrl+Alt 释放";
+                        topBarMousePillBtn.AccessibleName = topBarMousePillBtn.Text;
+                        Theme.ChangeGlyph(topBarMousePillBtn, Theme.Glyph.Lock);
+                        Theme.ChangeStyle(topBarMousePillBtn, Theme.ButtonStyle.WarningSoft);
                         topBarMousePillBtn.Visible = true;
                     }
                     else if (mouseMode == ControlMouseMode.ViewOnly)
                     {
-                        topBarMousePillBtn.Text = "👁 仅查看模式 · 点击恢复操控";
-                        topBarMousePillBtn.BackColor = Color.FromArgb(219, 234, 254);
-                        topBarMousePillBtn.ForeColor = Color.FromArgb(30, 64, 175);
+                        topBarMousePillBtn.Text = "仅查看模式 · 点击恢复操控";
+                        topBarMousePillBtn.AccessibleName = topBarMousePillBtn.Text;
+                        Theme.ChangeGlyph(topBarMousePillBtn, Theme.Glyph.Eye);
+                        Theme.ChangeStyle(topBarMousePillBtn, Theme.ButtonStyle.AccentSoft);
                         topBarMousePillBtn.Visible = true;
                     }
                     else
@@ -1641,21 +1722,13 @@ namespace DualRemote
                 this.modeTag = modeTag ?? "";
 
                 DoubleBuffered = true;
-                BackColor = Color.White;
+                BackColor = Theme.Paper;
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
-                cancelBtn = new Button
-                {
-                    Text = "取消并退出",
-                    Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold),
-                    ForeColor = Color.White,
-                    BackColor = Color.FromArgb(220, 38, 38),
-                    FlatStyle = FlatStyle.Flat,
-                    Cursor = Cursors.Hand,
-                    TabStop = false
-                };
-                cancelBtn.FlatAppearance.BorderSize = 0;
-                cancelBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(185, 28, 28);
+                cancelBtn = Theme.Action("取消并退出", Theme.ButtonStyle.Secondary);
+                cancelBtn.Dock = DockStyle.None;
+                cancelBtn.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+                cancelBtn.TabStop = false;
                 cancelBtn.Click += delegate { if (onCancel != null) onCancel(); };
                 Controls.Add(cancelBtn);
 
@@ -1676,6 +1749,7 @@ namespace DualRemote
                 if (!string.IsNullOrEmpty(tag)) modeTag = tag;
                 errorState = isError;
                 cancelBtn.Text = isError ? "关闭窗口" : "取消并退出";
+                cancelBtn.AccessibleName = cancelBtn.Text;
                 if (isError) animTimer.Stop();
                 else if (Visible) animTimer.Start();
                 Invalidate();
@@ -1733,15 +1807,9 @@ namespace DualRemote
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-                g.Clear(Color.White);
-
-                // Crisp hairline rounded card border + top brand accent strip
-                using (var p = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), 16f * scale))
-                using (var pen = new Pen(Color.FromArgb(218, 226, 238), 1.2f))
-                    g.DrawPath(pen, p);
-
-                using (var accent = new SolidBrush(errorState ? Color.FromArgb(239, 68, 68) : Color.FromArgb(37, 99, 235)))
-                    g.FillRectangle(accent, 0, 0, Width, Math.Max(3f, 4f * scale));
+                g.Clear(Theme.Paper);
+                Theme.Surface(g, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f),
+                    16f * scale, Theme.Paper, Theme.StrokeStrong);
 
                 int padX = (int)Math.Round(28 * scale);
                 int topY = (int)Math.Round(26 * scale);
@@ -1762,8 +1830,7 @@ namespace DualRemote
                 }
                 else
                 {
-                    using (var b = new SolidBrush(Color.FromArgb(37, 99, 235)))
-                        g.FillEllipse(b, padX, topY, logoSize, logoSize);
+                    Theme.DrawBrandMark(g, new RectangleF(padX, topY, logoSize, logoSize));
                 }
 
                 int textX = padX + logoSize + (int)Math.Round(16 * scale);
@@ -1776,11 +1843,11 @@ namespace DualRemote
                 using (var tipDescFont = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular))
                 using (var leftFmt = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
                 {
-                    using (var tb = new SolidBrush(Color.FromArgb(15, 23, 42)))
+                    using (var tb = new SolidBrush(Theme.Ink))
                         g.DrawString(titleText, titleFont, tb, new RectangleF(textX, topY + 1f * scale, textW, 28f * scale), leftFmt);
 
                     string subtitlePill = string.IsNullOrEmpty(modeTag) ? "BoBo V5 原生 D3D11VA 硬解" : ("原生 D3D11VA 硬解  ·  " + modeTag);
-                    using (var mb = new SolidBrush(Color.FromArgb(100, 116, 139)))
+                    using (var mb = new SolidBrush(Theme.Muted))
                         g.DrawString(subtitlePill, tagFont, mb, new RectangleF(textX, topY + 27f * scale, textW, 20f * scale), leftFmt);
 
                     // 2. Progress Bar + Stage Detail (spacious middle section)
@@ -1789,7 +1856,7 @@ namespace DualRemote
                     int progH = Math.Max(4, (int)Math.Round(5 * scale));
                     var trackRect = new RectangleF(padX, progY, progW, progH);
                     using (var tp = Theme.Round(trackRect, progH / 2f))
-                    using (var trackBg = new SolidBrush(errorState ? Color.FromArgb(254, 226, 226) : Color.FromArgb(226, 232, 240)))
+                    using (var trackBg = new SolidBrush(errorState ? Theme.AlertLight : Theme.Stroke))
                         g.FillPath(trackBg, tp);
 
                     if (!errorState)
@@ -1802,13 +1869,13 @@ namespace DualRemote
                         {
                             var activeRect = new RectangleF(clippedLeft, progY, clippedRight - clippedLeft, progH);
                             using (var ap = Theme.Round(activeRect, progH / 2f))
-                            using (var ab = new SolidBrush(Color.FromArgb(37, 99, 235)))
+                            using (var ab = new SolidBrush(Theme.Accent))
                                 g.FillPath(ab, ap);
                         }
                     }
 
                     int detailY = progY + progH + (int)Math.Round(12 * scale);
-                    using (var db = new SolidBrush(errorState ? Color.FromArgb(185, 28, 28) : Color.FromArgb(71, 85, 105)))
+                    using (var db = new SolidBrush(errorState ? Theme.Alert : Theme.BodyInk))
                         g.DrawString(detailText, detailFont, db, new RectangleF(padX, detailY, progW, 40f * scale));
 
                     // 3. Clean Shortcuts Quick-Tips Box
@@ -1816,8 +1883,8 @@ namespace DualRemote
                     int tipH = (int)Math.Round(46 * scale);
                     var tipBox = new RectangleF(padX, tipY, progW, tipH);
                     using (var boxP = Theme.Round(tipBox, 10f * scale))
-                    using (var boxBg = new SolidBrush(Color.FromArgb(248, 250, 252)))
-                    using (var boxBd = new Pen(Color.FromArgb(226, 232, 240), 1f))
+                    using (var boxBg = new SolidBrush(Theme.SurfaceSubtle))
+                    using (var boxBd = new Pen(Theme.Stroke, 1f))
                     {
                         g.FillPath(boxBg, boxP);
                         g.DrawPath(boxBd, boxP);
@@ -1830,10 +1897,10 @@ namespace DualRemote
                         { "Ctrl+Alt+Shift+Q", "立即断开" }
                     };
                     float colW = tipBox.Width / 3f;
-                    using (var keyBg = new SolidBrush(Color.White))
-                    using (var keyBd = new Pen(Color.FromArgb(203, 213, 225), 1f))
-                    using (var keyBr = new SolidBrush(Color.FromArgb(37, 99, 235)))
-                    using (var descBr = new SolidBrush(Color.FromArgb(71, 85, 105)))
+                    using (var keyBg = new SolidBrush(Theme.Paper))
+                    using (var keyBd = new Pen(Theme.StrokeStrong, 1f))
+                    using (var keyBr = new SolidBrush(Theme.Accent))
+                    using (var descBr = new SolidBrush(Theme.BodyInk))
                     using (var centerFmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
                     {
                         for (int i = 0; i < 3; i++)
@@ -1852,7 +1919,7 @@ namespace DualRemote
                     }
 
                     // Bottom left hint
-                    using (var hb = new SolidBrush(Color.FromArgb(148, 163, 184)))
+                    using (var hb = new SolidBrush(Theme.Muted))
                         g.DrawString("全屏模式支持拖动四边贴边悬浮球打开控制中心", tipTitleFont, hb,
                             new RectangleF(padX, Height - 44f * scale, progW - 150f * scale, 22f * scale), leftFmt);
                 }
@@ -1876,7 +1943,7 @@ namespace DualRemote
                 FormBorderStyle = FormBorderStyle.None;
                 ShowInTaskbar = false;
                 StartPosition = FormStartPosition.Manual;
-                BackColor = Color.FromArgb(15, 23, 42);
+                BackColor = Theme.OverlaySurface;
                 DoubleBuffered = true;
                 fadeTimer.Tick += delegate { TickFade(); };
             }
@@ -1968,12 +2035,12 @@ namespace DualRemote
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                g.Clear(Color.FromArgb(15, 23, 42));
+                g.Clear(Theme.OverlaySurface);
                 using (var p = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), (Height - 1) / 2f))
-                using (var pen = new Pen(Color.FromArgb(96, 165, 250), 1.1f))
+                using (var pen = new Pen(Color.FromArgb(64, Theme.OverlayMuted), 1.1f))
                     g.DrawPath(pen, p);
                 using (var f = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold))
-                using (var b = new SolidBrush(Color.FromArgb(248, 250, 252)))
+                using (var b = new SolidBrush(Theme.OverlayInk))
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
                     g.DrawString(text, f, b, ClientRectangle, sf);
             }
@@ -1995,7 +2062,7 @@ namespace DualRemote
                 FormBorderStyle = FormBorderStyle.None;
                 ShowInTaskbar = false;
                 StartPosition = FormStartPosition.Manual;
-                BackColor = Color.FromArgb(14, 21, 32);
+                BackColor = Theme.OverlaySurface;
                 Opacity = 0.86;
                 Size = new Size(370, 54);
                 DoubleBuffered = true;
@@ -2017,7 +2084,7 @@ namespace DualRemote
             {
                 if (s == null || IsDisposed) return;
                 double mbps = s.BitrateKbps / 1000.0;
-                string tr = string.IsNullOrEmpty(s.Transport) ? "UDP+FEC" : s.Transport;
+                string tr = s.Transport ?? "";
                 line1 = string.Format(CultureInfo.InvariantCulture,
                     "{0:F1} FPS | {1}x{2} | {3} | {4}",
                     s.Fps, s.Width, s.Height,
@@ -2033,14 +2100,14 @@ namespace DualRemote
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var bg = new SolidBrush(Color.FromArgb(18, 28, 42)))
+                using (var bg = new SolidBrush(Theme.OverlaySurface))
                     g.FillRectangle(bg, ClientRectangle);
-                using (var pen = new Pen(Color.FromArgb(62, 136, 210), 1f))
+                using (var pen = new Pen(Color.FromArgb(64, Theme.OverlayMuted), 1f))
                     g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
                 using (var f1 = new Font("Consolas", 9f, FontStyle.Bold))
                 using (var f2 = new Font("Microsoft YaHei UI", 8f, FontStyle.Regular))
-                using (var b1 = new SolidBrush(Color.FromArgb(132, 224, 255)))
-                using (var b2 = new SolidBrush(Color.FromArgb(224, 234, 246)))
+                using (var b1 = new SolidBrush(Theme.OverlayInk))
+                using (var b2 = new SolidBrush(Theme.OverlayMuted))
                 {
                     g.DrawString(line1, f1, b1, 10, 7);
                     g.DrawString(line2, f2, b2, 10, 28);

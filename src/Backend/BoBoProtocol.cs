@@ -483,6 +483,24 @@ namespace DualRemote
             return list;
         }
 
+        internal static bool IsLanInterface(NetworkInterface nic)
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up ||
+                nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) return false;
+            string name = nic.Name ?? "";
+            string description = nic.Description ?? "";
+            return name.IndexOf("WSL", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("Hyper-V", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("VirtualBox", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("VMware", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("ZeroTier", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("WireGuard", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   description.IndexOf("Loopback", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         internal static List<string> GetLocalLanIpv4Addresses()
         {
             var result = new List<string>();
@@ -490,23 +508,7 @@ namespace DualRemote
             {
                 foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    if (nic.OperationalStatus != OperationalStatus.Up) continue;
-                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
-                        nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
-                    string name = nic.Name ?? "";
-                    string desc = nic.Description ?? "";
-                    if (name.IndexOf("WSL", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("Hyper-V", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("VirtualBox", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("VMware", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("ZeroTier", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("WireGuard", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        desc.IndexOf("Loopback", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        continue;
-                    }
+                    if (!IsLanInterface(nic)) continue;
                     IPInterfaceProperties props = nic.GetIPProperties();
                     if (props == null) continue;
                     foreach (UnicastIPAddressInformation uni in props.UnicastAddresses)

@@ -111,6 +111,8 @@ BOBO_API int32_t __stdcall BoBoHost_SetBitrate(void* handle, int32_t bitrateKbps
 BOBO_API int32_t __stdcall BoBoHost_SetFps(void* handle, int32_t fps);
 BOBO_API void __stdcall BoBoHost_SetCompositeCursor(void* handle, int32_t enable);
 BOBO_API int32_t __stdcall BoBoHost_GetCursorShape(int32_t monitorIndex);
+// Returns the logical shape ID and, when available, its desktop bitmap size in pixels.
+BOBO_API int32_t __stdcall BoBoHost_GetCursorInfo(int32_t monitorIndex, int32_t* width, int32_t* height);
 
 BOBO_API void __stdcall BoBoHost_RequestKeyframe(void* handle);
 BOBO_API void __stdcall BoBoHost_SetMuteHost(void* handle, int32_t mute);
@@ -134,6 +136,8 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
     BoBoPrivacyEscapeCallback onEscape,
     void* userCtx);
 BOBO_API int32_t __stdcall BoBoHost_IsPrivacyInputBlocked(void);
+// Temporarily masks the hardware cursor on the host display. Capture's cursor path remains independent.
+BOBO_API int32_t __stdcall BoBoHost_SetPrivacyCursorMask(int32_t enable);
 
 // ---- Client Engine (In-Process D3D11VA H.264 Decode + D3D11 Render + WASAPI Audio + Viewport Input) ----
 BOBO_API void* __stdcall BoBoClient_Create(
@@ -170,6 +174,7 @@ BOBO_API void __stdcall BoBoClient_SetViewOnly(void* handle, int32_t viewOnly);
 BOBO_API void __stdcall BoBoClient_SetSysKeys(void* handle, int32_t sendSysKeys);
 BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t composited);
 BOBO_API void __stdcall BoBoClient_SetRemoteCursorShape(void* handle, int32_t shapeId);
+BOBO_API void __stdcall BoBoClient_SetRemoteCursorInfo(void* handle, int32_t shapeId, int32_t width, int32_t height);
 BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats);
 BOBO_API void __stdcall BoBoClient_Destroy(void* handle);
 

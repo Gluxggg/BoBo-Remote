@@ -41,9 +41,7 @@ namespace DualRemote
         private int boundPort;
         private volatile bool allowIncomingControl = true;
         private volatile bool activeStreamRunning;
-        private long currentStreamSessionId;
         private string activePeerName = "";
-        private int activeMonitorIndex;
         private BoBoLocalPairSession activePairSession;
 
         private readonly ConcurrentDictionary<string, BoBoDiscoveredPeer> lanPeers =
@@ -54,7 +52,7 @@ namespace DualRemote
 
         private readonly List<ActiveClientConnection> activeConnections = new List<ActiveClientConnection>();
         private readonly object streamOwnerGate = new object();
-        private ActiveClientConnection activeStreamConn;
+        private volatile ActiveClientConnection activeStreamConn;
 
         internal event Action<bool, string, bool> SessionStateChanged;
         internal event Action<bool> PrivacyCommandReceived;
@@ -178,7 +176,10 @@ namespace DualRemote
             udpSessions.Clear();
 
             DisconnectAllActiveStreams("被控端已关闭 BoBo远程");
-            try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
+            lock (streamOwnerGate)
+            {
+                BoBoCoreInterop.RestoreSuperDisplay();
+            }
 
             if (cts != null)
             {
@@ -585,7 +586,8 @@ namespace DualRemote
 
             BoBoCoreInterop.BoBoHostNativeHandle nativeHost = null;
             bool streamNotifiedStarted = false;
-            long myStreamSessionId = 0;
+            int activeMonitorIndex = 0;
+            var display = new SessionDisplay();
             int lastRecoveryKeyTick = 0;
             string clientNodeId = "";
             string clientDeviceCode = "";
@@ -650,6 +652,7 @@ namespace DualRemote
                     ack["protocolVersion"] = BoBoProtocol.ProtocolVersion;
                     ack["platform"] = BoBoProtocol.PlatformWindows;
                     ack["hostControlMode"] = BoBoProtocol.ControlModeFull;
+                    ack["superDisplayVersion"] = BoBoDisplayState.Version;
                     ack["screenOrientation"] = 0;
                     ack["nodeId"] = identity.NodeId;
                     ack["deviceCode"] = identity.DeviceCode;
@@ -664,11 +667,6 @@ namespace DualRemote
                     ack["lanIps"] = BoBoProtocol.GetLocalLanIpv4Addresses().ToArray();
                     ack["udpSupported"] = (boundUdpPort > 0);
                     await conn.SendJsonSafeAsync(ack, ct).ConfigureAwait(false);
-
-                    bool superDisplayActive = false;
-                    bool superDisplayNativeMatch = false;
-                    int activeFps = 60;
-                    int activeBitrateKbps = 14000;
 
                     // App-level dead-peer idle watchdog (detects silent NAT/Wi-Fi drops promptly)
                     Task _idleWatchdog = Task.Run(async delegate
@@ -698,7 +696,7 @@ namespace DualRemote
 
                         if (frame.Type == BoBoPacketType.InputEvent)
                         {
-                            if (authorized && nativeHost != null)
+                            if (authorized && nativeHost != null && object.ReferenceEquals(activeStreamConn, conn))
                             {
                                 BoBoInputPacket inp;
                                 if (BoBoProtocol.ParseInputPayload(frame.Payload, out inp))
@@ -882,12 +880,10 @@ namespace DualRemote
                             int reqBps = BoBoProtocol.GetInt(msg, "bitrateKbps", 10000);
                             bool muteHost = BoBoProtocol.GetBool(msg, "muteHost", false);
                             bool requestPrivacy = BoBoProtocol.GetBool(msg, "requestPrivacy", false);
-                            bool reqSuperDisplay = BoBoProtocol.GetBool(msg, "superDisplay", false);
-                            int clientW = BoBoProtocol.GetInt(msg, "clientWidth", 0);
-                            int clientH = BoBoProtocol.GetInt(msg, "clientHeight", 0);
                             bool reqUdp = BoBoProtocol.GetBool(msg, "udpTransport", false);
                             bool interleavedFec = BoBoProtocol.GetBool(msg, "udpInterleavedFec", false);
                             bool clientNativeCursor = BoBoProtocol.GetBool(msg, "nativeLocalCursor", false);
+                            bool cursorMetrics = BoBoProtocol.GetBool(msg, "cursorMetrics", false);
                             bool clientFreeMouse = BoBoProtocol.GetBool(msg, "freeMouse", true);
                             bool reqAutoBitrate = BoBoProtocol.GetBool(msg, "autoBitrate", true);
                             double initRttMs = 0.0;
@@ -897,53 +893,45 @@ namespace DualRemote
                                 try { initRttMs = Convert.ToDouble(initRttObj, CultureInfo.InvariantCulture); } catch { }
                             }
 
-                            // Enforce exclusive active stream ownership: disconnect any previous streaming client cleanly
-                            // BEFORE mutating SuperDisplay, Privacy Curtain, or nativeHost.
-                            ActiveClientConnection prevStreamConn = null;
-                            lock (streamOwnerGate)
-                            {
-                                if (activeStreamConn != null && !object.ReferenceEquals(activeStreamConn, conn))
-                                {
-                                    prevStreamConn = activeStreamConn;
-                                }
-                                activeStreamConn = conn;
-                            }
-                            if (prevStreamConn != null)
-                            {
-                                prevStreamConn.ForceClose("superseded by new stream");
-                            }
-
                             bool isLanClient = BoBoProtocol.IsPrivateLanIp(remoteIp) && (initRttMs <= 18.0);
                             wanPixelBudget = isLanClient ? long.MaxValue :
                                 (initRttMs > 65.0 ? 1600L * 1000L : 1920L * 1200L);
-                            activeFps = reqFps;
-                            activeBitrateKbps = reqBps;
-                            superDisplayActive = reqSuperDisplay;
-                            superDisplayNativeMatch = false;
-                            if (reqSuperDisplay && clientW >= 640 && clientH >= 480)
-                            {
-                                int actualW, actualH;
-                                if (BoBoCoreInterop.ApplySuperDisplay(reqMon, clientW, clientH, out actualW, out actualH) &&
-                                    actualW >= 640 && actualH >= 480)
-                                {
-                                    superDisplayNativeMatch = true;
-                                    long profilePixelBudget = Math.Max(1920L * 1200L,
-                                        (long)Math.Min(reqW, 3840) * Math.Min(reqH, 2160) * 115 / 100);
-                                    reqW = Math.Min(actualW, 3840);
-                                    reqH = Math.Min(actualH, 2160);
-                                    CapVideoPixels(ref reqW, ref reqH, profilePixelBudget);
-                                }
-                            }
-                            if (reqAutoBitrate) CapVideoPixels(ref reqW, ref reqH, wanPixelBudget);
 
-                            // CRITICAL: notify privacy curtain synchronously BEFORE creating capture engine (<5ms)!
-                            myStreamSessionId = Interlocked.Increment(ref currentStreamSessionId);
-                            activeStreamRunning = true;
-                            activePeerName = clientName;
-                            activeMonitorIndex = reqMon;
-                            streamNotifiedStarted = true;
+                            lock (streamOwnerGate)
+                            {
+                                if (ct.IsCancellationRequested || !allowIncomingControl) break;
+                                ActiveClientConnection previous = activeStreamConn;
+                                activeStreamConn = conn;
+                                if (previous != null && !object.ReferenceEquals(previous, conn))
+                                {
+                                    previous.ForceClose("superseded by new stream");
+                                    BoBoCoreInterop.InjectInput(0, new BoBoInputPacket { Kind = 6 });
+                                }
+                                activeStreamRunning = true;
+                                activePeerName = clientName;
+                                streamNotifiedStarted = true;
+                            }
+                            // Notify the host's privacy curtain synchronously before starting capture.
                             Action<bool, string, bool> sessEv = SessionStateChanged;
-                            if (sessEv != null) { try { sessEv(true, clientName, requestPrivacy); } catch { } }
+                            if (!ct.IsCancellationRequested && sessEv != null)
+                            {
+                                try { sessEv(true, clientName, requestPrivacy); } catch { }
+                            }
+
+                            lock (streamOwnerGate)
+                            {
+                                if (ct.IsCancellationRequested || !object.ReferenceEquals(activeStreamConn, conn)) break;
+                                // The outgoing connection cannot restore another session's display.
+                                BoBoCoreInterop.RestoreSuperDisplay();
+                                List<BoBoMonitorDescriptor> currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                activeMonitorIndex = FindMonitorIndex(currentMonitors, reqMon);
+                                display.ViewportProtocol = BoBoProtocol.GetInt(msg, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
+                                display.SetRequestedStream(reqW, reqH);
+                                display.ReadRequest(msg, "superDisplay");
+                                display.UpdateDesktop(activeMonitorIndex, currentMonitors);
+                                display.GetStreamSize(reqAutoBitrate ? wanPixelBudget : long.MaxValue, out reqW, out reqH);
+                            }
+                            reqMon = activeMonitorIndex;
 
                             if (cursorPollCts != null) { try { cursorPollCts.Cancel(); cursorPollCts.Dispose(); } catch { } cursorPollCts = null; }
                             if (activeUdpSession != null)
@@ -986,7 +974,8 @@ namespace DualRemote
                                     },
                                     delegate(BoBoInputPacket inp)
                                     {
-                                        BoBoCoreInterop.InjectInput(activeMonitorIndex, inp);
+                                        if (!ct.IsCancellationRequested && object.ReferenceEquals(activeStreamConn, conn))
+                                            BoBoCoreInterop.InjectInput(Volatile.Read(ref activeMonitorIndex), inp);
                                     },
                                     delegate
                                     {
@@ -1113,10 +1102,10 @@ namespace DualRemote
                                     activeUdpSession = null;
                                 }
                                 await SendErrorAsync(conn, "ENGINE_FAILED", hostErr ?? "主机采编引擎启动失败。", ct).ConfigureAwait(false);
-                                continue;
+                                break;
                             }
 
-                            // Lightweight cursor shape sync task (35ms poll, sends tiny 5B packet ONLY when shape changes)
+                            // Sync cursor shape and dimensions. Refresh UDP state periodically in case both copies are lost.
                             if (clientNativeCursor)
                             {
                                 cursorPollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -1124,25 +1113,33 @@ namespace DualRemote
                                 Task _cp = Task.Run(async delegate
                                 {
                                     int lastShape = -1;
+                                    int lastWidth = 0, lastHeight = 0;
+                                    bool sentOverUdp = false;
+                                    long lastSend = 0;
                                     uint seq = 0;
                                     while (!cpCt.IsCancellationRequested)
                                     {
                                         try
                                         {
-                                            int shape = BoBoCoreInterop.GetHostCursorShape(activeMonitorIndex);
-                                            if (shape != lastShape)
+                                            int width, height;
+                                            int shape = BoBoCoreInterop.GetHostCursorInfo(activeMonitorIndex, out width, out height);
+                                            if (!cursorMetrics) width = height = 0;
+                                            HostUdpSession uSess = activeUdpSession;
+                                            bool useUdp = uSess != null && uSess.IsActivated;
+                                            long now = Stopwatch.GetTimestamp();
+                                            if (shape != lastShape || width != lastWidth || height != lastHeight || useUdp != sentOverUdp ||
+                                                (useUdp && now - lastSend >= Stopwatch.Frequency))
                                             {
                                                 lastShape = shape;
-                                                HostUdpSession uSess = activeUdpSession;
-                                                if (uSess != null && uSess.IsActivated)
-                                                {
-                                                    uSess.SendCursorShape(shape);
-                                                }
-                                                else
-                                                {
-                                                    byte[] cpPayload = new byte[] { (byte)(shape & 0xFF) };
-                                                    conn.SendFrameFireAndForget(BoBoPacketType.CursorShape, ++seq, cpPayload, true, null);
-                                                }
+                                                lastWidth = width;
+                                                lastHeight = height;
+                                                sentOverUdp = useUdp;
+                                                lastSend = now;
+                                                byte[] payload = width > 0 && height > 0
+                                                    ? new byte[] { (byte)shape, (byte)width, (byte)height }
+                                                    : new byte[] { (byte)shape };
+                                                if (useUdp) uSess.SendCursorShape(payload);
+                                                else conn.SendFrameFireAndForget(BoBoPacketType.CursorShape, ++seq, payload, true, null);
                                             }
                                             await Task.Delay(35, cpCt).ConfigureAwait(false);
                                         }
@@ -1159,8 +1156,9 @@ namespace DualRemote
                             started["fps"] = startFps;
                             started["bitrateKbps"] = startBps;
                             started["monitorIndex"] = reqMon;
-                            started["superDisplayActive"] = superDisplayActive;
-                            started["superDisplayNativeMatch"] = superDisplayNativeMatch;
+                            started["superDisplayActive"] = display.Active;
+                            started["superDisplayNativeMatch"] = display.NativeMatch;
+                            display.WriteViewportState(started);
                             started["platform"] = BoBoProtocol.PlatformWindows;
                             started["hostControlMode"] = BoBoProtocol.ControlModeFull;
                             started["hostCursorComposited"] = hostCompositeCursor;
@@ -1183,31 +1181,45 @@ namespace DualRemote
 
                         if (msgType == "RECONFIGURE" && nativeHost != null)
                         {
-                            int reqMon = BoBoProtocol.GetInt(msg, "monitorIndex", activeMonitorIndex);
-                            int reqW = BoBoProtocol.GetInt(msg, "width", 1920);
-                            int reqH = BoBoProtocol.GetInt(msg, "height", 1080);
-                            int reqFps = BoBoProtocol.GetInt(msg, "fps", 60);
-                            int reqBps = BoBoProtocol.GetInt(msg, "bitrateKbps", 10000);
-                            bool reqAuto = BoBoProtocol.GetBool(msg, "autoBitrate", abrController != null ? abrController.AutoEnabled : true);
-                            if (abrController != null)
+                            var ackCfg = new Dictionary<string, object>();
+                            lock (streamOwnerGate)
                             {
+                                if (!object.ReferenceEquals(activeStreamConn, conn) || ct.IsCancellationRequested) break;
+                                int reqMon = BoBoProtocol.GetInt(msg, "monitorIndex", activeMonitorIndex);
+                                int reqW = BoBoProtocol.GetInt(msg, "width", display.RequestedWidth);
+                                int reqH = BoBoProtocol.GetInt(msg, "height", display.RequestedHeight);
+                                int reqFps = BoBoProtocol.GetInt(msg, "fps", abrController.CurrentFps);
+                                int reqBps = BoBoProtocol.GetInt(msg, "bitrateKbps", abrController.CurrentBitrateKbps);
+                                bool reqAuto = BoBoProtocol.GetBool(msg, "autoBitrate", abrController.AutoEnabled);
                                 abrController.UpdateTarget(reqAuto, reqBps, reqFps);
                                 reqBps = abrController.CurrentBitrateKbps;
                                 reqFps = abrController.CurrentFps;
+                                display.SetRequestedStream(reqW, reqH);
+
+                                List<BoBoMonitorDescriptor> currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                reqMon = FindMonitorIndex(currentMonitors, reqMon);
+                                if (reqMon != activeMonitorIndex)
+                                {
+                                    BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
+                                    BoBoCoreInterop.RestoreSuperDisplay();
+                                    currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                    reqMon = FindMonitorIndex(currentMonitors, reqMon);
+                                    display.UpdateDesktop(reqMon, currentMonitors);
+                                }
+                                Volatile.Write(ref activeMonitorIndex, reqMon);
+                                display.GetStreamSize(reqAuto ? wanPixelBudget : long.MaxValue, out reqW, out reqH);
+                                if (activeUdpSession != null) activeUdpSession.SetPacingBitrate(reqBps);
+                                nativeHost.Reconfigure(reqMon, reqW, reqH, reqFps, reqBps);
+                                ackCfg["type"] = "RECONFIGURED";
+                                ackCfg["monitorIndex"] = reqMon;
+                                ackCfg["width"] = reqW;
+                                ackCfg["height"] = reqH;
+                                ackCfg["fps"] = reqFps;
+                                ackCfg["bitrateKbps"] = reqBps;
+                                ackCfg["superDisplayActive"] = display.Active;
+                                ackCfg["superDisplayNativeMatch"] = display.NativeMatch;
+                                display.WriteViewportState(ackCfg);
                             }
-                            if (reqAuto) CapVideoPixels(ref reqW, ref reqH, wanPixelBudget);
-                            activeMonitorIndex = reqMon;
-                            activeFps = reqFps;
-                            activeBitrateKbps = reqBps;
-                            if (activeUdpSession != null) activeUdpSession.SetPacingBitrate(reqBps);
-                            nativeHost.Reconfigure(reqMon, reqW, reqH, reqFps, reqBps);
-                            var ackCfg = new Dictionary<string, object>();
-                            ackCfg["type"] = "RECONFIGURED";
-                            ackCfg["monitorIndex"] = reqMon;
-                            ackCfg["width"] = reqW;
-                            ackCfg["height"] = reqH;
-                            ackCfg["fps"] = reqFps;
-                            ackCfg["bitrateKbps"] = reqBps;
                             conn.SendJsonHighPriorityFireAndForget(ackCfg);
                             continue;
                         }
@@ -1259,54 +1271,27 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "SET_SUPER_DISPLAY")
+                        if (msgType == "SET_SUPER_DISPLAY" && nativeHost != null)
                         {
-                            bool enable = BoBoProtocol.GetBool(msg, "enable", false);
-                            int clientW = BoBoProtocol.GetInt(msg, "clientWidth", 0);
-                            int clientH = BoBoProtocol.GetInt(msg, "clientHeight", 0);
-                            int outW = 0;
-                            int outH = 0;
-
-                            if (enable && clientW >= 640 && clientH >= 480)
-                            {
-                                int actualW, actualH;
-                                bool matched = BoBoCoreInterop.ApplySuperDisplay(activeMonitorIndex, clientW, clientH, out actualW, out actualH);
-                                superDisplayActive = true;
-                                superDisplayNativeMatch = matched;
-                                outW = actualW;
-                                outH = actualH;
-                            }
-                            else
-                            {
-                                BoBoCoreInterop.RestoreSuperDisplay();
-                                superDisplayActive = false;
-                                superDisplayNativeMatch = false;
-                                List<BoBoMonitorDescriptor> monsNow = BoBoCoreInterop.EnumerateMonitors();
-                                if (monsNow.Count > 0)
-                                {
-                                    int idx = Math.Max(0, Math.Min(activeMonitorIndex, monsNow.Count - 1));
-                                    outW = monsNow[idx].Width;
-                                    outH = monsNow[idx].Height;
-                                }
-                            }
-
-                            if (nativeHost != null && (!superDisplayActive || superDisplayNativeMatch) && outW >= 640 && outH >= 480)
-                            {
-                                int streamW = Math.Min(outW, 3840);
-                                int streamH = Math.Min(outH, 2160);
-                                if (abrController != null && abrController.AutoEnabled)
-                                    CapVideoPixels(ref streamW, ref streamH, wanPixelBudget);
-                                int streamFps = abrController != null ? abrController.CurrentFps : activeFps;
-                                int streamBps = abrController != null ? abrController.CurrentBitrateKbps : activeBitrateKbps;
-                                nativeHost.Reconfigure(activeMonitorIndex, streamW, streamH, streamFps, streamBps);
-                            }
-
                             var ackSd = new Dictionary<string, object>();
-                            ackSd["type"] = "SUPER_DISPLAY_STATE";
-                            ackSd["active"] = superDisplayActive;
-                            ackSd["nativeMatch"] = superDisplayNativeMatch;
-                            ackSd["width"] = outW;
-                            ackSd["height"] = outH;
+                            lock (streamOwnerGate)
+                            {
+                                if (!object.ReferenceEquals(activeStreamConn, conn) || ct.IsCancellationRequested) break;
+                                display.ReadRequest(msg, "enable");
+                                display.UpdateDesktop(activeMonitorIndex, BoBoCoreInterop.EnumerateMonitors());
+                                int streamW, streamH;
+                                display.GetStreamSize(abrController.AutoEnabled ? wanPixelBudget : long.MaxValue, out streamW, out streamH);
+                                nativeHost.Reconfigure(activeMonitorIndex, streamW, streamH, abrController.CurrentFps, abrController.CurrentBitrateKbps);
+
+                                ackSd["type"] = "SUPER_DISPLAY_STATE";
+                                ackSd["active"] = display.Active;
+                                ackSd["nativeMatch"] = display.NativeMatch;
+                                ackSd["monitorIndex"] = activeMonitorIndex;
+                                // Older clients read width/height as the physical desktop size.
+                                ackSd["width"] = display.ViewportProtocol ? streamW : display.DesktopWidth;
+                                ackSd["height"] = display.ViewportProtocol ? streamH : display.DesktopHeight;
+                                display.WriteViewportState(ackSd);
+                            }
                             await conn.SendJsonSafeAsync(ackSd, ct).ConfigureAwait(false);
                             continue;
                         }
@@ -1476,28 +1461,26 @@ namespace DualRemote
                 {
                     nativeHost.Dispose();
                 }
-                if (streamNotifiedStarted)
-                {
-                    // 断开瞬间强制释放所有远端按下的修饰键与鼠标键，防止主机卡键/卡鼠标
-                    try
-                    {
-                        BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6, Flags = 0, A = 0, B = 0 });
-                    }
-                    catch { }
-
-                    // 仅当前断开的会话仍是最新活跃流时，才还原超级屏并通知关闭防窥，防止旧连接清理误伤新连接
-                    if (myStreamSessionId == Interlocked.Read(ref currentStreamSessionId))
-                    {
-                        try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
-                        activeStreamRunning = false;
-                        activePeerName = "";
-                        Action<bool, string, bool> sessEv = SessionStateChanged;
-                        if (sessEv != null) { try { sessEv(false, clientName, false); } catch { } }
-                    }
-                }
+                bool notifyStopped = false;
                 lock (streamOwnerGate)
                 {
-                    if (object.ReferenceEquals(activeStreamConn, conn)) activeStreamConn = null;
+                    if (object.ReferenceEquals(activeStreamConn, conn))
+                    {
+                        if (streamNotifiedStarted)
+                        {
+                            BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
+                            BoBoCoreInterop.RestoreSuperDisplay();
+                            activeStreamRunning = false;
+                            activePeerName = "";
+                            notifyStopped = true;
+                        }
+                        activeStreamConn = null;
+                    }
+                }
+                Action<bool, string, bool> stopped = SessionStateChanged;
+                if (notifyStopped && stopped != null)
+                {
+                    try { stopped(false, clientName, false); } catch { }
                 }
                 lock (activeConnections) { activeConnections.Remove(conn); }
                 conn.Dispose();
@@ -1537,6 +1520,114 @@ namespace DualRemote
                 if (!File.Exists(candidate)) return candidate;
             }
             return Path.Combine(dir, stem + "_" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ext);
+        }
+
+        private static int FindMonitorIndex(List<BoBoMonitorDescriptor> monitors, int index)
+        {
+            return index >= 0 && index < monitors.Count ? index : 0;
+        }
+
+        private sealed class SessionDisplay
+        {
+            internal bool ViewportProtocol;
+            internal bool Active;
+            internal bool NativeMatch;
+            internal int DesktopWidth;
+            internal int DesktopHeight;
+            internal int RequestedWidth = 1920;
+            internal int RequestedHeight = 1080;
+            private int viewportWidth;
+            private int viewportHeight;
+            private int requestId;
+            private bool fullscreen;
+            private int originalWidth;
+            private int originalHeight;
+            private int originalMonitor = -1;
+
+            internal void SetRequestedStream(int width, int height)
+            {
+                if (width > 0) RequestedWidth = width;
+                if (height > 0) RequestedHeight = height;
+            }
+
+            internal void ReadRequest(Dictionary<string, object> message, string enableField)
+            {
+                viewportWidth = BoBoProtocol.GetInt(message, "clientWidth", 0);
+                viewportHeight = BoBoProtocol.GetInt(message, "clientHeight", 0);
+                fullscreen = !ViewportProtocol || BoBoProtocol.GetBool(message, "fullscreen", false);
+                requestId = BoBoProtocol.GetInt(message, "displayRequestId", 0);
+                Active = BoBoProtocol.GetBool(message, enableField, false) &&
+                    viewportWidth >= 320 && viewportWidth <= 16384 && viewportHeight >= 240 && viewportHeight <= 16384;
+            }
+
+            internal void UpdateDesktop(int index, List<BoBoMonitorDescriptor> monitors)
+            {
+                if (!Active || !fullscreen) BoBoCoreInterop.RestoreSuperDisplay();
+                else if (originalMonitor != index)
+                {
+                    originalMonitor = index;
+                    originalWidth = monitors.Count > 0 ? monitors[index].Width : 0;
+                    originalHeight = monitors.Count > 0 ? monitors[index].Height : 0;
+                }
+
+                DesktopWidth = 0;
+                DesktopHeight = 0;
+                if (Active && fullscreen && viewportWidth >= 640 && viewportHeight >= 480)
+                    BoBoCoreInterop.ApplySuperDisplay(index, viewportWidth, viewportHeight, out DesktopWidth, out DesktopHeight);
+                if (DesktopWidth <= 0 || DesktopHeight <= 0)
+                {
+                    monitors = BoBoCoreInterop.EnumerateMonitors();
+                    if (index < monitors.Count)
+                    {
+                        DesktopWidth = monitors[index].Width;
+                        DesktopHeight = monitors[index].Height;
+                    }
+                }
+                if (!Active || !fullscreen) originalMonitor = -1;
+                NativeMatch = Active && DesktopWidth == viewportWidth && DesktopHeight == viewportHeight;
+            }
+
+            internal void GetStreamSize(long wanBudget, out int width, out int height)
+            {
+                width = RequestedWidth;
+                height = RequestedHeight;
+                if ((Active || ViewportProtocol) && DesktopWidth > 0 && DesktopHeight > 0)
+                {
+                    long profilePixels = (long)Math.Min(RequestedWidth, 3840) * Math.Min(RequestedHeight, 3840);
+                    long pixelBudget = Active ? Math.Min(wanBudget, profilePixels) : wanBudget;
+                    FitDesktopStream(DesktopWidth, DesktopHeight,
+                        Active ? viewportWidth : RequestedWidth, Active ? viewportHeight : RequestedHeight,
+                        pixelBudget, out width, out height);
+                }
+                else CapVideoPixels(ref width, ref height, wanBudget);
+            }
+
+            internal void WriteViewportState(Dictionary<string, object> message)
+            {
+                if (!ViewportProtocol) return;
+                message["displayRequestId"] = requestId;
+                message["clientWidth"] = viewportWidth;
+                message["clientHeight"] = viewportHeight;
+                message["desktopWidth"] = DesktopWidth;
+                message["desktopHeight"] = DesktopHeight;
+                message["desktopModeChanged"] = originalMonitor >= 0 && originalWidth > 0 && originalHeight > 0 &&
+                    (DesktopWidth != originalWidth || DesktopHeight != originalHeight);
+            }
+        }
+
+        internal static void FitDesktopStream(int desktopWidth, int desktopHeight, int boundsWidth, int boundsHeight,
+            long pixelBudget, out int width, out int height)
+        {
+            int maxWidth = desktopWidth >= desktopHeight ? 3840 : 2160;
+            int maxHeight = desktopWidth >= desktopHeight ? 2160 : 3840;
+            double scale = Math.Min(1.0, Math.Min(
+                (double)Math.Min(boundsWidth, maxWidth) / desktopWidth,
+                (double)Math.Min(boundsHeight, maxHeight) / desktopHeight));
+            scale = Math.Min(scale, Math.Sqrt((double)pixelBudget / ((long)desktopWidth * desktopHeight)));
+            // The capture path requires even NV12 dimensions and has a 320 x 240 minimum.
+            scale = Math.Max(scale, Math.Max(320.0 / desktopWidth, 240.0 / desktopHeight));
+            width = (int)(desktopWidth * scale + 1e-7) & ~1;
+            height = (int)(desktopHeight * scale + 1e-7) & ~1;
         }
 
         private static void CapVideoPixels(ref int width, ref int height, long pixelBudget)
@@ -1838,16 +1929,16 @@ namespace DualRemote
                 SendSealed(BoBoUdpPacketType.Audio, payload, 0, payload.Length, ep);
             }
 
-            internal void SendCursorShape(int shapeId)
+            internal void SendCursorShape(byte[] payload)
             {
                 IPEndPoint ep = remoteEp;
                 if (!activated || disposed || ep == null) return;
-                byte[] buf = new byte[5];
+                byte[] buf = new byte[4 + payload.Length];
                 uint seq = unchecked((uint)Interlocked.Increment(ref nextCursorSeq));
                 BoBoUdpCrypto.WriteUInt32LE(buf, 0, seq);
-                buf[4] = (byte)(shapeId & 0xFF);
-                SendSealed(BoBoUdpPacketType.CursorShape, buf, 0, 5, ep);
-                SendSealed(BoBoUdpPacketType.CursorShape, buf, 0, 5, ep);
+                Buffer.BlockCopy(payload, 0, buf, 4, payload.Length);
+                SendSealed(BoBoUdpPacketType.CursorShape, buf, 0, buf.Length, ep);
+                SendSealed(BoBoUdpPacketType.CursorShape, buf, 0, buf.Length, ep);
             }
 
             private void SendSealed(BoBoUdpPacketType type, byte[] plain, int off, int len, IPEndPoint ep)

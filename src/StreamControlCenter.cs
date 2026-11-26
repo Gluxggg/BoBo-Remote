@@ -30,6 +30,9 @@ namespace DualRemote
     {
         internal string HostDisplayName = "远程主机";
         internal string DisplayDeviceName = "显示屏 1";
+        internal List<BoBoMonitorDescriptor> RemoteMonitors;
+        internal int SelectedMonitorIndex;
+        internal Action<int> OnSelectMonitor;
         internal int LocalDisplayWidth = 1920;
         internal int LocalDisplayHeight = 1080;
         internal int HostNativeWidth = 1920;
@@ -44,12 +47,12 @@ namespace DualRemote
         internal int Fps = 60;
         internal bool TrueColor = false;
         internal bool HdrEnabled = false;
-        internal bool SafeRelayMode = false;
 
         internal bool AspectFit = true;
-        internal int ScaleMode = 2; // 0=1:1, 1=AspectFit, 2=SuperFill (zero black bars)
-        internal bool SuperDisplayActive = true;
-        internal bool SuperDisplayNativeMatch = false;
+        internal int ScaleMode = 1; // 0=1:1, 1=AspectFit, 2=Stretch
+        internal bool SuperDisplayActive;
+        internal string SuperDisplayStatus = "";
+        internal string ConnectionRoute = "";
         internal bool MiniWindowMode = false;
         internal int MiniWindowOpacity = 100;
         internal bool IsFullscreen = false;
@@ -82,7 +85,7 @@ namespace DualRemote
         internal Action<int> OnSelectFps;
         internal Action<bool> OnSelectTrueColor;
         internal Action<bool> OnToggleHdr;
-        internal Action<bool> OnToggleSafeRelay;
+        internal Action OnSelectWeakNetwork;
 
         internal Action<bool> OnSelectAspectFit;
         internal Action<int> OnSelectScaleMode;
@@ -140,7 +143,9 @@ namespace DualRemote
         Screenshot,
         Clipboard,
         Home,
-        Lock
+        Lock,
+        Mic,
+        Activity
     }
 
     internal sealed class CcMenuItem
@@ -171,7 +176,7 @@ namespace DualRemote
         private readonly OutsideClickFilter clickFilter;
         private readonly StreamControlCenterModel model;
         private readonly Action onClosed;
-        private bool closed;
+        private bool closed = true;
 
         internal bool IsOpen { get { return !closed && activePopups.Count > 0; } }
 
@@ -411,6 +416,22 @@ namespace DualRemote
         private static List<CcMenuItem> BuildDisplaySubmenu(StreamControlCenterModel m)
         {
             var items = new List<CcMenuItem>();
+            if (m.RemoteMonitors != null && m.RemoteMonitors.Count > 1)
+            {
+                for (int i = 0; i < m.RemoteMonitors.Count; i++)
+                {
+                    int index = i;
+                    BoBoMonitorDescriptor monitor = m.RemoteMonitors[i];
+                    items.Add(new CcMenuItem
+                    {
+                        Text = "显示屏 " + (index + 1) + " · " + monitor.Width + " × " + monitor.Height,
+                        Subtitle = monitor.Name,
+                        RadioSelected = m.SelectedMonitorIndex == index,
+                        OnClick = delegate { if (m.OnSelectMonitor != null) m.OnSelectMonitor(index); }
+                    });
+                }
+                items.Add(new CcMenuItem { IsSeparator = true });
+            }
             int lw = m.LocalDisplayWidth > 0 ? m.LocalDisplayWidth : 1920;
             int lh = m.LocalDisplayHeight > 0 ? m.LocalDisplayHeight : 1080;
             int hw = m.HostNativeWidth > 0 ? m.HostNativeWidth : m.CurrentWidth;
@@ -418,7 +439,7 @@ namespace DualRemote
 
             items.Add(new CcMenuItem
             {
-                Text = "跟随当前显示屏 (" + lw + " × " + lh + ")",
+                Text = "跟随画面区域 (" + lw + " × " + lh + ")",
                 RadioSelected = m.ResolutionMode == ControlResolutionMode.FollowLocal,
                 OnClick = delegate
                 {
@@ -514,10 +535,8 @@ namespace DualRemote
             items.Add(new CcMenuItem
             {
                 Icon = CcIcon.SuperScreen,
-                Text = m.SuperDisplayActive ? "超级屏模式（全屏无黑边自适应）" : "切换使用超级屏（消除上下黑边）",
-                Subtitle = m.SuperDisplayActive
-                    ? (m.SuperDisplayNativeMatch ? "已原生匹配当前屏幕比例，零黑边满屏显示" : "已启用满屏无黑边自适应，点击可恢复原生比例")
-                    : "优先匹配被控端同比例分辨率，无匹配时自动满屏消除上下黑边",
+                Text = "超级屏",
+                Subtitle = m.SuperDisplayStatus,
                 CheckSelected = m.SuperDisplayActive,
                 OnClick = delegate { if (m.OnToggleSuperDisplay != null) m.OnToggleSuperDisplay(); }
             });
@@ -614,10 +633,10 @@ namespace DualRemote
 
             items.Add(new CcMenuItem
             {
-                Text = "使用安全中转连接",
-                Subtitle = "画面卡顿时，可切换保守码率与抗丢包策略提升流畅度，仅本次远控生效。",
-                CheckSelected = m.SafeRelayMode,
-                OnClick = delegate { if (m.OnToggleSafeRelay != null) m.OnToggleSafeRelay(!m.SafeRelayMode); }
+                Icon = CcIcon.Activity,
+                Text = "弱网抗丢包",
+                Subtitle = "720p · 30 帧 · 3.5 Mbps，自适应码率",
+                OnClick = m.OnSelectWeakNetwork
             });
             return items;
         }
@@ -627,7 +646,7 @@ namespace DualRemote
             var items = new List<CcMenuItem>();
             items.Add(new CcMenuItem
             {
-                Text = "全屏自适应（无黑边）",
+                Text = "拉伸铺满",
                 RadioSelected = m.ScaleMode == 2,
                 OnClick = delegate
                 {
@@ -812,6 +831,7 @@ namespace DualRemote
             items.Add(new CcMenuItem { IsHeader = true, Text = "麦克风" });
             items.Add(new CcMenuItem
             {
+                Icon = CcIcon.Mic,
                 Text = "开启麦克风",
                 Subtitle = "Moonlight 串流暂不承载上行语音，建议配合语音工具或 RustDesk 音频通道。",
                 CheckSelected = m.MicEnabled,
@@ -879,7 +899,9 @@ namespace DualRemote
             var items = new List<CcMenuItem>();
             items.Add(new CcMenuItem
             {
+                Icon = CcIcon.Activity,
                 Text = "显示网络状态",
+                Subtitle = m.ConnectionRoute,
                 CheckSelected = m.ShowNetworkStats,
                 OnClick = delegate { if (m.OnToggleNetworkStats != null) m.OnToggleNetworkStats(!m.ShowNetworkStats); }
             });
@@ -909,7 +931,7 @@ namespace DualRemote
                 dlg.MinimizeBox = false;
                 dlg.StartPosition = FormStartPosition.CenterScreen;
                 dlg.TopMost = true;
-                dlg.BackColor = Color.White;
+                dlg.BackColor = Theme.Paper;
                 dlg.ClientSize = new Size(460, 360);
                 dlg.Font = new Font("Microsoft YaHei UI", 9.5f);
 
@@ -927,7 +949,7 @@ namespace DualRemote
                 {
                     Text = "内置远控快捷键（锁鼠模式下同样始终本地生效）",
                     Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold),
-                    ForeColor = Color.FromArgb(15, 23, 42),
+                    ForeColor = Theme.Ink,
                     AutoSize = true,
                     Margin = new Padding(0, 0, 0, 12)
                 };
@@ -952,7 +974,7 @@ namespace DualRemote
                     var lblDesc = new Label
                     {
                         Text = rows[i, 0],
-                        ForeColor = Color.FromArgb(51, 65, 85),
+                        ForeColor = Theme.BodyInk,
                         Dock = DockStyle.Fill,
                         TextAlign = ContentAlignment.MiddleLeft,
                         Height = 28
@@ -961,7 +983,7 @@ namespace DualRemote
                     {
                         Text = rows[i, 1],
                         Font = new Font("Consolas", 9.5f, FontStyle.Bold),
-                        ForeColor = Color.FromArgb(37, 99, 235),
+                        ForeColor = Theme.Accent,
                         Dock = DockStyle.Fill,
                         TextAlign = ContentAlignment.MiddleRight,
                         Height = 28
@@ -970,18 +992,12 @@ namespace DualRemote
                     layout.Controls.Add(lblKey, 1, i + 1);
                 }
 
-                var btnClose = new Button
-                {
-                    Text = "知道了",
-                    DialogResult = DialogResult.OK,
-                    BackColor = Color.FromArgb(37, 99, 235),
-                    ForeColor = Color.White,
-                    FlatStyle = FlatStyle.Flat,
-                    Size = new Size(104, 34),
-                    Anchor = AnchorStyles.Right,
-                    Cursor = Cursors.Hand
-                };
-                btnClose.FlatAppearance.BorderSize = 0;
+                var btnClose = Theme.Action("知道了", Theme.ButtonStyle.Primary);
+                btnClose.DialogResult = DialogResult.OK;
+                btnClose.Dock = DockStyle.None;
+                btnClose.Font = dlg.Font;
+                btnClose.Size = new Size(104, 34);
+                btnClose.Anchor = AnchorStyles.Right;
                 var bottom = new Panel { Dock = DockStyle.Bottom, Height = 52, Padding = new Padding(0, 8, 22, 10) };
                 btnClose.Location = new Point(dlg.ClientSize.Width - 126, 8);
                 bottom.Controls.Add(btnClose);
@@ -1079,7 +1095,7 @@ namespace DualRemote
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
-            BackColor = Color.White;
+            BackColor = Theme.Paper;
             DoubleBuffered = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
 
@@ -1376,13 +1392,9 @@ namespace DualRemote
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-            // Crisp pure white background + subtle hairline border
-            g.Clear(Color.White);
-            using (var borderPath = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), S(10)))
-            using (var borderPen = new Pen(Color.FromArgb(222, 228, 237), 1f))
-            {
-                g.DrawPath(borderPen, borderPath);
-            }
+            g.Clear(Theme.Paper);
+            Theme.Surface(g, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f),
+                S(10), Theme.Paper, Theme.StrokeStrong);
 
             if (volumeSliderMode)
             {
@@ -1405,56 +1417,46 @@ namespace DualRemote
                     if (it.IsSeparator)
                     {
                         int midY = r.Top + r.Height / 2;
-                        using (var sep = new Pen(Color.FromArgb(236, 240, 246), 1f))
+                        using (var sep = new Pen(Theme.Divider, 1f))
                             g.DrawLine(sep, r.Left, midY, r.Right, midY);
                         continue;
                     }
 
                     if (it.IsHeader)
                     {
-                        using (var hb = new SolidBrush(Color.FromArgb(100, 116, 139)))
+                        using (var hb = new SolidBrush(Theme.Muted))
                             g.DrawString(it.Text, hdrFont, hb, new Rectangle(r.Left + S(12), r.Top, r.Width - S(20), r.Height), leftFmt);
                         continue;
                     }
 
-                    bool isHover = (i == hoveredIndex || i == openSubmenuIndex) && it.Enabled;
-                    if (isHover)
+                    bool submenuOpen = i == openSubmenuIndex;
+                    if (it.Enabled && (i == hoveredIndex || submenuOpen))
                     {
-                        using (var hp = Theme.Round(r, S(7)))
-                        using (var hbg = new SolidBrush(it.IsDanger ? Color.FromArgb(254, 242, 242) : Color.FromArgb(238, 241, 246)))
-                            g.FillPath(hbg, hp);
+                        Color highlight = it.IsDanger ? Theme.AlertLight : submenuOpen ? Theme.AccentLight : Theme.SurfaceSubtle;
+                        Theme.Surface(g, r, S(6), highlight, Color.Transparent);
                     }
 
-                    Color fg = !it.Enabled
-                        ? Color.FromArgb(156, 163, 175)
-                        : (it.IsDanger ? Color.FromArgb(229, 57, 53) : Color.FromArgb(24, 33, 47));
-
-                    // Left icon OR radio dot OR checkmark
+                    Color fg = !it.Enabled ? Theme.Muted : it.IsDanger ? Theme.Alert : Theme.Ink;
                     int iconCenterX = r.Left + S(21);
                     int rowTopH = string.IsNullOrEmpty(it.Subtitle) ? r.Height : S(34);
                     int iconCenterY = r.Top + rowTopH / 2;
+                    float iconSize = S(16);
+                    var iconRect = new RectangleF(iconCenterX - iconSize / 2f, iconCenterY - iconSize / 2f, iconSize, iconSize);
 
-                    if (it.Icon != CcIcon.None)
+                    if (it.CheckSelected)
                     {
-                        DrawMenuIcon(g, it.Icon, iconCenterX, iconCenterY, S(16), fg);
+                        Theme.DrawGlyph(g, Theme.Glyph.Check, iconRect, it.Enabled ? Theme.Accent : Theme.Muted);
                     }
                     else if (it.RadioSelected)
                     {
                         float d = S(5.5f);
-                        using (var dot = new SolidBrush(Color.FromArgb(24, 33, 47)))
+                        using (var dot = new SolidBrush(it.Enabled ? Theme.Accent : Theme.Muted))
                             g.FillEllipse(dot, iconCenterX - d / 2f, iconCenterY - d / 2f, d, d);
                     }
-                    else if (it.CheckSelected)
+                    else if (it.Icon != CcIcon.None)
                     {
-                        using (var pen = new Pen(Color.FromArgb(24, 33, 47), Math.Max(1.6f, 1.6f * dpiScale)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
-                        {
-                            g.DrawLines(pen, new[]
-                            {
-                                new PointF(iconCenterX - S(5), iconCenterY),
-                                new PointF(iconCenterX - S(1.5f), iconCenterY + S(3.5f)),
-                                new PointF(iconCenterX + S(5.5f), iconCenterY - S(4))
-                            });
-                        }
+                        Color iconInk = it.IsDanger || !it.Enabled ? fg : submenuOpen ? Theme.Accent : Theme.BodyInk;
+                        DrawMenuIcon(g, it.Icon, iconRect, iconInk);
                     }
 
                     // Main text
@@ -1471,7 +1473,7 @@ namespace DualRemote
                     // Optional subtitle
                     if (!string.IsNullOrEmpty(it.Subtitle))
                     {
-                        using (var sb = new SolidBrush(Color.FromArgb(118, 128, 144)))
+                        using (var sb = new SolidBrush(Theme.Muted))
                         {
                             g.DrawString(it.Subtitle, subFont, sb,
                                 new RectangleF(textLeft, r.Top + S(31), r.Right - S(14) - textLeft, r.Height - S(34)));
@@ -1481,7 +1483,7 @@ namespace DualRemote
                     // Shortcut hint or submenu chevron
                     if (!string.IsNullOrEmpty(it.Shortcut))
                     {
-                        using (var scb = new SolidBrush(Color.FromArgb(148, 158, 172)))
+                        using (var scb = new SolidBrush(Theme.Muted))
                         {
                             g.DrawString(it.Shortcut, scFont, scb,
                                 new Rectangle(r.Right - S(116), r.Top, S(104), rowTopH), rightFmt);
@@ -1489,17 +1491,10 @@ namespace DualRemote
                     }
                     else if (it.SubmenuBuilder != null || it.IsVolumeSliderSubmenu)
                     {
-                        float cx = r.Right - S(14);
-                        float cy = iconCenterY;
-                        using (var cp = new Pen(Color.FromArgb(128, 138, 152), Math.Max(1.3f, 1.3f * dpiScale)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
-                        {
-                            g.DrawLines(cp, new[]
-                            {
-                                new PointF(cx - S(2.5f), cy - S(4)),
-                                new PointF(cx + S(2), cy),
-                                new PointF(cx - S(2.5f), cy + S(4))
-                            });
-                        }
+                        float chevronSize = S(13);
+                        var chevronRect = new RectangleF(r.Right - S(14) - chevronSize / 2f,
+                            iconCenterY - chevronSize / 2f, chevronSize, chevronSize);
+                        Theme.DrawGlyph(g, Theme.Glyph.ChevronRight, chevronRect, submenuOpen ? Theme.Accent : Theme.Muted);
                     }
                 }
             }
@@ -1508,22 +1503,27 @@ namespace DualRemote
         private void PaintVolumeSlider(Graphics g)
         {
             int effectiveVol = model.AudioMuted ? 0 : Math.Max(0, Math.Min(100, model.VolumePercent));
-            DrawMenuIcon(g, effectiveVol <= 0 ? CcIcon.SoundMuted : CcIcon.Sound,
-                speakerRect.Left + speakerRect.Width / 2, speakerRect.Top + speakerRect.Height / 2, S(18), Color.FromArgb(24, 33, 47));
+            bool muted = effectiveVol == 0;
+            Theme.Surface(g, speakerRect, S(6), muted ? Theme.AccentLight : Theme.SurfaceSubtle, Color.Transparent);
+            float speakerSize = S(18);
+            var speakerGlyph = new RectangleF(speakerRect.X + (speakerRect.Width - speakerSize) / 2f,
+                speakerRect.Y + (speakerRect.Height - speakerSize) / 2f, speakerSize, speakerSize);
+            Theme.DrawGlyph(g, muted ? Theme.Glyph.VolumeOff : Theme.Glyph.Volume, speakerGlyph,
+                muted ? Theme.Accent : Theme.BodyInk);
 
             using (var lblFont = new Font("Microsoft YaHei UI", 10f))
             using (var pctFont = new Font("Consolas", 9f, FontStyle.Bold))
-            using (var fg = new SolidBrush(Color.FromArgb(24, 33, 47)))
-            using (var muted = new SolidBrush(Color.FromArgb(100, 116, 139)))
+            using (var fg = new SolidBrush(Theme.Ink))
+            using (var hint = new SolidBrush(Theme.Muted))
             using (var fmt = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
             {
                 g.DrawString("音量", lblFont, fg, new Rectangle(S(50), 0, S(44), Height), fmt);
-                g.DrawString(effectiveVol + "%", pctFont, muted, new Rectangle(sliderTrackRect.Right + S(12), 0, S(42), Height), fmt);
+                g.DrawString(effectiveVol + "%", pctFont, hint, new Rectangle(sliderTrackRect.Right + S(12), 0, S(42), Height), fmt);
             }
 
             // Track background
             using (var trackPath = Theme.Round(sliderTrackRect, S(3)))
-            using (var trackBg = new SolidBrush(Color.FromArgb(224, 231, 240)))
+            using (var trackBg = new SolidBrush(Theme.StrokeStrong))
                 g.FillPath(trackBg, trackPath);
 
             // Active blue fill
@@ -1532,7 +1532,7 @@ namespace DualRemote
             {
                 var fillRect = new Rectangle(sliderTrackRect.X, sliderTrackRect.Y, Math.Max(S(4), fillW), sliderTrackRect.Height);
                 using (var fillPath = Theme.Round(fillRect, S(3)))
-                using (var fillBrush = new SolidBrush(Color.FromArgb(46, 125, 246)))
+                using (var fillBrush = new SolidBrush(Theme.Accent))
                     g.FillPath(fillBrush, fillPath);
             }
 
@@ -1540,155 +1540,69 @@ namespace DualRemote
             float thumbX = sliderTrackRect.X + fillW;
             float thumbY = sliderTrackRect.Y + sliderTrackRect.Height / 2f;
             float r = S(8);
-            using (var shadow = new SolidBrush(Color.FromArgb(36, 15, 23, 42)))
+            using (var shadow = new SolidBrush(Color.FromArgb(32, Theme.Ink)))
                 g.FillEllipse(shadow, thumbX - r, thumbY - r + 1.5f, r * 2f, r * 2f);
-            using (var white = new SolidBrush(Color.White))
-            using (var ring = new Pen(Color.FromArgb(46, 125, 246), Math.Max(2f, 2f * dpiScale)))
+            using (var white = new SolidBrush(Theme.Paper))
+            using (var ring = new Pen(Theme.Accent, Math.Max(2f, 2f * dpiScale)))
             {
                 g.FillEllipse(white, thumbX - r, thumbY - r, r * 2f, r * 2f);
                 g.DrawEllipse(ring, thumbX - r, thumbY - r, r * 2f, r * 2f);
             }
         }
 
-        private static void DrawMenuIcon(Graphics g, CcIcon icon, int cx, int cy, int size, Color color)
+        private static Theme.Glyph GetThemeGlyph(CcIcon icon)
         {
-            float s = size;
-            float x = cx - s / 2f;
-            float y = cy - s / 2f;
+            switch (icon)
+            {
+                case CcIcon.Monitor: return Theme.Glyph.Desktop;
+                case CcIcon.SwitchMonitor: return Theme.Glyph.SwitchDisplay;
+                case CcIcon.Quality: return Theme.Glyph.Image;
+                case CcIcon.Window: return Theme.Glyph.Window;
+                case CcIcon.Sound: return Theme.Glyph.Volume;
+                case CcIcon.SoundMuted: return Theme.Glyph.VolumeOff;
+                case CcIcon.Shield: return Theme.Glyph.Shield;
+                case CcIcon.Peripheral: return Theme.Glyph.Keypad;
+                case CcIcon.Tool: return Theme.Glyph.Gear;
+                case CcIcon.More: return Theme.Glyph.MoreDots;
+                case CcIcon.Fullscreen: return Theme.Glyph.Expand;
+                case CcIcon.Exit: return Theme.Glyph.Exit;
+                case CcIcon.Opacity: return Theme.Glyph.Sliders;
+                case CcIcon.PrivacyEye: return Theme.Glyph.EyeOff;
+                case CcIcon.Keyboard: return Theme.Glyph.Keyboard;
+                case CcIcon.Mouse: return Theme.Glyph.Mouse;
+                case CcIcon.Screenshot: return Theme.Glyph.Camera;
+                case CcIcon.Clipboard: return Theme.Glyph.Clipboard;
+                case CcIcon.Lock: return Theme.Glyph.Lock;
+                case CcIcon.Mic: return Theme.Glyph.Mic;
+                case CcIcon.Activity: return Theme.Glyph.Activity;
+                default: return Theme.Glyph.None;
+            }
+        }
+
+        private static void DrawMenuIcon(Graphics g, CcIcon icon, RectangleF area, Color color)
+        {
+            Theme.Glyph sharedGlyph = GetThemeGlyph(icon);
+            if (sharedGlyph != Theme.Glyph.None)
+            {
+                Theme.DrawGlyph(g, sharedGlyph, area, color);
+                return;
+            }
+
+            float s = area.Width;
+            float x = area.X;
+            float y = area.Y;
+            float cx = x + s / 2f;
+            float cy = y + s / 2f;
             float stroke = Math.Max(1.3f, s / 11.5f);
             using (var pen = new Pen(color, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
-            using (var brush = new SolidBrush(color))
             {
                 switch (icon)
                 {
-                    case CcIcon.Monitor:
-                        g.DrawRectangle(pen, x + s * 0.08f, y + s * 0.14f, s * 0.84f, s * 0.56f);
-                        g.DrawLine(pen, cx - s * 0.22f, y + s * 0.86f, cx + s * 0.22f, y + s * 0.86f);
-                        g.DrawLine(pen, cx, y + s * 0.70f, cx, y + s * 0.86f);
-                        break;
-                    case CcIcon.SwitchMonitor:
-                        g.DrawRectangle(pen, x + s * 0.08f, y + s * 0.16f, s * 0.56f, s * 0.44f);
-                        g.DrawLine(pen, x + s * 0.48f, y + s * 0.72f, x + s * 0.90f, y + s * 0.72f);
-                        g.DrawLine(pen, x + s * 0.76f, y + s * 0.58f, x + s * 0.90f, y + s * 0.72f);
-                        g.DrawLine(pen, x + s * 0.76f, y + s * 0.86f, x + s * 0.90f, y + s * 0.72f);
-                        break;
-                    case CcIcon.Quality:
-                        g.DrawRectangle(pen, x + s * 0.10f, y + s * 0.16f, s * 0.80f, s * 0.68f);
-                        g.DrawLines(pen, new[]
-                        {
-                            new PointF(x + s * 0.16f, y + s * 0.74f),
-                            new PointF(x + s * 0.38f, y + s * 0.48f),
-                            new PointF(x + s * 0.56f, y + s * 0.64f),
-                            new PointF(x + s * 0.72f, y + s * 0.42f),
-                            new PointF(x + s * 0.86f, y + s * 0.74f)
-                        });
-                        g.FillEllipse(brush, x + s * 0.26f, y + s * 0.28f, s * 0.13f, s * 0.13f);
-                        break;
-                    case CcIcon.Window:
-                        g.DrawRectangle(pen, x + s * 0.10f, y + s * 0.16f, s * 0.80f, s * 0.68f);
-                        g.DrawLine(pen, x + s * 0.10f, y + s * 0.36f, x + s * 0.90f, y + s * 0.36f);
-                        g.FillEllipse(brush, x + s * 0.20f, y + s * 0.23f, s * 0.08f, s * 0.08f);
-                        break;
-                    case CcIcon.Sound:
-                        g.DrawPolygon(pen, new[]
-                        {
-                            new PointF(x + s * 0.12f, y + s * 0.38f),
-                            new PointF(x + s * 0.32f, y + s * 0.38f),
-                            new PointF(x + s * 0.54f, y + s * 0.18f),
-                            new PointF(x + s * 0.54f, y + s * 0.82f),
-                            new PointF(x + s * 0.32f, y + s * 0.62f),
-                            new PointF(x + s * 0.12f, y + s * 0.62f)
-                        });
-                        g.DrawArc(pen, x + s * 0.50f, y + s * 0.30f, s * 0.24f, s * 0.40f, -55, 110);
-                        g.DrawArc(pen, x + s * 0.58f, y + s * 0.18f, s * 0.32f, s * 0.64f, -55, 110);
-                        break;
-                    case CcIcon.SoundMuted:
-                        g.DrawPolygon(pen, new[]
-                        {
-                            new PointF(x + s * 0.12f, y + s * 0.38f),
-                            new PointF(x + s * 0.32f, y + s * 0.38f),
-                            new PointF(x + s * 0.54f, y + s * 0.18f),
-                            new PointF(x + s * 0.54f, y + s * 0.82f),
-                            new PointF(x + s * 0.32f, y + s * 0.62f),
-                            new PointF(x + s * 0.12f, y + s * 0.62f)
-                        });
-                        g.DrawLine(pen, x + s * 0.66f, y + s * 0.36f, x + s * 0.90f, y + s * 0.64f);
-                        g.DrawLine(pen, x + s * 0.90f, y + s * 0.36f, x + s * 0.66f, y + s * 0.64f);
-                        break;
-                    case CcIcon.Shield:
-                        g.DrawPolygon(pen, new[]
-                        {
-                            new PointF(cx, y + s * 0.08f),
-                            new PointF(x + s * 0.86f, y + s * 0.24f),
-                            new PointF(x + s * 0.80f, y + s * 0.62f),
-                            new PointF(cx, y + s * 0.92f),
-                            new PointF(x + s * 0.20f, y + s * 0.62f),
-                            new PointF(x + s * 0.14f, y + s * 0.24f)
-                        });
-                        g.DrawLines(pen, new[]
-                        {
-                            new PointF(cx - s * 0.16f, cy + s * 0.02f),
-                            new PointF(cx - s * 0.02f, cy + s * 0.16f),
-                            new PointF(cx + s * 0.20f, cy - s * 0.12f)
-                        });
-                        break;
-                    case CcIcon.Peripheral:
-                        g.DrawLine(pen, cx, y + s * 0.14f, cx, y + s * 0.88f);
-                        g.DrawLine(pen, cx, y + s * 0.62f, x + s * 0.22f, y + s * 0.42f);
-                        g.DrawLine(pen, cx, y + s * 0.54f, x + s * 0.78f, y + s * 0.36f);
-                        g.FillEllipse(brush, cx - s * 0.10f, y + s * 0.08f, s * 0.20f, s * 0.20f);
-                        g.FillEllipse(brush, x + s * 0.14f, y + s * 0.34f, s * 0.16f, s * 0.16f);
-                        g.FillEllipse(brush, x + s * 0.70f, y + s * 0.28f, s * 0.16f, s * 0.16f);
-                        break;
-                    case CcIcon.Tool:
-                        g.DrawPolygon(pen, new[]
-                        {
-                            new PointF(cx, y + s * 0.10f),
-                            new PointF(x + s * 0.86f, y + s * 0.32f),
-                            new PointF(x + s * 0.86f, y + s * 0.70f),
-                            new PointF(cx, y + s * 0.92f),
-                            new PointF(x + s * 0.14f, y + s * 0.70f),
-                            new PointF(x + s * 0.14f, y + s * 0.32f)
-                        });
-                        g.DrawLine(pen, cx, cy, cx, y + s * 0.92f);
-                        g.DrawLine(pen, x + s * 0.14f, y + s * 0.32f, cx, cy);
-                        g.DrawLine(pen, x + s * 0.86f, y + s * 0.32f, cx, cy);
-                        break;
-                    case CcIcon.More:
-                        float b = s * 0.32f;
-                        g.DrawRectangle(pen, x + s * 0.12f, y + s * 0.12f, b, b);
-                        g.DrawRectangle(pen, x + s * 0.56f, y + s * 0.12f, b, b);
-                        g.DrawRectangle(pen, x + s * 0.12f, y + s * 0.56f, b, b);
-                        g.DrawRectangle(pen, x + s * 0.56f, y + s * 0.56f, b, b);
-                        break;
-                    case CcIcon.Fullscreen:
-                        float c = s * 0.24f;
-                        g.DrawLines(pen, new[] { new PointF(x + s * 0.12f, y + s * 0.12f + c), new PointF(x + s * 0.12f, y + s * 0.12f), new PointF(x + s * 0.12f + c, y + s * 0.12f) });
-                        g.DrawLines(pen, new[] { new PointF(x + s * 0.88f - c, y + s * 0.12f), new PointF(x + s * 0.88f, y + s * 0.12f), new PointF(x + s * 0.88f, y + s * 0.12f + c) });
-                        g.DrawLines(pen, new[] { new PointF(x + s * 0.12f, y + s * 0.88f - c), new PointF(x + s * 0.12f, y + s * 0.88f), new PointF(x + s * 0.12f + c, y + s * 0.88f) });
-                        g.DrawLines(pen, new[] { new PointF(x + s * 0.88f - c, y + s * 0.88f), new PointF(x + s * 0.88f, y + s * 0.88f), new PointF(x + s * 0.88f, y + s * 0.88f - c) });
-                        break;
                     case CcIcon.ExitFullscreen:
                         g.DrawLines(pen, new[] { new PointF(x + s * 0.14f, y + s * 0.36f), new PointF(x + s * 0.36f, y + s * 0.36f), new PointF(x + s * 0.36f, y + s * 0.14f) });
                         g.DrawLines(pen, new[] { new PointF(x + s * 0.86f, y + s * 0.36f), new PointF(x + s * 0.64f, y + s * 0.36f), new PointF(x + s * 0.64f, y + s * 0.14f) });
                         g.DrawLines(pen, new[] { new PointF(x + s * 0.14f, y + s * 0.64f), new PointF(x + s * 0.36f, y + s * 0.64f), new PointF(x + s * 0.36f, y + s * 0.86f) });
                         g.DrawLines(pen, new[] { new PointF(x + s * 0.86f, y + s * 0.64f), new PointF(x + s * 0.64f, y + s * 0.64f), new PointF(x + s * 0.64f, y + s * 0.86f) });
-                        break;
-                    case CcIcon.Exit:
-                        g.DrawLines(pen, new[]
-                        {
-                            new PointF(x + s * 0.56f, y + s * 0.14f),
-                            new PointF(x + s * 0.16f, y + s * 0.14f),
-                            new PointF(x + s * 0.16f, y + s * 0.86f),
-                            new PointF(x + s * 0.56f, y + s * 0.86f)
-                        });
-                        g.DrawLine(pen, x + s * 0.44f, cy, x + s * 0.88f, cy);
-                        g.DrawLines(pen, new[]
-                        {
-                            new PointF(x + s * 0.72f, cy - s * 0.18f),
-                            new PointF(x + s * 0.88f, cy),
-                            new PointF(x + s * 0.72f, cy + s * 0.18f)
-                        });
                         break;
                     case CcIcon.SuperScreen:
                         g.DrawRectangle(pen, x + s * 0.10f, y + s * 0.16f, s * 0.80f, s * 0.64f);
@@ -1697,40 +1611,8 @@ namespace DualRemote
                         break;
                     case CcIcon.MiniWindow:
                         g.DrawRectangle(pen, x + s * 0.10f, y + s * 0.18f, s * 0.80f, s * 0.64f);
-                        g.FillRectangle(brush, x + s * 0.48f, y + s * 0.46f, s * 0.34f, s * 0.26f);
-                        break;
-                    case CcIcon.Opacity:
-                        float q = s * 0.24f;
-                        g.DrawRectangle(pen, x + s * 0.14f, y + s * 0.14f, s * 0.72f, s * 0.72f);
-                        g.FillRectangle(brush, x + s * 0.14f, y + s * 0.14f, q, q);
-                        g.FillRectangle(brush, x + s * 0.14f + q, y + s * 0.14f + q, q, q);
-                        g.FillRectangle(brush, x + s * 0.14f + q * 2, y + s * 0.14f, q, q);
-                        g.FillRectangle(brush, x + s * 0.14f, y + s * 0.14f + q * 2, q, q);
-                        g.FillRectangle(brush, x + s * 0.14f + q * 2, y + s * 0.14f + q * 2, q, q);
-                        break;
-                    case CcIcon.PrivacyEye:
-                        g.DrawArc(pen, x + s * 0.10f, y + s * 0.26f, s * 0.80f, s * 0.48f, 15, 150);
-                        g.DrawLine(pen, x + s * 0.26f, y + s * 0.66f, x + s * 0.18f, y + s * 0.80f);
-                        g.DrawLine(pen, cx, y + s * 0.74f, cx, y + s * 0.88f);
-                        g.DrawLine(pen, x + s * 0.74f, y + s * 0.66f, x + s * 0.82f, y + s * 0.80f);
-                        break;
-                    case CcIcon.Keyboard:
-                        g.DrawRectangle(pen, x + s * 0.08f, y + s * 0.24f, s * 0.84f, s * 0.52f);
-                        g.DrawLine(pen, x + s * 0.22f, y + s * 0.42f, x + s * 0.78f, y + s * 0.42f);
-                        g.DrawLine(pen, x + s * 0.30f, y + s * 0.60f, x + s * 0.70f, y + s * 0.60f);
-                        break;
-                    case CcIcon.Mouse:
-                        using (var mp = Theme.Round(new RectangleF(x + s * 0.24f, y + s * 0.10f, s * 0.52f, s * 0.80f), s * 0.26f))
-                            g.DrawPath(pen, mp);
-                        g.DrawLine(pen, cx, y + s * 0.24f, cx, y + s * 0.42f);
-                        break;
-                    case CcIcon.Screenshot:
-                        g.DrawRectangle(pen, x + s * 0.12f, y + s * 0.22f, s * 0.76f, s * 0.58f);
-                        g.DrawEllipse(pen, cx - s * 0.16f, cy - s * 0.12f, s * 0.32f, s * 0.32f);
-                        break;
-                    case CcIcon.Clipboard:
-                        g.DrawRectangle(pen, x + s * 0.20f, y + s * 0.18f, s * 0.60f, s * 0.70f);
-                        g.DrawRectangle(pen, x + s * 0.34f, y + s * 0.10f, s * 0.32f, s * 0.14f);
+                        using (var fill = new SolidBrush(color))
+                            g.FillRectangle(fill, x + s * 0.48f, y + s * 0.46f, s * 0.34f, s * 0.26f);
                         break;
                     case CcIcon.Home:
                         g.DrawLines(pen, new[]
@@ -1740,10 +1622,6 @@ namespace DualRemote
                             new PointF(x + s * 0.88f, y + s * 0.50f)
                         });
                         g.DrawRectangle(pen, x + s * 0.24f, y + s * 0.48f, s * 0.52f, s * 0.38f);
-                        break;
-                    case CcIcon.Lock:
-                        g.DrawRectangle(pen, x + s * 0.20f, y + s * 0.44f, s * 0.60f, s * 0.44f);
-                        g.DrawArc(pen, x + s * 0.30f, y + s * 0.14f, s * 0.40f, s * 0.44f, 180, 180);
                         break;
                 }
             }

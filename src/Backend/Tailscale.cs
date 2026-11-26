@@ -73,6 +73,7 @@ namespace DualRemote
     {
         internal LinkProbeStatus Status;
         internal string Text = "";
+        internal PingPong LastPong;
 
         internal static LinkProbeResult Of(LinkProbeStatus status, string text)
         {
@@ -364,6 +365,7 @@ namespace DualRemote
             if (pongs.Count > 0)
             {
                 PingPong last = pongs[pongs.Count - 1];
+                probe.LastPong = last;
                 if (last.Direct) probe.Status = LinkProbeStatus.Reachable;
                 else if (last.Route.StartsWith("DERP(", StringComparison.Ordinal)
                     || last.Route.StartsWith("peer-relay(", StringComparison.Ordinal)) probe.Status = LinkProbeStatus.Relay;

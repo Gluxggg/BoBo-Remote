@@ -11,42 +11,44 @@ namespace DualRemote
 {
     internal static class RemoteTheme
     {
-        // UU-calibrated glacier ice-blue / porcelain white light system:
-        // L-frame (#F0F5F8) -> luminous ice-white workspace (#F7FBFE) -> pure elevated cards (#FFFFFF).
-        internal static readonly Color ChromeBg = Color.FromArgb(240, 245, 248);
-        internal static readonly Color Rail = Color.FromArgb(240, 245, 248);
-        internal static readonly Color Workspace = Color.FromArgb(247, 251, 254);
-        internal static readonly Color Paper = Color.FromArgb(255, 255, 255);
-        internal static readonly Color SurfaceSubtle = Color.FromArgb(241, 246, 250);
-        internal static readonly Color NavHover = Color.FromArgb(228, 235, 242);
-        internal static readonly Color NavActive = Color.FromArgb(221, 231, 241);
+        internal static readonly Color ChromeBg = Color.FromArgb(238, 240, 244);
+        internal static readonly Color Rail = ChromeBg;
+        internal static readonly Color Workspace = Color.FromArgb(245, 246, 248);
+        internal static readonly Color Paper = Color.FromArgb(252, 252, 253);
+        internal static readonly Color SurfaceSubtle = Color.FromArgb(238, 241, 245);
+        internal static readonly Color NavHover = Color.FromArgb(226, 232, 241);
+        internal static readonly Color NavActive = Color.FromArgb(220, 230, 246);
 
-        internal static readonly Color Ink = Color.FromArgb(26, 32, 44);
-        internal static readonly Color BodyInk = Color.FromArgb(74, 86, 104);
-        internal static readonly Color Muted = Color.FromArgb(125, 138, 154);
-        internal static readonly Color Placeholder = Color.FromArgb(164, 174, 186);
+        internal static readonly Color Ink = Color.FromArgb(29, 36, 49);
+        internal static readonly Color BodyInk = Color.FromArgb(60, 74, 94);
+        internal static readonly Color Muted = Color.FromArgb(86, 100, 120);
+        internal static readonly Color Placeholder = Color.FromArgb(102, 115, 135);
 
-        internal static readonly Color Stroke = Color.FromArgb(228, 236, 243);
-        internal static readonly Color StrokeStrong = Color.FromArgb(210, 221, 232);
-        internal static readonly Color Divider = Color.FromArgb(232, 238, 244);
-        internal static readonly Color WindowBorder = Color.FromArgb(212, 222, 233);
+        internal static readonly Color Stroke = Color.FromArgb(222, 227, 235);
+        internal static readonly Color StrokeStrong = Color.FromArgb(194, 204, 218);
+        internal static readonly Color Divider = Color.FromArgb(227, 231, 237);
+        internal static readonly Color WindowBorder = StrokeStrong;
 
-        internal static readonly Color Accent = Color.FromArgb(51, 122, 255);
-        internal static readonly Color AccentHover = Color.FromArgb(34, 102, 236);
-        internal static readonly Color AccentPressed = Color.FromArgb(24, 84, 206);
-        internal static readonly Color AccentLight = Color.FromArgb(235, 243, 255);
-        internal static readonly Color AccentBorder = Color.FromArgb(192, 217, 255);
-        internal static readonly Color AccentSky = Color.FromArgb(108, 182, 255);
+        internal static readonly Color Accent = Color.FromArgb(53, 90, 151);
+        internal static readonly Color AccentHover = Color.FromArgb(46, 82, 137);
+        internal static readonly Color AccentPressed = Color.FromArgb(39, 71, 121);
+        internal static readonly Color AccentLight = Color.FromArgb(234, 240, 249);
+        internal static readonly Color AccentBorder = Color.FromArgb(191, 207, 231);
+        internal static readonly Color AccentSky = Color.FromArgb(134, 159, 198);
 
-        internal static readonly Color DisabledBg = Color.FromArgb(201, 208, 218);
-        internal static readonly Color DisabledText = Color.FromArgb(255, 255, 255);
+        internal static readonly Color DisabledBg = Color.FromArgb(230, 233, 239);
+        internal static readonly Color DisabledText = Muted;
 
-        internal static readonly Color Success = Color.FromArgb(18, 158, 78);
-        internal static readonly Color SuccessLight = Color.FromArgb(236, 251, 243);
-        internal static readonly Color Warning = Color.FromArgb(198, 122, 16);
-        internal static readonly Color WarningLight = Color.FromArgb(253, 249, 240);
-        internal static readonly Color Alert = Color.FromArgb(220, 48, 56);
-        internal static readonly Color AlertLight = Color.FromArgb(254, 242, 243);
+        internal static readonly Color Success = Color.FromArgb(36, 111, 74);
+        internal static readonly Color SuccessLight = Color.FromArgb(233, 243, 237);
+        internal static readonly Color Warning = Color.FromArgb(128, 83, 20);
+        internal static readonly Color WarningLight = Color.FromArgb(250, 241, 225);
+        internal static readonly Color Alert = Color.FromArgb(160, 48, 63);
+        internal static readonly Color AlertLight = Color.FromArgb(249, 235, 238);
+        internal static readonly Color VideoBackdrop = Color.FromArgb(19, 24, 34);
+        internal static readonly Color OverlaySurface = Color.FromArgb(35, 44, 59);
+        internal static readonly Color OverlayInk = Color.FromArgb(242, 245, 250);
+        internal static readonly Color OverlayMuted = Color.FromArgb(189, 201, 222);
 
         private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.5f);
         private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 8.5f);
@@ -74,7 +76,9 @@ namespace DualRemote
             Chip,
             ToolbarAction,
             IconGhost,
-            DangerPill
+            DangerPill,
+            WarningSoft,
+            DangerSoft
         }
 
         internal enum Glyph
@@ -116,7 +120,23 @@ namespace DualRemote
             Network,
             MoreDots,
             Trash,
-            Lock
+            Lock,
+            Keypad,
+            Activity,
+            Sliders,
+            Mouse,
+            Volume,
+            VolumeOff,
+            Expand,
+            SwitchDisplay,
+            Keyboard,
+            Camera,
+            Mic,
+            Window,
+            Clipboard,
+            Exit,
+            Search,
+            WarningMark
         }
 
         internal enum PillTone { Neutral, Success, Warning, Alert, Info }
@@ -457,7 +477,7 @@ namespace DualRemote
         internal static void ChangeGlyph(Button button, Glyph glyph)
         {
             var action = button as ActionButton;
-            if (action == null) return;
+            if (action == null || action.Icon == glyph) return;
             action.Icon = glyph;
             action.Invalidate();
         }
@@ -465,7 +485,7 @@ namespace DualRemote
         internal static void ChangeStyle(Button button, ButtonStyle style)
         {
             var action = button as ActionButton;
-            if (action == null) return;
+            if (action == null || action.Style == style) return;
             action.Style = style;
             action.Invalidate();
         }
@@ -663,7 +683,7 @@ namespace DualRemote
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = e.Graphics.DpiX / 96f;
-                Color border = focused ? Accent : hovered ? Color.FromArgb(182, 190, 204) : StrokeStrong;
+                Color border = focused ? Accent : hovered ? AccentBorder : StrokeStrong;
                 Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, Paper, border, focused ? 1.4f : 1f);
             }
         }
@@ -992,15 +1012,22 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Secondary)
                     {
-                        background = !Enabled ? SurfaceSubtle : pressed ? Color.FromArgb(236, 240, 246) : glow ? SurfaceSubtle : Paper;
-                        stroke = glow ? Color.FromArgb(186, 194, 208) : StrokeStrong;
+                        background = !Enabled ? SurfaceSubtle : pressed ? NavHover : glow ? SurfaceSubtle : Paper;
+                        stroke = glow ? AccentBorder : StrokeStrong;
                         text = Enabled ? Ink : Muted;
                     }
                     else if (style == ButtonStyle.AccentSoft)
                     {
-                        background = pressed ? Color.FromArgb(215, 229, 255) : glow ? Color.FromArgb(225, 236, 255) : AccentLight;
-                        stroke = AccentBorder;
+                        background = Active || pressed ? NavActive : glow ? NavHover : AccentLight;
+                        stroke = Active ? Accent : AccentBorder;
                         text = Accent;
+                    }
+                    else if (style == ButtonStyle.WarningSoft || style == ButtonStyle.DangerSoft)
+                    {
+                        bool warning = style == ButtonStyle.WarningSoft;
+                        text = warning ? Warning : Alert;
+                        background = warning ? WarningLight : AlertLight;
+                        stroke = glow ? text : Color.Transparent;
                     }
                     else if (style == ButtonStyle.Chip)
                     {
@@ -1045,7 +1072,7 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.Close)
                     {
-                        background = glow ? Color.FromArgb(232, 17, 35) : surface;
+                        background = glow ? Alert : surface;
                         text = glow ? Paper : BodyInk;
                     }
                     else if (style == ButtonStyle.Caption)
@@ -1055,8 +1082,9 @@ namespace DualRemote
                     }
                     else if (style == ButtonStyle.DangerPill)
                     {
-                        background = !Enabled ? DisabledBg : pressed ? Color.FromArgb(172, 32, 42) : glow ? Color.FromArgb(232, 52, 64) : Alert;
-                        text = Paper;
+                        background = !Enabled ? DisabledBg : Alert;
+                        stroke = glow ? Ink : Color.Transparent;
+                        text = Enabled ? Paper : DisabledText;
                     }
 
                     if (!Enabled && style != ButtonStyle.Primary && style != ButtonStyle.DangerPill) text = Muted;
@@ -1077,27 +1105,30 @@ namespace DualRemote
                         Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), radius, background, stroke);
                     }
 
-                    // UU signature left blue vertical pill on active navigation item
+                    // Inset accent marker for the active page
                     if (style == ButtonStyle.Navigation && Active)
                     {
-                        float barW = Math.Max(3.2f, 3.2f * scale);
+                        float barW = Math.Max(2.5f, 2.5f * scale);
                         float barH = Math.Min(Height - 14f * scale, 18f * scale);
-                        Surface(g, new RectangleF(1.5f * scale, (Height - barH) / 2f, barW, barH), barW * 0.5f, Accent, Color.Transparent);
+                        Surface(g, new RectangleF(1.5f * scale, (Height - barH) / 2f, barW, barH), barW * 0.5f, SystemInformation.HighContrast ? text : Accent, Color.Transparent);
                     }
 
-                    // UU signature centered short blue underline on active settings tab
+                    // Accent underline for the active tab
                     if (style == ButtonStyle.UnderlineTab && Active)
                     {
                         float lineW = Math.Min(Width - 8f * scale, 22f * scale);
                         float lineH = Math.Max(2.5f, 2.5f * scale);
-                        Surface(g, new RectangleF((Width - lineW) / 2f, Height - lineH - 1f, lineW, lineH), lineH * 0.5f, Accent, Color.Transparent);
+                        Surface(g, new RectangleF((Width - lineW) / 2f, Height - lineH - 1f, lineW, lineH), lineH * 0.5f, SystemInformation.HighContrast ? text : Accent, Color.Transparent);
                     }
 
                     if (keyboardFocus && Focused && style != ButtonStyle.Caption && style != ButtonStyle.Close)
-                        FocusOutline(g, new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f), Math.Max(2f, radius - 1f), AccentBorder, 1.5f);
+                        FocusOutline(g, new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f), Math.Max(2f, radius - 1f),
+                            SystemInformation.HighContrast || style == ButtonStyle.Primary || style == ButtonStyle.DangerPill ? text : Accent, 1.5f);
 
-                    glyphColor = CustomGlyphColor.IsEmpty ? text : CustomGlyphColor;
-                    if (!Enabled) glyphColor = Muted;
+                    glyphColor = CustomGlyphColor.IsEmpty || SystemInformation.HighContrast ? text : CustomGlyphColor;
+                    if (style == ButtonStyle.Navigation && Enabled && CustomGlyphColor == Accent && !Active) glyphColor = BodyInk;
+                    if (style == ButtonStyle.Navigation && Enabled && Active && !SystemInformation.HighContrast) glyphColor = Accent;
+                    if (!Enabled) glyphColor = text;
                     if (style == ButtonStyle.Primary || style == ButtonStyle.DangerPill) glyphColor = text;
 
                     Font drawFont = Font;
@@ -1183,7 +1214,7 @@ namespace DualRemote
             }
         }
 
-        /// <summary>UU 风格纯白浮层卡片（轻柔 8px 圆角 + 极细瓷感描边 + 微弱冷色底部浮影）。</summary>
+        /// <summary>浅色内容卡片。</summary>
         internal sealed class Card : Panel
         {
             internal bool DashedBorder;
@@ -1217,10 +1248,7 @@ namespace DualRemote
                     }
                     return;
                 }
-                // Whisper-soft cool ambient elevation underneath the pure-white card on #F7FBFE workspace
-                var shadowBox = new RectangleF(1f, 1.5f, Width - 2f, Height - 2f);
-                Surface(e.Graphics, shadowBox, radius, Color.FromArgb(14, 24, 56, 98), Color.Transparent);
-                var box = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 2f);
+                var box = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
                 Surface(e.Graphics, box, radius, Paper, Stroke, 1f);
             }
         }
@@ -1596,6 +1624,8 @@ namespace DualRemote
                 float d = h - pad * 2f;
                 float thumbX = Checked ? x + w - d - pad : x + pad;
                 Color thumbColor = Checked ? Paper : (Enabled ? BodyInk : Muted);
+                if (Focused && ShowFocusCues)
+                    FocusOutline(g, new RectangleF(x - 2f, y - 2f, w + 4f, h + 4f), h / 2f + 2f, Accent, 1.4f);
                 using (var dot = new SolidBrush(thumbColor))
                     g.FillEllipse(dot, thumbX, y + pad, d, d);
             }
@@ -1640,8 +1670,8 @@ namespace DualRemote
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-                Color fill = Color.FromArgb(230, 236, 242);
-                Color fg = Color.FromArgb(98, 110, 126);
+                Color fill = SurfaceSubtle;
+                Color fg = BodyInk;
                 if (tone == PillTone.Success) { fill = SuccessLight; fg = Success; }
                 else if (tone == PillTone.Warning) { fill = WarningLight; fg = Warning; }
                 else if (tone == PillTone.Alert) { fill = AlertLight; fg = Alert; }
@@ -1695,29 +1725,29 @@ namespace DualRemote
                 textColor = BodyInk;
                 if (tone == PillTone.Success)
                 {
-                    bg = Color.FromArgb(240, 251, 245);
-                    border = Color.FromArgb(204, 238, 218);
+                    bg = SuccessLight;
+                    border = Stroke;
                     dotColor = Success;
-                    textColor = Color.FromArgb(21, 118, 62);
+                    textColor = Success;
                 }
                 else if (tone == PillTone.Warning)
                 {
-                    bg = Color.FromArgb(253, 249, 240);
-                    border = Color.FromArgb(242, 226, 192);
+                    bg = WarningLight;
+                    border = Stroke;
                     dotColor = Warning;
-                    textColor = Color.FromArgb(118, 82, 24);
+                    textColor = Warning;
                 }
                 else if (tone == PillTone.Alert)
                 {
-                    bg = Color.FromArgb(254, 244, 244);
-                    border = Color.FromArgb(248, 210, 212);
+                    bg = AlertLight;
+                    border = Stroke;
                     dotColor = Alert;
-                    textColor = Color.FromArgb(182, 34, 42);
+                    textColor = Alert;
                 }
                 else if (tone == PillTone.Info)
                 {
-                    bg = Color.FromArgb(240, 247, 255);
-                    border = Color.FromArgb(214, 231, 250);
+                    bg = AccentLight;
+                    border = AccentBorder;
                     dotColor = Accent;
                     textColor = BodyInk;
                 }
@@ -1739,12 +1769,19 @@ namespace DualRemote
                 Color bg, border, dotColor, textColor;
                 GetTonePalette(out bg, out border, out dotColor, out textColor);
 
+                if (SystemInformation.HighContrast)
+                {
+                    bg = SystemColors.Window;
+                    border = SystemColors.WindowFrame;
+                    dotColor = textColor = SystemColors.WindowText;
+                }
                 Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 8f * scale, bg, border);
-                float d = 7f * scale;
-                using (var dot = new SolidBrush(dotColor))
-                    g.FillEllipse(dot, 14f * scale, (Height - d) / 2f, d, d);
+                Glyph marker = tone == PillTone.Success ? Glyph.Check :
+                    tone == PillTone.Warning || tone == PillTone.Alert ? Glyph.WarningMark : Glyph.Info;
+                float iconSize = (float)Math.Round(16f * scale);
+                DrawGlyph(g, marker, new RectangleF(12f * scale, (Height - iconSize) / 2f, iconSize, iconSize), dotColor);
 
-                int leftPad = (int)Math.Round(30 * scale);
+                int leftPad = (int)Math.Round(36 * scale);
                 int rightPad = (int)Math.Round(14 * scale);
                 var textRect = new Rectangle(leftPad, 0, Math.Max(16, Width - leftPad - rightPad), Height);
                 TextRenderer.DrawText(g, messageText, SmallFont, textRect, textColor,
@@ -1759,12 +1796,12 @@ namespace DualRemote
             var state = g.Save();
             g.SmoothingMode = SmoothingMode.HighQuality;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            float dim = Math.Max(8f, (float)Math.Round(Math.Min(area.Width, area.Height)));
+            float dim = (float)Math.Round(Math.Min(area.Width, area.Height));
             float ox = (float)Math.Round(area.X + (area.Width - dim) * 0.5f);
             float oy = (float)Math.Round(area.Y + (area.Height - dim) * 0.5f);
             g.TranslateTransform(ox, oy);
             g.ScaleTransform(dim / 24f, dim / 24f);
-            float strokeW = Math.Max(1.85f, Math.Min(2.35f, 1.38f * 24f / dim));
+            float strokeW = Math.Max(1.7f, Math.Min(3.2f, 1.5f * 24f / dim));
             using (var p = new Pen(color, strokeW) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
             using (var fill = new SolidBrush(color))
             {
@@ -1779,22 +1816,13 @@ namespace DualRemote
                             g.DrawPath(p, phone);
                         break;
                     case Glyph.AllDevices:
-                        if (color == Accent)
+                        for (int row = 0; row < 2; row++)
                         {
-                            using (var sky = new SolidBrush(AccentSky))
+                            for (int col = 0; col < 2; col++)
                             {
-                                g.FillEllipse(fill, 3.6f, 3.6f, 7.2f, 7.2f);
-                                g.FillEllipse(sky, 13.2f, 3.6f, 7.2f, 7.2f);
-                                g.FillEllipse(sky, 3.6f, 13.2f, 7.2f, 7.2f);
-                                g.FillEllipse(fill, 13.2f, 13.2f, 7.2f, 7.2f);
+                                using (var tile = Round(new RectangleF(3.8f + col * 9.6f, 3.8f + row * 9.6f, 6.8f, 6.8f), 1.4f))
+                                    g.DrawPath(p, tile);
                             }
-                        }
-                        else
-                        {
-                            using (var r1 = Round(new RectangleF(3.5f, 3.5f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r1);
-                            using (var r2 = Round(new RectangleF(13.3f, 3.5f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r2);
-                            using (var r3 = Round(new RectangleF(3.5f, 13.3f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r3);
-                            using (var r4 = Round(new RectangleF(13.3f, 13.3f, 7.2f, 7.2f), 2.4f)) g.FillPath(fill, r4);
                         }
                         break;
                     case Glyph.WindowsTile:
@@ -1810,63 +1838,22 @@ namespace DualRemote
                         g.DrawLine(p, 7.5f, 19.8f, 16.5f, 19.8f);
                         break;
                     case Glyph.Assist:
-                        // UU-inspired luminous two-tone linked screens
-                        if (color == Accent)
-                        {
-                            using (var sky = new SolidBrush(AccentSky))
-                            using (var white = new SolidBrush(Paper))
-                            {
-                                using (var backBox = Round(new RectangleF(9.5f, 3.6f, 11.2f, 9f), 2.2f))
-                                    g.FillPath(sky, backBox);
-                                using (var frontBox = Round(new RectangleF(3.3f, 11.2f, 11.6f, 9.2f), 2.2f))
-                                    g.FillPath(fill, frontBox);
-                                using (var inner = Round(new RectangleF(6.2f, 14f, 5.8f, 3.4f), 1.1f))
-                                    g.FillPath(white, inner);
-                            }
-                        }
-                        else
-                        {
-                            using (var topBox = Round(new RectangleF(10.5f, 3.5f, 10f, 8.2f), 1.8f))
-                                g.DrawPath(p, topBox);
-                            using (var botBox = Round(new RectangleF(3.5f, 12.3f, 10f, 8.2f), 1.8f))
-                                g.FillPath(fill, botBox);
-                        }
+                        using (var screen = Round(new RectangleF(3.2f, 4.5f, 17.6f, 12.8f), 2f))
+                            g.DrawPath(p, screen);
+                        g.DrawLine(p, 8f, 20.4f, 16f, 20.4f);
+                        g.DrawLine(p, 8f, 13.4f, 15.7f, 8.2f);
+                        g.DrawLines(p, new[] { new PointF(11.7f, 8.2f), new PointF(15.7f, 8.2f), new PointF(15.7f, 12.2f) });
                         break;
                     case Glyph.Star:
-                        if (color == Accent)
+                        var star = new PointF[10];
+                        for (int i = 0; i < star.Length; i++)
                         {
-                            // UU-style solid azure bookmark ribbon with crisp white star cutout
-                            using (var ribbon = new GraphicsPath())
-                            {
-                                ribbon.AddArc(4.6f, 3.2f, 4.4f, 4.4f, 180, 90);
-                                ribbon.AddArc(15f, 3.2f, 4.4f, 4.4f, 270, 90);
-                                ribbon.AddLine(19.4f, 5.4f, 19.4f, 20.6f);
-                                ribbon.AddLine(19.4f, 20.6f, 12f, 17f);
-                                ribbon.AddLine(12f, 17f, 4.6f, 20.6f);
-                                ribbon.CloseFigure();
-                                g.FillPath(fill, ribbon);
-                            }
-                            PointF[] miniStar = new PointF[10];
-                            for (int i = 0; i < 10; i++)
-                            {
-                                double a = -Math.PI / 2 + i * Math.PI / 5;
-                                float r = (i % 2 == 0) ? 4.3f : 2.0f;
-                                miniStar[i] = new PointF(12f + (float)(r * Math.Cos(a)), 10.6f + (float)(r * Math.Sin(a)));
-                            }
-                            using (var white = new SolidBrush(Paper))
-                                g.FillPolygon(white, miniStar);
+                            double angle = -Math.PI / 2 + i * Math.PI / 5;
+                            float radius = i % 2 == 0 ? 8.8f : 4.3f;
+                            star[i] = new PointF(12f + radius * (float)Math.Cos(angle), 12.6f + radius * (float)Math.Sin(angle));
                         }
-                        else
-                        {
-                            PointF[] starPts = new PointF[10];
-                            for (int i = 0; i < 10; i++)
-                            {
-                                double a = -Math.PI / 2 + i * Math.PI / 5;
-                                float r = (i % 2 == 0) ? 8.6f : 3.9f;
-                                starPts[i] = new PointF(12f + (float)(r * Math.Cos(a)), 12.4f + (float)(r * Math.Sin(a)));
-                            }
-                            g.DrawPolygon(p, starPts);
-                        }
+                        if (color == Accent) g.FillPolygon(fill, star);
+                        g.DrawPolygon(p, star);
                         break;
                     case Glyph.Link:
                         g.DrawLines(p, new[] { new PointF(4f, 8f), new PointF(19.5f, 8f), new PointF(15.5f, 4.2f) });
@@ -1925,6 +1912,10 @@ namespace DualRemote
                         g.DrawLine(p, 12f, 5.2f, 12f, 18.8f);
                         break;
                     case Glyph.Pin:
+                        g.DrawPolygon(p, new[] { new PointF(8f, 4f), new PointF(16f, 4f), new PointF(15f, 9f),
+                            new PointF(18f, 13.2f), new PointF(6f, 13.2f), new PointF(9f, 9f) });
+                        g.DrawLine(p, 12f, 13.2f, 12f, 20.5f);
+                        break;
                     case Glyph.Lock:
                         using (var body = Round(new RectangleF(5.2f, 10.6f, 13.6f, 9.4f), 2f))
                             g.DrawPath(p, body);
@@ -1964,38 +1955,20 @@ namespace DualRemote
                         g.DrawLines(p, new[] { new PointF(4.5f, 17f), new PointF(9.2f, 12.2f), new PointF(13f, 15.2f), new PointF(16f, 11.4f), new PointF(19.6f, 17f) });
                         break;
                     case Glyph.Eye:
-                        if (color == Accent)
-                        {
-                            using (var eye = new GraphicsPath())
-                            using (var sky = new SolidBrush(AccentSky))
-                            using (var white = new SolidBrush(Paper))
-                            {
-                                eye.AddBezier(2.6f, 12f, 6.6f, 5.4f, 17.4f, 5.4f, 21.4f, 12f);
-                                eye.AddBezier(21.4f, 12f, 17.4f, 18.6f, 6.6f, 18.6f, 2.6f, 12f);
-                                g.FillPath(sky, eye);
-                                g.FillEllipse(white, 8.2f, 8.2f, 7.6f, 7.6f);
-                                g.FillEllipse(fill, 9.7f, 9.7f, 4.6f, 4.6f);
-                            }
-                        }
-                        else
-                        {
-                            using (var eye = new GraphicsPath())
-                            {
-                                eye.AddBezier(3f, 12f, 6.8f, 6f, 17.2f, 6f, 21f, 12f);
-                                eye.AddBezier(21f, 12f, 17.2f, 18f, 6.8f, 18f, 3f, 12f);
-                                g.DrawPath(p, eye);
-                            }
-                            g.DrawEllipse(p, 9.3f, 9.3f, 5.4f, 5.4f);
-                        }
-                        break;
-                    case Glyph.EyeOff:
                         using (var eye = new GraphicsPath())
                         {
-                            eye.AddBezier(3f, 12f, 6.8f, 6f, 17.2f, 6f, 21f, 12f);
-                            eye.AddBezier(21f, 12f, 17.2f, 18f, 6.8f, 18f, 3f, 12f);
+                            eye.AddBezier(3f, 12f, 7.5f, 5.8f, 16.5f, 5.8f, 21f, 12f);
+                            eye.AddBezier(21f, 12f, 16.5f, 18.2f, 7.5f, 18.2f, 3f, 12f);
                             g.DrawPath(p, eye);
                         }
-                        g.DrawLine(p, 4.5f, 4.5f, 19.5f, 19.5f);
+                        g.FillEllipse(fill, 9.6f, 9.6f, 4.8f, 4.8f);
+                        break;
+                    case Glyph.EyeOff:
+                        g.DrawBezier(p, 11.2f, 7.3f, 15f, 6.5f, 19f, 9.2f, 21f, 12f);
+                        g.DrawBezier(p, 21f, 12f, 20.3f, 13.1f, 19.6f, 13.7f, 18.6f, 14.5f);
+                        g.DrawBezier(p, 5.5f, 9.5f, 4.5f, 10.1f, 3.6f, 11.1f, 3f, 12f);
+                        g.DrawBezier(p, 3f, 12f, 5.2f, 15.5f, 9.8f, 17.7f, 13.4f, 16.6f);
+                        g.DrawLine(p, 4.2f, 4.2f, 19.8f, 19.8f);
                         break;
                     case Glyph.Check:
                         g.DrawLines(p, new[] { new PointF(5.2f, 12.5f), new PointF(10f, 17.2f), new PointF(18.8f, 7.2f) });
@@ -2019,14 +1992,106 @@ namespace DualRemote
                         g.DrawLine(p, 12.5f, 15.2f, 17f, 15.2f);
                         break;
                     case Glyph.Network:
-                        g.DrawEllipse(p, 3.4f, 3.4f, 17.2f, 17.2f);
-                        g.DrawLine(p, 3.4f, 12f, 20.6f, 12f);
-                        g.DrawEllipse(p, 8.2f, 3.4f, 7.6f, 17.2f);
+                        g.DrawLines(p, new[] { new PointF(5.7f, 16.2f), new PointF(12f, 7f), new PointF(18.3f, 16.2f) });
+                        g.FillEllipse(fill, 9.35f, 4.35f, 5.3f, 5.3f);
+                        g.FillEllipse(fill, 3.05f, 13.55f, 5.3f, 5.3f);
+                        g.FillEllipse(fill, 15.65f, 13.55f, 5.3f, 5.3f);
+                        break;
+                    case Glyph.WarningMark:
+                        g.DrawPolygon(p, new[] { new PointF(12f, 3.7f), new PointF(20.6f, 19.6f), new PointF(3.4f, 19.6f) });
+                        g.DrawLine(p, 12f, 9f, 12f, 13.1f);
+                        g.FillEllipse(fill, 10.9f, 15.2f, 2.2f, 2.2f);
                         break;
                     case Glyph.MoreDots:
                         g.FillEllipse(fill, 10.5f, 4.8f, 3f, 3f);
                         g.FillEllipse(fill, 10.5f, 10.5f, 3f, 3f);
                         g.FillEllipse(fill, 10.5f, 16.2f, 3f, 3f);
+                        break;
+                    case Glyph.Keypad:
+                        using (var pad = Round(new RectangleF(5.4f, 3.4f, 13.2f, 17.2f), 2.2f))
+                            g.DrawPath(p, pad);
+                        for (int row = 0; row < 3; row++)
+                            for (int col = 0; col < 2; col++)
+                                g.FillEllipse(fill, 8f + col * 5.5f, 6.9f + row * 4f, 2.4f, 2.4f);
+                        break;
+                    case Glyph.Activity:
+                        g.DrawLines(p, new[] { new PointF(3.4f, 12.5f), new PointF(7.8f, 12.5f), new PointF(10.8f, 5.4f),
+                            new PointF(14f, 18.6f), new PointF(16.8f, 12.5f), new PointF(20.6f, 12.5f) });
+                        break;
+                    case Glyph.Sliders:
+                        g.DrawLine(p, 3.5f, 8f, 7f, 8f);
+                        g.DrawLine(p, 12f, 8f, 20.5f, 8f);
+                        g.DrawEllipse(p, 7f, 5.5f, 5f, 5f);
+                        g.DrawLine(p, 3.5f, 16f, 12f, 16f);
+                        g.DrawLine(p, 17f, 16f, 20.5f, 16f);
+                        g.DrawEllipse(p, 12f, 13.5f, 5f, 5f);
+                        break;
+                    case Glyph.Mouse:
+                        using (var mouse = Round(new RectangleF(6.4f, 3.6f, 11.2f, 16.8f), 5.4f))
+                            g.DrawPath(p, mouse);
+                        g.DrawLine(p, 12f, 7f, 12f, 10.2f);
+                        break;
+                    case Glyph.Volume:
+                    case Glyph.VolumeOff:
+                        g.DrawPolygon(p, new[] { new PointF(3.6f, 9.2f), new PointF(7.4f, 9.2f), new PointF(12.2f, 5.1f),
+                            new PointF(12.2f, 18.9f), new PointF(7.4f, 14.8f), new PointF(3.6f, 14.8f) });
+                        if (icon == Glyph.Volume) g.DrawArc(p, 10f, 5.8f, 10.1f, 12.4f, -58f, 116f);
+                        else
+                        {
+                            g.DrawLine(p, 15.4f, 9.6f, 20.3f, 14.4f);
+                            g.DrawLine(p, 15.4f, 14.4f, 20.3f, 9.6f);
+                        }
+                        break;
+                    case Glyph.Expand:
+                        g.DrawLines(p, new[] { new PointF(4.6f, 9.2f), new PointF(4.6f, 4.6f), new PointF(9.2f, 4.6f) });
+                        g.DrawLines(p, new[] { new PointF(14.8f, 4.6f), new PointF(19.4f, 4.6f), new PointF(19.4f, 9.2f) });
+                        g.DrawLines(p, new[] { new PointF(4.6f, 14.8f), new PointF(4.6f, 19.4f), new PointF(9.2f, 19.4f) });
+                        g.DrawLines(p, new[] { new PointF(14.8f, 19.4f), new PointF(19.4f, 19.4f), new PointF(19.4f, 14.8f) });
+                        break;
+                    case Glyph.SwitchDisplay:
+                        using (var frontScreen = Round(new RectangleF(3.6f, 8.3f, 13.3f, 10.8f), 1.8f))
+                            g.DrawPath(p, frontScreen);
+                        g.DrawLines(p, new[] { new PointF(7.5f, 5f), new PointF(20.4f, 5f), new PointF(20.4f, 15.1f) });
+                        break;
+                    case Glyph.Keyboard:
+                        using (var keys = Round(new RectangleF(3.1f, 6f, 17.8f, 12f), 2f))
+                            g.DrawPath(p, keys);
+                        for (int col = 0; col < 3; col++) g.FillEllipse(fill, 6.4f + col * 4.3f, 8.9f, 2.5f, 2.5f);
+                        g.DrawLine(p, 7.6f, 14.2f, 16.4f, 14.2f);
+                        break;
+                    case Glyph.Camera:
+                        using (var camera = Round(new RectangleF(3.4f, 6.8f, 17.2f, 12f), 2f))
+                            g.DrawPath(p, camera);
+                        g.DrawLine(p, 9f, 4.6f, 15f, 4.6f);
+                        g.DrawEllipse(p, 9f, 9.7f, 6f, 6f);
+                        break;
+                    case Glyph.Mic:
+                        using (var mic = Round(new RectangleF(8.7f, 3.6f, 6.6f, 10.7f), 3.3f))
+                            g.DrawPath(p, mic);
+                        g.DrawArc(p, 5.7f, 6.7f, 12.6f, 11.3f, 0f, 180f);
+                        g.DrawLine(p, 12f, 18f, 12f, 20.6f);
+                        break;
+                    case Glyph.Window:
+                        using (var window = Round(new RectangleF(3.4f, 4.6f, 17.2f, 14.8f), 2f))
+                            g.DrawPath(p, window);
+                        g.DrawLine(p, 3.7f, 9f, 20.3f, 9f);
+                        break;
+                    case Glyph.Clipboard:
+                        using (var sheet = Round(new RectangleF(5.4f, 5.7f, 13.2f, 14.4f), 1.8f))
+                            g.DrawPath(p, sheet);
+                        using (var clip = Round(new RectangleF(8.7f, 3.3f, 6.6f, 3.7f), 1.4f))
+                            g.FillPath(fill, clip);
+                        g.DrawLine(p, 9f, 12f, 15f, 12f);
+                        g.DrawLine(p, 9f, 15.6f, 14f, 15.6f);
+                        break;
+                    case Glyph.Exit:
+                        g.DrawLines(p, new[] { new PointF(12.5f, 4.3f), new PointF(4.3f, 4.3f), new PointF(4.3f, 19.7f), new PointF(12.5f, 19.7f) });
+                        g.DrawLine(p, 9.5f, 12f, 20.3f, 12f);
+                        g.DrawLines(p, new[] { new PointF(16.5f, 8.2f), new PointF(20.3f, 12f), new PointF(16.5f, 15.8f) });
+                        break;
+                    case Glyph.Search:
+                        g.DrawEllipse(p, 4f, 4f, 11.8f, 11.8f);
+                        g.DrawLine(p, 14.3f, 14.3f, 20.1f, 20.1f);
                         break;
                     case Glyph.Trash:
                         g.DrawLine(p, 4.4f, 6.6f, 19.6f, 6.6f);

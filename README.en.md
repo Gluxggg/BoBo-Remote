@@ -25,7 +25,7 @@
 
 **Four native apps share one protocol. Windows ships a single executable.**
 
-**BoBo Remote V6.2** has been completely rebuilt as a **self-contained, zero-external-engine** remote desktop suite. It no longer bundles or launches external Sunshine, Moonlight, or RustDesk executables — instead, **Windows, Android, macOS, and iOS / iPadOS** communicate directly over the authoritative [**BoBo6.2 binary wire protocol**](protocol/BOBO6-SPEC.md) (`TCP+TLS 1.2 :49810` / LAN `UDP :49812`).
+**BoBo Remote v7.0.0** updates the Windows interface, connection options, adaptive display, and host privacy. **Windows, Android, macOS, and iOS / iPadOS** share the [**BoBo6.2 wire protocol**](protocol/BOBO6-SPEC.md). Windows uses a built-in media and input core.
 
 The Windows executable embeds the compressed C++17 media and input core, `BoBoCore.dll`. Devices discover each other on the LAN and connect over TLS. They can also connect across networks using Tailscale or a reachable IPv6 address.
 
@@ -50,7 +50,7 @@ The Windows executable embeds the compressed C++17 media and input core, `BoBoCo
 
 ## Why BoBo Remote?
 
-| Commercial Remote Desktop Suites | BoBo Remote V6.2 |
+| Commercial Remote Desktop Suites | BoBo Remote v7 |
 | --- | --- |
 | Mandatory cloud accounts; device metadata &amp; signaling hosted by vendor servers | **No accounts, no relays, no telemetry** — LAN auto-discovery or direct Tailscale (`100.x.y.z`) / IPv6 TLS 1.2 connections |
 | High FPS, resolution scaling, privacy screens, and mobile access paywalled | **MIT-licensed V6 source** — native hardware codecs, Super Display, real privacy shield, file transfer, four-platform support |
@@ -97,9 +97,11 @@ flowchart LR
 - `BoBo远程.exe` embeds the GZip-compressed C++17 `BoBoCore.dll` and loads it in process.
 - Full hardware-accelerated pipeline: **DXGI Desktop Duplication** (with automatic GDI fallback) → **Media Foundation H.264 HW encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48kHz audio**.
 
-### 2. Super Display (Zero Black Bars) &amp; Seamless Dual-Cursor UX
-- **Super Display Mode (On by Default)**: Automatically eliminates top/bottom black bars on 16:10 laptops and mismatched monitors, with 3 selectable viewport scale modes (**Full-Screen Adaptive / Aspect-Fit / 1:1 Native**) and automatic host resolution restoration on disconnect.
-- **Native Host Cursor Compositing**: Displays the host's native pointer inside the remote viewport and switches cleanly back to the local pointer outside the frame. Supports **Free Mouse / Locked Game Mouse / View-Only** modes — tap `Ctrl + Alt` anytime while locked to instantly release the cursor.
+### 2. Adaptive display, cursor, and connection options
+
+- **Super Display** fits the stream to the viewport while preserving the desktop aspect ratio. Fullscreen sessions can use a matching mode supported by the host display, and the original mode is restored on exit. The display menu also lists virtual displays already enabled in Windows.
+- **Free mouse** uses the host pointer size and shape inside the remote viewport, then returns to the local pointer outside it. Tap `Ctrl + Alt` to release the mouse in locked mode.
+- **Connection options** include automatic, LAN direct, and Tailscale. The session shows the detected path and actual media transport. Quality presets are independent of the connection route.
 
 ### 3. Unified Control Center &amp; Edge-Dockable Floating Ball
 - Shared real-time menu accessible from both the window header and a draggable, edge-snapping square floating ball:
@@ -109,8 +111,9 @@ flowchart LR
   - **Audio &amp; Security**: Volume slider, host mute-while-connected (auto-restored), lock host on disconnect, one-click remote privacy shield;
   - **Peripherals &amp; Tools**: System shortcut passthrough, mouse mode switch, `Ctrl+Alt+Del` injection, clipboard text send, screenshot capture, live network HUD, and instant disconnect.
 
-### 4. Physical-Grade Host Privacy Shield (Windows &amp; macOS)
-- **Instant Auto-Shield on Connect**: Raises a fullscreen privacy curtain excluded from screen capture (`WDA_EXCLUDEFROMCAPTURE` on Windows; ScreenCaptureKit window exclusion on macOS) so the remote viewer sees a clean desktop while the physical display shows a custom wallpaper or dark theme.
+### 4. Host privacy shield (Windows and macOS)
+
+- **Automatic privacy curtain** covers physical displays when enabled. Windows requests capture exclusion, masks the system pointer when supported, and brings the curtain forward when ordinary input-method popups appear. Coverage depends on Windows and the display driver. macOS uses ScreenCaptureKit window exclusion.
 - **Physical Keyboard &amp; Mouse Lock (On by Default)**: Native `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks on Windows and `CGEventTap` on macOS block local bystanders from clicking the taskbar or typing, allowing only signed BoBo remote input and the emergency exit hotkey.
 - **Optional Safe DDC/CI Backlight Dimming (Off by Default)**: Uses `dxva2.dll` to adjust **only** backlight brightness (`VCP 0x10`) on non-HDR displays — never touching contrast, color temperature, or RGB gains — with crash-safe persistent restoration and read-back verification.
 - **Lock-Screen Guard State Machine**: Optional auto-lock when dismissing privacy, with post-unlock debounce to prevent unintended re-triggering.

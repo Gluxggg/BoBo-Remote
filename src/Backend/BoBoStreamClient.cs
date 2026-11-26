@@ -35,6 +35,8 @@ namespace DualRemote
         internal List<string> LanIps = new List<string>();
         internal bool UdpSupported;
         internal double HandshakeRttMs;
+        internal IPAddress ConnectedAddress;
+        internal IPAddress LocalAddress;
         internal string Error = "";
     }
 
@@ -54,6 +56,42 @@ namespace DualRemote
         internal bool SuperDisplay = true;
         internal int ClientWidth = 0;
         internal int ClientHeight = 0;
+        internal bool ClientFullscreen;
+    }
+
+    internal sealed class BoBoDisplayState
+    {
+        internal const int Version = 2;
+        internal int RequestId;
+        internal int MonitorIndex;
+        internal int StreamWidth;
+        internal int StreamHeight;
+        internal int DesktopWidth;
+        internal int DesktopHeight;
+        internal int ViewportWidth;
+        internal int ViewportHeight;
+        internal bool Active;
+        internal bool NativeMatch;
+        internal bool DesktopModeChanged;
+
+        internal static BoBoDisplayState Parse(Dictionary<string, object> message, bool isDisplayReply, bool supportsViewport)
+        {
+            return new BoBoDisplayState
+            {
+                RequestId = BoBoProtocol.GetInt(message, "displayRequestId", 0),
+                MonitorIndex = BoBoProtocol.GetInt(message, "monitorIndex", -1),
+                // Legacy SET_SUPER_DISPLAY replies describe the desktop, so they cannot update video geometry.
+                StreamWidth = isDisplayReply && !supportsViewport ? 0 : BoBoProtocol.GetInt(message, "width", 0),
+                StreamHeight = isDisplayReply && !supportsViewport ? 0 : BoBoProtocol.GetInt(message, "height", 0),
+                DesktopWidth = BoBoProtocol.GetInt(message, "desktopWidth", 0),
+                DesktopHeight = BoBoProtocol.GetInt(message, "desktopHeight", 0),
+                ViewportWidth = BoBoProtocol.GetInt(message, "clientWidth", 0),
+                ViewportHeight = BoBoProtocol.GetInt(message, "clientHeight", 0),
+                Active = BoBoProtocol.GetBool(message, isDisplayReply ? "active" : "superDisplayActive", false),
+                NativeMatch = supportsViewport && BoBoProtocol.GetBool(message, isDisplayReply ? "nativeMatch" : "superDisplayNativeMatch", false),
+                DesktopModeChanged = supportsViewport && BoBoProtocol.GetBool(message, "desktopModeChanged", false)
+            };
+        }
     }
 
     /// <summary>
@@ -114,6 +152,7 @@ namespace DualRemote
 
         internal event Action<List<BoBoMonitorDescriptor>, int, int, int> StreamStarted;
         internal event Action<bool, bool, int, int> SuperDisplayStateChanged;
+        internal event Action<BoBoDisplayState> DisplayStateChanged;
         internal event Action<string, string> StreamError;
         internal event Action<string> Disconnected;
         internal event Action<bool> RemotePrivacyStateChanged;
@@ -123,6 +162,7 @@ namespace DualRemote
 
         internal bool SuperDisplayActive { get; private set; }
         internal bool SuperDisplayNativeMatch { get; private set; }
+        internal bool SupportsSuperDisplayViewport { get; private set; }
         internal bool HostCursorComposited { get; private set; }
         internal string RemotePlatform { get; private set; }
         internal string RemoteHostControlMode { get; private set; }
@@ -162,7 +202,7 @@ namespace DualRemote
 
             using (var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                timeoutCts.CancelAfter(timeoutMs > 500 ? timeoutMs : 5000);
+                timeoutCts.CancelAfter(timeoutMs > 0 ? timeoutMs : 5000);
                 using (var client = new TcpClient())
                 using (timeoutCts.Token.Register(delegate { try { client.Close(); } catch { } }))
                 {
@@ -171,6 +211,8 @@ namespace DualRemote
                         client.NoDelay = true;
                         await ConnectWithCancelAsync(client, res.Host, res.Port, timeoutCts.Token).ConfigureAwait(false);
                         res.Reachable = true;
+                        res.ConnectedAddress = ((IPEndPoint)client.Client.RemoteEndPoint).Address;
+                        res.LocalAddress = ((IPEndPoint)client.Client.LocalEndPoint).Address;
 
                         string serverThumb = "";
                         using (var sslStream = new SslStream(client.GetStream(), false,
@@ -245,61 +287,42 @@ namespace DualRemote
             }
         }
 
-        /// <summary>
-        /// 同 Wi-Fi / 同局域网自动直连升级：当用户通过 Tailscale 100.x IP 探测到目标主机且主机返回了 lanIps 时，
-        /// 并行极速（默认 350ms）探测主机局域网 IP 并校验完全一致的 NodeId + 证书指纹，命中则直接走 1ms 局域网直连，
-        /// 彻底杜绝同 Wi-Fi 绕行 Tailscale DERP 中继导致的高延迟与卡顿。
-        /// </summary>
-        internal static async Task<string> TryResolveDirectLanHostAsync(
-            BoBoHostProbeResult initialProbe,
-            BoBoIdentityStore identityStore,
-            int timeoutMs,
-            CancellationToken ct)
+        // Only probe on-link addresses announced by an already-reached BoBo peer.
+        // Changing transport still requires matching the node and its TLS certificate.
+        internal static async Task<BoBoHostProbeResult> TryResolveDirectLanHostAsync(
+            BoBoHostProbeResult initialProbe, BoBoIdentityStore identityStore, int timeoutMs, CancellationToken ct)
         {
-            if (initialProbe == null || !initialProbe.IsBoBoHost || initialProbe.LanIps == null || initialProbe.LanIps.Count == 0)
-                return null;
-            if (!BoBoProtocol.IsTailscaleCgnatIp(initialProbe.Host))
-                return null;
-            if (string.IsNullOrEmpty(initialProbe.HostNodeId) || string.IsNullOrEmpty(initialProbe.HostThumbprint))
-                return null;
+            if (initialProbe == null || !initialProbe.IsBoBoHost || initialProbe.ConnectedAddress == null ||
+                !Tailscale.IsTailnetAddress(initialProbe.ConnectedAddress.ToString()) ||
+                string.IsNullOrEmpty(initialProbe.HostNodeId) || string.IsNullOrEmpty(initialProbe.HostThumbprint)) return null;
 
-            List<string> localLanIps = BoBoProtocol.GetLocalLanIpv4Addresses();
-            var candidates = new List<string>();
-            for (int i = 0; i < initialProbe.LanIps.Count && candidates.Count < 3; i++)
+            using (var lanCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                string cand = initialProbe.LanIps[i];
-                if (string.IsNullOrWhiteSpace(cand) || string.Equals(cand, initialProbe.Host, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (localLanIps.Contains(cand)) continue;
-                candidates.Add(cand);
-            }
-            if (candidates.Count == 0) return null;
-
-            int probeTimeout = timeoutMs >= 200 ? timeoutMs : 350;
-            var tasks = new List<Task<BoBoHostProbeResult>>(candidates.Count);
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                string ip = candidates[i];
-                tasks.Add(ProbeHostAsync(ip, initialProbe.Port, identityStore, probeTimeout, ct));
-            }
-
-            while (tasks.Count > 0)
-            {
-                Task<BoBoHostProbeResult> finished = await Task.WhenAny(tasks).ConfigureAwait(false);
-                tasks.Remove(finished);
-                try
+                var candidates = new HashSet<IPAddress>();
+                var tasks = new List<Task<BoBoHostProbeResult>>(3);
+                foreach (string value in initialProbe.LanIps)
                 {
-                    BoBoHostProbeResult r = await finished.ConfigureAwait(false);
-                    if (r != null && r.Reachable && r.IsBoBoHost && r.AllowIncoming &&
-                        string.Equals(r.HostNodeId, initialProbe.HostNodeId, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(r.HostThumbprint, initialProbe.HostThumbprint, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return r.Host;
-                    }
+                    IPAddress candidate;
+                    if (!IPAddress.TryParse(value, out candidate) || !BoBoConnectionRoute.IsOnLocalSubnet(candidate, null) ||
+                        !candidates.Add(candidate)) continue;
+                    tasks.Add(ProbeHostAsync(candidate.ToString(), initialProbe.Port, identityStore, timeoutMs, lanCts.Token));
+                    if (tasks.Count == 3) break;
                 }
-                catch { }
+
+                while (tasks.Count > 0)
+                {
+                    Task<BoBoHostProbeResult> finished = await Task.WhenAny(tasks).ConfigureAwait(false);
+                    tasks.Remove(finished);
+                    BoBoHostProbeResult probe = await finished.ConfigureAwait(false);
+                    if (!probe.IsBoBoHost || !probe.AllowIncoming ||
+                        !BoBoConnectionRoute.IsOnLocalSubnet(probe.ConnectedAddress, probe.LocalAddress) ||
+                        !string.Equals(probe.HostNodeId, initialProbe.HostNodeId, StringComparison.OrdinalIgnoreCase) ||
+                        !BoBoIdentityStore.FixedTimeEqualsHex(probe.HostThumbprint, initialProbe.HostThumbprint)) continue;
+                    lanCts.Cancel();
+                    return probe;
+                }
+                return null;
             }
-            return null;
         }
 
         internal static async Task<Tuple<bool, string, string>> PairWithPinAsync(
@@ -620,6 +643,8 @@ namespace DualRemote
 
                 remoteMonitors = BoBoProtocol.ParseMonitors(ack, "monitors");
                 RemotePlatform = BoBoProtocol.GetStr(ack, "platform", BoBoProtocol.PlatformWindows);
+                SupportsSuperDisplayViewport = string.Equals(RemotePlatform, BoBoProtocol.PlatformWindows, StringComparison.OrdinalIgnoreCase) &&
+                    BoBoProtocol.GetInt(ack, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
                 RemoteHostControlMode = BoBoProtocol.GetStr(ack, "hostControlMode", BoBoProtocol.ControlModeFull);
                 string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
                 string hostCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
@@ -691,12 +716,18 @@ namespace DualRemote
                 startReq["freeMouse"] = options.FreeMouse;
                 startReq["muteHost"] = options.MuteHostAudio;
                 startReq["requestPrivacy"] = options.RequestPrivacy;
-                startReq["superDisplay"] = options.SuperDisplay;
+                startReq["superDisplay"] = options.SuperDisplay && SupportsSuperDisplayViewport;
                 startReq["clientWidth"] = options.ClientWidth;
                 startReq["clientHeight"] = options.ClientHeight;
+                if (SupportsSuperDisplayViewport)
+                {
+                    startReq["superDisplayVersion"] = BoBoDisplayState.Version;
+                    startReq["fullscreen"] = options.ClientFullscreen;
+                }
                 startReq["udpTransport"] = true;
                 startReq["udpInterleavedFec"] = true;
                 startReq["nativeLocalCursor"] = true;
+                startReq["cursorMetrics"] = true;
                 startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
                 await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
@@ -770,11 +801,7 @@ namespace DualRemote
 
                     if (frame.Type == BoBoPacketType.CursorShape)
                     {
-                        if (frame.Payload != null && frame.Payload.Length >= 1)
-                        {
-                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                            if (nc != null) nc.SetRemoteCursorShape(frame.Payload[0]);
-                        }
+                        if (!udpActive) ApplyRemoteCursorShape(frame.Payload, 0);
                         continue;
                     }
 
@@ -792,14 +819,10 @@ namespace DualRemote
                             int fps = BoBoProtocol.GetInt(msg, "fps", 60);
                             int actualBps = BoBoProtocol.GetInt(msg, "bitrateKbps", activeBitrateKbps);
                             if (actualBps > 0) activeBitrateKbps = actualBps;
-                            bool sdActive = BoBoProtocol.GetBool(msg, "superDisplayActive", false);
-                            bool sdNative = BoBoProtocol.GetBool(msg, "superDisplayNativeMatch", false);
                             string startedPlat = BoBoProtocol.GetStr(msg, "platform", "");
                             if (!string.IsNullOrEmpty(startedPlat)) RemotePlatform = startedPlat;
                             string startedMode = BoBoProtocol.GetStr(msg, "hostControlMode", "");
                             if (!string.IsNullOrEmpty(startedMode)) RemoteHostControlMode = startedMode;
-                            SuperDisplayActive = sdActive;
-                            SuperDisplayNativeMatch = sdNative;
                             HostCursorComposited = BoBoProtocol.GetBool(msg, "hostCursorComposited", false);
                             BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
                             if (curNc != null) curNc.SetHostCursorComposited(HostCursorComposited);
@@ -815,8 +838,13 @@ namespace DualRemote
 
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
                             if (ev != null) { try { ev(remoteMonitors, w, h, fps); } catch { } }
-                            Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
-                            if (sdEv != null) { try { sdEv(sdActive, sdNative, w, h); } catch { } }
+                            PublishDisplayState(msg, false, true);
+                        }
+                        else if (t == "RECONFIGURED")
+                        {
+                            int actualBps = BoBoProtocol.GetInt(msg, "bitrateKbps", activeBitrateKbps);
+                            if (actualBps > 0) activeBitrateKbps = actualBps;
+                            PublishDisplayState(msg, false, false);
                         }
                         else if (t == "CURSOR_MODE_STATE")
                         {
@@ -834,14 +862,7 @@ namespace DualRemote
                         }
                         else if (t == "SUPER_DISPLAY_STATE")
                         {
-                            bool sdActive = BoBoProtocol.GetBool(msg, "active", false);
-                            bool sdNative = BoBoProtocol.GetBool(msg, "nativeMatch", false);
-                            int w = BoBoProtocol.GetInt(msg, "width", 0);
-                            int h = BoBoProtocol.GetInt(msg, "height", 0);
-                            SuperDisplayActive = sdActive;
-                            SuperDisplayNativeMatch = sdNative;
-                            Action<bool, bool, int, int> sdEv = SuperDisplayStateChanged;
-                            if (sdEv != null) { try { sdEv(sdActive, sdNative, w, h); } catch { } }
+                            PublishDisplayState(msg, true, true);
                         }
                         else if (t == "PONG")
                         {
@@ -889,6 +910,28 @@ namespace DualRemote
                     Action<string> discEv = Disconnected;
                     if (discEv != null) { try { discEv(reason); } catch { } }
                 }
+            }
+        }
+
+        private void PublishDisplayState(Dictionary<string, object> message, bool isDisplayReply, bool publishLegacyEvent)
+        {
+            BoBoDisplayState state = BoBoDisplayState.Parse(message, isDisplayReply, SupportsSuperDisplayViewport);
+            if (publishLegacyEvent || SupportsSuperDisplayViewport)
+            {
+                SuperDisplayActive = state.Active;
+                SuperDisplayNativeMatch = state.NativeMatch;
+            }
+            Action<BoBoDisplayState> displayChanged = DisplayStateChanged;
+            if (displayChanged != null) { try { displayChanged(state); } catch { } }
+            Action<bool, bool, int, int> legacyChanged = SuperDisplayStateChanged;
+            if (publishLegacyEvent && legacyChanged != null)
+            {
+                try
+                {
+                    legacyChanged(state.Active, state.NativeMatch,
+                        BoBoProtocol.GetInt(message, "width", 0), BoBoProtocol.GetInt(message, "height", 0));
+                }
+                catch { }
             }
         }
 
@@ -1084,8 +1127,7 @@ namespace DualRemote
                         if (unchecked(cSeq - prev) > 0)
                         {
                             Volatile.Write(ref lastCursorSeq, cSeq);
-                            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                            if (nc != null) nc.SetRemoteCursorShape(plain[4]);
+                            ApplyRemoteCursorShape(plain, 4);
                         }
                         continue;
                     }
@@ -1440,6 +1482,14 @@ namespace DualRemote
             SendJsonFireAndForget(cmd);
         }
 
+        private void ApplyRemoteCursorShape(byte[] payload, int offset)
+        {
+            BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
+            if (nc == null || payload == null || offset >= payload.Length) return;
+            bool hasSize = payload.Length - offset >= 3;
+            nc.SetRemoteCursorInfo(payload[offset], hasSize ? payload[offset + 1] : 0, hasSize ? payload[offset + 2] : 0);
+        }
+
         internal void SendSetCursorMode(bool hostComposite)
         {
             var cmd = new Dictionary<string, object>();
@@ -1471,13 +1521,18 @@ namespace DualRemote
             SendJsonFireAndForget(cmd);
         }
 
-        internal void SendSetSuperDisplay(bool enable, int clientWidth, int clientHeight)
+        internal void SendSetSuperDisplay(bool enable, int clientWidth, int clientHeight, bool fullscreen = false, int requestId = 0)
         {
             var cmd = new Dictionary<string, object>();
             cmd["type"] = "SET_SUPER_DISPLAY";
             cmd["enable"] = enable;
             cmd["clientWidth"] = clientWidth;
             cmd["clientHeight"] = clientHeight;
+            if (SupportsSuperDisplayViewport)
+            {
+                cmd["fullscreen"] = fullscreen;
+                cmd["displayRequestId"] = requestId;
+            }
             SendJsonFireAndForget(cmd);
         }
 

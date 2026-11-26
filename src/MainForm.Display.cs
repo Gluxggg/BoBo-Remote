@@ -61,7 +61,7 @@ namespace DualRemote
                     ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏并锁定物理键鼠，断开后自动恢复。"
                     : "已关闭自动防窥守护。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启完全防窥保护",
+            AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启防窥",
                 "检测到 BoBo远程 会话连入时自动遮挡物理显示器并锁定现场键鼠，断开后自动恢复", autoSwitch);
 
             var blockInputSwitch = BuildToggle("防窥锁定物理键鼠", privacyConfig.BlockLocalInput);

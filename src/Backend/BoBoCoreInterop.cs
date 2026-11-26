@@ -167,6 +167,9 @@ namespace DualRemote
         private delegate int FnHostGetCursorShape(int monitorIndex);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostGetCursorInfo(int monitorIndex, out int width, out int height);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnHostRequestKeyframe(IntPtr handle);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -200,6 +203,9 @@ namespace DualRemote
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int FnHostIsPrivacyInputBlocked();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostSetPrivacyCursorMask(int enable);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate IntPtr FnClientCreate(
@@ -257,6 +263,9 @@ namespace DualRemote
         private delegate void FnClientSetRemoteCursorShape(IntPtr handle, int shapeId);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnClientSetRemoteCursorInfo(IntPtr handle, int shapeId, int width, int height);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientGetStats(IntPtr handle, ref BoBoNativeClientStats outStats);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -278,6 +287,7 @@ namespace DualRemote
         private static FnHostSetFps fnHostSetFps;
         private static FnHostSetCompositeCursor fnHostSetCompositeCursor;
         private static FnHostGetCursorShape fnHostGetCursorShape;
+        private static FnHostGetCursorInfo fnHostGetCursorInfo;
         private static FnHostRequestKeyframe fnHostRequestKeyframe;
         private static FnHostSetMuteHost fnHostSetMuteHost;
         private static FnHostDestroy fnHostDestroy;
@@ -287,6 +297,8 @@ namespace DualRemote
         private static FnHostRestoreSuperDisplay fnHostRestoreSuperDisplay;
         private static FnHostSetPrivacyInputBlock fnHostSetPrivacyInputBlock;
         private static FnHostIsPrivacyInputBlocked fnHostIsPrivacyInputBlocked;
+        private static FnHostSetPrivacyCursorMask fnHostSetPrivacyCursorMask;
+        private static bool cursorMaskExitHooked;
         private static BoBoPrivacyEscapeNativeCallback activePrivacyEscapeKeepAlive;
         private static FnClientCreate fnClientCreate;
         private static FnClientPushVideo fnClientPushVideo;
@@ -300,6 +312,7 @@ namespace DualRemote
         private static FnClientSetSysKeys fnClientSetSysKeys;
         private static FnClientSetHostCursorComposited fnClientSetHostCursorComposited;
         private static FnClientSetRemoteCursorShape fnClientSetRemoteCursorShape;
+        private static FnClientSetRemoteCursorInfo fnClientSetRemoteCursorInfo;
         private static FnClientGetStats fnClientGetStats;
         private static FnClientDestroy fnClientDestroy;
 
@@ -351,6 +364,7 @@ namespace DualRemote
                     fnHostSetFps = TryBind<FnHostSetFps>(mod, "BoBoHost_SetFps");
                     fnHostSetCompositeCursor = TryBind<FnHostSetCompositeCursor>(mod, "BoBoHost_SetCompositeCursor");
                     fnHostGetCursorShape = TryBind<FnHostGetCursorShape>(mod, "BoBoHost_GetCursorShape");
+                    fnHostGetCursorInfo = TryBind<FnHostGetCursorInfo>(mod, "BoBoHost_GetCursorInfo");
                     fnHostRequestKeyframe = Bind<FnHostRequestKeyframe>(mod, "BoBoHost_RequestKeyframe");
                     fnHostSetMuteHost = Bind<FnHostSetMuteHost>(mod, "BoBoHost_SetMuteHost");
                     fnHostDestroy = Bind<FnHostDestroy>(mod, "BoBoHost_Destroy");
@@ -360,6 +374,7 @@ namespace DualRemote
                     fnHostRestoreSuperDisplay = Bind<FnHostRestoreSuperDisplay>(mod, "BoBoHost_RestoreSuperDisplay");
                     fnHostSetPrivacyInputBlock = Bind<FnHostSetPrivacyInputBlock>(mod, "BoBoHost_SetPrivacyInputBlock");
                     fnHostIsPrivacyInputBlocked = Bind<FnHostIsPrivacyInputBlocked>(mod, "BoBoHost_IsPrivacyInputBlocked");
+                    fnHostSetPrivacyCursorMask = TryBind<FnHostSetPrivacyCursorMask>(mod, "BoBoHost_SetPrivacyCursorMask");
                     fnClientCreate = Bind<FnClientCreate>(mod, "BoBoClient_Create");
                     fnClientPushVideo = Bind<FnClientPushVideo>(mod, "BoBoClient_PushVideo");
                     fnClientPushAudio = Bind<FnClientPushAudio>(mod, "BoBoClient_PushAudio");
@@ -372,6 +387,7 @@ namespace DualRemote
                     fnClientSetSysKeys = Bind<FnClientSetSysKeys>(mod, "BoBoClient_SetSysKeys");
                     fnClientSetHostCursorComposited = TryBind<FnClientSetHostCursorComposited>(mod, "BoBoClient_SetHostCursorComposited");
                     fnClientSetRemoteCursorShape = TryBind<FnClientSetRemoteCursorShape>(mod, "BoBoClient_SetRemoteCursorShape");
+                    fnClientSetRemoteCursorInfo = TryBind<FnClientSetRemoteCursorInfo>(mod, "BoBoClient_SetRemoteCursorInfo");
                     fnClientGetStats = Bind<FnClientGetStats>(mod, "BoBoClient_GetStats");
                     fnClientDestroy = Bind<FnClientDestroy>(mod, "BoBoClient_Destroy");
 
@@ -583,10 +599,22 @@ namespace DualRemote
             return result;
         }
 
-        internal static int GetHostCursorShape(int monitorIndex)
+        internal static int GetHostCursorInfo(int monitorIndex, out int width, out int height)
         {
-            if (!loaded || fnHostGetCursorShape == null) return 1;
-            try { return fnHostGetCursorShape(monitorIndex); } catch { return 1; }
+            width = 0;
+            height = 0;
+            if (!loaded) return 1;
+            try
+            {
+                if (fnHostGetCursorInfo != null) return fnHostGetCursorInfo(monitorIndex, out width, out height);
+                if (fnHostGetCursorShape != null) return fnHostGetCursorShape(monitorIndex);
+            }
+            catch
+            {
+                width = 0;
+                height = 0;
+            }
+            return 1;
         }
 
         internal static void InjectInput(int monitorIndex, BoBoInputPacket pkt)
@@ -645,6 +673,23 @@ namespace DualRemote
                 int rc = fnHostSetPrivacyInputBlock(1, cb, IntPtr.Zero);
                 if (rc == 0) activePrivacyEscapeKeepAlive = null;
                 return rc != 0;
+            }
+        }
+
+        internal static bool SetPrivacyCursorMask(bool enable)
+        {
+            string error;
+            if (enable && !EnsureLoaded(out error)) return false;
+            lock (PrivacyGate)
+            {
+                if (fnHostSetPrivacyCursorMask == null) return !enable;
+                if (enable && !cursorMaskExitHooked)
+                {
+                    AppDomain.CurrentDomain.ProcessExit += delegate { SetPrivacyCursorMask(false); };
+                    cursorMaskExitHooked = true;
+                }
+                try { return fnHostSetPrivacyCursorMask(enable ? 1 : 0) != 0; }
+                catch { return false; }
             }
         }
 
@@ -956,15 +1001,16 @@ namespace DualRemote
                 finally { rwLock.ExitReadLock(); }
             }
 
-            internal void SetRemoteCursorShape(int shapeId)
+            internal void SetRemoteCursorInfo(int shapeId, int width, int height)
             {
                 rwLock.EnterReadLock();
                 try
                 {
-                    if (handle != IntPtr.Zero && fnClientSetRemoteCursorShape != null)
-                    {
+                    if (handle == IntPtr.Zero) return;
+                    if (fnClientSetRemoteCursorInfo != null)
+                        fnClientSetRemoteCursorInfo(handle, shapeId, width, height);
+                    else if (fnClientSetRemoteCursorShape != null)
                         fnClientSetRemoteCursorShape(handle, shapeId);
-                    }
                 }
                 finally { rwLock.ExitReadLock(); }
             }

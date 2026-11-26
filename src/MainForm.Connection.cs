@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -26,6 +27,63 @@ namespace DualRemote
         private string clientPairHost = "";
         private string clientPairHostName = "";
         private int connectRequestGeneration;
+        private ComboBox connectionRouteChoice;
+        private Label connectionRouteHint;
+        private BoBoConnectionRoute clientPairRoute;
+        private BoBoConnectionRoute activeConnectionRoute;
+
+        private BoBoRoutePreference SelectedConnectionRoute
+        {
+            get { return connectionRouteChoice == null ? BoBoRoutePreference.Auto : (BoBoRoutePreference)connectionRouteChoice.SelectedIndex; }
+        }
+
+        private void ShowConnectionRouteHint(BoBoConnectionRoute route)
+        {
+            if (connectionRouteHint == null) return;
+            if (route != null)
+            {
+                connectionRouteHint.Text = route.Label;
+                return;
+            }
+            switch (SelectedConnectionRoute)
+            {
+                case BoBoRoutePreference.LanOnly:
+                    connectionRouteHint.Text = "输入同网段 IP，或从「发现设备」选择。";
+                    break;
+                case BoBoRoutePreference.Tailnet:
+                    connectionRouteHint.Text = "使用 Tailscale 地址。直连可用时走 P2P，必要时走中继。";
+                    break;
+                default:
+                    connectionRouteHint.Text = "优先使用已核验身份的同网直连。";
+                    break;
+            }
+        }
+
+        private void TrackSessionRoute(NativeStreamForm session, BoBoConnectionRoute route)
+        {
+            session.ConnectionRouteLabelProvider = delegate { return route == null ? "" : route.Label; };
+            if (route == null || !route.IsTailnet) return;
+            var timer = new System.Windows.Forms.Timer { Interval = 10000 };
+            bool refreshing = false;
+            timer.Tick += async delegate
+            {
+                if (refreshing || IsDisposed || session.IsDisposed || activeNativeStreamForm != session) return;
+                refreshing = true;
+                try
+                {
+                    LinkProbeResult result = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2200));
+                    if (!IsDisposed && !session.IsDisposed && activeNativeStreamForm == session)
+                    {
+                        route.UpdateTailnetPath(result.LastPong);
+                        ShowConnectionRouteHint(route);
+                    }
+                }
+                catch { }
+                finally { refreshing = false; }
+            };
+            session.Disposed += delegate { timer.Dispose(); };
+            timer.Start();
+        }
 
         private Control BuildClientPairPanel()
         {
@@ -63,7 +121,7 @@ namespace DualRemote
             Theme.FixedColumn(actions, 10);
             Theme.FixedColumn(actions, 92);
             Theme.FillColumn(actions);
-            clientPairStartButton = Theme.Action("配对并连接", Theme.ButtonStyle.Primary, Theme.Glyph.Pin);
+            clientPairStartButton = Theme.Action("配对并连接", Theme.ButtonStyle.Primary, Theme.Glyph.Keypad);
             clientPairCancelButton = Theme.Action("取消", Theme.ButtonStyle.Secondary);
             clientPairStartButton.Click += async delegate { await StartClientPairingAsync(); };
             clientPairCancelButton.Click += delegate { CancelClientPairing("已取消本次配对。"); };
@@ -163,6 +221,20 @@ namespace DualRemote
                 return;
             }
 
+            BoBoRoutePreference preference = SelectedConnectionRoute;
+            IPAddress requestedAddress;
+            if (preference == BoBoRoutePreference.LanOnly &&
+                (!IPAddress.TryParse(cleanHost, out requestedAddress) || !BoBoConnectionRoute.IsOnLocalSubnet(requestedAddress, null)))
+            {
+                SetStatus("局域网直连需要对方的同网段 IP 地址，可在「发现设备」选择。", Theme.PillTone.Warning);
+                return;
+            }
+            if (preference == BoBoRoutePreference.Tailnet && !Tailscale.IsTailnetAddress(cleanHost))
+            {
+                SetStatus("跨网连接请输入对方的 Tailscale IP 或完整 MagicDNS 地址。", Theme.PillTone.Warning);
+                return;
+            }
+
             int request = ++connectRequestGeneration;
             if (clientPairBusy)
             {
@@ -216,43 +288,60 @@ namespace DualRemote
             if (!string.IsNullOrEmpty(probe.HostName))
                 clientPairHostName = probe.HostName;
 
-            // 同 Wi-Fi 自动局域网直连升级：若通过 Tailscale IP 连上且双方实为同局域网，350ms 内自动切到 1ms 局域网直连！
-            string effectiveHost = cleanHost;
-            if (BoBoProtocol.IsTailscaleCgnatIp(cleanHost) && probe.LanIps != null && probe.LanIps.Count > 0)
+            var route = new BoBoConnectionRoute(probe.ConnectedAddress, probe.LocalAddress, probe.HandshakeRttMs);
+            if (preference == BoBoRoutePreference.Auto && route.IsTailnet)
             {
-                string directLanIp = null;
+                BoBoHostProbeResult direct = null;
                 try
                 {
-                    directLanIp = await BoBoStreamClient.TryResolveDirectLanHostAsync(
-                        probe, BoBoIdentityStore.Default, 400, CancellationToken.None);
+                    direct = await BoBoStreamClient.TryResolveDirectLanHostAsync(probe, BoBoIdentityStore.Default, 650, CancellationToken.None);
                 }
                 catch { }
                 if (IsDisposed || request != connectRequestGeneration) return;
-                if (!string.IsNullOrEmpty(directLanIp))
+                if (direct != null)
                 {
-                    effectiveHost = directLanIp;
-                    clientPairHost = directLanIp;
+                    probe = direct;
+                    route = new BoBoConnectionRoute(probe.ConnectedAddress, probe.LocalAddress, probe.HandshakeRttMs);
                 }
             }
 
+            if ((preference == BoBoRoutePreference.LanOnly && route.Kind != BoBoRouteKind.Lan) ||
+                (preference == BoBoRoutePreference.Tailnet && !route.IsTailnet))
+            {
+                SetStatus("目标实际使用的地址与所选线路不符，请检查地址或选择自动。", Theme.PillTone.Warning);
+                return;
+            }
+            if (route.IsTailnet)
+            {
+                SetStatus("正在检测 Tailscale 直连或中继路径…", Theme.PillTone.Info);
+                try
+                {
+                    LinkProbeResult link = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2400));
+                    route.UpdateTailnetPath(link.LastPong);
+                }
+                catch { }
+                if (IsDisposed || request != connectRequestGeneration) return;
+            }
+
+            string effectiveHost = route.RemoteAddress != null ? route.RemoteAddress.ToString() : cleanHost;
+            clientPairRoute = route;
+            clientPairHost = effectiveHost;
+            ShowConnectionRouteHint(route);
             if (probe.Authorized)
             {
-                string routeMsg = !string.Equals(effectiveHost, cleanHost, StringComparison.OrdinalIgnoreCase)
-                    ? ("检测到同局域网，已自动升级高速直连（" + effectiveHost + " · UDP+FEC）…")
-                    : "双端 BoBo远程 已匹配授权，正在建立低延迟加密远程桌面（UDP+FEC）…";
-                SetStatus(routeMsg, Theme.PillTone.Success);
-                await StartStreamAsync(effectiveHost);
+                await StartStreamAsync(effectiveHost, route);
                 return;
             }
 
-            ShowClientPairPrompt(effectiveHost, clientPairHostName, true, "对方 BoBo远程 在线，需要输入对方生成的 4 位临时配对码。");
+            ShowClientPairPrompt(effectiveHost, clientPairHostName, true, route.Label + " · 请输入对方生成的 4 位临时配对码。", route);
         }
 
-        private void ShowClientPairPrompt(string cleanHost, string hostName, bool readable, string detail)
+        private void ShowClientPairPrompt(string cleanHost, string hostName, bool readable, string detail, BoBoConnectionRoute route)
         {
             string label = string.IsNullOrEmpty(hostName) ? cleanHost : (hostName + " (" + cleanHost + ")");
             clientPairHost = cleanHost;
             clientPairHostName = hostName ?? "";
+            clientPairRoute = route;
             clientPairTargetLabel.Text = "连接 " + label + " 需要 BoBo 双端配对授权（仅首次一次）";
             clientPairPinText.Text = "";
             SetClientPairPanelVisible(true);
@@ -267,6 +356,7 @@ namespace DualRemote
         {
             if (clientPairBusy) return;
             string host = clientPairHost;
+            BoBoConnectionRoute route = clientPairRoute;
             if (string.IsNullOrWhiteSpace(host))
             {
                 SetClientPairStatus("目标主机地址无效，请重新点击连接。", Theme.Alert);
@@ -315,7 +405,7 @@ namespace DualRemote
                     SetClientPairPanelVisible(false);
                     SetClientPairStatus("双向配对授权完成。", Theme.Success);
                     SetStatus("双向配对授权完成，正在建立全内置加密远程桌面…", Theme.PillTone.Success);
-                    await StartStreamAsync(host);
+                    await StartStreamAsync(host, route);
                     return;
                 }
 

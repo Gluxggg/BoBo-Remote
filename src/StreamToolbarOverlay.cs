@@ -145,7 +145,8 @@ namespace DualRemote
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            BackColor = Color.White;
+            BackColor = Theme.Paper;
+            AccessibleName = "控制中心";
             Opacity = 0.96;
             DoubleBuffered = true;
             Cursor = Cursors.Hand;
@@ -189,6 +190,14 @@ namespace DualRemote
             freeMouseTimer.Interval = 180;
             freeMouseTimer.Tick += delegate { EnforceFreeMouseIfNeeded(); };
 
+            quickRightMenu.Font = Theme.GetFont(Theme.TextSize.Body);
+            quickRightMenu.ShowImageMargin = false;
+            if (!SystemInformation.HighContrast)
+            {
+                quickRightMenu.BackColor = Theme.Paper;
+                quickRightMenu.ForeColor = Theme.Ink;
+                quickRightMenu.Renderer = new ToolStripProfessionalRenderer(new QuickMenuColors()) { RoundedEdges = false };
+            }
             BuildQuickRightMenu();
             ApplyDockedGeometry();
         }
@@ -642,7 +651,9 @@ namespace DualRemote
             activeMenuSession = new UuControlCenterSession(model, delegate
             {
                 menuOpen = false;
-                if (!IsDisposed && !Bounds.Contains(Cursor.Position))
+                if (IsDisposed) return;
+                Invalidate();
+                if (!Bounds.Contains(Cursor.Position))
                 {
                     edgeHideTimer.Stop();
                     edgeHideTimer.Start();
@@ -678,7 +689,6 @@ namespace DualRemote
                 quickRightMenu.Items.RemoveAt(0);
                 try { old.Dispose(); } catch { }
             }
-            quickRightMenu.Font = new Font("Microsoft YaHei UI", 9.5f);
             quickRightMenu.Items.Add("打开控制中心", null, delegate { OpenControlCenter(); });
             bool free = getFreeMouseActive == null || getFreeMouseActive();
             quickRightMenu.Items.Add(free ? "切换锁鼠游戏模式 (Ctrl+Alt+M)" : "释放鼠标 (Ctrl+Alt)", null, delegate
@@ -696,10 +706,20 @@ namespace DualRemote
             quickRightMenu.Items.Add(new ToolStripSeparator());
             var exitItem = new ToolStripMenuItem("退出远控 (Ctrl+Alt+Shift+Q)")
             {
-                ForeColor = Color.FromArgb(220, 38, 38)
+                ForeColor = SystemInformation.HighContrast ? SystemColors.MenuText : Theme.Alert
             };
             exitItem.Click += delegate { if (onDisconnect != null) onDisconnect(); };
             quickRightMenu.Items.Add(exitItem);
+        }
+
+        private sealed class QuickMenuColors : ProfessionalColorTable
+        {
+            public override Color ToolStripDropDownBackground { get { return Theme.Paper; } }
+            public override Color MenuBorder { get { return Theme.StrokeStrong; } }
+            public override Color MenuItemSelected { get { return Theme.SurfaceSubtle; } }
+            public override Color MenuItemBorder { get { return Theme.Stroke; } }
+            public override Color SeparatorDark { get { return Theme.Divider; } }
+            public override Color SeparatorLight { get { return Theme.Paper; } }
         }
 
         protected override void OnMouseEnter(EventArgs e)
@@ -800,20 +820,14 @@ namespace DualRemote
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             float s = Theme.GetDpiScale(this);
             bool free = getFreeMouseActive == null || getFreeMouseActive();
-            Color statusDot = free ? Color.FromArgb(34, 197, 94) : Color.FromArgb(245, 158, 11);
+            Color statusDot = free ? Theme.Success : Theme.Warning;
 
             if (hiddenAtEdge && !menuOpen && !dragging)
             {
-                // Sleek translucent docked edge handle tab
-                g.Clear(Color.FromArgb(248, 250, 252));
-                using (var bg = new SolidBrush(Color.FromArgb(245, 248, 253)))
-                using (var bd = new Pen(Color.FromArgb(196, 208, 224), 1f))
-                using (var p = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), 5f * s))
-                {
-                    g.FillPath(bg, p);
-                    g.DrawPath(bd, p);
-                }
-                using (var grip = new Pen(Color.FromArgb(148, 163, 184), Math.Max(1.6f, 1.6f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                g.Clear(Theme.SurfaceSubtle);
+                Theme.Surface(g, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f),
+                    5f * s, Theme.SurfaceSubtle, Theme.StrokeStrong);
+                using (var grip = new Pen(Theme.Muted, Math.Max(1.6f, 1.6f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 using (var dot = new SolidBrush(statusDot))
                 {
                     if (dockEdge == FloatDockEdge.Left || dockEdge == FloatDockEdge.Right)
@@ -834,22 +848,12 @@ namespace DualRemote
                 return;
             }
 
-            // Full crisp UU-style movable square floating widget (46x46)
-            Color cardFill = menuOpen
-                ? Color.FromArgb(236, 242, 252)
-                : (hovered ? Color.FromArgb(248, 250, 255) : Color.White);
-            Color cardBorder = menuOpen
-                ? Color.FromArgb(59, 130, 246)
-                : (!free ? Color.FromArgb(245, 158, 11) : Color.FromArgb(208, 218, 232));
+            Color cardFill = menuOpen ? Theme.AccentLight : hovered ? Theme.SurfaceSubtle : Theme.Paper;
+            Color cardBorder = menuOpen ? Theme.AccentBorder : Theme.StrokeStrong;
 
             g.Clear(cardFill);
-            using (var path = Theme.Round(new RectangleF(0.6f, 0.6f, Width - 1.6f, Height - 1.6f), 11f * s))
-            using (var bg = new SolidBrush(cardFill))
-            using (var bd = new Pen(cardBorder, menuOpen || !free ? 1.6f : 1.1f))
-            {
-                g.FillPath(bg, path);
-                g.DrawPath(bd, path);
-            }
+            Theme.Surface(g, new RectangleF(0.6f, 0.6f, Width - 1.6f, Height - 1.6f),
+                11f * s, cardFill, cardBorder);
 
             // Centered BoBo brand logo (or crisp control-center icon fallback)
             Bitmap logo = Theme.GetBrandLogoBitmap();
@@ -869,17 +873,16 @@ namespace DualRemote
             }
             else
             {
-                using (var f = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold))
-                using (var b = new SolidBrush(Color.FromArgb(37, 99, 235)))
-                using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString("Bo", f, b, ClientRectangle, sf);
+                float glyphSize = 21f * s;
+                Theme.DrawGlyph(g, Theme.Glyph.Sliders,
+                    new RectangleF((Width - glyphSize) / 2f, (Height - glyphSize) / 2f, glyphSize, glyphSize), Theme.BodyInk);
             }
 
             // Tiny live connection/mouse-mode indicator dot at top-right corner
             float dotSize = 8f * s;
             float dx = Width - dotSize - 4.5f * s;
             float dy = 4.5f * s;
-            using (var ring = new SolidBrush(Color.White))
+            using (var ring = new SolidBrush(cardFill))
             using (var dot = new SolidBrush(statusDot))
             {
                 g.FillEllipse(ring, dx - 1.2f, dy - 1.2f, dotSize + 2.4f, dotSize + 2.4f);

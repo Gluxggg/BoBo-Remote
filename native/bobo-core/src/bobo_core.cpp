@@ -10,6 +10,8 @@
 #include "d3d11_renderer.h"
 #include "mf_decoder.h"
 
+#include <climits>
+#include <cstdlib>
 #include <windowsx.h>
 #include <mmsystem.h>
 
@@ -291,7 +293,10 @@ struct BoBoClientSession {
     std::atomic<bool> alive{ true };
     std::atomic<bool> videoReceived{ false };
     std::atomic<bool> hostCursorComposited{ false };
-    std::atomic<int32_t> remoteCursorShape{ 1 }; // 0=Hidden, 1=Arrow, 2=IBeam, 3=Hand, ...
+    std::atomic<uint32_t> remoteCursorInfo{ 1 }; // Shape, width and height in the low three bytes.
+    uint32_t localCursorInfo = 0; // The cursor handles below are owned by the viewport thread.
+    HCURSOR localCursor = nullptr;
+    bool ownsLocalCursor = false;
     bool freeMouse = true;
     bool rawMouseRegistered = false;
     bool cursorHidden = false;
@@ -334,7 +339,73 @@ struct BoBoClientSession {
 
 static std::atomic<BoBoClientSession*> g_activeClient{ nullptr };
 
-// ==================== Host Hardware Privacy Input Blocker & Super Display ====================
+// ==================== Host Privacy Cursor Mask and Physical Input Blocker ====================
+class PrivacyCursorMask {
+public:
+    bool Set(bool enable) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enable) return RestoreLocked();
+        if (!initialized_) {
+            if (!LoadApi() || !initialize_()) return false;
+            initialized_ = true;
+        }
+        if (!showCursor_(FALSE)) {
+            if (!masked_.load(std::memory_order_relaxed)) RestoreLocked();
+            return false;
+        }
+        masked_.store(true, std::memory_order_release);
+        return true;
+    }
+
+    bool IsMasked() const { return masked_.load(std::memory_order_acquire); }
+
+private:
+    using Initialize = BOOL (WINAPI*)();
+    using ShowCursor = BOOL (WINAPI*)(BOOL);
+
+    bool LoadApi() {
+        if (module_) return true;
+        HMODULE module = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!module) return false;
+        auto init = GetProcAddress(module, "MagInitialize");
+        auto uninit = GetProcAddress(module, "MagUninitialize");
+        auto show = GetProcAddress(module, "MagShowSystemCursor");
+        if (!init || !uninit || !show) {
+            FreeLibrary(module);
+            return false;
+        }
+        // GetProcAddress returns FARPROC irrespective of the exported signature.
+        std::memcpy(&initialize_, &init, sizeof(initialize_));
+        std::memcpy(&uninitialize_, &uninit, sizeof(uninitialize_));
+        std::memcpy(&showCursor_, &show, sizeof(showCursor_));
+        module_ = module;
+        return true;
+    }
+
+    bool RestoreLocked() {
+        if (!initialized_) return true;
+        if (masked_.load(std::memory_order_relaxed)) {
+            if (!showCursor_(TRUE)) return false;
+            masked_.store(false, std::memory_order_release);
+        }
+        if (!uninitialize_()) return false;
+        initialized_ = false;
+        return true;
+    }
+
+    std::mutex mutex_;
+    std::atomic<bool> masked_{ false };
+    HMODULE module_ = nullptr;
+    Initialize initialize_ = nullptr;
+    Initialize uninitialize_ = nullptr;
+    ShowCursor showCursor_ = nullptr;
+    bool initialized_ = false;
+};
+
+// MagShowSystemCursor is a transient display override. The desktop cursor and scheme
+// remain available to the remote stream, including when the physical input hook is off.
+static PrivacyCursorMask g_privacyCursorMask;
+
 #ifndef LLMHF_LOWER_IL_INJECTED
 #define LLMHF_LOWER_IL_INJECTED 0x00000002
 #endif
@@ -688,38 +759,57 @@ static bool IsPointInVideoRect(const BoBoClientSession* st, int x, int y, RECT& 
     return (vpW > 0 && vpH > 0 && x >= outVp.left && x < outVp.right && y >= outVp.top && y < outVp.bottom);
 }
 
-static bool ShouldHideLocalCursor(const BoBoClientSession* st, bool insideVideo) {
-    if (!st) return false;
-    if (!st->freeMouse) return true;
-    // When host composites its cursor into video (legacy clients / Locked mode), hide laptop's local cursor.
-    // When hostCursorComposited == false (V6.3 zero-latency local cursor mode), keep laptop's 0ms OS cursor visible!
-    return !st->viewOnly && st->videoReceived.load() && st->hostCursorComposited.load() && insideVideo;
+static void ReleaseClientLocalCursor(BoBoClientSession* st) {
+    if (st->ownsLocalCursor) {
+        if (GetCursor() == st->localCursor) SetCursor(LoadStandardCursor(1));
+        DestroyCursor(st->localCursor);
+    }
+    st->localCursor = nullptr;
+    st->ownsLocalCursor = false;
+    st->localCursorInfo = 0;
 }
 
-static HCURSOR ResolveClientLocalCursor(const BoBoClientSession* st, bool insideVideo) {
-    if (!st || !insideVideo || st->viewOnly) {
-        return LoadCursorW(nullptr, IDC_ARROW);
+static void SetClientLocalCursor(BoBoClientSession* st, bool insideVideo) {
+    if (!st->freeMouse) {
+        SetCursor(nullptr);
+        return;
     }
-    if (ShouldHideLocalCursor(st, insideVideo)) {
-        return nullptr;
+    if (!insideVideo || st->viewOnly) {
+        SetCursor(LoadStandardCursor(1));
+        return;
     }
-    int32_t shape = st->remoteCursorShape.load(std::memory_order_acquire);
-    switch (shape) {
-        case 0:  return nullptr;
-        case 2:  return LoadCursorW(nullptr, IDC_IBEAM);
-        case 3:  return LoadCursorW(nullptr, IDC_HAND);
-        case 4:  return LoadCursorW(nullptr, IDC_WAIT);
-        case 5:  return LoadCursorW(nullptr, IDC_APPSTARTING);
-        case 6:  return LoadCursorW(nullptr, IDC_CROSS);
-        case 7:  return LoadCursorW(nullptr, IDC_SIZENS);
-        case 8:  return LoadCursorW(nullptr, IDC_SIZEWE);
-        case 9:  return LoadCursorW(nullptr, IDC_SIZENWSE);
-        case 10: return LoadCursorW(nullptr, IDC_SIZENESW);
-        case 11: return LoadCursorW(nullptr, IDC_SIZEALL);
-        case 12: return LoadCursorW(nullptr, IDC_NO);
-        case 13: return LoadCursorW(nullptr, IDC_HELP);
-        default: return LoadCursorW(nullptr, IDC_ARROW);
+    if (st->videoReceived.load() && st->hostCursorComposited.load()) {
+        SetCursor(nullptr);
+        return;
     }
+
+    const uint32_t info = st->remoteCursorInfo.load(std::memory_order_acquire);
+    const int32_t shape = static_cast<int32_t>(info & 0xff);
+    if (shape == 0) {
+        SetCursor(nullptr);
+        return;
+    }
+    if (st->localCursorInfo == info) {
+        SetCursor(st->localCursor);
+        return;
+    }
+
+    const int width = static_cast<int>((info >> 8) & 0xff);
+    const int height = static_cast<int>((info >> 16) & 0xff);
+    const int cursorW = width > 0 ? width : kDefaultCursorDimension;
+    const int cursorH = height > 0 ? height : kDefaultCursorDimension;
+    HCURSOR standard = LoadStandardCursor(shape);
+    HCURSOR scaled = nullptr;
+    SIZE bitmap = {};
+    if (standard && (!GetCursorBitmapSize(standard, bitmap) || bitmap.cx != cursorW || bitmap.cy != cursorH)) {
+        scaled = static_cast<HCURSOR>(CopyImage(standard, IMAGE_CURSOR, cursorW, cursorH, 0));
+    }
+    HCURSOR next = scaled ? scaled : standard;
+    SetCursor(next);
+    ReleaseClientLocalCursor(st);
+    st->localCursor = next;
+    st->ownsLocalCursor = scaled != nullptr;
+    st->localCursorInfo = info;
 }
 
 static bool ComputeCursorInVideoRect(BoBoClientSession* st, HWND hwnd) {
@@ -775,12 +865,18 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_ERASEBKGND:
             return 1;
 
+        case WM_NCDESTROY:
+            ReleaseClientLocalCursor(st);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+
         case WM_SIZE: {
             uint32_t w = LOWORD(lParam);
             uint32_t h = HIWORD(lParam);
             if (w > 0 && h > 0) {
                 std::string rErr;
                 st->renderer.ResizeSwapChain(w, h, rErr);
+                PostMessageW(hwnd, kMsgRefreshCursor, 0, 0);
             }
             return 0;
         }
@@ -790,7 +886,7 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 POINT pt = {};
                 if (GetCursorPos(&pt) && WindowFromPoint(pt) == hwnd) {
                     bool inside = ComputeCursorInVideoRect(st, hwnd);
-                    SetCursor(ResolveClientLocalCursor(st, inside));
+                    SetClientLocalCursor(st, inside);
                 }
             }
             return 0;
@@ -799,7 +895,7 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_SETCURSOR: {
             if (LOWORD(lParam) == HTCLIENT) {
                 bool inside = ComputeCursorInVideoRect(st, hwnd);
-                SetCursor(ResolveClientLocalCursor(st, inside));
+                SetClientLocalCursor(st, inside);
                 return TRUE;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -837,7 +933,7 @@ static LRESULT CALLBACK ClientViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 RECT vp = {};
                 bool insideVideo = IsPointInVideoRect(st, x, y, vp);
                 st->pointerInVideoRect = insideVideo;
-                SetCursor(ResolveClientLocalCursor(st, insideVideo));
+                SetClientLocalCursor(st, insideVideo);
                 bool dragging = (wParam & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2)) != 0;
                 if (insideVideo || dragging) {
                     EmitAbsMouseAtClientPoint(st, x, y, dragging);
@@ -1194,6 +1290,10 @@ namespace bobo {
 uint64_t GetLastRemoteMouseInjectMs() {
     return g_lastRemoteMouseInjectMs.load(std::memory_order_acquire);
 }
+
+bool IsPrivacyCursorMasked() {
+    return g_privacyCursorMask.IsMasked();
+}
 } // namespace bobo
 
 extern "C" {
@@ -1473,8 +1573,16 @@ BOBO_API void __stdcall BoBoHost_SetCompositeCursor(void* handle, int32_t enable
 }
 
 BOBO_API int32_t __stdcall BoBoHost_GetCursorShape(int32_t monitorIndex) {
+    return BoBoHost_GetCursorInfo(monitorIndex, nullptr, nullptr);
+}
+
+BOBO_API int32_t __stdcall BoBoHost_GetCursorInfo(int32_t monitorIndex, int32_t* width, int32_t* height) {
     (void)monitorIndex;
-    return ScreenCapturer::DetectStandardCursorShape();
+    SIZE bitmap = {};
+    int32_t shape = ScreenCapturer::DetectStandardCursorShape(&bitmap);
+    if (width) *width = bitmap.cx;
+    if (height) *height = bitmap.cy;
+    return shape;
 }
 
 BOBO_API void __stdcall BoBoHost_RequestKeyframe(void* handle) {
@@ -1496,7 +1604,7 @@ BOBO_API void __stdcall BoBoHost_Destroy(void* handle) {
         session->videoThread.join();
     }
     delete session;
-    BoBoHost_RestoreSuperDisplay();
+    // The server restores display modes under its active-stream ownership lock.
 }
 
 static std::atomic<int> g_prevCursorX{ -2147483647 };
@@ -1797,6 +1905,32 @@ BOBO_API void __stdcall BoBoHost_InjectUnicodeText(const wchar_t* text, int32_t 
     }
 }
 
+static bool ReadCurrentDesktopMode(const std::wstring& device, DEVMODEW& mode) {
+    mode = {};
+    mode.dmSize = sizeof(mode);
+    return EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &mode) != FALSE;
+}
+
+static bool RestoreSuperDisplayLocked() {
+    if (!g_superDispApplied) return true;
+    DEVMODEW original = g_superDispOrigMode;
+    original.dmFields &= DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    LONG rc = ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &original, nullptr, 0, nullptr);
+    InvalidateHostMonitorCache();
+
+    DEVMODEW current = {};
+    if (rc != DISP_CHANGE_SUCCESSFUL || !ReadCurrentDesktopMode(g_superDispDevice, current) ||
+        current.dmPelsWidth != original.dmPelsWidth || current.dmPelsHeight != original.dmPelsHeight ||
+        ((original.dmFields & DM_DISPLAYFREQUENCY) && current.dmDisplayFrequency != original.dmDisplayFrequency)) {
+        // Keep the saved mode for another restore attempt after the display returns.
+        return false;
+    }
+    g_superDispApplied = false;
+    g_superDispDevice.clear();
+    g_superDispOrigMode = {};
+    return true;
+}
+
 BOBO_API int32_t __stdcall BoBoHost_ApplySuperDisplay(
     int32_t monitorIndex,
     int32_t targetWidth,
@@ -1809,120 +1943,78 @@ BOBO_API int32_t __stdcall BoBoHost_ApplySuperDisplay(
 
     std::lock_guard<std::mutex> lk(g_superDispMutex);
     auto devs = ListMonitorDevicesOrdered();
-    if (devs.empty()) return 0;
-    int idx = (monitorIndex >= 0 && monitorIndex < static_cast<int>(devs.size())) ? monitorIndex : 0;
-    const std::wstring& devName = devs[static_cast<size_t>(idx)].deviceName;
-
-    // If previously applied to a different monitor, restore it first
-    if (g_superDispApplied && g_superDispDevice != devName) {
-        ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &g_superDispOrigMode, nullptr, 0, nullptr);
-        g_superDispApplied = false;
-        g_superDispDevice.clear();
-        std::memset(&g_superDispOrigMode, 0, sizeof(g_superDispOrigMode));
-    }
+    if (monitorIndex < 0 || monitorIndex >= static_cast<int32_t>(devs.size())) return 0;
+    const std::wstring& devName = devs[static_cast<size_t>(monitorIndex)].deviceName;
+    if (g_superDispApplied && g_superDispDevice != devName && !RestoreSuperDisplayLocked()) return 0;
 
     DEVMODEW curMode = {};
-    curMode.dmSize = sizeof(curMode);
-    if (!EnumDisplaySettingsW(devName.c_str(), ENUM_CURRENT_SETTINGS, &curMode)) {
-        return 0;
-    }
-
-    int32_t curW = static_cast<int32_t>(curMode.dmPelsWidth);
-    int32_t curH = static_cast<int32_t>(curMode.dmPelsHeight);
-    if (outActualWidth) *outActualWidth = curW;
-    if (outActualHeight) *outActualHeight = curH;
-    if (curW <= 0 || curH <= 0) return 0;
-
-    double targetAspect = static_cast<double>(targetWidth) / static_cast<double>(targetHeight);
-    double curAspect = static_cast<double>(curW) / static_cast<double>(curH);
-
-    // Already matching client aspect ratio natively -> zero black bars with no flicker!
-    if (std::fabs(curAspect - targetAspect) <= 0.025) {
-        return 1;
-    }
+    if (!ReadCurrentDesktopMode(devName, curMode)) return 0;
+    const auto report = [&](const DEVMODEW& mode) {
+        if (outActualWidth) *outActualWidth = static_cast<int32_t>(mode.dmPelsWidth);
+        if (outActualHeight) *outActualHeight = static_cast<int32_t>(mode.dmPelsHeight);
+        return mode.dmPelsWidth == static_cast<DWORD>(targetWidth) &&
+               mode.dmPelsHeight == static_cast<DWORD>(targetHeight) ? 1 : 0;
+    };
+    const auto sameAspect = [&](const DEVMODEW& mode) {
+        return mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0 &&
+            static_cast<uint64_t>(mode.dmPelsWidth) * targetHeight ==
+            static_cast<uint64_t>(mode.dmPelsHeight) * targetWidth;
+    };
+    if (report(curMode)) return 1;
+    const bool currentMatchesAspect = sameAspect(curMode);
 
     bool found = false;
     DEVMODEW bestMode = {};
-    double bestScore = -1e18;
-    DEVMODEW dm = {};
-    dm.dmSize = sizeof(dm);
-    const DWORD minAllowedW = (targetWidth >= 1440 && curW >= 1440) ? 1440u : 1024u;
-    const DWORD minAllowedH = (targetHeight >= 900 && curH >= 900) ? 900u : 600u;
-    for (DWORD modeNum = 0; EnumDisplaySettingsW(devName.c_str(), modeNum, &dm); ++modeNum) {
-        if (dm.dmBitsPerPel < 32) continue;
-        if (dm.dmPelsWidth < minAllowedW || dm.dmPelsHeight < minAllowedH) continue;
-        if ((dm.dmFields & DM_DISPLAYORIENTATION) && (curMode.dmFields & DM_DISPLAYORIENTATION) &&
-            dm.dmDisplayOrientation != curMode.dmDisplayOrientation) {
-            continue;
-        }
-        double aspect = static_cast<double>(dm.dmPelsWidth) / static_cast<double>(dm.dmPelsHeight);
-        if (std::fabs(aspect - targetAspect) > 0.035) continue;
+    uint64_t bestDistance = UINT64_MAX;
+    int bestRefreshDelta = INT_MAX;
+    for (DWORD modeNum = 0; ; ++modeNum) {
+        DEVMODEW mode = {};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsW(devName.c_str(), modeNum, &mode)) break;
+        if (!sameAspect(mode) || mode.dmPelsWidth < 640 || mode.dmPelsHeight < 480 ||
+            mode.dmBitsPerPel != curMode.dmBitsPerPel) continue;
+        if ((mode.dmFields & DM_DISPLAYORIENTATION) && (curMode.dmFields & DM_DISPLAYORIENTATION) &&
+            mode.dmDisplayOrientation != curMode.dmDisplayOrientation) continue;
 
-        double wDiff = std::fabs(static_cast<double>(dm.dmPelsWidth) - static_cast<double>(targetWidth));
-        double hDiff = std::fabs(static_cast<double>(dm.dmPelsHeight) - static_cast<double>(targetHeight));
-        int freqScore = (dm.dmDisplayFrequency >= 60 && dm.dmDisplayFrequency <= 240)
-            ? static_cast<int>(dm.dmDisplayFrequency) : 0;
-        double score = -(wDiff + hDiff) * 2.0 + static_cast<double>(freqScore) * 3.0;
-        if (dm.dmPelsWidth < 1280) score -= 2000.0;
-
-        if (!found || score > bestScore) {
-            DEVMODEW testDm = dm;
-            testDm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-            if (ChangeDisplaySettingsExW(devName.c_str(), &testDm, nullptr, CDS_TEST, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-                found = true;
-                bestScore = score;
-                bestMode = testDm;
-            }
-        }
-        dm.dmSize = sizeof(dm);
+        uint64_t distance = static_cast<uint64_t>(std::llabs(static_cast<int64_t>(mode.dmPelsWidth) - targetWidth)) +
+                            static_cast<uint64_t>(std::llabs(static_cast<int64_t>(mode.dmPelsHeight) - targetHeight));
+        if (currentMatchesAspect && distance != 0) continue;
+        int refreshDelta = std::abs(static_cast<int>(mode.dmDisplayFrequency) - static_cast<int>(curMode.dmDisplayFrequency));
+        if (found && (distance > bestDistance || (distance == bestDistance && refreshDelta >= bestRefreshDelta))) continue;
+        mode.dmFields &= DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+        if (ChangeDisplaySettingsExW(devName.c_str(), &mode, nullptr, CDS_TEST, nullptr) != DISP_CHANGE_SUCCESSFUL) continue;
+        found = true;
+        bestDistance = distance;
+        bestRefreshDelta = refreshDelta;
+        bestMode = mode;
     }
 
     if (!found) {
-        return 0;
+        if (g_superDispApplied && !currentMatchesAspect && RestoreSuperDisplayLocked()) {
+            ReadCurrentDesktopMode(devName, curMode);
+        }
+        return report(curMode);
     }
 
+    if (ChangeDisplaySettingsExW(devName.c_str(), &bestMode, nullptr, CDS_FULLSCREEN, nullptr) != DISP_CHANGE_SUCCESSFUL) {
+        return report(curMode);
+    }
     if (!g_superDispApplied) {
         g_superDispOrigMode = curMode;
         g_superDispDevice = devName;
+        g_superDispApplied = true;
     }
-
-    LONG rc = ChangeDisplaySettingsExW(devName.c_str(), &bestMode, nullptr, CDS_FULLSCREEN, nullptr);
-    if (rc != DISP_CHANGE_SUCCESSFUL) {
-        if (!g_superDispApplied) {
-            g_superDispDevice.clear();
-            std::memset(&g_superDispOrigMode, 0, sizeof(g_superDispOrigMode));
-        }
-        return 0;
-    }
-
-    g_superDispApplied = true;
     InvalidateHostMonitorCache();
-    if (outActualWidth) *outActualWidth = static_cast<int32_t>(bestMode.dmPelsWidth);
-    if (outActualHeight) *outActualHeight = static_cast<int32_t>(bestMode.dmPelsHeight);
-    return 1;
+    if (!ReadCurrentDesktopMode(devName, curMode) || !sameAspect(curMode)) {
+        RestoreSuperDisplayLocked();
+        if (!ReadCurrentDesktopMode(devName, curMode)) return 0;
+    }
+    return report(curMode);
 }
 
 BOBO_API void __stdcall BoBoHost_RestoreSuperDisplay() {
     std::lock_guard<std::mutex> lk(g_superDispMutex);
-    if (!g_superDispApplied) return;
-    g_superDispApplied = false;
-    // Prefer restoring the exact registry display mode (cleanly unwinds CDS_FULLSCREEN without touching color/HDR)
-    LONG rc = ChangeDisplaySettingsExW(g_superDispDevice.c_str(), nullptr, nullptr, 0, nullptr);
-    DEVMODEW verify = {};
-    verify.dmSize = sizeof(verify);
-    bool matched = (rc == DISP_CHANGE_SUCCESSFUL) &&
-        EnumDisplaySettingsW(g_superDispDevice.c_str(), ENUM_CURRENT_SETTINGS, &verify) &&
-        verify.dmPelsWidth == g_superDispOrigMode.dmPelsWidth &&
-        verify.dmPelsHeight == g_superDispOrigMode.dmPelsHeight &&
-        (g_superDispOrigMode.dmDisplayFrequency == 0 || verify.dmDisplayFrequency == g_superDispOrigMode.dmDisplayFrequency);
-    if (!matched && g_superDispOrigMode.dmPelsWidth > 0 && g_superDispOrigMode.dmPelsHeight > 0) {
-        DEVMODEW safeOrig = g_superDispOrigMode;
-        safeOrig.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-        ChangeDisplaySettingsExW(g_superDispDevice.c_str(), &safeOrig, nullptr, 0, nullptr);
-    }
-    InvalidateHostMonitorCache();
-    g_superDispDevice.clear();
-    std::memset(&g_superDispOrigMode, 0, sizeof(g_superDispOrigMode));
+    RestoreSuperDisplayLocked();
 }
 
 BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
@@ -2015,6 +2107,10 @@ BOBO_API int32_t __stdcall BoBoHost_SetPrivacyInputBlock(
         return 0;
     }
     return 1;
+}
+
+BOBO_API int32_t __stdcall BoBoHost_SetPrivacyCursorMask(int32_t enable) {
+    return g_privacyCursorMask.Set(enable != 0) ? 1 : 0;
 }
 
 BOBO_API int32_t __stdcall BoBoHost_IsPrivacyInputBlocked() {
@@ -2170,7 +2266,9 @@ BOBO_API void __stdcall BoBoClient_SetVolume(void* handle, int32_t volumePercent
 
 BOBO_API void __stdcall BoBoClient_SetScaleMode(void* handle, int32_t scaleMode) {
     auto* st = static_cast<BoBoClientSession*>(handle);
-    if (st) st->renderer.SetScaleMode(scaleMode);
+    if (!st) return;
+    st->renderer.SetScaleMode(scaleMode);
+    if (st->viewportHwnd) PostMessageW(st->viewportHwnd, kMsgRefreshCursor, 0, 0);
 }
 
 BOBO_API void __stdcall BoBoClient_SetViewOnly(void* handle, int32_t viewOnly) {
@@ -2200,10 +2298,22 @@ BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t
 }
 
 BOBO_API void __stdcall BoBoClient_SetRemoteCursorShape(void* handle, int32_t shapeId) {
+    BoBoClient_SetRemoteCursorInfo(handle, shapeId, 0, 0);
+}
+
+BOBO_API void __stdcall BoBoClient_SetRemoteCursorInfo(void* handle, int32_t shapeId, int32_t width, int32_t height) {
     auto* st = static_cast<BoBoClientSession*>(handle);
     if (!st) return;
-    int32_t prev = st->remoteCursorShape.exchange(shapeId, std::memory_order_acq_rel);
-    if (prev != shapeId && st->viewportHwnd && IsWindow(st->viewportHwnd)) {
+    if (shapeId < 0 || shapeId > 13) shapeId = 1;
+    if (shapeId == 0 || width <= 0 || height <= 0 || width > kMaxCursorDimension || height > kMaxCursorDimension) {
+        width = 0;
+        height = 0;
+    }
+    const uint32_t info = static_cast<uint32_t>(shapeId) |
+                          (static_cast<uint32_t>(width) << 8) |
+                          (static_cast<uint32_t>(height) << 16);
+    const uint32_t prev = st->remoteCursorInfo.exchange(info, std::memory_order_acq_rel);
+    if (prev != info && st->viewportHwnd && IsWindow(st->viewportHwnd)) {
         PostMessageW(st->viewportHwnd, kMsgRefreshCursor, 0, 0);
     }
 }
@@ -2270,7 +2380,6 @@ BOBO_API void __stdcall BoBoClient_Destroy(void* handle) {
         st->decodeDoneEvent = nullptr;
     }
     if (st->viewportHwnd && IsWindow(st->viewportHwnd)) {
-        SetWindowLongPtrW(st->viewportHwnd, GWLP_USERDATA, 0);
         DestroyWindow(st->viewportHwnd);
         st->viewportHwnd = nullptr;
     }

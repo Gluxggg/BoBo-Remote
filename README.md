@@ -25,7 +25,7 @@
 
 **四端原生应用使用统一协议，Windows 主程序采用单文件封装。**
 
-**BoBo Remote V6.2** 已全面重构为**零外置第三方内核**的全内置原生远控系统：不再依赖或打包外部 Sunshine / Moonlight / RustDesk 独立程序，由统一的 [**BoBo6.2 权威二进制协议**](protocol/BOBO6-SPEC.md)（`TCP+TLS 1.2 :49810` / 局域网 `UDP :49812`）贯通 **Windows、Android、macOS 与 iOS / iPadOS** 四大平台。
+**BoBo Remote v7.0.0** 更新了 Windows 的界面、连接线路选择、超级屏和防窥。**Windows、Android、macOS 与 iOS / iPadOS** 通过 [**BoBo6.2 协议**](protocol/BOBO6-SPEC.md)互通，Windows 使用内置媒体与输入内核。
 
 Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll`。设备可在局域网内自动发现并建立 TLS 连接，也可通过 Tailscale 等组网工具跨网连接。
 
@@ -41,7 +41,7 @@ Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll
 
 | 平台 | 系统要求 | Release 安装包 | 主控（控制他人） | 被控（被他人控制） | 平台核心能力 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`<br>`BoBoRemote-Portable-x64.zip` | ✅ **全功能**<br>含 Android 手机导航栏、iOS 投屏观看 | ✅ **全功能**<br>DXGI/GDI + Media Foundation H.264 硬编 + WASAPI 音频 | 进程内单文件、超级屏无黑边自适应、框内原生小指针、物理键鼠锁真防窥、客户端内一键自动更新 |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`<br>`BoBoRemote-Portable-x64.zip` | ✅ **全功能**<br>含 Android 手机导航栏、iOS 投屏观看 | ✅ **全功能**<br>DXGI/GDI + Media Foundation H.264 硬编 + WASAPI 音频 | 进程内单文件、超级屏等比适配、主机尺寸光标、实体屏防窥、应用内更新 |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` | ✅ **全功能**<br>MediaCodec 零拷贝硬解 + 48kHz 立体声 | ✅ **免 Root 全功能**<br>MediaProjection 录屏 + 无障碍服务触控 | 触控板鼠标 / 直点触控双模式、贴边悬浮球、控制中心、快捷 PC 键盘栏、蓝牙键盘映射 Windows VK、系统导航键控制 |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg`（Universal 2） | ✅ **全功能**<br>`AVSampleBufferDisplayLayer` 零拷贝渲染 | ✅ **全功能**<br>`ScreenCaptureKit` 含免驱动系统音频 + VideoToolbox 硬编 | 超级屏自适应、`⌘ → Ctrl` 智能键位映射、防窥窗口自动从录屏排除 + `CGEventTap` 物理键鼠锁 |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` | **前台主控**<br>VideoToolbox 硬解 + 触控板/直点 | 👁️ **ReplayKit 仅观看投屏** | 内嵌 ReplayKit 广播扩展与本机回环桥接，支持 Sideloadly / AltStore / SideStore / Xcode 签装 |
@@ -50,7 +50,7 @@ Windows 主程序内嵌压缩的 C++17 原生媒体与输入内核 `BoBoCore.dll
 
 ## 为什么选择 BoBo Remote？
 
-| 传统商业远控（UU 远程 / ToDesk / 向日葵） | BoBo Remote V6.2 |
+| 传统商业远控（UU 远程 / ToDesk / 向日葵） | BoBo Remote v7 |
 | --- | --- |
 | 强制注册云端账号，设备列表与信令托管第三方服务器 | **零账号、零中转、零遥测** — 局域网自动发现直连，跨网通过 Tailscale (`100.x.y.z`) / IPv6 端到端直连 |
 | 高帧率、高清画质、防窥模式、跨端控制常设会员档位 | **MIT 全量开源、全功能无限制** — 原生硬编硬解、超级屏、真防窥、文件传输、四端互通开箱全解锁 |
@@ -97,9 +97,11 @@ flowchart LR
 - 自研 C++17 `BoBoCore.dll` 以 GZip 压缩形式内嵌于 `BoBo远程.exe`，运行时在进程内加载。
 - 采集与渲染全链路硬加速：**DXGI Desktop Duplication**（含无头/异常自动 GDI 回退）→ **Media Foundation 硬件 H.264 编码** → **D3D11 + DXGI 1.2 Flip-Model 零拷贝渲染** → **WASAPI Loopback 48kHz 音频采集**。
 
-### 2. 超级屏无黑边自适应 & 框内原生光标体验
-- **超级屏模式（默认开启）**：自动匹配 16:10 笔记本等异形比例，消除上下黑边；支持 3 档显示缩放模式自由切换（**全屏自适应无黑边** / **等比居中保留原比例** / **实际大小 1:1**），会话断开后主机分辨率自动复原。
-- **光标无缝衔接**：远端画面内实时合成主机原生光标指针，移动出远控窗口边缘后自动切回本机大指针；支持**自由鼠标 / 锁鼠游戏 / 仅观看**三模式，锁鼠状态下随时轻按 `Ctrl + Alt` 秒释放鼠标去点悬浮球或切换本地窗口。
+### 2. 超级屏与远程光标
+
+- **超级屏**按控制端画面区域的实际像素适配。全屏时可临时切换到被控显示器支持的同宽高比模式，退出全屏和断开会话时恢复原模式。窗口模式保持桌面比例，串流尺寸受画质和网络预算限制。已有虚拟显示器在 Windows 中启用后，可在会话中切换使用。
+- **自由鼠标**在远控画面内按主机传来的指针尺寸和形状绘制，移出画面后恢复本机指针。锁鼠模式使用主机合成指针，按 `Ctrl + Alt` 可释放鼠标。
+- **连接线路**可选自动、局域网直连或 Tailscale 跨网。会话中显示探测到的 P2P 或中继路径，以及 UDP+FEC 或 TCP+TLS 传输。画质可独立选择低延迟、弱网抗丢包或其他档位。
 
 ### 3. UU 级控制中心 & 四边贴边隐藏方形悬浮球
 - 窗口顶栏「控制中心」按钮与全屏可拖拽、可任意贴边隐藏的方形悬浮球共用同一套实时菜单：
@@ -109,8 +111,9 @@ flowchart LR
   - **声音与安全**：音量滑块、被控端静音运行（断开自动恢复）、远程结束后自动锁屏、一键开关远端防窥屏；
   - **外设与工具**：系统快捷键透传、鼠标模式切换、发送 `Ctrl+Alt+Del`、剪贴板文字发送、本地截屏、网络状态浮层与一键断开。
 
-### 4. 真·物理级被控防窥保护（Windows & macOS）
-- **连入瞬间自动防窥**：开启后被控瞬间即拉起全屏防窥幕布（Windows 基于 `WDA_EXCLUDEFROMCAPTURE`，macOS 基于 ScreenCaptureKit 窗口排除），远端控制画面清晰无干扰，机前物理屏仅显示自定义防窥壁纸或纯黑/深空/极简霜白主题。
+### 4. 被控端防窥（Windows 和 macOS）
+
+- **自动防窥**可在会话开始时覆盖实体屏。Windows 通过 `WDA_EXCLUDEFROMCAPTURE` 把防窥壁纸从串流中排除，并请求遮挡系统指针、在普通输入法弹窗出现时重新置顶。实际遮挡由 Windows 和显示驱动决定。macOS 用 ScreenCaptureKit 排除防窥窗口。
 - **物理键鼠彻底锁定（默认开启）**：Windows 通过 `BoBoCore.dll` 原生 `WH_MOUSE_LL` + `WH_KEYBOARD_LL` 钩子、macOS 通过 `CGEventTap` 彻底拦截机前实体键鼠操作（防止他人点击任务栏、开始菜单或干扰打字），仅放行远控签名注入事件与紧急退出组合键。
 - **可选 DDC/CI 安全背光降亮（默认关闭）**：基于 `dxva2.dll`，严格仅调节非 HDR 物理显示器背光亮度（VCP `0x10`），**绝不修改对比度、色温或 RGB 增益**；原始亮度持久化保存，恢复时写回并回读校验。
 - **锁屏状态机守护**：支持退出防窥自动锁屏，Windows 解锁返回桌面后具备防抖抑制窗口，避免误重拉起。
@@ -212,7 +215,7 @@ Windows 本次本地验证直接调用了编译器，原生自检 10/10、托管
 | --- | --- |
 | `protocol/` | 跨端权威协议规范 [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) 与三语言一致校验基准 [`golden-vectors.json`](protocol/golden-vectors.json) |
 | `native/bobo-core/` | Windows 原生 C++17 内核（`BoBoCore.dll`）：DXGI/GDI 采集、硬件光标合成、MF H.264 编解码、D3D11 Flip-Model 渲染、WASAPI 音频、超级屏与物理键鼠锁 |
-| `src/` | Windows C# 5 / WinForms 主程序：冰川浅蓝 UI、原生串流窗、控制中心、贴边悬浮球、7 步新手引导、防窥幕布与 `Backend/`（协议、宿主服务、自动更新、DDC/CI 调亮、全量自检） |
+| `src/` | Windows C# 5 / WinForms 主程序：雾银灰与灰蓝 UI、原生串流窗、控制中心、贴边悬浮球、7 步新手引导、防窥幕布与 `Backend/`（协议、宿主服务、自动更新、DDC/CI 调亮、全量自检） |
 | `installer/` | Windows 零依赖图形化安装/静默升级/卸载向导（`BoBoSetup.cs`） |
 | `android/` | Android 原生应用（Kotlin + Jetpack Compose）：零第三方加密依赖、MediaCodec 硬编硬解、MediaProjection + 无障碍免 Root 被控与单测 |
 | `apple/BoBoAppleCore/` | Apple 跨平台纯 Swift Package（零第三方依赖）：协议栈、纯 Swift DER RSA-2048 X.509/PKCS#12、TLS 1.2、VideoToolbox 硬解、音频播放与 XCTest |

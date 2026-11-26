@@ -60,7 +60,7 @@ namespace DualRemote
         private Button[] settingsTabButtons;
         private int activeSettingsTab = 0;
 
-        private int defaultQuality = 0;
+        private int defaultQuality = AutoQualityProfile;
         private bool fillLastTarget = true;
         private bool showStreamStats = false;
         private bool playAudioOnHost = false;
@@ -570,7 +570,7 @@ namespace DualRemote
                 "自动回填最近连接过的主机地址与协助设备码，省去重复输入",
                 PreferenceToggle("启动时填入上次设备", fillLastTarget, value => fillLastTarget = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Network, "启动时自动检查新版本",
+            AddStandaloneSettingCard(page, Theme.Glyph.Refresh, "启动时自动检查新版本",
                 "后台静默检查 GitHub Releases 最新版，发现新版本可直接在应用内一键校验更新",
                 PreferenceToggle("自动检查更新", autoCheckUpdates, value => autoCheckUpdates = value));
 
@@ -596,7 +596,7 @@ namespace DualRemote
 
             updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
             updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
-            updateStatusCardText = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Bolt,
+            updateStatusCardText = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Refresh,
                 "软件版本与在线自动更新（当前 v" + AppUpdater.CurrentVersion + "）",
                 "无需手动去仓库下载安装包，支持 SHA-256 校验后自动增量或覆盖升级",
                 updateActionButton, 156);
@@ -739,11 +739,11 @@ namespace DualRemote
                     ApplyHostSnapshotToUi();
                 }));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Pin, "本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
+            AddStandaloneSettingCard(page, Theme.Glyph.Keypad, "本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
                 "已授权设备保存在本机独立安全名单中，可随时查看并一键撤销授权",
                 BuildEngineActionRow(true, "管理授权", delegate { ShowAuthorizedPeersDialog(); }), 186);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Link, "Tailscale 异地组网发现（可选）",
+            AddStandaloneSettingCard(page, Theme.Glyph.Network, "Tailscale 异地组网发现（可选）",
                 "局域网设备已内置 UDP 自动发现；若需跨公网高速直连可配合 Tailscale 自动发现同网设备",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
@@ -776,7 +776,7 @@ namespace DualRemote
             return box;
         }
 
-        /// <summary>UU 设置页标准单列卡片行（左侧线性图标 + 标题/说明 + 右侧开关或下拉控件）。</summary>
+        /// <summary>单列设置卡片行，左侧为图标和说明，右侧为操作控件。</summary>
         private static void AddStandaloneSettingCard(TableLayoutPanel parent, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 108)
         {
             AddStandaloneSettingCardWithDesc(parent, glyph, title, description, action, actionWidth);
@@ -789,13 +789,13 @@ namespace DualRemote
 
             var card = new Theme.Card { Padding = new Padding(20, 12, 20, 12) };
             var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 26);
-            Theme.FixedColumn(row, 14);
+            Theme.FixedColumn(row, 32);
+            Theme.FixedColumn(row, 12);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 14);
             Theme.FixedColumn(row, actionWidth);
 
-            var icon = new Theme.IconTile(glyph, true, Color.Transparent, Theme.BodyInk, 0f);
+            var icon = new Theme.IconTile(glyph, true, Theme.SurfaceSubtle, Theme.BodyInk, 8f);
             var textBlock = new Theme.TwoLineText(title, description, Theme.TextSize.Label, Theme.Ink, Theme.Muted);
 
             int innerH = cardH - 24;
@@ -1527,7 +1527,7 @@ namespace DualRemote
             useAbsoluteMouse = true;
             minimizeToTray = false;
             autoCheckUpdates = true;
-            defaultQuality = 0;
+            defaultQuality = AutoQualityProfile;
 
             try
             {

@@ -51,42 +51,107 @@ std::vector<BoBoMonitorInfo> ScreenCapturer::EnumerateMonitors() {
     return list;
 }
 
-int32_t ScreenCapturer::DetectStandardCursorShape() {
-    CURSORINFO ci = {};
-    ci.cbSize = sizeof(ci);
-    if (!GetCursorInfo(&ci)) return 1;
-    bool vis = ((ci.flags & CURSOR_SHOWING) != 0) && (ci.hCursor != nullptr);
-    if (!vis) {
-        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
-        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL) {
-            return 1; // Keep arrow visible on headless/virtual displays during active remote control
+HCURSOR LoadStandardCursor(int32_t shapeId) {
+    switch (shapeId) {
+        case 0:  return nullptr;
+        case 2:  return LoadCursorW(nullptr, IDC_IBEAM);
+        case 3:  return LoadCursorW(nullptr, IDC_HAND);
+        case 4:  return LoadCursorW(nullptr, IDC_WAIT);
+        case 5:  return LoadCursorW(nullptr, IDC_APPSTARTING);
+        case 6:  return LoadCursorW(nullptr, IDC_CROSS);
+        case 7:  return LoadCursorW(nullptr, IDC_SIZENS);
+        case 8:  return LoadCursorW(nullptr, IDC_SIZEWE);
+        case 9:  return LoadCursorW(nullptr, IDC_SIZENWSE);
+        case 10: return LoadCursorW(nullptr, IDC_SIZENESW);
+        case 11: return LoadCursorW(nullptr, IDC_SIZEALL);
+        case 12: return LoadCursorW(nullptr, IDC_NO);
+        case 13: return LoadCursorW(nullptr, IDC_HELP);
+        default: return LoadCursorW(nullptr, IDC_ARROW);
+    }
+}
+
+bool GetCursorBitmapSize(HCURSOR cursor, SIZE& size, POINT* hotspot) {
+    ICONINFO info = {};
+    if (!cursor || !GetIconInfo(cursor, &info)) return false;
+    BITMAP bitmap = {};
+    const bool monochrome = !info.hbmColor;
+    HBITMAP image = monochrome ? info.hbmMask : info.hbmColor;
+    bool valid = image && GetObjectW(image, sizeof(bitmap), &bitmap) > 0;
+    if (info.hbmMask) DeleteObject(info.hbmMask);
+    if (info.hbmColor) DeleteObject(info.hbmColor);
+    if (!valid) return false;
+
+    // Monochrome cursors store the AND and XOR masks in a double-height bitmap.
+    size.cx = bitmap.bmWidth;
+    size.cy = monochrome ? bitmap.bmHeight / 2 : bitmap.bmHeight;
+    if (hotspot) {
+        hotspot->x = static_cast<LONG>(info.xHotspot);
+        hotspot->y = static_cast<LONG>(info.yHotspot);
+    }
+    return size.cx > 0 && size.cy > 0;
+}
+
+static HCURSOR ReadHostCursor(POINT& position) {
+    CURSORINFO info = {};
+    info.cbSize = sizeof(info);
+    const bool haveInfo = GetCursorInfo(&info) != FALSE;
+    const bool masked = IsPrivacyCursorMasked();
+    if (haveInfo) {
+        position = info.ptScreenPos;
+        if (info.hCursor && ((info.flags & CURSOR_SHOWING) != 0 || masked)) {
+            return info.hCursor;
         }
-        return 0; // Hidden
     }
-    static HCURSOR kStdCursors[14] = { nullptr };
-    static bool kStdInit = false;
-    if (!kStdInit) {
-        kStdCursors[1]  = LoadCursorW(nullptr, IDC_ARROW);
-        kStdCursors[2]  = LoadCursorW(nullptr, IDC_IBEAM);
-        kStdCursors[3]  = LoadCursorW(nullptr, IDC_HAND);
-        kStdCursors[4]  = LoadCursorW(nullptr, IDC_WAIT);
-        kStdCursors[5]  = LoadCursorW(nullptr, IDC_APPSTARTING);
-        kStdCursors[6]  = LoadCursorW(nullptr, IDC_CROSS);
-        kStdCursors[7]  = LoadCursorW(nullptr, IDC_SIZENS);
-        kStdCursors[8]  = LoadCursorW(nullptr, IDC_SIZEWE);
-        kStdCursors[9]  = LoadCursorW(nullptr, IDC_SIZENWSE);
-        kStdCursors[10] = LoadCursorW(nullptr, IDC_SIZENESW);
-        kStdCursors[11] = LoadCursorW(nullptr, IDC_SIZEALL);
-        kStdCursors[12] = LoadCursorW(nullptr, IDC_NO);
-        kStdCursors[13] = LoadCursorW(nullptr, IDC_HELP);
-        kStdInit = true;
+
+    const uint64_t lastRemote = GetLastRemoteMouseInjectMs();
+    // A headless output or a masked hardware cursor can have no cursor handle.
+    if ((masked || (lastRemote != 0 && GetTickCount64() - lastRemote <= 10000ULL)) &&
+        GetCursorPos(&position)) {
+        return LoadStandardCursor(1);
     }
-    for (int32_t id = 1; id <= 13; ++id) {
-        if (kStdCursors[id] != nullptr && ci.hCursor == kStdCursors[id]) {
-            return id;
+    return nullptr;
+}
+
+int32_t ScreenCapturer::DetectStandardCursorShape(SIZE* bitmapSize) {
+    POINT position = {};
+    HCURSOR cursor = ReadHostCursor(position);
+    if (!cursor) {
+        if (bitmapSize) *bitmapSize = {};
+        return 0;
+    }
+
+    // Monitor layout/theme changes can resize a shared cursor without replacing its handle.
+    struct CursorSnapshot {
+        HCURSOR handle = nullptr;
+        uint64_t sampledAt = 0;
+        SIZE size = {};
+        int32_t shape = 1;
+    };
+    thread_local CursorSnapshot snapshot;
+    uint64_t now = GetTickCount64();
+    if (snapshot.handle != cursor || now - snapshot.sampledAt >= 500) {
+        snapshot.handle = cursor;
+        snapshot.sampledAt = now;
+        snapshot.size = {};
+        snapshot.shape = 1;
+        for (int32_t id = 1; id <= 13; ++id) {
+            if (cursor == LoadStandardCursor(id)) {
+                snapshot.shape = id;
+                break;
+            }
+        }
+        SIZE size = {};
+        if (GetCursorBitmapSize(cursor, size)) {
+            LONG largest = std::max(size.cx, size.cy);
+            if (largest > kMaxCursorDimension) {
+                size.cx = std::max<LONG>(1, MulDiv(size.cx, kMaxCursorDimension, largest));
+                size.cy = std::max<LONG>(1, MulDiv(size.cy, kMaxCursorDimension, largest));
+            }
+            snapshot.size = size;
         }
     }
-    return 1; // Default arrow for custom/unknown visible cursors
+    if (bitmapSize) *bitmapSize = snapshot.size;
+    return snapshot.shape;
 }
 
 ScreenCapturer::~ScreenCapturer() {
@@ -382,31 +447,12 @@ bool ScreenCapturer::ConvertBgraTextureToCpuNv12(ID3D11Texture2D* bgraTex, std::
 }
 
 bool ScreenCapturer::HasCursorMovedOrChanged(bool& outVisible, POINT& outPt, HCURSOR& outHandle) const {
-    CURSORINFO ci = {};
-    ci.cbSize = sizeof(ci);
-    outVisible = false;
     outPt = POINT{ -99999, -99999 };
-    outHandle = nullptr;
-    bool hasState = false;
-    if (GetCursorInfo(&ci)) {
-        outVisible = (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
-        outPt = ci.ptScreenPos;
-        outHandle = ci.hCursor;
-        hasState = true;
-    }
-    if (!outVisible) {
-        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
-        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&outPt)) {
-            outVisible = true;
-            outHandle = LoadCursorW(nullptr, IDC_ARROW);
-            hasState = true;
-        }
-    }
-    if (!hasState) return false;
-    return (outVisible != lastCursorVisible_ ||
-            outHandle != lastCursorHandle_ ||
-            outPt.x != lastCursorPos_.x ||
-            outPt.y != lastCursorPos_.y);
+    outHandle = ReadHostCursor(outPt);
+    outVisible = outHandle != nullptr;
+    return outVisible != lastCursorVisible_ ||
+           (outVisible && (outHandle != lastCursorHandle_ ||
+                           outPt.x != lastCursorPos_.x || outPt.y != lastCursorPos_.y));
 }
 
 bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv12, bool& outChanged, std::string& outError) {
@@ -717,29 +763,16 @@ void ScreenCapturer::UpdateCursorShapeCache(HCURSOR hCur) {
     cursorHotX_ = 0;
     cursorHotY_ = 0;
 
-    ICONINFO ii = {};
-    int cw = GetSystemMetrics(SM_CXCURSOR);
-    int ch = GetSystemMetrics(SM_CYCURSOR);
-    if (cw <= 0 || cw > 128) cw = 32;
-    if (ch <= 0 || ch > 128) ch = 32;
-    if (GetIconInfo(hCur, &ii)) {
-        cursorHotX_ = static_cast<int>(ii.xHotspot);
-        cursorHotY_ = static_cast<int>(ii.yHotspot);
-        BITMAP bm = {};
-        if (ii.hbmColor && GetObjectW(ii.hbmColor, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
-            cw = bm.bmWidth;
-            ch = bm.bmHeight;
-        } else if (ii.hbmMask && GetObjectW(ii.hbmMask, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
-            cw = bm.bmWidth;
-            ch = (bm.bmHeight >= bm.bmWidth * 2) ? (bm.bmHeight / 2) : bm.bmHeight;
-        }
-        if (ii.hbmMask) DeleteObject(ii.hbmMask);
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    SIZE size = {};
+    POINT hotspot = {};
+    int cw = kDefaultCursorDimension;
+    int ch = kDefaultCursorDimension;
+    if (GetCursorBitmapSize(hCur, size, &hotspot)) {
+        cw = std::min<int>(size.cx, kMaxCursorDimension);
+        ch = std::min<int>(size.cy, kMaxCursorDimension);
+        cursorHotX_ = MulDiv(hotspot.x, cw, size.cx);
+        cursorHotY_ = MulDiv(hotspot.y, ch, size.cy);
     }
-    if (cw < 8) cw = 32;
-    if (ch < 8) ch = 32;
-    if (cw > 128) cw = 128;
-    if (ch > 128) ch = 128;
 
     HDC screenDc = GetDC(nullptr);
     if (!screenDc) return;
@@ -938,22 +971,9 @@ void ScreenCapturer::BuildFallbackArrowCursor() {
 }
 
 void ScreenCapturer::CompositeHostCursorIntoNv12(std::vector<uint8_t>& nv12) {
-    CURSORINFO ci = {};
-    ci.cbSize = sizeof(ci);
-    bool gotInfo = (GetCursorInfo(&ci) != FALSE);
-    bool vis = gotInfo && ((ci.flags & CURSOR_SHOWING) != 0) && (ci.hCursor != nullptr);
-    POINT pt = gotInfo ? ci.ptScreenPos : POINT{ -99999, -99999 };
-    HCURSOR hCur = gotInfo ? ci.hCursor : nullptr;
-
-    if (!vis) {
-        // Headless desktop / virtual display / post-SuperDisplay mode switch: Windows may clear CURSOR_SHOWING
-        // even while remote mouse input is actively moving the cursor. Keep host cursor visible!
-        uint64_t lastRemote = GetLastRemoteMouseInjectMs();
-        if (lastRemote != 0 && (GetTickCount64() - lastRemote) <= 10000ULL && GetCursorPos(&pt)) {
-            vis = true;
-            hCur = LoadCursorW(nullptr, IDC_ARROW);
-        }
-    }
+    POINT pt = { -99999, -99999 };
+    HCURSOR hCur = ReadHostCursor(pt);
+    bool vis = hCur != nullptr;
 
     lastCursorVisible_ = vis;
     lastCursorPos_ = pt;

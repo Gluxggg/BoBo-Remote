@@ -146,7 +146,7 @@ namespace DualRemote
             Theme.FixedColumn(top, 10);
             Theme.FixedColumn(top, 252);
 
-            var infoIcon = new Theme.IconTile(Theme.Glyph.InfoMark, false, Theme.Accent, Theme.Paper, 13f);
+            var infoIcon = new Theme.IconTile(Theme.Glyph.Info, true, Theme.AccentLight, Theme.Accent, 8f);
             heroHostStatusBadge.AlignRight = true;
             heroPrivacyBadge.AlignRight = true;
             var badges = Theme.Grid(3);
@@ -675,7 +675,7 @@ namespace DualRemote
             Theme.FixedColumn(row, 36);
             Theme.FixedColumn(row, 32);
 
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 7.5f);
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, true, Theme.AccentLight, Theme.Accent, 8f);
             var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, "本机");
 
             var infoBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Info);
@@ -705,8 +705,8 @@ namespace DualRemote
             Theme.FixedColumn(row, 8);
             Theme.FixedColumn(row, 34);
 
-            Color tileBg = peer.Online ? Theme.Accent : Color.FromArgb(164, 171, 182);
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, tileBg, Theme.Paper, 7.5f);
+            Color tileBg = peer.Online ? Theme.AccentLight : Theme.SurfaceSubtle;
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, true, tileBg, peer.Online ? Theme.Accent : Theme.Muted, 8f);
 
             string displayName = PeerName(peer);
             var identity = new Theme.TwoLineText(
@@ -837,7 +837,7 @@ namespace DualRemote
                 ShowAuthorizedPeersDialog();
             };
 
-            var actSettings = Theme.Action("画质与抗丢包", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Gear);
+            var actSettings = Theme.Action("画质与抗丢包", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Sliders);
             actSettings.Click += delegate
             {
                 ShowPage(SettingsPage);
@@ -1078,7 +1078,7 @@ namespace DualRemote
                             Size lsz = TextRenderer.MeasureText(g, liveText, lf, new Size(260, 26),
                                 TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                             var livePill = new RectangleF(16f * scale, 14f * scale, lsz.Width + 22f * scale, 26f * scale);
-                            Theme.Surface(g, livePill, 13f * scale, Color.FromArgb(215, 16, 136, 72), Color.FromArgb(110, 255, 255, 255), 1f);
+                            Theme.Surface(g, livePill, 13f * scale, Color.FromArgb(235, Theme.Success), Color.FromArgb(110, 255, 255, 255), 1f);
                             TextRenderer.DrawText(g, liveText, lf, Rectangle.Round(livePill), Color.White,
                                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                         }
@@ -1117,7 +1117,7 @@ namespace DualRemote
 
                         Color ctaBg;
                         if (controlling)
-                            ctaBg = (hovered && !hoverShuffle) ? Color.FromArgb(232, 52, 64) : Theme.Alert;
+                            ctaBg = hovered && !hoverShuffle ? ControlPaint.Dark(Theme.Alert, 0.08f) : Theme.Alert;
                         else if (!online)
                             ctaBg = Color.FromArgb(204, 102, 112, 128);
                         else
@@ -1348,7 +1348,7 @@ namespace DualRemote
             Theme.FixedColumn(row, 88);
 
             var icon = new Theme.IconTile(device.Stream ? Theme.Glyph.WindowsTile : Theme.Glyph.Assist,
-                false, device.Stream ? Theme.Accent : Color.FromArgb(56, 142, 238), Theme.Paper, 7.5f);
+                true, Theme.AccentLight, Theme.Accent, 8f);
 
             var info = new Theme.TwoLineText(
                 device.Address,

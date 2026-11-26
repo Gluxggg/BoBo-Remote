@@ -17,6 +17,12 @@
 namespace bobo {
 
 uint64_t GetLastRemoteMouseInjectMs();
+bool IsPrivacyCursorMasked();
+
+constexpr int32_t kMaxCursorDimension = 128;
+constexpr int32_t kDefaultCursorDimension = 32;
+HCURSOR LoadStandardCursor(int32_t shapeId);
+bool GetCursorBitmapSize(HCURSOR cursor, SIZE& size, POINT* hotspot = nullptr);
 
 class ScreenCapturer {
 public:
@@ -27,7 +33,7 @@ public:
     // Returns standard Windows cursor shape ID:
     // 0=Hidden, 1=Arrow, 2=IBeam, 3=Hand, 4=Wait, 5=AppStarting, 6=Cross,
     // 7=SizeNS, 8=SizeWE, 9=SizeNWSE, 10=SizeNESW, 11=SizeAll, 12=No, 13=Help
-    static int32_t DetectStandardCursorShape();
+    static int32_t DetectStandardCursorShape(SIZE* bitmapSize = nullptr);
 
     bool Initialize(int monitorIndex, uint32_t outWidth, uint32_t outHeight, std::string& outError);
     void Shutdown();

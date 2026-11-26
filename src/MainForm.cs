@@ -16,7 +16,7 @@ namespace DualRemote
         private readonly ComboBox remoteId = Theme.Choice("远程设备码", true);
         private readonly ComboBox streamHost = Theme.Choice("串流主机地址", true);
         private readonly ComboBox quality = Theme.Choice("串流画质", false);
-        private readonly Button discover = Theme.Action("发现设备", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
+        private readonly Button discover = Theme.Action("发现设备", Theme.ButtonStyle.Secondary, Theme.Glyph.Search);
         private readonly Theme.StatusBanner assistBanner = new Theme.StatusBanner("输入伙伴设备地址或 9 位设备码即可连接；首次高速串流会在此展开 4 位配对码授权。");
         private readonly Theme.Badge streamModeBadge = new Theme.Badge("检测串流组件", Theme.PillTone.Neutral);
         private readonly Label streamHint = Theme.Text("", Theme.TextSize.Small, Theme.Muted);
@@ -50,6 +50,7 @@ namespace DualRemote
         private const int WanWideProfile = 0;
         private const int WanTallProfile = 1;
         private const int WeakNetProfile = 3;
+        private const int AutoQualityProfile = 9;
         private const int Lan2K90WideProfile = 4;
         private const int Lan2K90TallProfile = 5;
 
@@ -89,15 +90,16 @@ namespace DualRemote
 
         private static readonly QualityOption[] QualityOptions =
         {
-            new QualityOption("外网流畅自适应 · 1080p · 60 帧 · 10 Mbps（推荐）", 1920, 1080, 60, 10000),
+            new QualityOption("低延迟自适应 · 1080p · 60 帧 · 10 Mbps", 1920, 1080, 60, 10000),
             new QualityOption("外网 16:10 · 1920×1200 · 60 帧 · 10 Mbps", 1920, 1200, 60, 10000),
             new QualityOption("外网高清 · 1440p · 60 帧 · 14 Mbps", 2560, 1440, 60, 14000),
-            new QualityOption("弱网抗丢包 · 720p · 60 帧 · 6 Mbps", 1280, 720, 60, 6000),
+            new QualityOption("弱网抗丢包 · 720p · 30 帧 · 3.5 Mbps", 1280, 720, 30, 3500),
             new QualityOption("高速 / 局域网 · 2560×1440 · 90 帧 · 22 Mbps", 2560, 1440, 90, 22000),
             new QualityOption("高速 / 局域网 16:10 · 2560×1600 · 90 帧 · 24 Mbps", 2560, 1600, 90, 24000),
             new QualityOption("局域网高刷 · 2560×1440 · 120 帧 · 30 Mbps", 2560, 1440, 120, 30000),
             new QualityOption("极速电竞高刷 · 2560×1440 · 144 帧 · 36 Mbps", 2560, 1440, 144, 36000),
-            new QualityOption("4K 超清办公 · 3840×2160 · 60 帧 · 35 Mbps", 3840, 2160, 60, 35000)
+            new QualityOption("4K 超清办公 · 3840×2160 · 60 帧 · 35 Mbps", 3840, 2160, 60, 35000),
+            new QualityOption("自动推荐 · 根据线路选择画质", 1920, 1080, 60, 10000)
         };
 
         private readonly RecentStore recent;
@@ -927,7 +929,7 @@ namespace DualRemote
             Theme.FixedColumn(row, 10);
             Theme.FixedColumn(row, 124);
 
-            streamConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary);
+            streamConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary, Theme.Glyph.Arrow);
             streamConnectBtn.Click += async delegate
             {
                 if (IsActivelyControlling())
@@ -945,6 +947,23 @@ namespace DualRemote
             Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
 
+            var routeRow = Theme.Grid(3);
+            Theme.FixedColumn(routeRow, 72);
+            Theme.FixedColumn(routeRow, 8);
+            Theme.FillColumn(routeRow);
+            connectionRouteChoice = Theme.Choice("连接线路", false);
+            connectionRouteChoice.Items.AddRange(new object[] { "自动选择", "局域网直连", "跨网 · Tailscale（优先 P2P）" });
+            connectionRouteChoice.SelectedIndex = (int)BoBoRoutePreference.Auto;
+            connectionRouteHint = Theme.Text("", Theme.TextSize.Small, Theme.Muted);
+            connectionRouteHint.AutoEllipsis = true;
+            connectionRouteChoice.SelectedIndexChanged += delegate { ShowConnectionRouteHint(activeConnectionRoute); };
+            streamHost.TextChanged += delegate { ShowConnectionRouteHint(activeConnectionRoute); };
+            Theme.Row(routeRow, 38, Theme.Text("连接线路", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(connectionRouteChoice));
+            Theme.Row(panel, 38, routeRow);
+            Theme.Row(panel, 24, connectionRouteHint);
+            Theme.Row(panel, 8);
+            ShowConnectionRouteHint(null);
+
             // Responsive quality selector + hint row
             var qRow = Theme.Grid(5);
             Theme.FixedColumn(qRow, 72);
@@ -953,7 +972,7 @@ namespace DualRemote
             Theme.FixedColumn(qRow, 14);
             Theme.FixedColumn(qRow, 92);
 
-            var probeBtn = Theme.Action("链路测速", Theme.ButtonStyle.Link);
+            var probeBtn = Theme.Action("链路测速", Theme.ButtonStyle.Link, Theme.Glyph.Activity);
             probeBtn.Click += async delegate { await ProbeLink(); };
 
             Theme.Row(qRow, 38, Theme.Text("画质档位", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(quality), null, probeBtn);
@@ -1033,14 +1052,14 @@ namespace DualRemote
                 {
                     streamConnectBtn.Text = "退出控制";
                     Theme.ChangeStyle(streamConnectBtn, Theme.ButtonStyle.DangerPill);
-                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.Close);
+                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.Exit);
                     streamConnectBtn.Enabled = true;
                 }
                 else
                 {
                     streamConnectBtn.Text = "连接";
                     Theme.ChangeStyle(streamConnectBtn, Theme.ButtonStyle.Primary);
-                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.None);
+                    Theme.ChangeGlyph(streamConnectBtn, Theme.Glyph.Arrow);
                     streamConnectBtn.Enabled = !string.IsNullOrWhiteSpace(streamHost.Text);
                 }
             }
@@ -1152,7 +1171,7 @@ namespace DualRemote
                             if (privacyCurtain.Activate(privacyConfig, false, out msg))
                             {
                                 privacyGuard.OnManualActivate();
-                                ShowDisplayBanner("已由 " + peerName + " 发起加密远控，物理屏防窥壁纸已瞬间开启。", Theme.PillTone.Success);
+                                ShowDisplayBanner(msg, Theme.PillTone.Info);
                             }
                         }
                     }
@@ -1460,7 +1479,14 @@ namespace DualRemote
             }
         }
 
-        private Task StartStreamAsync(string confirmedHost)
+        private QualityOption ResolveStreamQuality(BoBoConnectionRoute route)
+        {
+            if (quality.SelectedIndex == AutoQualityProfile)
+                return QualityOptions[route != null && route.PreferWeakNetworkProfile ? WeakNetProfile : WanWideProfile];
+            return quality.SelectedItem as QualityOption ?? QualityOptions[WanWideProfile];
+        }
+
+        private Task StartStreamAsync(string confirmedHost, BoBoConnectionRoute route = null)
         {
             string message;
             string host = Engines.NormalizeHost(confirmedHost, out message);
@@ -1471,12 +1497,11 @@ namespace DualRemote
                 return Task.FromResult(0);
             }
 
-            var profile = quality.SelectedItem as QualityOption ?? QualityOptions[0];
-            StartNativeIntegratedStream(host, profile);
+            StartNativeIntegratedStream(host, ResolveStreamQuality(route), route);
             return Task.FromResult(0);
         }
 
-        private void StartNativeIntegratedStream(string host, QualityOption profile)
+        private void StartNativeIntegratedStream(string host, QualityOption profile, BoBoConnectionRoute route)
         {
             string displayName = string.IsNullOrEmpty(clientPairHostName) ? host : clientPairHostName;
             string modeTag = profile.Height + "p" + profile.Fps + " · D3D11VA";
@@ -1661,7 +1686,7 @@ namespace DualRemote
                     if (!IsDisposed)
                     {
                         RestoreFromTray();
-                        ShowClientPairPrompt(targetHost, displayName, true, "该主机尚未授权当前内置客户端，请完成一次 4 位配对码授权。");
+                        ShowClientPairPrompt(targetHost, displayName, true, "该主机需要 4 位配对码授权。", route);
                     }
                 }));
             };
@@ -1674,6 +1699,8 @@ namespace DualRemote
                     if (activeNativeStreamForm == nativeForm)
                     {
                         activeNativeStreamForm = null;
+                        activeConnectionRoute = null;
+                        ShowConnectionRouteHint(null);
                         activeStreamPid = 0;
                         activeStreamHost = "";
                         if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
@@ -1687,10 +1714,13 @@ namespace DualRemote
             };
 
             activeNativeStreamForm = nativeForm;
+            activeConnectionRoute = route;
+            TrackSessionRoute(nativeForm, route);
             activeStreamHost = host;
             activeStreamPid = 0;
 
-            string note = "已在 BoBo 内部窗口启动一体化远程桌面（" + displayName + " · " + modeTag + "）。";
+            string routeLabel = route == null ? "指定地址" : route.Label;
+            string note = "正在连接 " + displayName + " · " + routeLabel + " · " + profile.Height + "p / " + profile.Fps + " 帧";
             ConnectionTelemetry.RecordSubmitted("NativeV5", host, profile.Width,
                 profile.Height, profile.Fps, profile.BitrateKbps, false, true, note);
             recent.RememberMoonlightHost(host);
@@ -1908,7 +1938,7 @@ namespace DualRemote
                 SavePreferences();
                 if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
                 {
-                    QualityOption p = QualityOptions[newIndex];
+                    QualityOption p = ResolveStreamQuality(activeConnectionRoute);
                     string modeTag = p.Height + "p" + p.Fps + " · D3D11VA";
                     if (activeStreamToolbar != null && !activeStreamToolbar.IsDisposed)
                         activeStreamToolbar.UpdateSession(activeNativeStreamForm.PlayerPid);
@@ -1938,7 +1968,7 @@ namespace DualRemote
             {
                 if (activeNativeStreamForm != null && !activeNativeStreamForm.IsDisposed)
                 {
-                    var p = quality.SelectedItem as QualityOption ?? QualityOptions[0];
+                    var p = ResolveStreamQuality(activeConnectionRoute);
                     await activeNativeStreamForm.SwitchQualityAsync(p.Width, p.Height, p.Fps, p.BitrateKbps, p.Height + "p" + p.Fps + " · D3D11VA");
                     return;
                 }
@@ -1964,6 +1994,8 @@ namespace DualRemote
         {
             NativeStreamForm nativeForm = activeNativeStreamForm;
             activeNativeStreamForm = null;
+            activeConnectionRoute = null;
+            ShowConnectionRouteHint(null);
             activeStreamPid = 0;
             activeStreamHost = "";
             Engines.ReleaseCursorClip();
@@ -2238,7 +2270,9 @@ namespace DualRemote
             var selected = quality.SelectedItem as QualityOption;
             if (selected == null) return;
             streamModeBadge.UpdateStatus("V6 全内置内核 · 端口 49810", Theme.PillTone.Success);
-            streamHint.Text = "全内置双端加密引擎已就绪：双方同时打开 BoBo远程 并完成 4 位码授权后即可零外置进程直连（" + selected.Height + "p" + selected.Fps + "）。";
+            streamHint.Text = quality.SelectedIndex == AutoQualityProfile
+                ? "稳定线路使用低延迟档，高 RTT 或中继时使用弱网档。"
+                : "优先使用 UDP+FEC，连接后可在性能浮层查看传输协议。";
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)

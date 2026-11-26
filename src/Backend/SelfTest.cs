@@ -846,6 +846,33 @@ namespace DualRemote
                         bool gotPrivOff = privOffEvt.Wait(3000) && privacyCmdToggledOff;
                         Check("V6 直连控制：主控端直接开关被控端防窥指令", gotPrivOff, "toggledOff=" + privacyCmdToggledOff);
 
+                        using (var viewportEvt = new System.Threading.ManualResetEventSlim(false))
+                        {
+                            BoBoDisplayState viewportReply = null;
+                            Action<BoBoDisplayState> onViewport = delegate(BoBoDisplayState state)
+                            {
+                                if (state.RequestId != 7) return;
+                                viewportReply = state;
+                                viewportEvt.Set();
+                            };
+                            authClient.DisplayStateChanged += onViewport;
+                            try
+                            {
+                                authClient.SendSetSuperDisplay(true, 960, 600, false, 7);
+                                bool received = viewportEvt.Wait(3000);
+                                Check("V7 超级屏：窗口区域协商返回实际串流尺寸，保持主机显示模式",
+                                    received && authClient.SupportsSuperDisplayViewport && viewportReply.Active &&
+                                    !viewportReply.DesktopModeChanged && viewportReply.ViewportWidth == 960 &&
+                                    viewportReply.ViewportHeight == 600 && viewportReply.StreamWidth > 0 && viewportReply.StreamHeight > 0 &&
+                                    (long)viewportReply.StreamWidth * viewportReply.StreamHeight <= 640L * 360L,
+                                    received ? viewportReply.StreamWidth + "×" + viewportReply.StreamHeight : "未收到窗口适配回执");
+                            }
+                            finally
+                            {
+                                authClient.DisplayStateChanged -= onViewport;
+                            }
+                        }
+
                         var sdEvt = new System.Threading.ManualResetEventSlim(false);
                         bool sdReceived = false;
                         authClient.SuperDisplayStateChanged += delegate(bool act, bool nat, int sw, int sh)
@@ -1167,6 +1194,33 @@ namespace DualRemote
                 BoBoProtocol.IsPrivateLanIp("192.168.1.20") && BoBoProtocol.IsPrivateLanIp("10.0.0.1") &&
                 BoBoProtocol.IsPrivateLanIp("::ffff:172.16.0.1") && BoBoProtocol.IsPrivateLanIp("127.0.0.1") &&
                 !BoBoProtocol.IsPrivateLanIp("100.64.0.12") && !BoBoProtocol.IsPrivateLanIp("203.0.113.1"), "");
+
+            var testedRoute = new BoBoConnectionRoute(System.Net.IPAddress.Parse("100.64.0.12"), null, 34);
+            bool unknownRoute = testedRoute.Kind == BoBoRouteKind.TailnetUnknown;
+            testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via 192.0.2.12:41641 in 34ms")[0]);
+            bool directRoute = testedRoute.Kind == BoBoRouteKind.TailnetDirect && !testedRoute.PreferWeakNetworkProfile;
+            testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via DERP(tok) in 72ms")[0]);
+            bool relayRoute = testedRoute.Kind == BoBoRouteKind.TailnetDerp && testedRoute.PreferWeakNetworkProfile;
+            testedRoute.UpdateTailnetPath(Tailscale.ParsePongs("pong from desk (100.64.0.12) via peer-relay(example) in 68ms")[0]);
+            bool peerRelayRoute = testedRoute.Kind == BoBoRouteKind.TailnetPeerRelay && testedRoute.PreferWeakNetworkProfile;
+            testedRoute.UpdateTailnetPath(null);
+            Check("串流线路：P2P、DERP、节点中继和未确认路径分别显示",
+                unknownRoute && directRoute && relayRoute && peerRelayRoute && testedRoute.Kind == BoBoRouteKind.TailnetUnknown, testedRoute.Label);
+
+            var subnetAddress = System.Net.IPAddress.Parse("192.168.42.129");
+            Check("同网段识别：按实际掩码区分局域网候选地址",
+                BoBoConnectionRoute.HasSamePrefix(subnetAddress, System.Net.IPAddress.Parse("192.168.42.250"), 25) &&
+                !BoBoConnectionRoute.HasSamePrefix(subnetAddress, System.Net.IPAddress.Parse("192.168.42.45"), 25) &&
+                BoBoConnectionRoute.HasSamePrefix(System.Net.IPAddress.Parse("fd01:23::1"), System.Net.IPAddress.Parse("fd01:23::2"), 64), "");
+
+            int videoWidth, videoHeight;
+            BoBoHostServer.FitDesktopStream(1920, 1080, 2880, 1800, long.MaxValue, out videoWidth, out videoHeight);
+            bool fitOriginal = videoWidth == 1920 && videoHeight == 1080;
+            BoBoHostServer.FitDesktopStream(2880, 1800, 2880, 1800, 1920L * 1200, out videoWidth, out videoHeight);
+            bool fitBudget = videoWidth == 1920 && videoHeight == 1200;
+            BoBoHostServer.FitDesktopStream(2560, 1440, 2560, 1600, 1280L * 720, out videoWidth, out videoHeight);
+            Check("超级屏：保留桌面比例，并遵守编码像素预算",
+                fitOriginal && fitBudget && videoWidth == 1280 && videoHeight == 720, videoWidth + "×" + videoHeight);
 
             // 5. V6 All-In-One Auto-Updater Light ZIP selection check
             var fakeRel = AppUpdater.BuildReleaseFromTag("v6.9.0");

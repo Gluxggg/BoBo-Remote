@@ -54,7 +54,7 @@ Offset  Size  Type      Field
 | `0x03` | `AudioAdpcm` | `[0..3] int32 LE sampleRate (48000)`, `[4] uint8 channels (2)`, `[5..6] uint16 LE sampleCount`, `[7..] IMA-ADPCM 立体声数据` |
 | `0x04` | `InputEvent` | 固定 6 字节：`[0] uint8 kind`, `[1] uint8 flags`, `[2..3] int16 LE a`, `[4..5] int16 LE b` |
 | `0x05` | `FileChunk` | `[0..15] 16B ASCII transferId (右补 0x00)`, `[16..23] int64 LE fileOffset`, `[24..] 文件块原始字节`（单块 `<= 512 KiB`，单文件 `<= 2 GiB`，强制校验 `offset >= 0 && offset + len <= totalBytes` 及必填 64 位 SHA-256） |
-| `0x06` | `CursorShape` | `[0] uint8 standardCursorId (0=Hidden, 1=Arrow, 2=IBeam, ... 13=Help)`（可选，未识别端可安全忽略） |
+| `0x06` | `CursorShape` | `[0] uint8 standardCursorId (0=Hidden, 1=Arrow, 2=IBeam, ... 13=Help)`。客户端在 `START_STREAM` 声明 `cursorMetrics: true` 后，主机可追加 `[1] uint8 width`、`[2] uint8 height`，单位为主机桌面像素，每边最大 128。UDP 类型的载荷在此格式前另带 4 字节小端序号。旧端只发送和读取光标编号。 |
 
 ### 3.2 `InputEvent`（`0x04`）编码表
 
@@ -159,6 +159,10 @@ Host → Client:
 | `FILE_OFFER` → `FILE_ACCEPT` → `0x05 FileChunk*` → `FILE_DONE` → `FILE_ACK` | C ↔ H | `transferId` (16B ASCII), `fileName`, `totalBytes` (`<= 2 GiB`), `sha256` (必填 64-hex), `ok`, `savedPath`, `error` |
 | `DISCONNECT` | 双向 | 优雅断开 |
 | `ERROR` | H → C | `code`, `message`。Android 和 Apple 被控端在有活动串流时可返回 `HOST_BUSY`，采集未就绪时可返回 `CAPTURE_NOT_READY`。 |
+
+Windows 被控端可以在 `HELLO_ACK` 中声明 `superDisplayVersion: 2`。支持此版本的 Windows 控制端在 `START_STREAM` 中回传版本，`clientWidth` / `clientHeight` 表示视频区域的实际像素大小，`fullscreen` 表示当前是否全屏。调整窗口后用 `SET_SUPER_DISPLAY` 更新这三个字段，并发送递增的 `displayRequestId`。全屏时可以临时切换当前被控显示器的模式。窗口模式使用原桌面比例调整串流尺寸。
+
+协商后的 `STREAM_STARTED`、`RECONFIGURED` 和 `SUPER_DISPLAY_STATE` 中，`width` / `height` 表示串流尺寸，`desktopWidth` / `desktopHeight` 表示被控显示器模式，`desktopModeChanged` 表示当前会话是否临时更改了该模式。`superDisplayNativeMatch`（更新回执中为 `nativeMatch`）要求桌面像素尺寸与视频区域完全一致。回执携带 `clientWidth`、`clientHeight` 和 `displayRequestId`。未协商版本的旧客户端仍收到原格式，`SUPER_DISPLAY_STATE.width` / `height` 对它们表示桌面尺寸。
 
 ---
 
