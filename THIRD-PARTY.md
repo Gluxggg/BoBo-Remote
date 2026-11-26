@@ -1,8 +1,13 @@
 # 第三方组件、版本、许可与源码获取
 
-## 当前 V6 构建
+## 当前 V6 / V7 构建
 
-V6 Windows 包由项目的 WinForms 主程序、内嵌 `BoBoCore.dll` 和安装器组成，使用 Windows 系统 API 与 .NET Framework 4.8。旧引擎界面、调用代码和工具脚本资源已从 V6 Windows 应用中移除。仓库仍保存历史 Sunshine 工具、V5 播放器参考源码和 `moonlight-common-c` 许可。Android 的构建依赖列在 Gradle 配置中，Apple 应用使用系统 SDK 和本仓库 Swift 包。 [NOTICE](NOTICE.md) · [Android 依赖](android/app/build.gradle.kts) · [V5 计划归档](docs/V5-NATIVE-STREAM-PLAN.md) · [moonlight-common-c 许可](native/third_party/moonlight-common-c/LICENSE.txt)
+Windows 单文件程序由项目的 WinForms 主程序、内嵌自研原生内核 `BoBoCore.dll`、内嵌纯 Go 用户态跨网引擎 `BoBoTsNet.exe`（GZip 压缩资源 `DualRemote.BoBoTsNet.exe.gz`）和安装器组成，使用 Windows 系统 API 与 .NET Framework 4.8。旧引擎界面、调用代码和工具脚本资源已从当前 Windows 应用中移除。仓库仍保存历史 Sunshine 工具、V5 播放器参考源码和 `moonlight-common-c` 许可。Android 的构建依赖列在 Gradle 配置中，Apple 应用使用系统 SDK 和本仓库 Swift 包。 [NOTICE](NOTICE.md) · [Android 依赖](android/app/build.gradle.kts) · [V5 计划归档](docs/V5-NATIVE-STREAM-PLAN.md) · [moonlight-common-c 许可](native/third_party/moonlight-common-c/LICENSE.txt)
+
+| 组件 | 版本 | 许可证 | 用途 | 上游仓库 |
+| --- | --- | --- | --- | --- |
+| `tailscale.com` (`tsnet` 等 Go 模块) | `v1.106.1` | BSD-3-Clause | `BoBoTsNet.exe` 用户态免安装 WireGuard/DERP 跨网组网与鉴权环回 SOCKS5 | <https://github.com/tailscale/tailscale> |
+| Go 标准库及 `golang.org/x/*` 间接依赖 | 随 `native/bobo-tsnet/go.mod` / `go.sum` 锁定 | BSD-3-Clause | 静态构建 `CGO_ENABLED=0` 纯 Go 用户态子进程 | <https://go.dev> |
 
 ## 历史 Windows 引擎归档
 

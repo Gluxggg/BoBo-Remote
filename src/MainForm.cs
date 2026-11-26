@@ -455,6 +455,7 @@ namespace DualRemote
             PrivacyDisplayDimmer.RecoverIfNeeded();
             EnsureBoBoHostServerStarted();
             SyncRemoteGuardTimer();
+            HookAndAutoStartEmbeddedTailnet();
         }
 
         private void ClampMinimumSizeToWorkArea()
@@ -2129,6 +2130,12 @@ namespace DualRemote
             {
                 try { server.Dispose(); } catch { }
             }
+            try
+            {
+                BoBoEmbeddedTailnet.Default.StateChanged -= OnEmbeddedTailnetStateChanged;
+                BoBoEmbeddedTailnet.Default.Dispose();
+            }
+            catch { }
             try { BoBoCoreInterop.SetPrivacyInputBlock(false, null); } catch { }
             try { BoBoCoreInterop.RestoreSuperDisplay(); } catch { }
             try { PrivacyDisplayDimmer.RestoreAllSync(); } catch { }

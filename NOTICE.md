@@ -1,6 +1,12 @@
 # NOTICE
 
-BoBo Remote V6 的项目源码、安装器、构建脚本和文档以 [MIT](LICENSE) 发布，版权归仓库作者。Windows 构建在主程序资源中内嵌自研 `BoBoCore.dll`。RustDesk、Moonlight、Moonlight V+ 和 Foundation Sunshine 属于早期 Windows 发行包。其界面、调用代码及相关资源已从当前 Windows 应用和构建中移除，仓库中的 Sunshine 调优脚本作为历史资料保留。 [第三方组件记录](THIRD-PARTY.md)
+BoBo Remote 的项目源码、安装器、构建脚本和文档以 [MIT](LICENSE) 发布，版权归仓库作者。Windows 构建在主程序资源中内嵌自研原生内核 `BoBoCore.dll` 与纯 Go 用户态跨网组件 `BoBoTsNet.exe`（基于 `tailscale.com/tsnet`，BSD-3-Clause）。RustDesk、Moonlight、Moonlight V+ 和 Foundation Sunshine 属于早期 Windows 发行包。其界面、调用代码及相关资源已从当前 Windows 应用和构建中移除，仓库中的 Sunshine 调优脚本作为历史资料保留。 [第三方组件记录](THIRD-PARTY.md)
+
+## 当前构建第三方组件
+
+| 组件 | 版本 | 许可证 | 上游仓库与源码 |
+| --- | --- | --- | --- |
+| tailscale (`tsnet`) | v1.106.1 | BSD-3-Clause | <https://github.com/tailscale/tailscale> |
 
 ## 历史 Windows 发行包
 

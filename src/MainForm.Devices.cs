@@ -40,6 +40,24 @@ namespace DualRemote
         private TableLayoutPanel hostCardDetailsLayout;
         private bool hostDetailsExpanded;
 
+        private int embeddedTailnetRow = -1;
+        private Theme.Card embeddedTsCard;
+        private Label embeddedTsTitleLabel;
+        private Label embeddedTsSubtitleLabel;
+        private Theme.Badge embeddedTsBadge;
+        private Theme.IconTile embeddedTsIcon;
+        private EmbeddedActionsStrip embeddedTsActionsBar;
+        private Button embeddedTsLoginBtn;
+        private Button embeddedTsOpenAuthBtn;
+        private Button embeddedTsCopyUrlBtn;
+        private Button embeddedTsCancelBtn;
+        private Button embeddedTsCopyIpBtn;
+        private Button embeddedTsLogoutBtn;
+        private string lastEmbeddedAuthUrl = "";
+        private string lastEmbeddedBackendState = "";
+        private Color embeddedTsAccentColor = Theme.Accent;
+        private bool embeddedTsBusy;
+
         private Button computersGroupBtn;
         private bool computersExpanded = true;
         private TableLayoutPanel peerListHost;
@@ -99,7 +117,13 @@ namespace DualRemote
             var hostCard = BuildHostInfoCard();
             hostCardRow = desk.RowCount;
             Theme.Row(desk, HostCardHeight(), hostCard);
-            Theme.Row(desk, 22);
+            Theme.Row(desk, 14);
+
+            // Built-in Zero-Install Tailscale (BoBoTsNet) Login & Mesh Card
+            var embeddedCard = BuildEmbeddedTailnetCard();
+            embeddedTailnetRow = desk.RowCount;
+            Theme.Row(desk, EmbeddedTailnetCardHeight(), embeddedCard);
+            Theme.Row(desk, 18);
 
             // Collapsible "电脑 N" section header
             var groupRow = Theme.Grid(2);
@@ -161,7 +185,7 @@ namespace DualRemote
             var subWrap = Theme.Grid(2);
             Theme.FixedColumn(subWrap, 36);
             Theme.FillColumn(subWrap);
-            heroSubtitleLabel = Theme.Text("在笔记本或另一台电脑直接解压运行 BoBo远程，登录同账号 Tailscale 或输入本机 IP 即可秒连。", Theme.TextSize.Small, Theme.Muted);
+            heroSubtitleLabel = Theme.Text("同局域网打开即连；跨外网可点击下方「一键登录账号」免安装直连，或使用自建兜底中转。", Theme.TextSize.Small, Theme.Muted);
             heroSubtitleLabel.AutoEllipsis = false;
             Theme.FillRow(subWrap);
             subWrap.Controls.Add(heroSubtitleLabel, 1, 0);
@@ -223,6 +247,382 @@ namespace DualRemote
 
             card.Controls.Add(content);
             return card;
+        }
+
+        private int EmbeddedTailnetCardHeight()
+        {
+            return DevicePixels(86);
+        }
+
+        private Control BuildEmbeddedTailnetCard()
+        {
+            var card = new Theme.Card { Padding = new Padding(22, 16, 22, 16) };
+            embeddedTsCard = card;
+            card.Paint += delegate(object sender, PaintEventArgs pe)
+            {
+                Graphics g = pe.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = CurrentDpiScale();
+                float w = Math.Max(3f, 3.5f * scale);
+                float marginY = 12f * scale;
+                float h = Math.Max(12f, card.Height - marginY * 2f);
+                Theme.Surface(g, new RectangleF(6f * scale, marginY, w, h), w * 0.5f, embeddedTsAccentColor, Color.Transparent);
+            };
+
+            var row = Theme.Grid(5);
+            Theme.FixedColumn(row, 40);
+            Theme.FixedColumn(row, 14);
+            Theme.FillColumn(row);
+            Theme.FixedColumn(row, 14);
+            Theme.FixedColumn(row, 286);
+
+            embeddedTsIcon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.AccentLight, Theme.Accent, 8f);
+
+            var info = Theme.Grid(1);
+            Theme.FillColumn(info);
+            var titleLine = Theme.Grid(3);
+            Theme.FillColumn(titleLine);
+            Theme.FixedColumn(titleLine, 8);
+            Theme.FixedColumn(titleLine, 178);
+
+            embeddedTsTitleLabel = Theme.Text("内置跨网通道（Tailscale 免安装）", Theme.TextSize.LabelBold, Theme.Ink);
+            embeddedTsTitleLabel.AutoEllipsis = true;
+            embeddedTsBadge = new Theme.Badge("未登录", Theme.PillTone.Neutral) { AlignRight = true };
+            Theme.Row(titleLine, 26, embeddedTsTitleLabel, null, embeddedTsBadge);
+
+            embeddedTsSubtitleLabel = Theme.Text("无需安装官方 Tailscale 与虚拟网卡；两端登录同一账号即可跨网发现与直连。", Theme.TextSize.Small, Theme.Muted);
+            embeddedTsSubtitleLabel.AutoEllipsis = true;
+            Theme.Row(info, 26, titleLine);
+            Theme.Row(info, 2);
+            Theme.Row(info, 22, embeddedTsSubtitleLabel);
+
+            embeddedTsLoginBtn = Theme.Action("一键登录账号", Theme.ButtonStyle.Primary, Theme.Glyph.Network);
+            embeddedTsLoginBtn.Click += async delegate { await BeginEmbeddedTailnetLoginAsync(); };
+
+            embeddedTsOpenAuthBtn = Theme.Action("打开登录页", Theme.ButtonStyle.AccentSoft);
+            embeddedTsOpenAuthBtn.Click += delegate { OpenEmbeddedAuthUrlInBrowser(); };
+
+            embeddedTsCopyUrlBtn = Theme.Action("复制链接", Theme.ButtonStyle.Secondary, Theme.Glyph.Copy);
+            embeddedTsCopyUrlBtn.Click += delegate { CopyEmbeddedAuthUrlToClipboard(); };
+
+            embeddedTsCancelBtn = Theme.Action("取消", Theme.ButtonStyle.Quiet);
+            embeddedTsCancelBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
+
+            embeddedTsCopyIpBtn = Theme.Action("复制 IP", Theme.ButtonStyle.Secondary, Theme.Glyph.Copy);
+            embeddedTsCopyIpBtn.Click += delegate
+            {
+                EmbeddedTailnetSnapshot cur = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+                CopyHostAddress("内置 Tailscale IP", cur != null ? cur.SelfIp4 : "");
+            };
+
+            embeddedTsLogoutBtn = Theme.Action("退出账号", Theme.ButtonStyle.DangerSoft, Theme.Glyph.Exit);
+            embeddedTsLogoutBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
+
+            embeddedTsActionsBar = new EmbeddedActionsStrip(this,
+                embeddedTsLoginBtn,
+                embeddedTsOpenAuthBtn, embeddedTsCopyUrlBtn, embeddedTsCancelBtn,
+                embeddedTsCopyIpBtn, embeddedTsLogoutBtn);
+
+            Theme.Row(row, 50, embeddedTsIcon, null, info, null, embeddedTsActionsBar);
+            card.Controls.Add(row);
+
+            ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+            return card;
+        }
+
+        private sealed class EmbeddedActionsStrip : Panel
+        {
+            private readonly MainForm owner;
+            private readonly Button loginBtn;
+            private readonly Button openAuthBtn;
+            private readonly Button copyUrlBtn;
+            private readonly Button cancelBtn;
+            private readonly Button copyIpBtn;
+            private readonly Button logoutBtn;
+
+            internal EmbeddedActionsStrip(
+                MainForm owner,
+                Button loginBtn,
+                Button openAuthBtn,
+                Button copyUrlBtn,
+                Button cancelBtn,
+                Button copyIpBtn,
+                Button logoutBtn)
+            {
+                this.owner = owner;
+                this.loginBtn = loginBtn;
+                this.openAuthBtn = openAuthBtn;
+                this.copyUrlBtn = copyUrlBtn;
+                this.cancelBtn = cancelBtn;
+                this.copyIpBtn = copyIpBtn;
+                this.logoutBtn = logoutBtn;
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                BackColor = Theme.Paper;
+                DoubleBuffered = true;
+
+                Button[] all = new[] { loginBtn, openAuthBtn, copyUrlBtn, cancelBtn, copyIpBtn, logoutBtn };
+                for (int i = 0; i < all.Length; i++)
+                {
+                    all[i].Dock = DockStyle.None;
+                    Controls.Add(all[i]);
+                }
+            }
+
+            internal void SetMode(int mode, bool busy, bool hasAuthUrl)
+            {
+                // mode: 0=unlogged, 1=waiting auth, 2=running
+                loginBtn.Visible = mode == 0;
+                loginBtn.Enabled = mode == 0 && !busy;
+
+                openAuthBtn.Visible = mode == 1;
+                openAuthBtn.Enabled = mode == 1 && hasAuthUrl;
+                copyUrlBtn.Visible = mode == 1;
+                copyUrlBtn.Enabled = mode == 1 && hasAuthUrl;
+                cancelBtn.Visible = mode == 1;
+                cancelBtn.Enabled = mode == 1;
+
+                copyIpBtn.Visible = mode == 2;
+                copyIpBtn.Enabled = mode == 2;
+                logoutBtn.Visible = mode == 2;
+                logoutBtn.Enabled = mode == 2 && !busy;
+
+                PerformLayout();
+            }
+
+            protected override void OnLayout(LayoutEventArgs levent)
+            {
+                base.OnLayout(levent);
+                int gap = owner.DevicePixels(6);
+                int h = owner.DevicePixels(36);
+                int y = Math.Max(0, (ClientSize.Height - h) / 2);
+                int right = ClientSize.Width;
+
+                Button[] orderRightToLeft = new[] { logoutBtn, copyIpBtn, cancelBtn, copyUrlBtn, openAuthBtn, loginBtn };
+                int[] logicalWidths = new[] { 98, 86, 56, 86, 98, 144 };
+
+                for (int i = 0; i < orderRightToLeft.Length; i++)
+                {
+                    Button btn = orderRightToLeft[i];
+                    if (!btn.Visible) continue;
+                    int bw = Math.Min(owner.DevicePixels(logicalWidths[i]), Math.Max(40, right));
+                    btn.Bounds = new Rectangle(Math.Max(0, right - bw), y, bw, h);
+                    right -= bw + gap;
+                }
+            }
+        }
+
+        private void HookAndAutoStartEmbeddedTailnet()
+        {
+            BoBoEmbeddedTailnet.Default.StateChanged += OnEmbeddedTailnetStateChanged;
+            if (BoBoEmbeddedTailnet.HasSavedState)
+            {
+                StartEmbeddedTailnetBackgroundAsync().ContinueWith(delegate { }, TaskContinuationOptions.OnlyOnFaulted);
+            }
+        }
+
+        private async Task StartEmbeddedTailnetBackgroundAsync()
+        {
+            try
+            {
+                await BoBoEmbeddedTailnet.Default.EnsureStartedAsync(System.Threading.CancellationToken.None);
+            }
+            catch { }
+        }
+
+        private void OnEmbeddedTailnetStateChanged(EmbeddedTailnetSnapshot snap)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke(new Action(delegate
+                {
+                    if (IsDisposed) return;
+                    string prevState = lastEmbeddedBackendState;
+                    ApplyEmbeddedTailnetUi(snap);
+                    string nextState = snap != null ? (snap.BackendState ?? "") : "";
+                    if (!string.Equals(prevState, "Running", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(nextState, "Running", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RefreshDashboardAsync().ContinueWith(delegate { }, TaskContinuationOptions.OnlyOnFaulted);
+                    }
+                }));
+            }
+            catch { }
+        }
+
+        private void ApplyEmbeddedTailnetUi(EmbeddedTailnetSnapshot snap)
+        {
+            if (sidebarCrossNetCard != null)
+                sidebarCrossNetCard.ApplyEmbeddedSnapshot(snap);
+
+            string state = snap != null ? (snap.BackendState ?? "Stopped") : "Stopped";
+            lastEmbeddedBackendState = state;
+            lastEmbeddedAuthUrl = snap != null ? (snap.AuthUrl ?? "") : "";
+
+            if (embeddedTsCard == null) return;
+
+            bool isRunning = string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase);
+            bool hasUrl = !string.IsNullOrEmpty(lastEmbeddedAuthUrl);
+            bool isWaiting = !isRunning && (hasUrl
+                || string.Equals(state, "Starting", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(state, "NeedsMachineAuth", StringComparison.OrdinalIgnoreCase));
+
+            if (isRunning)
+            {
+                embeddedTsAccentColor = Theme.Success;
+                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.SuccessLight, Theme.Success);
+                string account = (snap != null && !string.IsNullOrEmpty(snap.DisplayName)) ? snap.DisplayName
+                    : (snap != null && !string.IsNullOrEmpty(snap.LoginName)) ? snap.LoginName
+                    : (snap != null && !string.IsNullOrEmpty(snap.TailnetName)) ? snap.TailnetName
+                    : "已登录";
+                embeddedTsTitleLabel.Text = "内置跨网已就绪 · " + account;
+                string ipText = snap != null && !string.IsNullOrEmpty(snap.SelfIp4) ? snap.SelfIp4 : "分配中";
+                embeddedTsBadge.UpdateStatus("内置在线 · " + ipText, Theme.PillTone.Success);
+                int count = snap != null && snap.Peers != null ? snap.Peers.Count : 0;
+                embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
+                embeddedTsSubtitleLabel.Text = "免驱动 WireGuard 已接管 49810 端口"
+                    + (count > 0 ? (" · 已发现 " + count + " 台同账号设备。") : " · 等待同账号其他设备上线。");
+                embeddedTsActionsBar.SetMode(2, embeddedTsBusy, false);
+            }
+            else if (isWaiting || embeddedTsBusy)
+            {
+                embeddedTsAccentColor = Theme.Warning;
+                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.WarningLight, Theme.Warning);
+                embeddedTsTitleLabel.Text = hasUrl ? "请在浏览器完成 Tailscale 账号授权" : "正在启动内置跨网引擎…";
+                embeddedTsBadge.UpdateStatus(hasUrl ? "等待授权" : "正在连接", Theme.PillTone.Warning);
+                embeddedTsSubtitleLabel.ForeColor = Theme.Warning;
+                embeddedTsSubtitleLabel.Text = hasUrl
+                    ? "授权完成后本机将自动上线（如未弹出窗口，请点右侧「打开登录页」或「复制链接」）。"
+                    : (!string.IsNullOrEmpty(snap != null ? snap.Error : null) ? snap.Error : "正在初始化纯用户态跨网通道并向协调节点请求登录链接…");
+                embeddedTsActionsBar.SetMode(1, embeddedTsBusy, hasUrl);
+            }
+            else
+            {
+                embeddedTsAccentColor = Theme.Accent;
+                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.AccentLight, Theme.Accent);
+                embeddedTsTitleLabel.Text = "内置跨网通道（Tailscale 免安装）";
+                string err = snap != null ? snap.Error : "";
+                embeddedTsBadge.UpdateStatus("未登录", Theme.PillTone.Neutral);
+                if (!string.IsNullOrEmpty(err))
+                {
+                    embeddedTsSubtitleLabel.ForeColor = Theme.Alert;
+                    embeddedTsSubtitleLabel.Text = err;
+                }
+                else
+                {
+                    embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
+                    embeddedTsSubtitleLabel.Text = "无需安装官方 Tailscale 与虚拟网卡；两端登录同一账号即可跨网发现与直连，不干扰本机 VPN。";
+                }
+                embeddedTsActionsBar.SetMode(0, embeddedTsBusy, false);
+            }
+            embeddedTsCard.Invalidate();
+        }
+
+        private async Task HandleCrossNetCardClickAsync()
+        {
+            ShowPage(AllDevicesPage);
+            EmbeddedTailnetSnapshot snap = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+            string st = snap != null ? (snap.BackendState ?? "") : "";
+            if (string.Equals(st, "Running", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrEmpty(snap.SelfIp4))
+                    CopyHostAddress("内置 Tailscale IP", snap.SelfIp4);
+                await RefreshDashboardAsync();
+                return;
+            }
+            if (snap != null && !string.IsNullOrEmpty(snap.AuthUrl))
+            {
+                OpenEmbeddedAuthUrlInBrowser();
+                return;
+            }
+            await BeginEmbeddedTailnetLoginAsync();
+        }
+
+        private async Task BeginEmbeddedTailnetLoginAsync()
+        {
+            if (embeddedTsBusy) return;
+            embeddedTsBusy = true;
+            ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+            deviceBanner.Set("正在启动内置免安装跨网引擎，请稍候…", Theme.PillTone.Info);
+            try
+            {
+                EmbeddedTailnetSnapshot snap = await BoBoEmbeddedTailnet.Default.BeginLoginAsync(System.Threading.CancellationToken.None);
+                if (IsDisposed) return;
+                ApplyEmbeddedTailnetUi(snap);
+                if (snap != null && !string.IsNullOrEmpty(snap.AuthUrl))
+                {
+                    OpenEmbeddedAuthUrlInBrowser();
+                    deviceBanner.Set("已在默认浏览器打开 Tailscale 登录页，完成登录后设备将自动上线。", Theme.PillTone.Info);
+                }
+                else if (snap != null && string.Equals(snap.BackendState, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    deviceBanner.Set("内置跨网通道已上线（" + snap.SelfIp4 + "）。", Theme.PillTone.Success);
+                    await RefreshDashboardAsync();
+                }
+                else if (snap != null && !string.IsNullOrEmpty(snap.Error))
+                {
+                    deviceBanner.Set(snap.Error, Theme.PillTone.Warning);
+                }
+            }
+            finally
+            {
+                embeddedTsBusy = false;
+                if (!IsDisposed)
+                    ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+            }
+        }
+
+        private void OpenEmbeddedAuthUrlInBrowser()
+        {
+            string url = lastEmbeddedAuthUrl;
+            if (string.IsNullOrEmpty(url))
+            {
+                EmbeddedTailnetSnapshot cur = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+                url = cur != null ? cur.AuthUrl : "";
+            }
+            if (string.IsNullOrEmpty(url)) return;
+            string err;
+            if (Engines.TryOpenUrl(url, out err))
+                deviceBanner.Set("已打开 Tailscale 登录页；完成后等待 2~3 秒自动同步，无需手动操作。", Theme.PillTone.Info);
+            else
+                deviceBanner.Set("无法自动拉起浏览器：" + err + "，请点「复制链接」后粘贴到浏览器打开。", Theme.PillTone.Warning);
+        }
+
+        private void CopyEmbeddedAuthUrlToClipboard()
+        {
+            if (string.IsNullOrEmpty(lastEmbeddedAuthUrl)) return;
+            try
+            {
+                Clipboard.SetText(lastEmbeddedAuthUrl);
+                deviceBanner.Set("已复制 Tailscale 登录授权链接，请粘贴到浏览器完成登录。", Theme.PillTone.Success);
+            }
+            catch
+            {
+                deviceBanner.Set("无法访问剪贴板，请直接点击「打开登录页」。", Theme.PillTone.Warning);
+            }
+        }
+
+        private async Task CancelOrLogoutEmbeddedTailnetAsync()
+        {
+            if (embeddedTsBusy) return;
+            embeddedTsBusy = true;
+            ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+            try
+            {
+                await BoBoEmbeddedTailnet.Default.LogoutAsync(System.Threading.CancellationToken.None);
+                if (!IsDisposed)
+                {
+                    deviceBanner.Set("已退出内置跨网账号。", Theme.PillTone.Info);
+                    await RefreshDashboardAsync();
+                }
+            }
+            finally
+            {
+                embeddedTsBusy = false;
+                if (!IsDisposed)
+                    ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+            }
         }
 
         /// <summary>
@@ -328,6 +728,10 @@ namespace DualRemote
                 hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded ? SumRows(hostCardDetailsLayout) : 0;
             }
             devicesDesk.RowStyles[hostCardRow].Height = HostCardHeight();
+            if (embeddedTailnetRow >= 0)
+            {
+                devicesDesk.RowStyles[embeddedTailnetRow].Height = EmbeddedTailnetCardHeight();
+            }
             RecalculateDevicesDeskHeight();
         }
 
@@ -706,7 +1110,7 @@ namespace DualRemote
             Theme.FixedColumn(row, 34);
 
             Color tileBg = peer.Online ? Theme.AccentLight : Theme.SurfaceSubtle;
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, true, tileBg, peer.Online ? Theme.Accent : Theme.Muted, 8f);
+            var icon = new Theme.IconTile(PeerOsGlyph(peer), true, tileBg, peer.Online ? Theme.Accent : Theme.Muted, 8f);
 
             string displayName = PeerName(peer);
             var identity = new Theme.TwoLineText(
@@ -744,7 +1148,7 @@ namespace DualRemote
             var icon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.SurfaceSubtle, Theme.Muted, 7.5f);
             var text = new Theme.TwoLineText(
                 issue == null ? "暂未发现同网 Tailscale 远端电脑" : "未读取到 Tailscale 设备列表",
-                "可直接点右侧「手动连接」输入局域网 IP、公网 IPv6 或 9 位协助设备码。",
+                "可点击上方「登录内置跨网」在两台电脑登录同一账号，或点右侧「手动连接」输入 IP / 9 位设备码。",
                 Theme.TextSize.Label,
                 Theme.Ink,
                 Theme.Muted);
@@ -1463,6 +1867,22 @@ namespace DualRemote
                         Theme.BodyInk, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
             }
+        }
+
+        private static Theme.Glyph PeerOsGlyph(TsPeer peer)
+        {
+            string os = (peer != null && peer.Os != null ? peer.Os : "").Trim().ToLowerInvariant();
+            if (os.Length == 0 && peer != null && !string.IsNullOrEmpty(peer.LinkText))
+            {
+                string lt = peer.LinkText.ToLowerInvariant();
+                if (lt.IndexOf("[android]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[ios]", StringComparison.Ordinal) >= 0)
+                    return Theme.Glyph.Devices;
+                if (lt.IndexOf("[macos]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[darwin]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[linux]", StringComparison.Ordinal) >= 0)
+                    return Theme.Glyph.Desktop;
+            }
+            if (os == "android" || os == "ios") return Theme.Glyph.Devices;
+            if (os == "macos" || os == "darwin" || os == "linux" || os == "freebsd" || os == "openbsd") return Theme.Glyph.Desktop;
+            return Theme.Glyph.WindowsTile;
         }
 
         private static string PeerName(TsPeer peer)

@@ -11,6 +11,7 @@ nul
 ci-out/
 release-assets/
 native/bobo-core/out/
+native/bobo-tsnet/out/
 native/bobo-stream-player/out/
 native/bobo-stream-player/build/
 native/bobo-stream-player/third_party/

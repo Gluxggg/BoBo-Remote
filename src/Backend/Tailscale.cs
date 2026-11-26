@@ -18,6 +18,7 @@ namespace DualRemote
         internal string CurAddr = "";
         internal string Relay = "";
         internal string PeerRelay = "";
+        internal string Os = "";
         private string customLinkText = "";
 
         /// <summary>最近一次记录到的连接路径；对于局域网 BoBo V6 发现节点可直接写入自定义链路状态。</summary>
@@ -108,46 +109,154 @@ namespace DualRemote
             get { return File.Exists(ExePath); }
         }
 
-        /// <summary>读取已认证节点（只保留 Windows），阻塞，最多 timeoutMs；请在后台线程调用。</summary>
+        private static readonly object systemDaemonGate = new object();
+        private static long systemDaemonCheckedTicks;
+        private static bool systemDaemonRunningCached;
+
+        internal static bool IsSystemDaemonRunningCached()
+        {
+            if (!Present) return false;
+            long now = Stopwatch.GetTimestamp();
+            long maxAge = Stopwatch.Frequency * 15;
+            lock (systemDaemonGate)
+            {
+                if (systemDaemonCheckedTicks > 0 && (now - systemDaemonCheckedTicks) <= maxAge)
+                    return systemDaemonRunningCached;
+            }
+            bool alive = false;
+            try
+            {
+                int exitCode;
+                string stderrText;
+                bool timedOut;
+                string json = RunCli("status --json", 1200, out exitCode, out stderrText, out timedOut);
+                if (!timedOut && exitCode == 0)
+                {
+                    List<TsPeer> dummyPeers;
+                    string bs, pe;
+                    if (TryParseStatusJson(json, out dummyPeers, out bs, out pe))
+                        alive = BackendReady(bs);
+                }
+            }
+            catch { }
+            lock (systemDaemonGate)
+            {
+                systemDaemonCheckedTicks = Stopwatch.GetTimestamp();
+                systemDaemonRunningCached = alive;
+            }
+            return alive;
+        }
+
+        /// <summary>读取跨网已认证节点（优先合并内置 BoBoTsNet 与本机系统 Tailscale），请在后台线程调用。</summary>
         internal static TailnetLoadResult LoadPeers(int timeoutMs)
         {
-            TailnetLoadResult result = new TailnetLoadResult();
+            var result = new TailnetLoadResult();
+            var seenIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool embeddedOk = false;
+            string embeddedState = "";
+            string embeddedErr = "";
+
+            if (BoBoEmbeddedTailnet.Default.IsRunning)
+            {
+                try
+                {
+                    EmbeddedTailnetSnapshot snap = BoBoEmbeddedTailnet.Default
+                        .RefreshStatusAsync(System.Threading.CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                    if (snap != null)
+                    {
+                        embeddedState = snap.BackendState ?? "";
+                        embeddedErr = snap.Error ?? "";
+                        if (BackendReady(embeddedState))
+                        {
+                            embeddedOk = true;
+                            List<TsPeer> embPeers = BoBoEmbeddedTailnet.ConvertPeersToTsPeers(snap);
+                            for (int i = 0; i < embPeers.Count; i++)
+                            {
+                                if (seenIps.Add(embPeers[i].Ip))
+                                    result.Peers.Add(embPeers[i]);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            bool sysOk = false;
+            string sysState = "";
+            string sysErr = "";
+            if (Present)
+            {
+                int exitCode;
+                string stderrText;
+                bool timedOut;
+                string json = RunCli("status --json", timeoutMs, out exitCode, out stderrText, out timedOut);
+                if (timedOut)
+                {
+                    sysErr = "读取系统 Tailscale 状态超时（约 " + Math.Max(1, timeoutMs / 1000) + " 秒），暂不可读；不代表没有设备。";
+                }
+                else if (exitCode != 0)
+                {
+                    sysErr = DescribeStatusFailure(exitCode, stderrText);
+                }
+                else
+                {
+                    List<TsPeer> sysPeers;
+                    string parseError;
+                    if (!TryParseStatusJson(json, out sysPeers, out sysState, out parseError))
+                    {
+                        sysErr = parseError;
+                    }
+                    else
+                    {
+                        lock (systemDaemonGate)
+                        {
+                            systemDaemonCheckedTicks = Stopwatch.GetTimestamp();
+                            systemDaemonRunningCached = BackendReady(sysState);
+                        }
+                        if (BackendReady(sysState))
+                        {
+                            sysOk = true;
+                            for (int i = 0; i < sysPeers.Count; i++)
+                            {
+                                if (seenIps.Add(sysPeers[i].Ip))
+                                    result.Peers.Add(sysPeers[i]);
+                            }
+                        }
+                        else
+                        {
+                            sysErr = "系统 Tailscale 当前未运行或未登录（状态：" + DescribeBackendState(sysState) + "）。";
+                        }
+                    }
+                }
+            }
+
+            if (embeddedOk || sysOk)
+            {
+                result.Ok = true;
+                result.BackendState = "Running";
+                return result;
+            }
+
+            if (!string.IsNullOrEmpty(embeddedState))
+            {
+                result.BackendState = embeddedState;
+                result.Error = string.IsNullOrEmpty(embeddedErr)
+                    ? ("内置跨网账号状态：" + DescribeBackendState(embeddedState) + "，请在「全部设备」中完成登录后重试。")
+                    : embeddedErr;
+                return result;
+            }
+
             if (!Present)
             {
-                result.Error = "未找到 Tailscale：" + ExePath;
+                result.Error = "尚未登录内置跨网账号（也未安装系统 Tailscale），可在上方点击「一键登录账号」免安装直连。";
                 return result;
             }
-            int exitCode;
-            string stderrText;
-            bool timedOut;
-            string json = RunCli("status --json", timeoutMs, out exitCode, out stderrText, out timedOut);
-            if (timedOut)
-            {
-                result.Error = "读取 Tailscale 状态超时（约 " + Math.Max(1, timeoutMs / 1000) + " 秒），暂不可读；不代表没有设备。";
-                return result;
-            }
-            if (exitCode != 0)
-            {
-                result.Error = DescribeStatusFailure(exitCode, stderrText);
-                return result;
-            }
-            List<TsPeer> peers;
-            string backendState;
-            string parseError;
-            if (!TryParseStatusJson(json, out peers, out backendState, out parseError))
-            {
-                result.Error = parseError;
-                return result;
-            }
-            result.BackendState = backendState;
-            if (!BackendReady(backendState))
-            {
-                result.Error = "Tailscale 当前未运行或未登录（状态：" + DescribeBackendState(backendState)
-                             + "）。请在 Tailscale 中登录后重试。";
-                return result;
-            }
-            result.Ok = true;
-            result.Peers.AddRange(peers);
+
+            result.BackendState = sysState;
+            result.Error = string.IsNullOrEmpty(sysErr)
+                ? "Tailscale 当前未运行或未登录，可在上方点击「一键登录账号」或在系统 Tailscale 登录。"
+                : sysErr;
             return result;
         }
 
@@ -280,10 +389,14 @@ namespace DualRemote
 
         private static LinkProbeResult ProbeTailnetHost(string host, int timeoutMs)
         {
+            if (BoBoEmbeddedTailnet.Default.IsRunning && BoBoEmbeddedTailnet.Default.ShouldRouteHost(host))
+            {
+                return BoBoEmbeddedTailnet.Default.PingPeerSync(host, timeoutMs);
+            }
             if (!Present)
             {
                 return LinkProbeResult.Of(LinkProbeStatus.Unknown,
-                    "未找到 Tailscale，未执行 Tailscale 节点路径探测；这不代表节点不可达，可直接用局域网/公网地址连接。");
+                    "未找到系统 Tailscale 且未登录内置跨网引擎，未执行 Tailscale 节点路径探测；这不代表节点不可达，可直接用局域网/公网地址或内置跨网账号连接。");
             }
             int left = Math.Max(1, timeoutMs);
             int exitCode;

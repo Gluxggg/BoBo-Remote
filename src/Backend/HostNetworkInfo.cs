@@ -22,6 +22,12 @@ namespace DualRemote
         {
             var snap = new HostSnapshot();
             CollectAddresses(snap);
+            if (string.IsNullOrEmpty(snap.TailscaleIpv4) && BoBoEmbeddedTailnet.Default.IsRunning)
+            {
+                EmbeddedTailnetSnapshot emb = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+                if (emb != null && !string.IsNullOrEmpty(emb.SelfIp4))
+                    snap.TailscaleIpv4 = emb.SelfIp4;
+            }
             return snap;
         }
 

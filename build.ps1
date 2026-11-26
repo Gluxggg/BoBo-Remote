@@ -1,11 +1,11 @@
 ﻿<#
 .SYNOPSIS
-    BoBo远程 V6.0 全内置单文件 Windows x64 构建脚本。
+    BoBo远程 全内置单文件 Windows x64 构建脚本。
 
 .DESCRIPTION
     全程四步（零外置 Sunshine / Moonlight / RustDesk / 独立播放核）：
-    1. 编译并自检内嵌原生内核 native\bobo-core\out\BoBoCore.dll（压成 BoBoCore.dll.gz）；
-    2. 使用系统自带 .NET 4.8 csc.exe 编译 BoBo远程.exe，并将 BoBoCore.dll.gz 直接嵌入主程序资源；
+    1. 编译并自检内嵌原生内核 native\bobo-core\out\BoBoCore.dll（压成 BoBoCore.dll.gz）与纯 Go 免安装跨网核 native\bobo-tsnet\out\BoBoTsNet.exe（压成 BoBoTsNet.exe.gz）；
+    2. 使用系统自带 .NET 4.8 csc.exe 编译 BoBo远程.exe，并将 BoBoCore.dll.gz 与 BoBoTsNet.exe.gz 直接嵌入主程序资源；
     3. 组装干净单文件发布目录（校验不存在任何其它 .exe 或 engines\ 目录）；
     4. 输出 dist\BoBo远程-Windows-x64、便携 ZIP、轻量更新包与标准图形安装包 BoBoRemote-Setup-x64.exe。
 
@@ -32,16 +32,18 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.0.5' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.1.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
-$BuildDir       = Join-Path $Root '.cache\build'
-$StageRoot      = Join-Path $BuildDir 'clean-stage'
-$PackageDir     = Join-Path $StageRoot 'BoBo远程'
-$DistDir        = if ([string]::IsNullOrWhiteSpace($OutputDir)) { Join-Path $Root 'dist' } else { [System.IO.Path]::GetFullPath($OutputDir) }
-$LauncherOut    = Join-Path $BuildDir 'BoBo远程.exe'
-$CoreScriptPath = Join-Path $Root 'native\bobo-core\build-core.ps1'
-$CoreGzPath     = Join-Path $Root 'native\bobo-core\out\BoBoCore.dll.gz'
-$ZipPath        = Join-Path $DistDir 'BoBo远程-Windows-x64.zip'
+$BuildDir        = Join-Path $Root '.cache\build'
+$StageRoot       = Join-Path $BuildDir 'clean-stage'
+$PackageDir      = Join-Path $StageRoot 'BoBo远程'
+$DistDir         = if ([string]::IsNullOrWhiteSpace($OutputDir)) { Join-Path $Root 'dist' } else { [System.IO.Path]::GetFullPath($OutputDir) }
+$LauncherOut     = Join-Path $BuildDir 'BoBo远程.exe'
+$CoreScriptPath  = Join-Path $Root 'native\bobo-core\build-core.ps1'
+$CoreGzPath      = Join-Path $Root 'native\bobo-core\out\BoBoCore.dll.gz'
+$TsNetScriptPath = Join-Path $Root 'native\bobo-tsnet\build-tsnet.ps1'
+$TsNetGzPath     = Join-Path $Root 'native\bobo-tsnet\out\BoBoTsNet.exe.gz'
+$ZipPath         = Join-Path $DistDir 'BoBo远程-Windows-x64.zip'
 $LightZipPath   = Join-Path $DistDir 'BoBo远程-轻量更新包.zip'
 $SetupExePath   = Join-Path $DistDir 'BoBoRemote-Setup-x64.exe'
 
@@ -69,8 +71,18 @@ function Invoke-CoreBuildStage {
     Write-Ok "BoBoCore.dll.gz 就绪（$gzLen 字节，SHA256 $(Get-FileSha256 $CoreGzPath)）"
 }
 
+function Invoke-TsNetBuildStage {
+    Write-Step '第 1b 步：编译并自检内嵌用户态跨网引擎 BoBoTsNet.exe'
+    if (-not (Test-Path -LiteralPath $TsNetScriptPath)) { throw "缺少跨网核构建脚本：$TsNetScriptPath" }
+    powershell -NoProfile -File $TsNetScriptPath -RunSelfTest
+    if ($LASTEXITCODE -ne 0) { throw "BoBoTsNet.exe 编译或自检失败（exit=$LASTEXITCODE）" }
+    if (-not (Test-Path -LiteralPath $TsNetGzPath)) { throw "未生成内嵌跨网内核：$TsNetGzPath" }
+    $gzLen = (Get-Item -LiteralPath $TsNetGzPath).Length
+    Write-Ok "BoBoTsNet.exe.gz 就绪（$gzLen 字节，SHA256 $(Get-FileSha256 $TsNetGzPath)）"
+}
+
 function Invoke-CompileStage {
-    Write-Step '第 2 步：编译单文件 BoBo远程.exe（内嵌 BoBoCore.dll.gz）'
+    Write-Step '第 2 步：编译单文件 BoBo远程.exe（内嵌 BoBoCore.dll.gz + BoBoTsNet.exe.gz）'
     $csc = Find-CscExe
     $srcPath = Join-Path $Root $SourceDir
     $sources = @(Get-ChildItem -LiteralPath $srcPath -Recurse -File -Filter '*.cs' |
@@ -105,6 +117,7 @@ function Invoke-CompileStage {
         "/win32manifest:$manifest",
         "/reference:$($refs -join ',')",
         "/resource:$CoreGzPath,DualRemote.BoBoCore.dll.gz",
+        "/resource:$TsNetGzPath,DualRemote.BoBoTsNet.exe.gz",
         "/resource:$verFile,DualRemote.app-version.txt"
     )
     if (Test-Path -LiteralPath $appIcon) { $argsList += "/win32icon:$appIcon" }
@@ -114,7 +127,7 @@ function Invoke-CompileStage {
     & $csc.Compiler @argsList
     if ($LASTEXITCODE -ne 0) { throw "csc.exe 编译 BoBo远程.exe 失败（exit=$LASTEXITCODE）" }
     $exeLen = (Get-Item -LiteralPath $LauncherOut).Length
-    Write-Ok "已编译 BoBo远程.exe（$($sources.Count) 个源码文件，$exeLen 字节，内嵌 BoBoCore）"
+    Write-Ok "已编译 BoBo远程.exe（$($sources.Count) 个源码文件，$exeLen 字节，内嵌 BoBoCore + BoBoTsNet）"
 }
 
 function Invoke-Stage {
@@ -132,10 +145,10 @@ function Invoke-Stage {
     }
 
     $buildInfo = @(
-        "BoBo Remote Windows x64 (V6 All-In-One)"
+        "BoBo Remote Windows x64 (All-In-One + Embedded tsnet)"
         "Version: $BuildVersion"
         "BuiltUtc: $($BuildTimestamp.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
-        "Architecture: Single-App Embedded BoBoCore.dll (DXGI/GDI + MF H.264 + D3D11VA + WASAPI + TLS 1.2 Port 49810)"
+        "Architecture: Single-App Embedded BoBoCore.dll + Embedded BoBoTsNet (tsnet User-Space Tailnet) + TLS 1.2 Port 49810"
         "StandaloneExternalEngines: None (0)"
         "MainExeSha256: $(Get-FileSha256 (Join-Path $PackageDir 'BoBo远程.exe'))"
     ) -join "`r`n"
@@ -273,6 +286,7 @@ try {
     }
 
     Invoke-CoreBuildStage
+    Invoke-TsNetBuildStage
     Invoke-CompileStage
     Invoke-Stage
     if ($NoPublish) {

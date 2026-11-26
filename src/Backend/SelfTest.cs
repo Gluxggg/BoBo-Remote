@@ -1438,6 +1438,141 @@ namespace DualRemote
             Check("V6 自动更新轻量包选择：全内置架构无 engines 目录也能命中 LightZip",
                 updRes.PackageKind == UpdatePackageKind.LightZip,
                 "intact=" + AppUpdater.IsLocalAllInOneInstallIntact() + " kind=" + updRes.PackageKind);
+
+            // 6. Embedded tsnet user-space Tailscale resource, status JSON, and SOCKS5 loopback verification
+            Check("内置跨网引擎：BoBoTsNet.exe.gz 已内嵌到主程序资源",
+                BoBoEmbeddedTailnet.IsEmbeddedResourceAvailable,
+                BoBoEmbeddedTailnet.EmbeddedResourceName);
+            using (Stream tsRes = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(BoBoEmbeddedTailnet.EmbeddedResourceName))
+            {
+                Check("内置跨网引擎：压缩资源体积有效 (> 1 MB)",
+                    tsRes != null && tsRes.Length > 1000000,
+                    "bytes=" + (tsRes != null ? tsRes.Length : 0));
+            }
+
+            EmbeddedTailnetSnapshot loginSnap = BoBoEmbeddedTailnet.ParseStatusJson(
+                "{\"backendState\":\"NeedsLogin\",\"authUrl\":\"https://login.tailscale.com/a/unit123\",\"selfHostName\":\"bobo-desk\"}");
+            Check("内置跨网解析：NeedsLogin 可解析授权 URL",
+                loginSnap.BackendState == "NeedsLogin"
+                && loginSnap.AuthUrl == "https://login.tailscale.com/a/unit123"
+                && loginSnap.SelfHostName == "bobo-desk",
+                loginSnap.BackendState + " " + loginSnap.AuthUrl);
+
+            EmbeddedTailnetSnapshot runSnap = BoBoEmbeddedTailnet.ParseStatusJson(
+                "{\"backendState\":\"Running\",\"selfIp4\":\"100.64.0.5\",\"displayName\":\"user@example.com\",\"peers\":["
+                + "{\"hostName\":\"win-rig\",\"os\":\"windows\",\"ip4\":\"100.64.0.10\",\"ip6\":\"fd7a:115c:a1e0::10\",\"online\":true,\"curAddr\":\"1.2.3.4:41641\"},"
+                + "{\"hostName\":\"mac-studio\",\"os\":\"macOS\",\"ip4\":\"100.64.0.11\",\"online\":true,\"relay\":\"tok\"},"
+                + "{\"hostName\":\"pixel-9\",\"os\":\"android\",\"ip4\":\"100.64.0.12\",\"online\":false}]}");
+            List<TsPeer> tsPeers = BoBoEmbeddedTailnet.ConvertPeersToTsPeers(runSnap);
+            Check("内置跨网解析：Running 节点转换保留多平台 Os 与链路状态",
+                runSnap.BackendState == "Running"
+                && runSnap.SelfIp4 == "100.64.0.5"
+                && tsPeers.Count == 3
+                && tsPeers[0].Ip == "100.64.0.10" && tsPeers[0].Os == "windows"
+                && tsPeers[1].Os == "macOS" && tsPeers[1].LinkText.IndexOf("DERP(tok)", StringComparison.Ordinal) >= 0
+                && tsPeers[2].Os == "android" && !tsPeers[2].Online,
+                "count=" + tsPeers.Count);
+
+            RunEmbeddedSocks5SelfTest();
+        }
+
+        private static void RunEmbeddedSocks5SelfTest()
+        {
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            try
+            {
+                int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+                System.Threading.Tasks.Task serverTask = System.Threading.Tasks.Task.Run(delegate
+                {
+                    for (int i = 0; i < 2; i++)
+                    {
+                        using (System.Net.Sockets.TcpClient c = listener.AcceptTcpClient())
+                        using (System.Net.Sockets.NetworkStream s = c.GetStream())
+                        {
+                            s.ReadTimeout = 3000;
+                            s.WriteTimeout = 3000;
+                            byte[] greet = new byte[3];
+                            if (!ReadExactSync(s, greet, 3) || greet[0] != 0x05 || greet[2] != 0x02) continue;
+                            s.Write(new byte[] { 0x05, 0x02 }, 0, 2);
+
+                            byte[] uHdr = new byte[2];
+                            if (!ReadExactSync(s, uHdr, 2) || uHdr[0] != 0x01) continue;
+                            byte[] uBytes = new byte[uHdr[1]];
+                            if (!ReadExactSync(s, uBytes, uBytes.Length)) continue;
+                            byte[] pLen = new byte[1];
+                            if (!ReadExactSync(s, pLen, 1)) continue;
+                            byte[] pBytes = new byte[pLen[0]];
+                            if (!ReadExactSync(s, pBytes, pBytes.Length)) continue;
+
+                            string uStr = Encoding.UTF8.GetString(uBytes);
+                            string pStr = Encoding.UTF8.GetString(pBytes);
+                            if (uStr != "bobo" || pStr != "good-secret")
+                            {
+                                s.Write(new byte[] { 0x01, 0x01 }, 0, 2);
+                                continue;
+                            }
+                            s.Write(new byte[] { 0x01, 0x00 }, 0, 2);
+
+                            byte[] req = new byte[10];
+                            if (!ReadExactSync(s, req, 10) || req[0] != 0x05 || req[1] != 0x01 || req[3] != 0x01) continue;
+                            s.Write(new byte[] { 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, 0, 10);
+
+                            byte[] buf = new byte[64];
+                            int n = s.Read(buf, 0, buf.Length);
+                            if (n > 0) s.Write(buf, 0, n);
+                        }
+                    }
+                });
+
+                bool rejectedBad = false;
+                try
+                {
+                    using (var cBad = new System.Net.Sockets.TcpClient())
+                    using (var cts = new System.Threading.CancellationTokenSource(3000))
+                    {
+                        BoBoEmbeddedTailnet.ConnectViaSocks5Async(cBad, "127.0.0.1", port, "bobo", "wrong-secret", "100.64.0.88", 49810, cts.Token)
+                            .GetAwaiter().GetResult();
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    rejectedBad = true;
+                }
+                Check("内置跨网 SOCKS5：错误会话密钥触发 UnauthorizedAccessException", rejectedBad, rejectedBad ? "rejected" : "not-rejected");
+
+                string echoed = "";
+                using (var cGood = new System.Net.Sockets.TcpClient())
+                using (var cts = new System.Threading.CancellationTokenSource(3000))
+                {
+                    BoBoEmbeddedTailnet.ConnectViaSocks5Async(cGood, "127.0.0.1", port, "bobo", "good-secret", "100.64.0.88", 49810, cts.Token)
+                        .GetAwaiter().GetResult();
+                    System.Net.Sockets.NetworkStream gs = cGood.GetStream();
+                    byte[] payload = Encoding.ASCII.GetBytes("BOBO-SOCKS5-OK");
+                    gs.Write(payload, 0, payload.Length);
+                    byte[] reply = new byte[payload.Length];
+                    if (ReadExactSync(gs, reply, reply.Length))
+                        echoed = Encoding.ASCII.GetString(reply);
+                }
+                try { serverTask.Wait(1500); } catch { }
+                Check("内置跨网 SOCKS5：RFC1929 鉴权 + Tailnet IP CONNECT 回环透传", echoed == "BOBO-SOCKS5-OK", "echo=" + echoed);
+            }
+            finally
+            {
+                try { listener.Stop(); } catch { }
+            }
+        }
+
+        private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)
+        {
+            int off = 0;
+            while (off < count)
+            {
+                int n = stream.Read(buf, off, count - off);
+                if (n <= 0) return false;
+                off += n;
+            }
+            return true;
         }
 
         private static byte[] SerializeSingleFrame(BoBoPacketType type, uint flagsOrTs, byte[] payload)

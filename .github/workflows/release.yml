@@ -82,6 +82,12 @@ jobs:
         with:
           ref: ${{ needs.release-metadata.outputs.commit }}
           persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/bobo-tsnet/go.mod
+          cache: true
+          cache-dependency-path: native/bobo-tsnet/go.sum
       - name: Build and self-test Windows packages
         shell: powershell
         env:

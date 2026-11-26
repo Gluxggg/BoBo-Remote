@@ -67,14 +67,14 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "7.0.5";
+        internal const string FallbackVersion = "7.1.0";
 
         /// <summary>当前内嵌架构指纹；与发布流水线写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
         internal const string CurrentEnginesStamp = "bobo-v6-allinone-inproc";
 
         private const string UninstallRegSubKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BoBoRemote";
         private const int ApiTimeoutMs = 12000;
-        private const int DownloadTimeoutMs = 60000;
+        private const int DownloadTimeoutMs = 180000;
         private const int MaxJsonBytes = 512 * 1024;
         private const int MaxSumsBytes = 64 * 1024;
 

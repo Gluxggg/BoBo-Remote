@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    BoBo远程 V6 CI 编译 + 全内置自检脚本（先编译内嵌原生核 BoBoCore.dll.gz，再编译单文件 BoBoRemote.exe 并运行 --self-test）。
+    BoBo远程 CI 编译 + 全内置自检脚本（先编译内嵌原生核 BoBoCore.dll.gz 与免安装跨网核 BoBoTsNet.exe.gz，再编译单文件 BoBoRemote.exe 并运行 --self-test）。
 
 .NOTES
     本文件保存为 UTF-8 带 BOM（适配 Windows PowerShell 5.1）。
@@ -10,7 +10,7 @@
 param(
     [string] $OutputDirectory = 'ci-out',
     [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
-    [string] $ReleaseVersion = '7.0.5'
+    [string] $ReleaseVersion = '7.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +25,14 @@ if ($LASTEXITCODE -ne 0) { throw "build-core.ps1 failed with exit code $LASTEXIT
 
 $coreGz = Join-Path $repoRoot 'native\bobo-core\out\BoBoCore.dll.gz'
 if (-not (Test-Path -LiteralPath $coreGz)) { throw "missing embedded core payload: $coreGz" }
+
+Write-Host '=== Step 1b: Build & self-test embedded BoBoTsNet.exe ==='
+$tsNetScript = Join-Path $repoRoot 'native\bobo-tsnet\build-tsnet.ps1'
+powershell -NoProfile -File $tsNetScript -RunSelfTest
+if ($LASTEXITCODE -ne 0) { throw "build-tsnet.ps1 failed with exit code $LASTEXITCODE" }
+
+$tsNetGz = Join-Path $repoRoot 'native\bobo-tsnet\out\BoBoTsNet.exe.gz'
+if (-not (Test-Path -LiteralPath $tsNetGz)) { throw "missing embedded tsnet payload: $tsNetGz" }
 
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $compiler = Join-Path $framework 'csc.exe'
@@ -51,7 +59,7 @@ $versionPath = Join-Path $outputRoot 'app-version.txt'
 $exePath = Join-Path $outputRoot 'BoBoRemote.exe'
 if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
-Write-Host "=== Step 2: Compile BoBoRemote.exe with embedded BoBoCore.dll.gz ==="
+Write-Host "=== Step 2: Compile BoBoRemote.exe with embedded BoBoCore.dll.gz & BoBoTsNet.exe.gz ==="
 Write-Host "compiler: $compiler"
 $compilerArgs = @(
     '/nologo'
@@ -65,6 +73,7 @@ $compilerArgs = @(
     "/win32manifest:$manifest"
     "/reference:$($references -join ',')"
     "/resource:$coreGz,DualRemote.BoBoCore.dll.gz"
+    "/resource:$tsNetGz,DualRemote.BoBoTsNet.exe.gz"
     "/resource:$versionPath,DualRemote.app-version.txt"
 )
 if (Test-Path -LiteralPath $appIcon) { $compilerArgs += "/win32icon:$appIcon" }

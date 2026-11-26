@@ -24,13 +24,13 @@
 
 ---
 
-**BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no official cloud accounts**, **no vendor signaling servers**, and **bundles zero third-party remote desktop engine binaries**.
+**BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + Go + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no BoBo vendor accounts** and **bundles zero third-party remote desktop engine binaries**.
 
 ### At a Glance
 
-- **User-Owned Networking**: Instant LAN discovery (`UDP 49812`), **P2P-first** cross-network connectivity (Tailscale `100.x.y.z` / reachable IPv6), and built-in client management & TCP probing for your own **self-hosted VPS fallback relays** — relay nodes never see plaintext video, audio, or input.
+- **Zero-Install Embedded Tailnet & User-Owned Routing**: Instant LAN discovery (`UDP 49812`); **`v7.1.0` embeds a pure-Go user-space Tailscale engine (`tsnet`) directly inside the Windows app** — install BoBo on two PCs, sign into your own Tailscale account in one click inside the UI with zero TUN driver or VPN interference; also includes built-in **self-hosted VPS fallback relay** management and TCP probing, keeping all traffic end-to-end encrypted between host and controller.
 - **True Four-Platform Native Interop**: One deterministic protocol and shared cross-language [test vectors (`protocol/golden-vectors.json`)](protocol/golden-vectors.json) power Windows, Android, macOS, and iOS with zero paywalled resolutions or frame rates.
-- **Ultra-Lightweight Footprint**: Windows ships as a **~634 KB portable ZIP** (**~922 KB GUI installer**) containing a single `BoBo远程.exe` with the GZip-compressed C++17 hardware media/input core (`BoBoCore.dll`) loaded strictly in-process.
+- **Single-File Process-Bound Footprint**: Windows ships as a **~9.1 MB portable ZIP** (**~9.4 MB GUI installer**) containing a single `BoBo远程.exe` with compressed **C++17 `BoBoCore.dll`** and **pure-Go `BoBoTsNet`** resources managed strictly per session.
 - **Weak-Network Resilience & Physical Privacy**: Windows-to-Windows sessions upgrade to `AES-128-CTR + HMAC-SHA256` encrypted `UDP+FEC/NACK` with 12s-baseline ABR; controlled hosts feature a dedicated-thread privacy curtain and native low-level physical input locks.
 
 <p align="center">
@@ -54,10 +54,10 @@
 
 | Dimension | Commercial Remote Desktop Suites | BoBo Remote |
 | --- | --- | --- |
-| **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No official accounts, no central directory, zero telemetry**: config & keys stay local; cross-network uses P2P or your own VPS relay |
+| **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No BoBo vendor accounts, no central directory, zero telemetry**: config & keys stay local; optionally sign into **your own Tailscale account in-app (zero separate install)** or use your own VPS relay |
 | **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: HW codecs, Super Display, privacy shield, and 2 GiB file transfer out of the box |
-| **Footprint & Background Services** | Tens to hundreds of MB, multiple external processes, always-on background services | **~634 KB Windows single-file package** with in-process `BoBoCore.dll`; closing the app immediately stops port `49810` and unhooks filters |
-| **Routing & BYO-VPS Freedom** | Fixed vendor relay clusters | **4 route modes + inline custom VPS manager**: Automatic, LAN Direct, Tailscale, and **Direct-First + Self-Hosted Relay Fallback** with TCP latency probing |
+| **Footprint & Background Services** | Tens to hundreds of MB, multiple external processes, always-on background services | **~9.1 MB Windows portable package** with embedded `BoBoCore.dll` + user-space `BoBoTsNet` (no TUN driver); closing the app immediately terminates children via Job Object, closes `49810`, and unhooks filters |
+| **Routing & BYO-VPS Freedom** | Fixed vendor relay clusters | **4 route modes + 1-click built-in Tailnet & custom VPS manager**: Automatic, LAN Direct, Embedded Tailscale, and **Direct-First + Self-Hosted Relay Fallback** with TCP latency probing |
 | **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + physical-grade privacy**: TLS 1.2 leaf-cert SHA-256 TOFU + RSA proofs + 4-digit brute-force-protected PIN + `WDA_EXCLUDEFROMCAPTURE` + low-level input locks |
 
 ---
@@ -68,7 +68,10 @@
 - [`protocol/BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) defines a **9-byte little-endian frame header** across six payload types (`ControlJson`, `VideoH264`, `AudioAdpcm`, `InputEvent`, `FileChunk`, `CursorShape`), spanning Windows mouse/keyboard, multi-touch pointers (`kind=7`), and mobile OS navigation actions (`kind=8`: Back / Home / Recents / Notifications / Lock / Volume / Power).
 - All four clients implement **zero-dependency** crypto/framing stacks (C# `.NET 4.8`, Kotlin, and pure-Swift DER RSA-2048 X.509/PKCS#12) validated against shared [`protocol/golden-vectors.json`](protocol/golden-vectors.json).
 
-### 2. P2P First + Self-Hosted VPS Relay Fallback + Weak-Network Transport
+### 2. Zero-Install Embedded Tailscale + Self-Hosted VPS Relay + Weak-Network Transport
+- **Zero-Install Embedded User-Space Tailscale Engine ([`BoBoTsNet`](native/bobo-tsnet/main.go) · [`BoBoEmbeddedTailnet`](src/Backend/BoBoEmbeddedTailnet.cs))**:
+  - Compiled in pure Go (`CGO_ENABLED=0`, `tailscale.com/tsnet`) and GZip-embedded inside `BoBo远程.exe`: once BoBo Remote is installed on two Windows PCs, users click **"Sign In"** in the sidebar card or All Devices banner to authorize their own Tailscale account in a browser — **no separate Tailscale installer, no TUN driver, and zero interference with existing system proxies or VPNs**.
+  - Protected by a per-session random `128-bit Token` (`X-BoBo-Token`) HTTP control API, a localhost authenticated SOCKS5 proxy (RFC 1928 + 1929) **strictly restricted to Tailnet targets (`100.64.0.0/10` / `fd7a:115c:a1e0::/48` / `*.ts.net`)**, automatic `:49810` `tsnet` inbound forwarding to `BoBoHostServer` preserving **end-to-end TLS 1.2 + RSA-2048 TOFU**, and Win32 Job Object (`KILL_ON_JOB_CLOSE`) + `--parent-pid` watchdog teardown on exit.
 - **Route Selector & Inline Custom Fallback Relay Panel ([`BoBoRelayStore`](src/Backend/BoBoRelayStore.cs))**:
   - Persists four route strategies: **Automatic (LAN / P2P First)**, **LAN Direct**, **Cross-Network · Tailscale (P2P First)**, and **Direct First + Self-Hosted Relay Fallback**.
   - Users can add, switch, delete, and **TCP-probe** up to 12 custom VPS relay endpoints (`IP:port`, `domain:443`, `[IPv6]:port`, default `49810`) right inside the Assist page.
@@ -101,9 +104,9 @@
 
 ## Four-Platform Matrix & Release Sizes
 
-| Platform | OS Requirement | `v7.0.5` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| Platform | OS Requirement | `v7.1.0` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~922 KB)<br>`BoBoRemote-Portable-x64.zip` (~634 KB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264 + WASAPI | In-process `BoBoCore.dll`, `UDP+FEC/NACK`, BYO-VPS relay manager, Super Display, privacy shield, in-app updater |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264 + WASAPI | Embedded `BoBoCore.dll` + **zero-install `BoBoTsNet` (`tsnet`) 1-click Tailscale**, `UDP+FEC/NACK`, BYO-VPS relay manager, Super Display, privacy shield, in-app updater |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>MediaCodec zero-copy decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection + Accessibility touch | Trackpad/direct touch, floating ball, Control Center, PC shortcut bar, Bluetooth VK map |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | Super Display, `⌘ → Ctrl` mapping, capture-excluded curtain + `CGEventTap` input lock |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~835 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | Embedded ReplayKit Broadcast Extension + local loopback bridge; sign via Sideloadly / AltStore / SideStore / Xcode |
@@ -114,13 +117,13 @@
 
 ## Architecture & Network Roadmap
 
-### A. Shipped Architecture (`BoBo6.2` · `v7.0.5`)
+### A. Shipped Architecture (`BoBo6.2` · `v7.1.0`)
 
 ```mermaid
 flowchart LR
   subgraph CLIENTS["Four Native Clients (Controller + Protocol Stack Built In)"]
     direction TB
-    WIN["Windows x64 · C# WinForms + Embedded C++17 BoBoCore.dll"]
+    WIN["Windows x64 · C# WinForms + Embedded BoBoCore.dll + Zero-Install BoBoTsNet (tsnet)"]
     AND["Android · Kotlin + Jetpack Compose + MediaCodec"]
     MAC["macOS · SwiftUI + BoBoAppleCore + ScreenCaptureKit"]
     IOS["iOS / iPadOS · SwiftUI + BoBoAppleCore + ReplayKit"]
@@ -129,15 +132,15 @@ flowchart LR
   subgraph PROTO["BoBo6.2 Wire Protocol & Encrypted Transport"]
     direction TB
     DISC["UDP 49812 · LAN Discovery (PROBE / HELLO / BYE)"]
-    TLS["TCP 49810 (or Custom Relay Port) · TLS 1.2+ & RSA-2048 TOFU"]
+    TLS["TCP 49810 (or tsnet Tunnel / Custom Relay Port) · TLS 1.2+ & RSA-2048 TOFU"]
     AUTH["RSA Challenge Signature + 4-Digit Temporary PIN (HMAC-SHA256)"]
     FRAMES["6 TCP Frames: ControlJson · VideoH264 · AudioAdpcm · InputEvent · FileChunk · CursorShape"]
-    UDP["UDP 49811 (Windows Peers) · AES-128-CTR+HMAC · Interleaved XOR FEC + Selective NACK + 12s ABR"]
+    UDP["UDP 49811 (Direct Windows Peers) · AES-128-CTR+HMAC · Interleaved XOR FEC + Selective NACK + 12s ABR"]
     DISC --> TLS --> AUTH --> FRAMES
     AUTH --> UDP
   end
 
-  NET["Direct LAN / Public IPv6 / Tailscale (P2P · DERP · Peer Relay) / BYO-VPS Fallback Relay"]
+  NET["Direct LAN / Public IPv6 / Embedded Tailscale (P2P · DERP · Peer Relay) / BYO-VPS Fallback Relay"]
 
   WIN <--> PROTO
   AND <--> PROTO
@@ -170,9 +173,9 @@ flowchart TB
 3. **Provide a `TCP/TLS 443` fallback when UDP is blocked**: Keep connectivity alive inside restrictive campus or corporate firewalls.
 4. **Adapt bitrate and FPS when link quality drops**: Continuously tune bitrate and FPS from live RTT, jitter, and loss telemetry (Windows already ships `UDP+FEC/NACK` and 12s-baseline ABR in `v7.0.3–v7.0.4`, ready to extend across platforms and integrate with the coordinator layer).
 
-> **Personal & Open-Source BYO-VPS Status**
-> - **Available Today (`v7.0.5`)**: The Windows Route dropdown includes **Direct First + Self-Hosted Relay Fallback** with an inline custom relay panel (save up to 12 VPS `host[:port]` endpoints, run TCP latency probes, and fall back automatically over end-to-end TLS 1.2 + RSA TOFU), alongside native recognition of **Tailscale Peer Relay** (`< 55 ms` preserves high-bitrate streaming) and custom DERP nodes.
-> - **Next-Gen Goal (`V7.1+ / V8`)**: Ship a lightweight self-hostable **Connection Coordinator + TURN / UDP Relay + `TCP/TLS 443` fallback** so all four platforms can punch NATs and fail over to user-owned VPS nodes without external mesh software.
+> **Personal & Open-Source Cross-Network / BYO-VPS Status**
+> - **Out-of-the-Box Cross-Network + BYO-VPS (`v7.1.0`)**: Windows now embeds a **pure-Go user-space Tailscale engine (`tsnet`)** — sign into your own Tailscale account once per PC directly inside BoBo Remote for automatic discovery and encrypted P2P/DERP connections with **no TUN driver or VPN conflict**, complementing the **inline custom VPS fallback relay panel** (12 endpoints + TCP probe) and **Tailscale Peer Relay** (`< 55 ms` preserves high-bitrate streaming).
+> - **Next-Gen Goal (`V7.2+ / V8`)**: Ship a lightweight self-hostable **Connection Coordinator + TURN / UDP Relay + `TCP/TLS 443` fallback** so all four platforms can punch NATs and fail over to user-owned VPS nodes without external identity providers.
 
 ---
 
@@ -202,7 +205,7 @@ Download the artifact for your platform from [**GitHub Releases (latest)**](http
 - **iOS / iPadOS 16.0+**: Sideload **`BoBoRemote-iOS-Unsigned.ipa`** via [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode, trust the developer certificate, and allow **Local Network** access.
 
 ### 3-Step First Connection
-1. **Establish Reachability**: Keep peers on the same LAN (`UDP 49812` discovery), connect over [Tailscale](https://tailscale.com/) (`100.x.y.z`) / reachable IPv6, or choose **Direct First + Self-Hosted Relay Fallback** in Windows and add your VPS endpoint.
+1. **Establish Reachability**: Keep peers on the same LAN (`UDP 49812` discovery), click **Sign In** inside BoBo Remote's built-in Tailscale card (zero separate Tailscale installer needed), dial reachable IPv6, or choose **Direct First + Self-Hosted Relay Fallback** in Windows to add your VPS endpoint.
 2. **Generate a 4-Digit PIN**: On the host, open BoBo Remote, enable incoming control, and generate a **4-digit temporary pairing PIN** (valid 120s).
 3. **Pair & Connect**: Select the discovered host or enter its address/9-digit code on the controller to complete one-time TOFU pairing; future reconnects verify pinned certificates automatically.
 
@@ -228,8 +231,8 @@ Download the artifact for your platform from [**GitHub Releases (latest)**](http
 Run platform builds from the repository root ([CI workflow](.github/workflows/ci.yml) · [Release workflow](.github/workflows/release.yml)):
 
 ```powershell
-# Windows x64 (requires MSVC Build Tools, Windows SDK, and .NET 4.8 csc.exe)
-.\ci\build.ps1        # Builds BoBoCore.dll.gz + BoBoRemote.exe + Setup and runs self-tests
+# Windows x64 (requires MSVC Build Tools, Windows SDK, Go 1.26+/GOTOOLCHAIN=auto, and .NET 4.8 csc.exe)
+.\ci\build.ps1        # Builds BoBoCore.dll.gz + BoBoTsNet.exe.gz + BoBoRemote.exe + Setup and runs self-tests
 .\build.ps1           # Assembles portable ZIP, light update ZIP, and GUI installer
 ```
 
@@ -246,9 +249,9 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.0.5`)**
-- **Local Windows suite**: **10/10** native `BoBoCore.dll` self-tests (encoder, D3D11, WASAPI, physical input blocker; capture falls back to synthetic NV12 in non-interactive sessions), **130/130** managed `--self-test` checks (protocol Golden Vectors, UDP FEC/NACK, ABR, privacy guard state machine, `BoBoRelayStore` & custom relay routing), **7/7** installer self-tests, **56/56** UI/dropdown/relay/animation/icon smoke checks, and **12/12** threaded privacy curtain checks passed.
-- **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows build Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA) and verify all 6 release artifacts against `SHA256SUMS.txt`. (End-to-end WAN throughput over custom VPS nodes remains dependent on user ISP peering and VPS bandwidth.)
+**Verified Test Coverage (`v7.1.0`)**
+- **Local Windows suite**: **10/10** native `BoBoCore.dll` self-tests (encoder, D3D11, WASAPI, physical input blocker; capture falls back to synthetic NV12 in non-interactive sessions), **7/7** pure-Go `native/bobo-tsnet` unit tests (+ `--self-test` & live HTTP auth/`/logout`/`/shutdown` lifecycle smoke), **136/136** managed `--self-test` checks (protocol Golden Vectors, UDP FEC/NACK, ABR, privacy guard state machine, `BoBoRelayStore`, and `BoBoEmbeddedTailnet` JSON/SOCKS5 loopback checks), **7/7** installer self-tests, **69/69** UI/dropdown/relay/embedded-Tailnet/sidebar/animation/icon smoke checks, and **12/12** threaded privacy curtain checks passed.
+- **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows build Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA) and verify all 6 release artifacts against `SHA256SUMS.txt`. (Interactive browser OAuth sign-in for Tailscale and end-to-end WAN streaming throughput depend on user devices, ISP peering, and network environment.)
 
 ---
 
@@ -258,7 +261,8 @@ bash apple/scripts/package-ios-ipa.sh
 | --- | --- |
 | [`protocol/`](protocol/BOBO6-SPEC.md) | Authoritative [`BOBO6-SPEC.md`](protocol/BOBO6-SPEC.md) spec and cross-language [`golden-vectors.json`](protocol/golden-vectors.json) |
 | [`native/bobo-core/`](native/bobo-core/build-core.ps1) | Windows C++17 in-process core (`BoBoCore.dll`): DXGI/GDI capture, cursor compositing, MF H.264 codecs, D3D11 render, WASAPI audio, Super Display & hardware input lock |
-| [`src/`](src/MainForm.cs) | Windows C# 5 / WinForms client: glacier-blue UI (`RemoteTheme` / `StyledChoiceBox` / `UiTransition`), stream window, Control Center, floating ball, 7-step onboarding, threaded privacy curtain & `Backend/` (`BoBoRelayStore`, `BoBoUdpTransport`, `BoBoConnectionRoute`, `AppUpdater`, `SelfTest`) |
+| [`native/bobo-tsnet/`](native/bobo-tsnet/build-tsnet.ps1) | Windows pure-Go user-space Tailscale engine (`CGO_ENABLED=0` `tsnet`, Tailnet-only auth SOCKS5, `:49810` forwarder & Job watchdog) |
+| [`src/`](src/MainForm.cs) | Windows C# 5 / WinForms client: glacier-blue UI (`RemoteTheme` / `StyledChoiceBox` / `UiTransition` / `CrossNetSidebarCard`), stream window, Control Center, floating ball, 7-step onboarding, threaded privacy curtain & `Backend/` (`BoBoEmbeddedTailnet`, `BoBoRelayStore`, `BoBoUdpTransport`, `BoBoConnectionRoute`, `AppUpdater`, `SelfTest`) |
 | [`installer/BoBoSetup.cs`](installer/BoBoSetup.cs) | Zero-dependency Windows GUI installer, silent updater, and uninstaller |
 | `android/` | Native Android client (Kotlin + Compose): MediaCodec decode, rootless MediaProjection + Accessibility host, and unit tests |
 | `apple/` | Pure Swift `BoBoAppleCore` (with XCTest), macOS SwiftUI app, and iOS app + ReplayKit Broadcast Extension |
@@ -274,20 +278,23 @@ BoBo-Remote/
 │   ├── BOBO6-SPEC.md                        # Authoritative BoBo6.2 binary wire & signaling spec
 │   └── golden-vectors.json                  # Byte-exact C# / Kotlin / Swift test vectors
 ├── native/
-│   └── bobo-core/                           # Windows C++17 embedded native core (BoBoCore.dll)
-│       ├── build-core.ps1
-│       └── src/                             # bobo_core / screen_capture / mf_encoder / wasapi_loopback / ima_adpcm
+│   ├── bobo-core/                           # Windows C++17 embedded native core (BoBoCore.dll)
+│   │   ├── build-core.ps1
+│   │   └── src/                             # bobo_core / screen_capture / mf_encoder / wasapi_loopback / ima_adpcm
+│   └── bobo-tsnet/                          # Windows pure-Go zero-install Tailscale engine (BoBoTsNet.exe.gz)
+│       ├── build-tsnet.ps1
+│       └── main.go / parent_windows.go / main_test.go
 ├── src/
-│   ├── MainForm*.cs                         # Main window, Devices, Assist & BYO-VPS relay UI, Privacy, Settings
+│   ├── MainForm*.cs                         # Main window, Embedded Tailnet UI, Devices, Assist & BYO-VPS relay UI, Privacy, Settings
 │   ├── NativeStreamForm.cs                  # Embedded stream window, Super Display, cursor, HUD & mobile nav bar
 │   ├── StreamControlCenter.cs & StreamToolbarOverlay.cs
 │   ├── PrivacyCurtainForm.cs                # Dedicated STA privacy curtain thread & WinEvent z-order lock
 │   ├── OnboardingTour.cs                    # 7-step ClearType spotlight onboarding tour
 │   ├── RemoteTheme.cs & UiTransition.cs     # Custom glacier-blue controls (StyledChoiceBox), icons & animations
 │   └── Backend/                             # BoBoProtocol / BoBoIdentity / BoBoHostServer / BoBoStreamClient /
-│                                            # BoBoUdpTransport / BoBoConnectionRoute / BoBoRelayStore / Tailscale /
-│                                            # NativeStreamStats / ConnectionTelemetry / PrivacyDisplayDimmer /
-│                                            # AppUpdater / SelfTest
+│                                            # BoBoEmbeddedTailnet / BoBoUdpTransport / BoBoConnectionRoute /
+│                                            # BoBoRelayStore / Tailscale / NativeStreamStats / ConnectionTelemetry /
+│                                            # PrivacyDisplayDimmer / AppUpdater / SelfTest
 ├── installer/
 │   └── BoBoSetup.cs                         # Windows GUI installer / silent updater / uninstaller
 ├── android/
@@ -311,8 +318,8 @@ BoBo-Remote/
 
 ## Security, Privacy & Honest Boundaries
 
-- **Minimal Local State & Blind Relays**: No vendor sign-in or cloud device directory. Even when routing through your own VPS relay fallback, session keys remain strictly end-to-end on the two endpoints — relay hosts cannot decrypt streams or input. Local settings, custom relay lists (`relays.txt`), and trusted fingerprints reside in `%LOCALAPPDATA%\双端远程\` on Windows.
-- **No Hidden Background Daemons**: Exiting BoBo Remote immediately closes port `49810` and releases all hooks.
+- **Minimal Local State & Blind Relays**: No BoBo vendor directory. If the built-in Tailscale engine is signed in, state lives locally in `%LOCALAPPDATA%\双端远程\tsnet\` (wiped upon sign-out); even when routing through Tailscale or your own VPS relay fallback, session keys remain strictly end-to-end on the two endpoints — relay hosts cannot decrypt streams or input. Local settings, custom relay lists (`relays.txt`), and trusted fingerprints reside in `%LOCALAPPDATA%\双端远程\` on Windows.
+- **No Hidden Background Daemons**: Exiting BoBo Remote immediately closes port `49810`, releases all hooks, and terminates any running `BoBoTsNet` child via Win32 Job Object + `--parent-pid` watchdog.
 - **Safe DDC/CI Dimming Boundary**: Disabled by default; when enabled, adjusts backlight (`VCP 0x10`) on non-HDR displays only and restores brightness on recovery.
 - **OS & Signing Constraints**:
   - **iOS / iPadOS**: Controller & viewer require foreground execution; host mode uses ReplayKit (`view_only`) paused when backgrounded.
@@ -329,7 +336,8 @@ BoBo-Remote/
 | **V5** | Embedded native stream window, Control Center cascading menus, 4-edge dockable floating ball, `Ctrl+Alt` instant mouse release | ✅ Done |
 | **V6.0 – V6.2** | In-process C++17 `BoBoCore.dll` (zero external engines), `BoBo6.2` unified wire spec, physical input-lock privacy shield, **4-platform Windows / Android / macOS / iOS release** | ✅ Done |
 | **V7.0 (through v7.0.5)** | Super Display v2, host-sized cursor, Windows encrypted `UDP+FEC/NACK` (interleaved XOR FEC + selective NACK) & 12s ABR, dedicated curtain thread (anti-IME flash), custom dropdowns & **inline BYO-VPS relay manager + TCP prober** | ✅ Done |
-| **V7.1+ / V8** | Self-hostable open-source Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK & HEVC negotiation, Linux exploration | 🚧 Planned / Evolving |
+| **V7.1 (`v7.1.0`)** | **Zero-install pure-Go `tsnet` embedded Tailscale engine** (1-click in-app browser auth, no TUN driver / zero VPN interference, Tailnet-only auth SOCKS5 + `:49810` TLS passthrough & sidebar status card) | ✅ Done |
+| **V7.2+ / V8** | Self-hostable open-source Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK & HEVC negotiation, Linux exploration | 🚧 Planned / Evolving |
 
 ---
 
@@ -348,7 +356,7 @@ BoBo-Remote/
 ## Contributing & License
 
 - **Contributing**: Pull requests and issues are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) and verify platform builds & Golden Vectors tests pass before submitting.
-- **MIT License**: All V6.x / V7.x four-platform source code (`src/`, `native/bobo-core/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is open-source under [**MIT License**](LICENSE), and official release artifacts **do not bundle any external third-party remote desktop engines**. Legacy V5 GPL-3.0 `moonlight-common-c` archives and notices remain documented at [THIRD-PARTY.md](THIRD-PARTY.md), [NOTICE.md](NOTICE.md), and [V5-NATIVE-STREAM-PLAN.md](docs/V5-NATIVE-STREAM-PLAN.md).
+- **MIT License**: All four-platform and `native/bobo-tsnet/` source code (`src/`, `native/`, `installer/`, `android/`, `apple/`, `protocol/`, `tools/`, `ci/`, `build.ps1`, and docs) is open-source under [**MIT License**](LICENSE); Go dependencies embedded in Windows via `tailscale.com/tsnet` (`v1.106.1`) follow `BSD-3-Clause`, and official release artifacts **bundle zero external third-party remote desktop engine binaries**. Legacy V5 GPL-3.0 `moonlight-common-c` archives and notices remain documented at [THIRD-PARTY.md](THIRD-PARTY.md), [NOTICE.md](NOTICE.md), and [V5-NATIVE-STREAM-PLAN.md](docs/V5-NATIVE-STREAM-PLAN.md).
 
 ---
 

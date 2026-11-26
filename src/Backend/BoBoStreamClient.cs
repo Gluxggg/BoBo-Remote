@@ -141,6 +141,7 @@ namespace DualRemote
         private BoBoUdpInputCodec udpInputCodec;
         private volatile bool udpActive;
         private volatile bool udpNackNegotiated;
+        private volatile bool routedViaEmbeddedTailnet;
         private long lastUdpRxTicks;
         private long udpFallbackSuppressUntilTicks;
         private long lastUdpMoveSentTicks;
@@ -182,7 +183,14 @@ namespace DualRemote
         internal bool IsConnected { get { return connected; } }
         internal bool IsUdpActive { get { return udpActive; } }
         internal bool IsUdpNackActive { get { return udpActive && udpNackNegotiated; } }
-        internal string ActiveTransportLabel { get { return udpActive ? (udpNackNegotiated ? "UDP+FEC/NACK" : "UDP+FEC") : "TCP+TLS"; } }
+        internal string ActiveTransportLabel
+        {
+            get
+            {
+                if (routedViaEmbeddedTailnet) return "内置跨网 · WireGuard";
+                return udpActive ? (udpNackNegotiated ? "UDP+FEC/NACK" : "UDP+FEC") : "TCP+TLS";
+            }
+        }
         internal double LatestRttMs { get { return latestRttMs; } }
         internal double LatestJitterMs { get { return latestJitterMs; } }
         internal double LatestPacketLossPct { get { return latestPacketLossPct; } }
@@ -221,10 +229,20 @@ namespace DualRemote
                     try
                     {
                         client.NoDelay = true;
-                        await ConnectWithCancelAsync(client, res.Host, res.Port, timeoutCts.Token).ConfigureAwait(false);
+                        bool viaEmbedded = await ConnectWithCancelAsync(client, res.Host, res.Port, timeoutCts.Token).ConfigureAwait(false);
                         res.Reachable = true;
-                        res.ConnectedAddress = ((IPEndPoint)client.Client.RemoteEndPoint).Address;
-                        res.LocalAddress = ((IPEndPoint)client.Client.LocalEndPoint).Address;
+                        if (viaEmbedded)
+                        {
+                            IPAddress targetIp;
+                            if (IPAddress.TryParse(res.Host, out targetIp))
+                                res.ConnectedAddress = targetIp;
+                            res.LocalAddress = null;
+                        }
+                        else
+                        {
+                            res.ConnectedAddress = ((IPEndPoint)client.Client.RemoteEndPoint).Address;
+                            res.LocalAddress = ((IPEndPoint)client.Client.LocalEndPoint).Address;
+                        }
 
                         string serverThumb = "";
                         using (var sslStream = new SslStream(client.GetStream(), false,
@@ -618,7 +636,7 @@ namespace DualRemote
                 using (hsCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
                 {
                     hsCts.CancelAfter(12000);
-                    await ConnectWithCancelAsync(tcp, options.Host, targetPort, hsCts.Token).ConfigureAwait(false);
+                    routedViaEmbeddedTailnet = await ConnectWithCancelAsync(tcp, options.Host, targetPort, hsCts.Token).ConfigureAwait(false);
 
                     ssl = new SslStream(tcp.GetStream(), false,
                         delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
@@ -840,12 +858,12 @@ namespace DualRemote
                             BoBoCoreInterop.BoBoClientNativeHandle curNc = nativeClient;
                             if (curNc != null) curNc.SetHostCursorComposited(HostCursorComposited);
 
-                            // Auto-activate encrypted UDP+FEC/NACK media+input channel if host provided UDP session params
+                            // Auto-activate encrypted UDP+FEC/NACK media+input channel if host provided UDP session params (skip on user-space SOCKS5 tunnel)
                             int udpPort = BoBoProtocol.GetInt(msg, "udpPort", 0);
                             long udpSidLong = BoBoProtocol.GetLong(msg, "udpSessionId", 0);
                             string udpKeyB64 = BoBoProtocol.GetStr(msg, "udpKey", "");
                             bool hostUdpNack = BoBoProtocol.GetBool(msg, "udpNack", false);
-                            if (udpPort > 0 && udpSidLong != 0 && !string.IsNullOrEmpty(udpKeyB64))
+                            if (!routedViaEmbeddedTailnet && udpPort > 0 && udpSidLong != 0 && !string.IsNullOrEmpty(udpKeyB64))
                             {
                                 TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, hostUdpNack, ct);
                             }
@@ -1968,6 +1986,7 @@ namespace DualRemote
         {
             bool wasConnected = connected;
             connected = false;
+            routedViaEmbeddedTailnet = false;
             HostCursorComposited = false;
             try
             {
@@ -2026,14 +2045,20 @@ namespace DualRemote
             return BoBoProtocol.WriteJsonAsync(sslStream, hello, ct);
         }
 
-        private static async Task ConnectWithCancelAsync(TcpClient client, string host, int port, CancellationToken ct)
+        private static async Task<bool> ConnectWithCancelAsync(TcpClient client, string host, int port, CancellationToken ct)
         {
+            if (BoBoEmbeddedTailnet.Default.ShouldRouteHost(host))
+            {
+                await BoBoEmbeddedTailnet.Default.ConnectTargetOverSocks5Async(client, host, port, ct).ConfigureAwait(false);
+                return true;
+            }
             Task connectTask = client.ConnectAsync(host, port);
             using (ct.Register(delegate { try { client.Close(); } catch { } }))
             {
                 await connectTask.ConfigureAwait(false);
             }
             ct.ThrowIfCancellationRequested();
+            return false;
         }
 
         private static string ComputeFileSha256(string path)

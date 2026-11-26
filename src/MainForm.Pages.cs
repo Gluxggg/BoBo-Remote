@@ -38,6 +38,7 @@ namespace DualRemote
         private Button topMenuBtn;
         private Button maxRestoreBtn;
         private Button navExitBtn;
+        private CrossNetSidebarCard sidebarCrossNetCard;
         private Control perfDiagCard;
         private Theme.TwoLineText updateStatusCardText;
         private Button updateActionButton;
@@ -325,6 +326,12 @@ namespace DualRemote
             Theme.Row(rail, 38, privacyBtn);
 
             Theme.FillRow(rail);
+
+            // Compact Glacier-Blue Embedded Tailscale Status Card
+            sidebarCrossNetCard = new CrossNetSidebarCard();
+            sidebarCrossNetCard.Click += async delegate { await HandleCrossNetCardClickAsync(); };
+            Theme.Row(rail, 68, sidebarCrossNetCard);
+            Theme.Row(rail, 8);
 
             // Bottom pinned divider + Settings + Direct Exit button (clear frontend exit!)
             Theme.Row(rail, 1, Theme.Rule());
@@ -1644,6 +1651,165 @@ namespace DualRemote
             }
             catch (IOException) { PreferenceError(); }
             catch (UnauthorizedAccessException) { PreferenceError(); }
+        }
+
+        private sealed class CrossNetSidebarCard : Control
+        {
+            private readonly UiTransition hoverTransition;
+            private bool hovered;
+            private bool pressed;
+            private string primaryText = "内置跨网 · 未登录";
+            private string secondaryText = "点击一键登录 Tailscale";
+            private int visualTone = 0; // 0=Neutral/Accent, 1=Warning, 2=Success
+
+            internal CrossNetSidebarCard()
+            {
+                hoverTransition = new UiTransition(this);
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                Cursor = Cursors.Hand;
+                BackColor = Theme.ChromeBg;
+                AccessibleName = "内置跨网账号状态";
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+
+            internal string PrimaryText { get { return primaryText; } }
+            internal string SecondaryText { get { return secondaryText; } }
+            internal int VisualTone { get { return visualTone; } }
+
+            internal void ApplyEmbeddedSnapshot(EmbeddedTailnetSnapshot snap)
+            {
+                string state = snap != null ? (snap.BackendState ?? "") : "";
+                if (string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    string acct = !string.IsNullOrEmpty(snap.DisplayName) ? snap.DisplayName
+                        : !string.IsNullOrEmpty(snap.LoginName) ? snap.LoginName
+                        : !string.IsNullOrEmpty(snap.TailnetName) ? snap.TailnetName
+                        : "内置跨网已就绪";
+                    primaryText = acct;
+                    secondaryText = string.IsNullOrEmpty(snap.SelfIp4) ? "内置跨网 · 在线" : (snap.SelfIp4 + " · 在线");
+                    visualTone = 2;
+                }
+                else if (snap != null && !string.IsNullOrEmpty(snap.AuthUrl))
+                {
+                    primaryText = "等待浏览器授权…";
+                    secondaryText = "点击在浏览器完成登录";
+                    visualTone = 1;
+                }
+                else if (string.Equals(state, "Starting", StringComparison.OrdinalIgnoreCase))
+                {
+                    primaryText = "内置跨网启动中…";
+                    secondaryText = "正在连接协调节点";
+                    visualTone = 1;
+                }
+                else if (string.Equals(state, "NeedsMachineAuth", StringComparison.OrdinalIgnoreCase))
+                {
+                    primaryText = "等待设备审批";
+                    secondaryText = "需管理员确认设备加入";
+                    visualTone = 1;
+                }
+                else
+                {
+                    primaryText = "内置跨网 · 未登录";
+                    secondaryText = "点击一键登录 Tailscale";
+                    visualTone = 0;
+                }
+                AccessibleName = primaryText + "，" + secondaryText;
+                Invalidate();
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hovered = true;
+                hoverTransition.MoveTo(1f, 115);
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hovered = false;
+                pressed = false;
+                hoverTransition.MoveTo(0f, 115);
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left) { pressed = true; Invalidate(); }
+                base.OnMouseDown(e);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                pressed = false;
+                Invalidate();
+                base.OnMouseUp(e);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                if (Width < 16 || Height < 16) return;
+                Graphics g = e.Graphics;
+                Theme.FillBg(g, ClientRectangle, Theme.ChromeBg);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                float scale = Math.Max(1f, g.DpiX / 96f);
+                float hover = pressed ? 1f : hoverTransition.Value;
+                Color bg = Blend(Theme.Paper, Theme.AccentLight, hover * 0.85f);
+                Color border = Blend(Theme.Stroke, Theme.AccentBorder, hovered || pressed ? 1f : hover);
+                var cardRect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+                Theme.Surface(g, cardRect, 8f * scale, bg, border, 1f);
+
+                Color iconBg = visualTone == 2 ? Theme.SuccessLight : visualTone == 1 ? Theme.WarningLight : Theme.AccentLight;
+                Color iconFg = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.Accent;
+                float iconBox = (float)Math.Round(30f * scale);
+                float iconX = (float)Math.Round(10f * scale);
+                float iconY = (float)Math.Round((Height - iconBox) * 0.5f);
+                var iconRect = new RectangleF(iconX, iconY, iconBox, iconBox);
+                Theme.Surface(g, iconRect, 7f * scale, iconBg, Color.Transparent);
+                float pad = (float)Math.Round(6f * scale);
+                Theme.DrawGlyph(g, Theme.Glyph.Network, RectangleF.Inflate(iconRect, -pad, -pad), iconFg);
+
+                float dotSize = (float)Math.Round(6.5f * scale);
+                float dotX = Width - (float)Math.Round(10f * scale) - dotSize;
+                float dotY = (float)Math.Round(11f * scale);
+                Color dotColor = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.StrokeStrong;
+                using (var db = new SolidBrush(dotColor))
+                    g.FillEllipse(db, dotX, dotY, dotSize, dotSize);
+
+                int textLeft = (int)Math.Round(iconX + iconBox + 10f * scale);
+                int textW = Math.Max(16, (int)Math.Floor(dotX - 6f * scale - textLeft));
+                int topPad = (int)Math.Round(12f * scale);
+                int lineH = Math.Max(16, (int)Math.Round(19f * scale));
+                int subTop = topPad + lineH + (int)Math.Round(2f * scale);
+
+                TextRenderer.DrawText(g, primaryText, Theme.GetFont(Theme.TextSize.LabelBold),
+                    new Rectangle(textLeft, topPad, textW, lineH), Theme.Ink,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                Color subColor = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.Muted;
+                TextRenderer.DrawText(g, secondaryText, Theme.GetFont(Theme.TextSize.Small),
+                    new Rectangle(textLeft, subTop, textW + (int)Math.Round(10f * scale), lineH), subColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            }
+
+            private static Color Blend(Color a, Color b, float t)
+            {
+                if (t <= 0f) return a;
+                if (t >= 1f) return b;
+                return Color.FromArgb(
+                    (int)Math.Round(a.A + (b.A - a.A) * t),
+                    (int)Math.Round(a.R + (b.R - a.R) * t),
+                    (int)Math.Round(a.G + (b.G - a.G) * t),
+                    (int)Math.Round(a.B + (b.B - a.B) * t));
+            }
         }
     }
 }
