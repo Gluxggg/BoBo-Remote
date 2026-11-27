@@ -26,13 +26,13 @@
 
 **BoBo Remote（BoBo远程）** 是一款从零自主研发、MIT 开源的四端原生远程桌面与加密文件传输软件：包含 **Windows（C++17 原生媒体内核 + 纯 Go `tsnet` + C# WinForms）**、**Android（Kotlin + Jetpack Compose）** 与 **macOS / iOS / iPadOS（Swift / SwiftUI）**。四端共享同一套确定性二进制协议 [**BoBo6.2**](protocol/BOBO6-SPEC.md) 与跨语言测试向量 [`golden-vectors.json`](protocol/golden-vectors.json)，**无需注册 BoBo 官方账号**，安装包**不含任何外置第三方远程桌面引擎二进制**。
 
-### 核心速览（`v7.3.0`）
+### 核心速览（`v7.3.2`）
 
-- **全四端加密 `UDP + FEC/NACK`（标准 AEAD `AES-128-GCM`）**：`v7.3.0` 完成 P1 加密审计与全平台下沉——UDP 实时传输升级为 **标准 AEAD `AES-128-GCM`（128-bit 认证标签，Windows CNG / Android `javax.crypto` / Apple `CryptoKit` 原生实现）**，严格执行 `0xFFFFFF00` Nonce 上限防回绕、先验签后更新 512 包防重放窗口与析构密钥清零；同时将交错 `XOR FEC` 与选择性 `NACK` 正式推向 **Windows、Android 与 macOS/iOS 四端**（UDP 受阻超过 `3.5s` 自动无感回落至 TLS 1.2）。
-- **GCC 延迟梯度拥塞控制与动态 FEC**：基于队列排队延迟梯度的 `Normal / Hold / Overuse` 三态检测与单峰抗抖免疫，结合控制端实时 `jitterX10` 反馈动态收放编码步调冗余（`1.35x → 1.22x → 1.12x`）并自适应收缩 FEC 分组冗余。
-- **高效 `AAC-LC 96 kbps` 音频 + 无缝 ADPCM 兜底**：Windows 主被控直接调用系统 Media Foundation `AAC-LC`（48 kHz 立体声 ADTS，零额外第三方 DLL 体积），相比 `384 kbps IMA-ADPCM` 节省约 **75%** 音频带宽，同时自动协商兼容不支持端的 `ADPCM` 回落。
-- **免安装内置 Tailscale + 自建 VPS 多节点动态调度**：Windows 端单文件内嵌纯 Go 用户态 [`BoBoTsNet`](native/bobo-tsnet/main.go)（无 TUN 驱动、不干扰本机 VPN），两端一键浏览器登录自有 Tailscale 账号即可跨网直连；直连失败亦可无缝切换至自建开源 [`bobo-relay`](tools/bobo-relay/README.md) 节点池，支持并发测速、负载均衡优选与过载热迁移。
-- **商务简约全新前端 UI**：遵循低干扰商务简约规范重构设备页、防窥与设置页——以纯白分组容器 + `1px` 极细分割线收敛零散框线，柔化中灰文本与边框层级，精简冗余提示文案并保持所有底层功能与 7 步新手引导完整可用。
+- **120 Hz 按需微交互与物理质感前端动效（`v7.3.2` 新增）**：[`UiTransition`](src/UiTransition.cs) 升级为**按需引用计数 `timeBeginPeriod(1)` 120 Hz 节拍器**（闲置自动释放 `ActiveHighResCount == 0` 零功耗负担），内置 `EaseOutQuint` / `EaseOutExpo` / `SpringSettle` 阻尼曲线并严格遵循系统动效辅助开关；全面重塑按钮按压微压缩 + 指针起点柔光水波纹、侧栏指示条与设置页下划线滑入、分组箭头顺滑旋转、开关拨片动态拉伸、输入框渐显光晕、设备预览卡片悬停抬升以及控制中心悬浮球平滑贴边缩进/弹出项滑动高亮。
+- **2 ms 突发 Z 序防窥抗穿透（`v7.3.1` 加固）**：Windows 独立 STA 防窥守护在底层 `WH_MOUSE_LL / WH_KEYBOARD_LL` 捕获底栏/侧边点击与键入时同步触发最高 `2 ms` 突发置顶守卫，拦截已激活状态下的任务栏缩略图悬停、复用 HWND 无事件输入法候选框闪烁穿透与 `WM_WINDOWPOSCHANGING` 非法降层。
+- **全四端加密 `UDP + FEC/NACK`（标准 AEAD `AES-128-GCM`）**：`v7.3` 完成 P1 加密审计与全平台下沉——UDP 实时传输升级为 **标准 AEAD `AES-128-GCM`（128-bit 认证标签，Windows CNG / Android `javax.crypto` / Apple `CryptoKit` 原生实现）**，严格执行 `0xFFFFFF00` Nonce 上限防回绕、先验签后更新 512 包防重放窗口与析构密钥清零；同时将交错 `XOR FEC` 与选择性 `NACK` 正式推向 **Windows、Android 与 macOS/iOS 四端**（UDP 受阻超过 `3.5s` 自动无感回落至 TLS 1.2）。
+- **GCC 延迟梯度拥塞控制与高效 `AAC-LC 96 kbps` 音频**：基于队列排队延迟梯度的 `Normal / Hold / Overuse` 三态检测与单峰抗抖免疫，动态收放步调冗余（`1.35x → 1.22x → 1.12x`）与 FEC 分组冗余；Windows 主被控直接调用系统 Media Foundation `AAC-LC`（48 kHz 立体声 ADTS，比 ADPCM 省约 **75%** 音频带宽并兼容自动回退）。
+- **免安装内置 Tailscale + 自建 VPS 多节点动态调度 + 商务简约分组白卡 UI**：内嵌纯 Go 用户态 [`BoBoTsNet`](native/bobo-tsnet/main.go)（无 TUN 驱动、一键浏览器登录），支持最多 12 个开源 [`bobo-relay`](tools/bobo-relay/README.md) 节点并发测速、负载评分与过载热迁移；纯白分组卡片 + `1px` 分割线收敛信息层级，保留完整 7 步新手引导。
 
 <p align="center">
   <a href="#对比传统商业方案与同类开源">方案对比</a> ·
@@ -46,20 +46,20 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.3.0 商务简约设备管理主界面" width="900" />
+  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.3.2 商务简约设备管理主界面" width="900" />
 </p>
 
 ---
 
 ## 对比传统商业方案与同类开源
 
-| 对比维度 | 商业闭源远控 | 开源套壳 / 单协议串流 | BoBo Remote (`v7.3.0`) |
+| 对比维度 | 商业闭源远控 | 开源套壳 / 单协议串流 | BoBo Remote (`v7.3.2`) |
 | --- | --- | --- | --- |
 | **账号体系与控制权** | 强制注册厂商云账号，设备列表与路由受第三方控制 | 仅专注本地游戏串流或依赖第三方完整 Daemon | **零 BoBo 官方账号、零遥测**：配置与密钥全存本机；内置免安装用户态 `tsnet`（自用 Tailscale 账号）+ **自建 VPS 盲中转兜底** |
 | **功能限制与授权** | 高刷、2K/4K、防窥屏、移动端常设会员付费墙 | 缺少防窥、文件传输或跨端移动宿主 | **MIT 100% 开源全解锁**：硬编硬解、超级屏、物理键鼠锁防窥、2 GiB 文件传输与 4 端互通全部开放 |
 | **安装包体与后台残留** | 数十至数百 MB，常伴随常驻系统服务与驱动 | 需要独立部署配置多个运行时组件 | **Windows 便携包 ~9.2 MB / 安装包 ~9.4 MB**：C++17 `BoBoCore.dll` 与纯 Go `BoBoTsNet` 压缩内嵌单文件；退出立即终止子进程并释放 49810 端口与系统钩子 |
 | **弱网传输与音视频引擎** | 黑盒协议与中继限速 | 仅单一 TCP 或缺动态 FEC/NACK | **全四端加密 `AES-128-GCM` UDP + 交错 `XOR FEC` + `NACK` + GCC 拥塞控制 + `AAC-LC 96 kbps`**（自动兼容 ADPCM / TLS 1.2 回退） |
-| **物理防窥安全性** | 假黑屏易被输入法弹窗、任务栏点击穿透 | 无物理隐私幕布或现场锁键鼠 | **`WDA_EXCLUDEFROMCAPTURE` + 独立防窥线程 + 原生 `WH_MOUSE_LL / WH_KEYBOARD_LL` / `CGEventTap` 现场键鼠锁** + 安全 DDC/CI 背光降亮 |
+| **物理防窥与交互体验** | 假黑屏易被输入法弹窗、任务栏点击穿透；界面卡顿广告多 | 无物理隐私幕布或仅简单列表切换 | **`WDA_EXCLUDEFROMCAPTURE` + 2ms 突发抗穿防窥线程 + 现场键鼠锁 + 120 Hz 按需微交互商务简约 UI** |
 
 ---
 
@@ -88,24 +88,24 @@
 - **Windows (`BoBoCore.dll`)**：**DXGI Desktop Duplication**（自动 GDI 兼容回退）→ GPU D3D11 NV12 转换 → **Media Foundation 硬件 H.264 编码** → **有界视频解码队列（`12 帧 / 4 MiB / 250 ms` 硬上限 + IDR 自动恢复与防花屏过滤）+ D3D11 Flip-Model 渲染** → **WASAPI 48 kHz 立体声采集 + MF `AAC-LC 96 kbps` / IMA-ADPCM 编码**。
 - **Android / macOS / iOS**：Android 主控 `MediaCodec` 零拷贝硬解 + 被控无 Root `MediaProjection` + `AccessibilityService` 触控注入；macOS 原生 `ScreenCaptureKit` 音视频 + `VideoToolbox` + `CGEventTap` + `⌘→Ctrl` 智能映射；iOS 支持前台低延迟主控与 `ReplayKit Broadcast Extension` 共享观屏。
 
-### 5. 商务简约桌面 UI、超级屏 v2 与三行遥测 HUD
-- **商务简约重构（`v7.3.0`）**：将设备页、防窥页与设置页（常规 / 串流 / 引擎与网络）的多层重框收拢为纯白分组卡片 + `1px` 分割线；校准字号阶梯与中性灰蓝主次视觉，全面支持高 DPI 清晰渲染与自定义防 Win32 蓝框的 `StyledChoiceBox` 下拉控件（完美兼容屏下/离屏 `WM_PRINTCLIENT` 渲染）。
-- **超级屏 v2 与极简流控中心**：自动匹配主控视口长宽比并在退出后精确还原原分辨率；自由出框鼠标同步远端指针形态，锁定模式下轻敲 `Ctrl + Alt` 瞬间释鼠；支持四边贴边可隐藏方形悬浮球、置顶透明度小窗、无跳变音量条及 **三行全链路管线 HUD**（帧率/码率/传输模式 · RTT 抖动丢包与 FEC/NACK 恢复 · 排队/解码/渲染耗时与队列深度/丢重置预警）。
+### 5. 商务简约桌面 UI、120 Hz 按需微交互与三行遥测 HUD
+- **商务简约分组卡片与高刷物理动效（`v7.3.0` – `v7.3.2`）**：将设备页、防窥页与设置页的多层重框收拢为纯白分组卡片 + `1px` 分割线与中性灰蓝主次视觉，全面兼容 `WM_PRINTCLIENT` 离屏绘制的 `StyledChoiceBox`（消除 Win32 蓝底）。`v7.3.2` 升级 [`UiTransition`](src/UiTransition.cs) 按需引用计数 `timeBeginPeriod(1)` 120 Hz 节拍器与 `EaseOutQuint` / `EaseOutExpo` / `SpringSettle` 阻尼曲线，为按钮（微压缩 + 指针起点水波纹）、开关（拨片拉伸回弹）、侧栏指示条、设置下划线、分组旋转箭头、输入框光晕、设备预览卡片及通知栏带来零闲置功耗、跟手细腻的微交互反馈（自动响应系统动效关闭设置）。
+- **超级屏 v2 与极简流控中心**：自动匹配主控视口长宽比并在退出后精确还原原分辨率；自由出框鼠标同步远端指针形态，锁定模式下轻敲 `Ctrl + Alt` 瞬间释鼠；支持四边贴边平滑伸缩悬浮球、控制中心弹出淡入与滑动菜单高亮胶囊、置顶透明度小窗、无跳变音量条及 **三行全链路管线 HUD**。
 
 ### 6. 零信任双向认证与物理级防窥守护
 - **RSA-2048 TOFU + 防爆破 4 位配对码**：首连强制验证一次性 `HMAC-SHA256` 4 位临时配对码（120s 过期，连错 5 次锁定销毁），TLS 1.2 握手直接钉选宿主叶子证书 SHA-256 指纹；内置加密通道支持最大 **2 GiB** 文件传输并自动校验 SHA-256。
-- **独立 STA 防窥线程（Windows）+ ScreenCaptureKit 排除（macOS）**：Windows 使用 `WDA_EXCLUDEFROMCAPTURE` + `SetWinEventHook` 在独立窗口线程稳住最顶层遮罩，彻底抗击输入法候选框闪烁穿透；默认启用物理键鼠锁（只放行远控指令与紧急退出组合键 `Ctrl+Alt+Shift+P` / `⌘+⌥+⇧+P`），并支持仅限非 HDR 屏幕 `VCP 0x10` 的安全 DDC/CI 背光降亮选项。
+- **独立 STA 防窥线程（`v7.3.1` 2 ms Z 序防穿）+ ScreenCaptureKit 排除**：Windows 使用 `WDA_EXCLUDEFROMCAPTURE` + `SetWinEventHook` + 底边栏/输入法突发 `2 ms` 高频 Z 序守卫及 `WM_WINDOWPOSCHANGING` 反降层，彻底阻断激活态任务栏悬停或复用 HWND 输入法闪烁穿透；默认启用物理键鼠锁（只放行远控指令与紧急退出组合键 `Ctrl+Alt+Shift+P` / `⌘+⌥+⇧+P`），并支持仅限非 HDR 屏幕 `VCP 0x10` 的安全 DDC/CI 背光降亮选项。
 
 ---
 
 ## 四端矩阵与发行产物
 
-| 平台 | 系统要求 | `v7.3.0` 发行产物 | 主控端 (Controller) | 被控端 (Host) | 核心特性 |
+| 平台 | 系统要求 | `v7.3.2` 发行产物 | 主控端 (Controller) | 被控端 (Host) | 核心特性 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe`（9.4 MB）<br>`BoBoRemote-Portable-x64.zip`（9.2 MB）<br>`BoBoRemote-Update-x64.zip`（9.2 MB） | ✅ **完整功能**<br>含 Android 导航与 iOS 观看 | ✅ **完整功能**<br>DXGI/GDI + MF H.264/AAC + WASAPI | 内嵌 `BoBoCore.dll`（12f/4MiB 有界队列 + `AAC-LC 96k`）+ **免安装 `BoBoTsNet`** + 多中转负载调度 + `AES-128-GCM` UDP+FEC/NACK + GCC 拥塞控制 + 物理防窥 + 商务简约分组 UI |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk`（~1.1 MB） | ✅ **完整功能**<br>`MediaCodec` 硬解 + 48kHz 立体声 | ✅ **免 Root 完整宿主**<br>`MediaProjection` + 无障碍触控 | **`v7.3` 新增加密 `AES-128-GCM` UDP+FEC/NACK**、触控板/直触模式、悬浮球、PC 快捷键栏与蓝牙键映射 |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg`（~2.6 MB）<br>Universal 2（Apple Silicon & Intel） | ✅ **完整功能**<br>`AVSampleBufferDisplayLayer` | ✅ **完整功能**<br>`ScreenCaptureKit` 音视频 + VideoToolbox | **`v7.3` 新增 `CryptoKit AES-128-GCM` UDP+FEC/NACK**、超级屏、`⌘→Ctrl`、防截屏遮罩 + `CGEventTap` 物理锁键鼠 |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa`（~850 KB） | ✅ **前台完整主控**<br>VideoToolbox 硬解 + 触控板 | 👁️ **ReplayKit 仅观看** | **`v7.3` 新增 `AES-128-GCM` UDP+FEC/NACK**、内嵌 ReplayKit 录屏扩展与本地回环桥接；支持 Sideloadly / AltStore / SideStore / Xcode 自签 |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (9.2 MB)<br>`BoBoRemote-Update-x64.zip` (9.2 MB) | ✅ **完整功能**<br>含 Android 导航与 iOS 观看 | ✅ **完整功能**<br>DXGI/GDI + MF H.264/AAC + WASAPI | 内嵌 `BoBoCore.dll`（12f/4MiB 有界队列 + `AAC-LC 96k`）+ **免安装 `BoBoTsNet`** + 多中转负载调度 + `AES-128-GCM` UDP+FEC/NACK + GCC 拥塞控制 + **2ms 防穿物理防窥** + **120 Hz 按需微交互简约 UI** |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **完整功能**<br>`MediaCodec` 硬解 + 48kHz 立体声 | ✅ **免 Root 完整宿主**<br>`MediaProjection` + 无障碍触控 | **`AES-128-GCM` UDP+FEC/NACK**、触控板/直触模式、悬浮球、PC 快捷键栏与蓝牙键映射 |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2（Apple Silicon & Intel） | ✅ **完整功能**<br>`AVSampleBufferDisplayLayer` | ✅ **完整功能**<br>`ScreenCaptureKit` 音视频 + VideoToolbox | **`CryptoKit AES-128-GCM` UDP+FEC/NACK**、超级屏、`⌘→Ctrl`、防截屏遮罩 + `CGEventTap` 物理锁键鼠 |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **前台完整主控**<br>VideoToolbox 硬解 + 触控板 | 👁️ **ReplayKit 仅观看** | **`AES-128-GCM` UDP+FEC/NACK**、内嵌 ReplayKit 录屏扩展与本地回环桥接；支持 Sideloadly / AltStore / SideStore / Xcode 自签 |
 
 > 四端权限开启步骤与跨网联调细节请见：[**四端安装、权限配置与联调指南 (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md)。
 
@@ -113,7 +113,7 @@
 
 ## 系统架构与协议管线
 
-### 当前已落地架构（`BoBo6.2` · `v7.3.0`）
+### 当前已落地架构（`BoBo6.2` · `v7.3.2`）
 
 ```mermaid
 flowchart LR
@@ -150,7 +150,7 @@ flowchart LR
 ## 界面预览
 
 <p align="center">
-  <img src="assets/screenshot-privacy-display.png" alt="BoBo Remote v7.3.0 防窥与显示分组策略配置" width="450" />
+  <img src="assets/screenshot-privacy-display.png" alt="BoBo Remote v7.3.2 防窥与显示分组策略配置" width="450" />
   <img src="assets/screenshot-onboarding.png" alt="7 步双层 ClearType 新手引导" width="450" />
 </p>
 
@@ -218,12 +218,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**`v7.3.1` 已验证测试矩阵**：
+**`v7.3.2` 已验证测试矩阵**：
 - **本地 Windows 全量回归**：
   - 原生 `BoBoCore.dll` 自检 **`12/12`** 通过（H.264 编解码环回、D3D11 渲染、WASAPI ADPCM、Media Foundation `AAC-LC 48 kHz` 立体声 ADTS 往返、物理键鼠锁、以及 `12 帧 / 4 MiB / 250 ms` 有界解码队列与 IDR 恢复；无桌面交互会话下采屏按预期平滑降级合成 NV12 测试）
   - 纯 Go `native/bobo-tsnet` **`7/7`** 单测与 `--self-test` 通过；纯 Go `tools/bobo-relay` **`3/3`** 并发回环与负载饱和单测通过
-  - 托管核心 `BoBo远程.exe --self-test` **`150/150`** 全部通过（协议黄金向量含 `udpAesGcm`、`AES-128-GCM` 先验签后窗口 / 512 窗防重放 / `0xFFFFFF00` Nonce 封顶 / `Dispose` 密钥清零、GCC 延迟梯度过载与单峰免疫、动态 FEC、`AudioAac`、底边栏输入突发触发 & 任务栏/输入法窗口识别、多中转动态调度与 3 行 HUD ABI）
-  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`** 通过；`UiSmoke731` **`85/85`** UI 冒烟通过；`CurtainSmoke731` **`15/15`** 独立防窥线程压测通过（含激活态任务栏 + 悬停缩略图与静默 IME 突发强压）；**`5/5`** PowerShell 脚本 UTF-8 BOM + AST 语法校验通过
+  - 托管核心 `BoBo远程.exe --self-test` **`153/153`** 全部通过（协议黄金向量含 `udpAesGcm`、`AES-128-GCM` 先验签后窗口 / 512 窗防重放 / `0xFFFFFF00` Nonce 封顶 / `Dispose` 密钥清零、GCC 延迟梯度过载与单峰免疫、动态 FEC、`AudioAac`、底边栏输入突发触发 & 任务栏/输入法窗口识别、120 Hz 动效曲线边界与引用计数归零、多中转动态调度与 3 行 HUD ABI）
+  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`** 通过；`UiSmoke732` **`107/107`** UI 冒烟与微交互动画校验通过（覆盖按钮按压与点击水波纹、指示条/下划线过渡、旋转箭头、输入框光晕、控制中心滑动高亮与主界面渲染核验）；`CurtainSmoke731` **`15/15`** 独立防窥线程压测通过；**`5/5`** PowerShell 脚本 UTF-8 BOM + AST 语法校验通过
 - **GitHub Actions 四端 CI / Release 流水线**：自动跨平台跑通 `tools/bobo-relay`、`native/bobo-tsnet`、Windows x64 全量包、Android 单元测试（含 `BoBoProtocolGoldenTest` AES-128-GCM 与交错 FEC/NACK 向量）与 Release APK 构建、Apple `BoBoAppleCore` Swift XCTest 与 macOS DMG / iOS IPA 构建，并对全部 6 个平台包自动生成 `SHA256SUMS.txt` 发布验证。（实时浏览器 Tailscale OAuth 授权及公网多 VPS 实际带宽吞吐依赖真实网络对端与用户自建节点环境。）
 
 ---
@@ -296,7 +296,7 @@ BoBo-Remote/
 | **V1 – V5** | WinForms 自绘主题与 7 步新手引导、独立防窥守护与安装/更新器、原生内嵌串流窗、控制中心与贴边悬浮球 | ✅ 已完成 |
 | **V6.0 – V6.2** | 内嵌 C++17 `BoBoCore.dll`（零外置引擎）、`BoBo6.2` 统一跨端协议、物理级键鼠锁防窥、**Windows / Android / macOS / iOS 四端发布** | ✅ 已完成 |
 | **V7.0 – V7.2 (`v7.2.1`)** | 超级屏 v2、主机尺寸光标、纯 Go 内嵌免安装 `tsnet` Tailscale、多自建 VPS 并发测速与负载调度（[`tools/bobo-relay`](tools/bobo-relay/README.md)）、**P0 有界 `12f/4MiB/250ms` 视频解码队列 + 3 行帧管线 HUD** | ✅ 已完成 |
-| **V7.3 (`v7.3.0` – `v7.3.1`)** | **全量 P1 + 商务简约重构与防窥 2ms Z序加固落地**：① 标准 AEAD **`AES-128-GCM`** 与安全审计；② **GCC 拥塞控制**与动态 FEC；③ **全四端加密 `UDP+FEC/NACK`**；④ **OS 原生 `AAC-LC 96 kbps`** 压缩音频与兜底；⑤ **商务简约分组白卡 UI 重构**；⑥ `v7.3.1` **2 ms 防窥突发 Z 序泵 + 任务栏/底边栏与输入法突发拦截** | ✅ 已完成 |
+| **V7.3 (`v7.3.0` – `v7.3.2`)** | **全量 P1 + 商务简约重构、防窥 2ms Z序加固与 120 Hz 微交互动画**：① 标准 AEAD **`AES-128-GCM`** 与安全审计；② **GCC 拥塞控制**与动态 FEC；③ **全四端加密 `UDP+FEC/NACK`**；④ **OS 原生 `AAC-LC 96 kbps`** 压缩音频与兜底；⑤ **商务简约分组白卡 UI** 与 `v7.3.1` **2 ms 防窥突发 Z 序防穿泵**；⑥ `v7.3.2` **按需 120 Hz 微交互动效引擎**（按钮微压缩与水波纹、指示条/下划线滑入、旋转箭头、拨片拉伸回弹与控制中心滑动高亮） | ✅ 已完成 |
 | **V8 / P2** | `HEVC (H.265)` / `AV1` / `H.264 4:4:4` 编码协商（代码/设计极致锐度）、HDR 与高刷新率多屏增强、自部署信令协调 + 原生 STUN/ICE P2P 与 TURN/TCP 443 穿透、社区公益中继与 Linux 客户端探索 | 🚧 规划 / 演进中 |
 
 ---

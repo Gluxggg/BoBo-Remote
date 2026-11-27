@@ -444,9 +444,7 @@ namespace DualRemote
         {
             var action = button as ActionButton;
             if (action == null) return;
-            if (action.Active == active) return;
-            action.Active = active;
-            action.Invalidate();
+            action.SetActive(active);
         }
 
         internal static void SetGlyphTint(Button button, Color tint)
@@ -585,10 +583,14 @@ namespace DualRemote
 
         internal sealed class StyledChoiceBox : ComboBox
         {
+            private readonly UiTransition hoverTransition;
+            private readonly UiTransition openTransition;
             private bool hovered;
 
             internal StyledChoiceBox()
             {
+                hoverTransition = new UiTransition(this);
+                openTransition = new UiTransition(this);
                 Dock = DockStyle.None;
                 DropDownStyle = ComboBoxStyle.DropDownList;
                 FlatStyle = FlatStyle.Flat;
@@ -625,6 +627,7 @@ namespace DualRemote
             protected override void OnMouseEnter(EventArgs e)
             {
                 hovered = true;
+                hoverTransition.AnimateTo(Enabled ? 1f : 0f, 110, UiEase.EaseOutExpo);
                 Invalidate();
                 base.OnMouseEnter(e);
             }
@@ -632,6 +635,7 @@ namespace DualRemote
             protected override void OnMouseLeave(EventArgs e)
             {
                 hovered = false;
+                hoverTransition.AnimateTo(0f, 110, UiEase.EaseOutExpo);
                 Invalidate();
                 base.OnMouseLeave(e);
             }
@@ -650,12 +654,14 @@ namespace DualRemote
 
             protected override void OnDropDown(EventArgs e)
             {
+                openTransition.AnimateTo(1f, 170, UiEase.EaseOutQuint);
                 Invalidate();
                 base.OnDropDown(e);
             }
 
             protected override void OnDropDownClosed(EventArgs e)
             {
+                openTransition.AnimateTo(0f, 160, UiEase.EaseOutQuint);
                 Invalidate();
                 base.OnDropDownClosed(e);
             }
@@ -796,15 +802,18 @@ namespace DualRemote
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
                     | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
+                float hoverT = Enabled ? Math.Max(hoverTransition.Value, hovered && !hoverTransition.IsRunning ? 1f : 0f) : 0f;
+                float openT = openTransition.IsRunning ? openTransition.Value : (DroppedDown ? 1f : openTransition.Value);
+                float activeAccent = Math.Max(hoverT, Math.Max(openT, Focused ? 1f : 0f));
                 Color chevColor = highContrast
                     ? (Enabled ? SystemColors.WindowText : SystemColors.GrayText)
-                    : (Enabled ? ((hovered || DroppedDown || Focused) ? Accent : Muted) : StrokeStrong);
+                    : (Enabled ? Mix(Muted, Accent, activeAccent) : StrokeStrong);
                 var chevRect = new RectangleF(
                     bounds.Right - rightPad - chevSize,
                     bounds.Y + (bounds.Height - chevSize) * 0.5f,
                     chevSize,
                     chevSize);
-                DrawGlyph(g, DroppedDown ? Glyph.ChevronUp : Glyph.ChevronDown, chevRect, chevColor);
+                DrawRotatedChevron(g, chevRect, chevColor, openT);
             }
 
             protected override void WndProc(ref Message m)
@@ -899,6 +908,8 @@ namespace DualRemote
         {
             private readonly Control inner;
             private readonly Panel comboClip;
+            private readonly UiTransition hoverTransition;
+            private readonly UiTransition focusTransition;
             private bool focused;
             private bool hovered;
             private bool dropped;
@@ -906,27 +917,29 @@ namespace DualRemote
             internal InputShell(Control inner)
             {
                 this.inner = inner;
+                hoverTransition = new UiTransition(this);
+                focusTransition = new UiTransition(this);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 BackColor = Paper;
                 DoubleBuffered = true;
                 ResizeRedraw = true;
                 inner.BackColor = inner.Enabled ? Paper : SurfaceSubtle;
-                inner.GotFocus += delegate { focused = true; Invalidate(); };
-                inner.LostFocus += delegate { focused = false; Invalidate(); };
-                inner.MouseEnter += delegate { hovered = true; Invalidate(); };
-                inner.MouseLeave += delegate { hovered = false; Invalidate(); };
+                inner.GotFocus += delegate { focused = true; SyncVisualTransitions(); };
+                inner.LostFocus += delegate { focused = false; SyncVisualTransitions(); };
+                inner.MouseEnter += delegate { hovered = true; SyncVisualTransitions(); };
+                inner.MouseLeave += delegate { hovered = false; SyncVisualTransitions(); };
                 inner.EnabledChanged += delegate
                 {
                     inner.BackColor = inner.Enabled ? Paper : SurfaceSubtle;
-                    Invalidate();
+                    SyncVisualTransitions();
                 };
                 var styledChoice = inner as StyledChoiceBox;
                 if (styledChoice != null)
                 {
                     Cursor = Cursors.Hand;
-                    styledChoice.DropDown += delegate { dropped = true; Invalidate(); };
-                    styledChoice.DropDownClosed += delegate { dropped = false; Invalidate(); };
+                    styledChoice.DropDown += delegate { dropped = true; SyncVisualTransitions(); };
+                    styledChoice.DropDownClosed += delegate { dropped = false; SyncVisualTransitions(); };
                     Controls.Add(inner);
                 }
                 else if (inner is ComboBox)
@@ -942,17 +955,25 @@ namespace DualRemote
                 }
             }
 
+            private void SyncVisualTransitions()
+            {
+                bool active = inner != null && inner.Enabled;
+                hoverTransition.AnimateTo(active && hovered ? 1f : 0f, 110, UiEase.EaseOutExpo);
+                focusTransition.AnimateTo(active && (focused || dropped) ? 1f : 0f, 160, UiEase.EaseOutQuint);
+                Invalidate();
+            }
+
             protected override void OnMouseEnter(EventArgs e)
             {
                 hovered = true;
-                Invalidate();
+                SyncVisualTransitions();
                 base.OnMouseEnter(e);
             }
 
             protected override void OnMouseLeave(EventArgs e)
             {
                 hovered = false;
-                Invalidate();
+                SyncVisualTransitions();
                 base.OnMouseLeave(e);
             }
 
@@ -1012,9 +1033,18 @@ namespace DualRemote
                 e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 float scale = e.Graphics.DpiX / 96f;
                 bool disabled = inner != null && !inner.Enabled;
+                float hoverT = disabled ? 0f : hoverTransition.Value;
+                float focusT = disabled ? 0f : focusTransition.Value;
                 Color fill = disabled ? SurfaceSubtle : Paper;
-                Color border = disabled ? Stroke : (focused || dropped) ? Accent : hovered ? AccentBorder : StrokeStrong;
-                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, fill, border, (focused || dropped) ? 1.4f : 1f);
+                Color border = disabled ? Stroke : Mix(Mix(StrokeStrong, AccentBorder, hoverT), Accent, focusT);
+                float borderWidth = 1f + 0.45f * focusT;
+                if (!disabled && focusT > 0.01f && !SystemInformation.HighContrast)
+                {
+                    Color halo = Color.FromArgb((int)Math.Round(28f * focusT), Accent);
+                    Surface(e.Graphics, new RectangleF(1.35f, 1.35f, Width - 2.7f, Height - 2.7f),
+                        Math.Max(2f, 6f * scale - 0.8f), Color.Transparent, halo, 1.6f * scale);
+                }
+                Surface(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), 6f * scale, fill, border, borderWidth);
             }
         }
 
@@ -1228,6 +1258,65 @@ namespace DualRemote
             }
         }
 
+        internal static void DrawRotatedChevron(Graphics graphics, RectangleF bounds, Color color, float openProgress)
+        {
+            if (openProgress <= 0.001f)
+            {
+                DrawGlyph(graphics, Glyph.ChevronDown, bounds, color);
+                return;
+            }
+            if (openProgress >= 0.999f)
+            {
+                DrawGlyph(graphics, Glyph.ChevronUp, bounds, color);
+                return;
+            }
+            GraphicsState state = graphics.Save();
+            try
+            {
+                float cx = bounds.X + bounds.Width * 0.5f;
+                float cy = bounds.Y + bounds.Height * 0.5f;
+                graphics.TranslateTransform(cx, cy);
+                graphics.RotateTransform(-180f * openProgress);
+                DrawGlyph(graphics, Glyph.ChevronDown,
+                    new RectangleF(-bounds.Width * 0.5f, -bounds.Height * 0.5f, bounds.Width, bounds.Height), color);
+            }
+            finally
+            {
+                graphics.Restore(state);
+            }
+        }
+
+        internal static void DrawClickRipple(Graphics graphics, RectangleF bounds, float radius,
+            PointF origin, float progress, Color rippleColor, int maxAlpha)
+        {
+            if (progress <= 0f || progress >= 1f || bounds.Width < 2f || bounds.Height < 2f || maxAlpha <= 0) return;
+            float fade = (1f - progress);
+            int alpha = (int)Math.Round(maxAlpha * fade * fade);
+            if (alpha <= 0) return;
+
+            float ox = Math.Max(bounds.Left, Math.Min(bounds.Right, origin.X));
+            float oy = Math.Max(bounds.Top, Math.Min(bounds.Bottom, origin.Y));
+            float dx = Math.Max(ox - bounds.Left, bounds.Right - ox);
+            float dy = Math.Max(oy - bounds.Top, bounds.Bottom - oy);
+            float maxDist = (float)Math.Sqrt(dx * dx + dy * dy);
+            float r = Math.Max(4f, maxDist * (0.22f + 0.88f * progress));
+
+            GraphicsState state = graphics.Save();
+            try
+            {
+                using (var clipPath = Round(bounds, radius))
+                using (var brush = new SolidBrush(Color.FromArgb(alpha, rippleColor)))
+                {
+                    graphics.SetClip(clipPath, CombineMode.Intersect);
+                    graphics.FillEllipse(brush, ox - r, oy - r, r * 2f, r * 2f);
+                }
+            }
+            finally
+            {
+                graphics.Restore(state);
+            }
+        }
+
         private static Color Mix(Color from, Color to, float amount)
         {
             if (amount <= 0f) return from;
@@ -1293,11 +1382,17 @@ namespace DualRemote
             private ButtonStyle style;
             internal ButtonStyle Style { get { return style; } set { style = value; } }
             private readonly UiTransition hoverTransition;
+            private readonly UiTransition pressTransition;
+            private readonly UiTransition activeTransition;
+            private readonly UiTransition rippleTransition;
             private bool hovered;
             private bool pressed;
             private bool keyboardFocus;
+            private bool active;
+            private PointF rippleOrigin;
+            private bool rippleVisible;
             internal Glyph Icon;
-            internal bool Active;
+            internal bool Active { get { return active; } set { SetActive(value); } }
             internal Color CustomGlyphColor = Color.Empty;
             internal int NavIndent = 0;
             internal bool ShowIndicatorDot;
@@ -1307,6 +1402,9 @@ namespace DualRemote
             {
                 this.style = style;
                 hoverTransition = new UiTransition(this);
+                pressTransition = new UiTransition(this);
+                activeTransition = new UiTransition(this);
+                rippleTransition = new UiTransition(this);
                 Icon = icon;
                 FlatStyle = FlatStyle.Flat;
                 FlatAppearance.BorderSize = 0;
@@ -1315,6 +1413,15 @@ namespace DualRemote
                     | ControlStyles.SupportsTransparentBackColor, true);
                 BackColor = Color.Transparent;
                 Cursor = Cursors.Hand;
+            }
+
+            internal void SetActive(bool next)
+            {
+                if (active == next) return;
+                active = next;
+                if (activeTransition != null)
+                    activeTransition.AnimateTo(next ? 1f : 0f, 195, UiEase.EaseOutQuint);
+                Invalidate();
             }
 
             protected override void OnMouseEnter(EventArgs e)
@@ -1326,7 +1433,12 @@ namespace DualRemote
 
             protected override void OnMouseLeave(EventArgs e)
             {
-                hovered = pressed = false;
+                hovered = false;
+                if (pressed)
+                {
+                    pressed = false;
+                    UpdatePress(false);
+                }
                 UpdateHover();
                 base.OnMouseLeave(e);
             }
@@ -1335,37 +1447,79 @@ namespace DualRemote
             {
                 base.OnVisibleChanged(e);
                 if (Visible) return;
-                hovered = pressed = false;
+                hovered = false;
+                pressed = false;
+                rippleVisible = false;
+                if (pressTransition != null) pressTransition.SnapTo(0f);
+                if (rippleTransition != null) rippleTransition.SnapTo(1f);
                 UpdateHover();
             }
 
             protected override void OnEnabledChanged(EventArgs e)
             {
                 base.OnEnabledChanged(e);
-                if (!Enabled) hovered = pressed = false;
+                if (!Enabled)
+                {
+                    hovered = false;
+                    pressed = false;
+                    rippleVisible = false;
+                    UpdatePress(false);
+                }
                 UpdateHover();
             }
 
             private void UpdateHover()
             {
                 if (hoverTransition != null)
-                    hoverTransition.MoveTo(Enabled && hovered && style != ButtonStyle.Close ? 1f : 0f, 115);
+                    hoverTransition.AnimateTo(Enabled && hovered ? 1f : 0f,
+                        style == ButtonStyle.Close ? 95 : 120, UiEase.EaseOutExpo);
                 Invalidate();
             }
+
+            private void UpdatePress(bool down)
+            {
+                if (pressTransition != null)
+                    pressTransition.AnimateTo(Enabled && down ? 1f : 0f,
+                        down ? 55 : 185, UiEase.EaseOutQuint);
+                Invalidate();
+            }
+
             protected override void OnMouseDown(MouseEventArgs e)
             {
                 keyboardFocus = false;
-                pressed = e.Button == MouseButtons.Left;
+                if (e.Button == MouseButtons.Left && Enabled)
+                {
+                    pressed = true;
+                    UpdatePress(true);
+                    if (style != ButtonStyle.Caption && style != ButtonStyle.Close
+                        && style != ButtonStyle.Link && style != ButtonStyle.UnderlineTab)
+                    {
+                        rippleOrigin = e.Location;
+                        rippleVisible = true;
+                        if (rippleTransition != null)
+                            rippleTransition.RestartFrom(0f, 1f, 280, UiEase.EaseOutExpo);
+                    }
+                }
                 Invalidate();
                 base.OnMouseDown(e);
             }
-            protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                if (pressed)
+                {
+                    pressed = false;
+                    UpdatePress(false);
+                }
+                base.OnMouseUp(e);
+            }
+
             protected override void OnMouseCaptureChanged(EventArgs e)
             {
                 base.OnMouseCaptureChanged(e);
                 if (!pressed || Capture) return;
                 pressed = false;
-                Invalidate();
+                UpdatePress(false);
             }
 
             protected override void OnEnter(EventArgs e)
@@ -1409,97 +1563,104 @@ namespace DualRemote
                     Color stroke = Color.Transparent;
                     Color text = Ink;
                     Color glyphColor = Color.Empty;
-                    bool glow = Enabled && (hovered || pressed);
-                    float hover = !Enabled ? 0f : pressed ? 1f : hoverTransition.Value;
+                    float hover = !Enabled ? 0f : hoverTransition.Value;
+                    float press = !Enabled ? 0f : pressTransition.Value;
+                    float activeT = activeTransition.Value;
+                    float rippleT = rippleTransition.Value;
+                    if (rippleVisible && !rippleTransition.IsRunning && rippleT >= 1f)
+                        rippleVisible = false;
+                    float glowT = Math.Max(hover, press);
                     float scale = GetDpiScale(this);
 
                     if (style == ButtonStyle.Primary)
                     {
-                        background = !Enabled ? DisabledBg : pressed ? AccentPressed : Mix(Accent, AccentHover, hover);
+                        background = !Enabled ? DisabledBg : Mix(Mix(Accent, AccentHover, hover), AccentPressed, press);
                         text = !Enabled ? DisabledText : Paper;
                     }
                     else if (style == ButtonStyle.Secondary)
                     {
-                        background = !Enabled ? SurfaceSubtle : pressed ? NavHover : Mix(Paper, SurfaceSubtle, hover);
-                        stroke = Mix(StrokeStrong, AccentBorder, hover);
+                        background = !Enabled ? SurfaceSubtle : Mix(Mix(Paper, SurfaceSubtle, hover), NavHover, press);
+                        stroke = Mix(Mix(StrokeStrong, AccentBorder, hover), Accent, press * 0.55f);
                         text = Enabled ? Ink : Muted;
                     }
                     else if (style == ButtonStyle.AccentSoft)
                     {
-                        background = Active || pressed ? NavActive : Mix(AccentLight, NavHover, hover);
-                        stroke = Active ? Accent : AccentBorder;
+                        float strength = Math.Max(activeT, press);
+                        background = Mix(Mix(AccentLight, NavHover, hover), NavActive, strength);
+                        stroke = Mix(AccentBorder, Accent, Math.Max(activeT, press * 0.7f));
                         text = Accent;
                     }
                     else if (style == ButtonStyle.WarningSoft || style == ButtonStyle.DangerSoft)
                     {
                         bool warning = style == ButtonStyle.WarningSoft;
                         text = warning ? Warning : Alert;
-                        background = warning ? WarningLight : AlertLight;
-                        stroke = glow ? text : Color.Transparent;
+                        Color softBase = warning ? WarningLight : AlertLight;
+                        background = Mix(softBase, warning ? Color.FromArgb(245, 229, 198) : Color.FromArgb(245, 217, 222), press * 0.7f);
+                        stroke = Mix(Color.Transparent, text, glowT);
                     }
                     else if (style == ButtonStyle.Chip)
                     {
-                        background = Active ? AccentLight : Mix(Paper, SurfaceSubtle, hover);
-                        stroke = Active ? Accent : StrokeStrong;
-                        text = Active ? Accent : Ink;
+                        background = Mix(Mix(Mix(Paper, SurfaceSubtle, hover), AccentLight, activeT), NavActive, press * 0.45f);
+                        stroke = Mix(Mix(StrokeStrong, AccentBorder, hover), Accent, Math.Max(activeT, press * 0.6f));
+                        text = Mix(Ink, Accent, activeT);
                     }
                     else if (style == ButtonStyle.UnderlineTab)
                     {
                         background = surface;
-                        text = Active ? Ink : glow ? BodyInk : Muted;
+                        text = Mix(Mix(Muted, BodyInk, glowT), Ink, activeT);
                     }
                     else if (style == ButtonStyle.Navigation)
                     {
-                        background = Active ? NavActive : Mix(surface, NavHover, hover);
-                        text = Active ? Ink : glow ? Ink : BodyInk;
+                        background = Mix(Mix(Mix(surface, NavHover, hover), NavActive, activeT), NavHover, press * 0.35f);
+                        text = Mix(BodyInk, Ink, Math.Max(glowT, activeT));
                     }
                     else if (style == ButtonStyle.NavSection)
                     {
-                        background = Mix(surface, NavHover, hover);
+                        background = Mix(Mix(surface, NavHover, hover), NavActive, press * 0.35f);
                         text = Ink;
                     }
                     else if (style == ButtonStyle.ToolbarAction)
                     {
-                        background = Mix(Paper, SurfaceSubtle, hover);
+                        background = Mix(Mix(Paper, SurfaceSubtle, hover), NavHover, press * 0.65f);
                         text = Enabled ? BodyInk : Muted;
                     }
                     else if (style == ButtonStyle.Link)
                     {
                         background = surface;
-                        text = Enabled ? (glow ? AccentHover : Accent) : Muted;
+                        text = Enabled ? Mix(Accent, AccentHover, glowT) : Muted;
                     }
                     else if (style == ButtonStyle.Quiet)
                     {
-                        background = Mix(surface, SurfaceSubtle, hover);
-                        text = Enabled ? (Active ? Accent : BodyInk) : Muted;
+                        background = Mix(Mix(surface, SurfaceSubtle, hover), NavHover, press * 0.65f);
+                        text = Enabled ? Mix(BodyInk, Accent, activeT) : Muted;
                     }
                     else if (style == ButtonStyle.IconGhost)
                     {
-                        background = Active ? NavActive : Mix(surface, NavHover, hover);
+                        background = Mix(Mix(Mix(surface, NavHover, hover), NavActive, activeT), NavHover, press * 0.45f);
                         text = Ink;
                     }
                     else if (style == ButtonStyle.Close)
                     {
-                        background = glow ? Alert : surface;
-                        text = glow ? Paper : BodyInk;
+                        background = Mix(surface, Alert, glowT);
+                        text = Mix(BodyInk, Paper, glowT);
                     }
                     else if (style == ButtonStyle.Caption)
                     {
-                        background = Mix(surface, NavHover, hover);
+                        background = Mix(Mix(surface, NavHover, hover), NavActive, press * 0.5f);
                         text = BodyInk;
                     }
                     else if (style == ButtonStyle.DangerPill)
                     {
-                        background = !Enabled ? DisabledBg : Alert;
-                        stroke = glow ? Ink : Color.Transparent;
+                        background = !Enabled ? DisabledBg : Mix(Alert, ControlPaint.Dark(Alert, 0.12f), Math.Max(hover * 0.55f, press));
+                        stroke = Mix(Color.Transparent, Ink, glowT * 0.45f);
                         text = Enabled ? Paper : DisabledText;
                     }
 
                     if (!Enabled && style != ButtonStyle.Primary && style != ButtonStyle.DangerPill) text = Muted;
                     if (SystemInformation.HighContrast)
                     {
-                        background = Active ? SystemColors.Highlight : SystemColors.ButtonFace;
-                        text = !Enabled ? SystemColors.GrayText : Active ? SystemColors.HighlightText : SystemColors.ControlText;
+                        background = active ? SystemColors.Highlight : SystemColors.ButtonFace;
+                        text = !Enabled ? SystemColors.GrayText : active ? SystemColors.HighlightText : SystemColors.ControlText;
                         stroke = SystemColors.WindowFrame;
                     }
                     if (background.A == 0) background = surface;
@@ -1508,25 +1669,53 @@ namespace DualRemote
                         || style == ButtonStyle.Link || style == ButtonStyle.ToolbarAction)
                         ? 0f : style == ButtonStyle.DangerPill ? (Height - 2f) * 0.5f : (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection) ? 8f * scale : 6.5f * scale;
 
+                    bool allowCompress = style != ButtonStyle.Caption && style != ButtonStyle.Close
+                        && style != ButtonStyle.UnderlineTab && style != ButtonStyle.Link && style != ButtonStyle.ToolbarAction;
+                    float inset = allowCompress ? press * 0.85f * scale : 0f;
+                    var surfaceRect = new RectangleF(0.5f + inset, 0.5f + inset,
+                        Math.Max(2f, Width - 1f - inset * 2f), Math.Max(2f, Height - 1f - inset * 2f));
+
                     if (style != ButtonStyle.UnderlineTab && style != ButtonStyle.Link)
                     {
-                        Surface(g, new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), radius, background, stroke);
+                        Surface(g, surfaceRect, radius, background, stroke);
+                        if (rippleVisible && !SystemInformation.HighContrast && style != ButtonStyle.Caption && style != ButtonStyle.Close)
+                        {
+                            Color rippleTint = (style == ButtonStyle.Primary || style == ButtonStyle.DangerPill) ? Paper
+                                : style == ButtonStyle.DangerSoft ? Alert
+                                : style == ButtonStyle.WarningSoft ? Warning
+                                : Accent;
+                            int maxAlpha = (style == ButtonStyle.Primary || style == ButtonStyle.DangerPill) ? 38 : 26;
+                            DrawClickRipple(g, surfaceRect, radius, rippleOrigin, rippleT, rippleTint, maxAlpha);
+                        }
                     }
 
-                    // Inset accent marker for the active page
-                    if (style == ButtonStyle.Navigation && Active)
+                    // Inset accent marker for the active page (animated vertical spring reveal)
+                    if (style == ButtonStyle.Navigation && activeT > 0.01f)
                     {
                         float barW = Math.Max(2.5f, 2.5f * scale);
-                        float barH = Math.Min(Height - 14f * scale, 18f * scale);
-                        Surface(g, new RectangleF(1.5f * scale, (Height - barH) / 2f, barW, barH), barW * 0.5f, SystemInformation.HighContrast ? text : Accent, Color.Transparent);
+                        float maxBarH = Math.Min(Height - 14f * scale, 18f * scale);
+                        float barH = Math.Max(3f * scale, maxBarH * (0.28f + 0.72f * activeT));
+                        Color barColor = SystemInformation.HighContrast ? text : Color.FromArgb((int)Math.Round(255f * Math.Min(1f, activeT)), Accent);
+                        Surface(g, new RectangleF(1.5f * scale + inset * 0.4f, (Height - barH) / 2f, barW, barH), barW * 0.5f, barColor, Color.Transparent);
                     }
 
-                    // Accent underline for the active tab
-                    if (style == ButtonStyle.UnderlineTab && Active)
+                    // Accent underline for the active tab (subtle hover hint + crisp active glide)
+                    if (style == ButtonStyle.UnderlineTab)
                     {
-                        float lineW = Math.Min(Width - 8f * scale, 22f * scale);
                         float lineH = Math.Max(2.5f, 2.5f * scale);
-                        Surface(g, new RectangleF((Width - lineW) / 2f, Height - lineH - 1f, lineW, lineH), lineH * 0.5f, SystemInformation.HighContrast ? text : Accent, Color.Transparent);
+                        if (hover > 0.01f && activeT < 0.99f && !SystemInformation.HighContrast)
+                        {
+                            float hintW = Math.Min(Width - 8f * scale, 16f * scale) * hover;
+                            Color hintColor = Color.FromArgb((int)Math.Round(96f * hover * (1f - activeT)), AccentBorder);
+                            Surface(g, new RectangleF((Width - hintW) / 2f, Height - lineH - 1f, hintW, lineH), lineH * 0.5f, hintColor, Color.Transparent);
+                        }
+                        if (activeT > 0.01f)
+                        {
+                            float maxLineW = Math.Min(Width - 8f * scale, 22f * scale);
+                            float lineW = Math.Max(4f * scale, maxLineW * (0.25f + 0.75f * activeT));
+                            Color lineColor = SystemInformation.HighContrast ? text : Color.FromArgb((int)Math.Round(255f * Math.Min(1f, activeT)), Accent);
+                            Surface(g, new RectangleF((Width - lineW) / 2f, Height - lineH - 1f, lineW, lineH), lineH * 0.5f, lineColor, Color.Transparent);
+                        }
                     }
 
                     if (keyboardFocus && Focused && style != ButtonStyle.Caption && style != ButtonStyle.Close)
@@ -1534,13 +1723,13 @@ namespace DualRemote
                             SystemInformation.HighContrast || style == ButtonStyle.Primary || style == ButtonStyle.DangerPill ? text : Accent, 1.5f);
 
                     glyphColor = CustomGlyphColor.IsEmpty || SystemInformation.HighContrast ? text : CustomGlyphColor;
-                    if (style == ButtonStyle.Navigation && Enabled && CustomGlyphColor == Accent && !Active) glyphColor = BodyInk;
-                    if (style == ButtonStyle.Navigation && Enabled && Active && !SystemInformation.HighContrast) glyphColor = Accent;
+                    if (style == ButtonStyle.Navigation && Enabled && CustomGlyphColor == Accent)
+                        glyphColor = Mix(BodyInk, Accent, activeT);
                     if (!Enabled) glyphColor = text;
                     if (style == ButtonStyle.Primary || style == ButtonStyle.DangerPill) glyphColor = text;
 
                     Font drawFont = Font;
-                    if (style == ButtonStyle.UnderlineTab && Active)
+                    if (style == ButtonStyle.UnderlineTab && active)
                         drawFont = LabelBoldFont;
 
                     if (style == ButtonStyle.Navigation || style == ButtonStyle.NavSection)
@@ -1562,9 +1751,10 @@ namespace DualRemote
                         if (style == ButtonStyle.NavSection)
                         {
                             float chevSize = (float)Math.Round(13f * scale);
-                            DrawGlyph(g, Active ? Glyph.ChevronUp : Glyph.ChevronDown,
+                            DrawRotatedChevron(g,
                                 new RectangleF(Width - (float)Math.Round(8f * scale) - chevSize,
-                                    (float)Math.Round((Height - chevSize) / 2f), chevSize, chevSize), Muted);
+                                    (float)Math.Round((Height - chevSize) / 2f), chevSize, chevSize),
+                                Mix(Muted, BodyInk, glowT), activeT);
                         }
                         return;
                     }
@@ -1996,12 +2186,16 @@ namespace DualRemote
         internal sealed class Switch : CheckBox
         {
             private readonly UiTransition position;
-            private bool hovered;
+            private readonly UiTransition hoverTransition;
+            private readonly UiTransition pressTransition;
+            private bool pressed;
             internal bool ShowStateText = true;
 
             internal Switch()
             {
                 position = new UiTransition(this);
+                hoverTransition = new UiTransition(this);
+                pressTransition = new UiTransition(this);
                 AutoSize = false;
                 Cursor = Cursors.Hand;
                 Margin = Padding.Empty;
@@ -2010,8 +2204,76 @@ namespace DualRemote
                 BackColor = Color.Transparent;
             }
 
-            protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
-            protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hoverTransition.AnimateTo(Enabled ? 1f : 0f, 110, UiEase.EaseOutExpo);
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 165, UiEase.EaseOutQuint);
+                }
+                hoverTransition.AnimateTo(0f, 110, UiEase.EaseOutExpo);
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs mevent)
+            {
+                if (mevent.Button == MouseButtons.Left && Enabled)
+                {
+                    pressed = true;
+                    pressTransition.AnimateTo(1f, 60, UiEase.EaseOutQuint);
+                    Invalidate();
+                }
+                base.OnMouseDown(mevent);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs mevent)
+            {
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 165, UiEase.EaseOutQuint);
+                    Invalidate();
+                }
+                base.OnMouseUp(mevent);
+            }
+
+            protected override void OnMouseCaptureChanged(EventArgs e)
+            {
+                base.OnMouseCaptureChanged(e);
+                if (!pressed || Capture) return;
+                pressed = false;
+                pressTransition.AnimateTo(0f, 165, UiEase.EaseOutQuint);
+                Invalidate();
+            }
+
+            protected override void OnVisibleChanged(EventArgs e)
+            {
+                base.OnVisibleChanged(e);
+                if (Visible) return;
+                pressed = false;
+                hoverTransition.SnapTo(0f);
+                pressTransition.SnapTo(0f);
+            }
+
+            protected override void OnEnabledChanged(EventArgs e)
+            {
+                base.OnEnabledChanged(e);
+                if (!Enabled)
+                {
+                    pressed = false;
+                    hoverTransition.AnimateTo(0f, 110, UiEase.EaseOutExpo);
+                    pressTransition.AnimateTo(0f, 165, UiEase.EaseOutQuint);
+                }
+                Invalidate();
+            }
 
             protected override void OnCheckedChanged(EventArgs e)
             {
@@ -2034,7 +2296,8 @@ namespace DualRemote
                 float x = Math.Max(inset, Width - w - inset);
                 float y = (float)Math.Round((Height - h) / 2f);
                 float progress = position.Value;
-                bool hot = Enabled && hovered;
+                float hover = Enabled ? hoverTransition.Value : 0f;
+                float press = Enabled ? pressTransition.Value : 0f;
 
                 if (ShowStateText && x > 22f * scale)
                 {
@@ -2043,17 +2306,31 @@ namespace DualRemote
                         TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                 }
 
-                Color onFill = Enabled ? (hot ? AccentHover : Accent) : AccentBorder;
-                Color offFill = hot ? SurfaceSubtle : Paper;
-                Color offBorder = Enabled ? (hot ? BodyInk : Muted) : StrokeStrong;
+                if (hover > 0.01f && progress > 0.05f && Enabled && !SystemInformation.HighContrast)
+                {
+                    float glowPad = 1.6f * scale;
+                    Surface(g, new RectangleF(x - glowPad, y - glowPad, w + glowPad * 2f, h + glowPad * 2f),
+                        h / 2f + glowPad, Color.FromArgb((int)Math.Round(24f * hover * progress), Accent), Color.Transparent);
+                }
+
+                Color onFill = Enabled ? Mix(Accent, AccentHover, Math.Max(hover, press * 0.6f)) : AccentBorder;
+                Color offFill = Mix(Paper, SurfaceSubtle, Math.Max(hover, press));
+                Color offBorder = Enabled ? Mix(Muted, BodyInk, Math.Max(hover, press)) : StrokeStrong;
                 Surface(g, new RectangleF(x, y, w, h), h / 2f, Mix(offFill, onFill, progress), Mix(offBorder, onFill, progress), scale);
 
                 float pad = (float)Math.Round(3f * scale);
                 float diameter = h - pad * 2f;
-                float thumbX = x + pad + (w - h) * progress;
+                float flight = 4f * progress * (1f - progress);
+                float stretch = (2.6f * press + 2.2f * flight) * scale;
+                float thumbW = Math.Min(w - pad * 2f, diameter + Math.Max(0f, stretch));
+                float thumbX = x + pad + (w - pad * 2f - thumbW) * progress;
+                if (progress > 0.05f && !SystemInformation.HighContrast)
+                {
+                    Surface(g, new RectangleF(thumbX, y + pad + 0.8f * scale, thumbW, diameter),
+                        diameter * 0.5f, Color.FromArgb((int)Math.Round(26f * progress), Ink), Color.Transparent);
+                }
                 Color thumbColor = Mix(Enabled ? BodyInk : Muted, Paper, progress);
-                using (var dot = new SolidBrush(thumbColor))
-                    g.FillEllipse(dot, thumbX, y + pad, diameter, diameter);
+                Surface(g, new RectangleF(thumbX, y + pad, thumbW, diameter), diameter * 0.5f, thumbColor, Color.Transparent);
 
                 if (Focused && ShowFocusCues)
                 {
@@ -2126,11 +2403,14 @@ namespace DualRemote
 
         internal sealed class StatusBanner : Control
         {
+            private readonly UiTransition toneTransition;
             private string messageText;
+            private PillTone prevTone = PillTone.Info;
             private PillTone tone = PillTone.Info;
 
             internal StatusBanner(string initial)
             {
+                toneTransition = new UiTransition(this, 1f);
                 messageText = initial ?? "";
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
@@ -2145,39 +2425,48 @@ namespace DualRemote
             internal void Set(string message, PillTone newTone = PillTone.Info)
             {
                 messageText = message ?? "";
-                tone = newTone;
+                if (newTone != tone)
+                {
+                    prevTone = tone;
+                    tone = newTone;
+                    toneTransition.RestartFrom(0f, 1f, 200, UiEase.EaseOutExpo);
+                }
+                else
+                {
+                    tone = newTone;
+                }
                 AccessibleName = messageText;
                 Invalidate();
             }
 
-            private void GetTonePalette(out Color bg, out Color border, out Color dotColor, out Color textColor)
+            private static void GetTonePalette(PillTone which, out Color bg, out Color border, out Color dotColor, out Color textColor)
             {
                 bg = SurfaceSubtle;
                 border = Stroke;
                 dotColor = Accent;
                 textColor = BodyInk;
-                if (tone == PillTone.Success)
+                if (which == PillTone.Success)
                 {
                     bg = SuccessLight;
                     border = Stroke;
                     dotColor = Success;
                     textColor = Success;
                 }
-                else if (tone == PillTone.Warning)
+                else if (which == PillTone.Warning)
                 {
                     bg = WarningLight;
                     border = Stroke;
                     dotColor = Warning;
                     textColor = Warning;
                 }
-                else if (tone == PillTone.Alert)
+                else if (which == PillTone.Alert)
                 {
                     bg = AlertLight;
                     border = Stroke;
                     dotColor = Alert;
                     textColor = Alert;
                 }
-                else if (tone == PillTone.Info)
+                else if (which == PillTone.Info)
                 {
                     bg = AccentLight;
                     border = AccentBorder;
@@ -2200,7 +2489,17 @@ namespace DualRemote
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
                 float scale = Math.Max(1f, g.DpiX / 96f);
                 Color bg, border, dotColor, textColor;
-                GetTonePalette(out bg, out border, out dotColor, out textColor);
+                GetTonePalette(tone, out bg, out border, out dotColor, out textColor);
+                float mixT = toneTransition.Value;
+                if (mixT < 0.999f && prevTone != tone)
+                {
+                    Color prevBg, prevBorder, prevDot, prevText;
+                    GetTonePalette(prevTone, out prevBg, out prevBorder, out prevDot, out prevText);
+                    bg = Mix(prevBg, bg, mixT);
+                    border = Mix(prevBorder, border, mixT);
+                    dotColor = Mix(prevDot, dotColor, mixT);
+                    textColor = Mix(prevText, textColor, mixT);
+                }
 
                 if (SystemInformation.HighContrast)
                 {

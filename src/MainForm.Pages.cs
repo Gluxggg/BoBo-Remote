@@ -1744,8 +1744,11 @@ namespace DualRemote
         private sealed class CrossNetSidebarCard : Control
         {
             private readonly UiTransition hoverTransition;
-            private bool hovered;
+            private readonly UiTransition pressTransition;
+            private readonly UiTransition rippleTransition;
             private bool pressed;
+            private PointF rippleOrigin;
+            private bool rippleVisible;
             private string primaryText = "内置跨网 · 未登录";
             private string secondaryText = "点击一键登录 Tailscale";
             private int visualTone = 0; // 0=Neutral/Accent, 1=Warning, 2=Success
@@ -1753,6 +1756,8 @@ namespace DualRemote
             internal CrossNetSidebarCard()
             {
                 hoverTransition = new UiTransition(this);
+                pressTransition = new UiTransition(this);
+                rippleTransition = new UiTransition(this);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 Cursor = Cursors.Hand;
@@ -1809,32 +1814,55 @@ namespace DualRemote
 
             protected override void OnMouseEnter(EventArgs e)
             {
-                hovered = true;
-                hoverTransition.MoveTo(1f, 115);
+                hoverTransition.AnimateTo(1f, 130, UiEase.EaseOutQuint);
                 Invalidate();
                 base.OnMouseEnter(e);
             }
 
             protected override void OnMouseLeave(EventArgs e)
             {
-                hovered = false;
-                pressed = false;
-                hoverTransition.MoveTo(0f, 115);
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                }
+                hoverTransition.AnimateTo(0f, 130, UiEase.EaseOutQuint);
                 Invalidate();
                 base.OnMouseLeave(e);
             }
 
             protected override void OnMouseDown(MouseEventArgs e)
             {
-                if (e.Button == MouseButtons.Left) { pressed = true; Invalidate(); }
+                if (e.Button == MouseButtons.Left)
+                {
+                    pressed = true;
+                    pressTransition.AnimateTo(1f, 60, UiEase.EaseOutQuint);
+                    rippleOrigin = e.Location;
+                    rippleVisible = true;
+                    rippleTransition.RestartFrom(0f, 1f, 280, UiEase.EaseOutExpo);
+                    Invalidate();
+                }
                 base.OnMouseDown(e);
             }
 
             protected override void OnMouseUp(MouseEventArgs e)
             {
-                pressed = false;
-                Invalidate();
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                    Invalidate();
+                }
                 base.OnMouseUp(e);
+            }
+
+            protected override void OnMouseCaptureChanged(EventArgs e)
+            {
+                base.OnMouseCaptureChanged(e);
+                if (!pressed || Capture) return;
+                pressed = false;
+                pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                Invalidate();
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -1847,11 +1875,20 @@ namespace DualRemote
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
                 float scale = Math.Max(1f, g.DpiX / 96f);
-                float hover = pressed ? 1f : hoverTransition.Value;
-                Color bg = Blend(Theme.Paper, Theme.AccentLight, hover * 0.85f);
-                Color border = Blend(Theme.Stroke, Theme.AccentBorder, hovered || pressed ? 1f : hover);
-                var cardRect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+                float hover = hoverTransition.Value;
+                float press = pressTransition.Value;
+                float rippleT = rippleTransition.Value;
+                if (rippleVisible && !rippleTransition.IsRunning && rippleT >= 1f)
+                    rippleVisible = false;
+
+                Color bg = Blend(Blend(Theme.Paper, Theme.AccentLight, hover * 0.85f), Theme.NavActive, press * 0.65f);
+                Color border = Blend(Theme.Stroke, Theme.AccentBorder, Math.Max(hover, press));
+                float inset = press * 0.85f * scale;
+                var cardRect = new RectangleF(0.5f + inset, 0.5f + inset,
+                    Math.Max(4f, Width - 1f - inset * 2f), Math.Max(4f, Height - 1f - inset * 2f));
                 Theme.Surface(g, cardRect, 8f * scale, bg, border, 1f);
+                if (rippleVisible && !SystemInformation.HighContrast)
+                    Theme.DrawClickRipple(g, cardRect, 8f * scale, rippleOrigin, rippleT, Theme.Accent, 24);
 
                 Color iconBg = visualTone == 2 ? Theme.SuccessLight : visualTone == 1 ? Theme.WarningLight : Theme.AccentLight;
                 Color iconFg = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.Accent;

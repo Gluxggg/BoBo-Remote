@@ -1078,11 +1078,19 @@ namespace DualRemote
         private int[] shortcutWidths;
         private int hoveredIndex = -1;
         private int openSubmenuIndex = -1;
+        private readonly UiTransition entranceOpacity;
+        private readonly UiTransition hoverBarY;
+        private readonly UiTransition hoverBarH;
+        private readonly UiTransition hoverBarAlpha;
+        private bool hoverBarInitialized;
+        private Color hoverBarColor = Theme.SurfaceSubtle;
 
         private Rectangle speakerRect;
         private Rectangle sliderTrackRect;
         private readonly UiTransition volumePosition;
         private readonly UiTransition sliderEmphasis;
+        private readonly UiTransition speakerHoverTransition;
+        private bool speakerHovered;
         private bool draggingSlider;
         private int sliderDragOffset;
         private int lastNonZeroVolume = 80;
@@ -1094,11 +1102,19 @@ namespace DualRemote
             this.items = items ?? new List<CcMenuItem>();
             this.volumeSliderMode = volumeSliderMode;
             this.model = model ?? new StreamControlCenterModel();
+            entranceOpacity = new UiTransition(this, 1f, delegate
+            {
+                if (!IsDisposed) Opacity = Math.Max(0.05, Math.Min(1.0, entranceOpacity.Value));
+            });
+            hoverBarY = new UiTransition(this);
+            hoverBarH = new UiTransition(this);
+            hoverBarAlpha = new UiTransition(this);
             if (volumeSliderMode)
             {
                 if (this.model.VolumePercent > 0) lastNonZeroVolume = this.model.VolumePercent;
                 volumePosition = new UiTransition(this, EffectiveVolume / 100f);
                 sliderEmphasis = new UiTransition(this);
+                speakerHoverTransition = new UiTransition(this);
             }
 
             dpiScale = ResolveScale();
@@ -1111,6 +1127,21 @@ namespace DualRemote
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
 
             MeasureAndLayout();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (UiTransition.AreAnimationsEnabled() && Left > -2000 && Top > -2000)
+            {
+                Opacity = 0.08;
+                entranceOpacity.RestartFrom(0.08f, 1f, 115, UiEase.EaseOutQuint);
+            }
+            else
+            {
+                Opacity = 1.0;
+                entranceOpacity.SnapTo(1f);
+            }
         }
 
         private static float ResolveScale()
@@ -1274,14 +1305,13 @@ namespace DualRemote
             if (hit != hoveredIndex)
             {
                 hoveredIndex = hit;
-                Invalidate();
 
                 if (hit >= 0 && hit < items.Count)
                 {
                     CcMenuItem it = items[hit];
                     if (it.IsVolumeSliderSubmenu || it.SubmenuBuilder != null)
                     {
-                        if (openSubmenuIndex != hit)
+                        if (session != null && openSubmenuIndex != hit)
                         {
                             openSubmenuIndex = hit;
                             Rectangle screenRow = RectangleToScreen(itemRects[hit]);
@@ -1291,9 +1321,10 @@ namespace DualRemote
                     else if (!it.IsSeparator && !it.IsHeader)
                     {
                         openSubmenuIndex = -1;
-                        session.CloseFromLevel(Level + 1);
+                        if (session != null) session.CloseFromLevel(Level + 1);
                     }
                 }
+                UpdateMenuHoverHighlight();
             }
             Cursor = (hit >= 0 && hit < items.Count && !items[hit].IsSeparator && !items[hit].IsHeader && items[hit].Enabled)
                 ? Cursors.Hand
@@ -1308,8 +1339,40 @@ namespace DualRemote
             else if (openSubmenuIndex < 0)
             {
                 hoveredIndex = -1;
-                Invalidate();
+                UpdateMenuHoverHighlight();
             }
+        }
+
+        private void UpdateMenuHoverHighlight()
+        {
+            int active = (hoveredIndex >= 0 && hoveredIndex < items.Count && !items[hoveredIndex].IsSeparator && !items[hoveredIndex].IsHeader && items[hoveredIndex].Enabled)
+                ? hoveredIndex
+                : (openSubmenuIndex >= 0 && openSubmenuIndex < items.Count && !items[openSubmenuIndex].IsSeparator && !items[openSubmenuIndex].IsHeader && items[openSubmenuIndex].Enabled)
+                    ? openSubmenuIndex
+                    : -1;
+            if (active >= 0)
+            {
+                Rectangle row = itemRects[active];
+                CcMenuItem item = items[active];
+                hoverBarColor = item.IsDanger ? Theme.AlertLight : active == openSubmenuIndex ? Theme.AccentLight : Theme.SurfaceSubtle;
+                if (!hoverBarInitialized || hoverBarAlpha.Value <= 0.02f)
+                {
+                    hoverBarInitialized = true;
+                    hoverBarY.SnapTo(row.Top);
+                    hoverBarH.SnapTo(row.Height);
+                }
+                else
+                {
+                    hoverBarY.AnimateTo(row.Top, 130, UiEase.EaseOutQuint);
+                    hoverBarH.AnimateTo(row.Height, 130, UiEase.EaseOutQuint);
+                }
+                hoverBarAlpha.AnimateTo(1f, 110, UiEase.EaseOutExpo);
+            }
+            else
+            {
+                hoverBarAlpha.AnimateTo(0f, 110, UiEase.EaseOutExpo);
+            }
+            Invalidate();
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -1343,13 +1406,16 @@ namespace DualRemote
 
             if (it.IsVolumeSliderSubmenu || it.SubmenuBuilder != null)
             {
-                openSubmenuIndex = hit;
-                session.OpenSubmenu(Level, RectangleToScreen(itemRects[hit]), it, Owner);
+                if (session != null)
+                {
+                    openSubmenuIndex = hit;
+                    session.OpenSubmenu(Level, RectangleToScreen(itemRects[hit]), it, Owner);
+                }
                 return;
             }
 
             Action act = it.OnClick;
-            if (it.CloseOnClick) session.CloseAll();
+            if (it.CloseOnClick && session != null) session.CloseAll();
             if (act != null)
             {
                 try { act(); } catch { }
@@ -1381,8 +1447,14 @@ namespace DualRemote
         private void UpdateSliderHover(Point point)
         {
             bool sliderHot = draggingSlider || IsOverSlider(point);
-            Cursor = sliderHot || speakerRect.Contains(point) ? Cursors.Hand : Cursors.Default;
+            bool spHot = speakerRect.Contains(point);
+            Cursor = sliderHot || spHot ? Cursors.Hand : Cursors.Default;
             sliderEmphasis.MoveTo(sliderHot ? 1f : 0f, 115);
+            if (speakerHoverTransition != null && spHot != speakerHovered)
+            {
+                speakerHovered = spHot;
+                speakerHoverTransition.AnimateTo(spHot ? 1f : 0f, 110, UiEase.EaseOutExpo);
+            }
         }
 
         private int EffectiveVolume
@@ -1439,6 +1511,16 @@ namespace DualRemote
                 return;
             }
 
+            if (!hoverBarAlpha.IsRunning && hoverBarAlpha.Value <= 0.01f)
+                hoverBarInitialized = false;
+            float pillAlpha = hoverBarAlpha.Value;
+            if (hoverBarInitialized && pillAlpha > 0.01f && itemRects.Length > 0)
+            {
+                var pillRect = new RectangleF(S(6), hoverBarY.Value, Math.Max(8f, Width - S(12)), Math.Max(12f, hoverBarH.Value));
+                Color pillColor = Color.FromArgb((int)Math.Round(255f * Math.Min(1f, pillAlpha)), hoverBarColor);
+                Theme.Surface(g, pillRect, S(6), pillColor, Color.Transparent);
+            }
+
             Font mainFont = Theme.GetFont(Theme.TextSize.Label);
             Font smallFont = Theme.GetFont(Theme.TextSize.Small);
             Font headerFont = Theme.GetFont(Theme.TextSize.LabelBold);
@@ -1461,11 +1543,6 @@ namespace DualRemote
                 }
 
                 bool submenuOpen = i == openSubmenuIndex;
-                if (item.Enabled && (i == hoveredIndex || submenuOpen))
-                {
-                    Color highlight = item.IsDanger ? Theme.AlertLight : submenuOpen ? Theme.AccentLight : Theme.SurfaceSubtle;
-                    Theme.Surface(g, row, S(6), highlight, Color.Transparent);
-                }
 
                 Color foreground = !item.Enabled ? Theme.Muted : item.IsDanger ? Theme.Alert : Theme.Ink;
                 bool hasSubtitle = !string.IsNullOrEmpty(item.Subtitle);
@@ -1521,7 +1598,11 @@ namespace DualRemote
         {
             int volume = EffectiveVolume;
             bool muted = volume == 0;
-            Theme.Surface(g, speakerRect, S(6), muted ? Theme.AccentLight : Theme.SurfaceSubtle, Color.Transparent);
+            float spHover = speakerHoverTransition != null ? speakerHoverTransition.Value : 0f;
+            Color spBg = muted
+                ? BlendColor(Theme.AccentLight, Theme.NavActive, spHover)
+                : BlendColor(Theme.SurfaceSubtle, Theme.NavHover, spHover);
+            Theme.Surface(g, speakerRect, S(6), spBg, Color.Transparent);
             int speakerSize = S(18);
             var speakerGlyph = new RectangleF(speakerRect.X + (speakerRect.Width - speakerSize) / 2f,
                 speakerRect.Y + (speakerRect.Height - speakerSize) / 2f, speakerSize, speakerSize);
@@ -1637,6 +1718,16 @@ namespace DualRemote
                         break;
                 }
             }
+        }
+        private static Color BlendColor(Color a, Color b, float t)
+        {
+            if (t <= 0f) return a;
+            if (t >= 1f) return b;
+            return Color.FromArgb(
+                (int)Math.Round(a.A + (b.A - a.A) * t),
+                (int)Math.Round(a.R + (b.R - a.R) * t),
+                (int)Math.Round(a.G + (b.G - a.G) * t),
+                (int)Math.Round(a.B + (b.B - a.B) * t));
         }
     }
 }

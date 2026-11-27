@@ -102,6 +102,7 @@ namespace DualRemote
         private bool hotkeyRegistered;
         private bool hiddenAtEdge;
         private bool hovered;
+        private bool pressed;
         private bool userHiddenBySetting;
         private bool menuOpen;
 
@@ -112,6 +113,15 @@ namespace DualRemote
         private bool dragMoved;
         private Point dragStartCursor;
         private Point dragStartLocation;
+
+        private readonly UiTransition hoverTransition;
+        private readonly UiTransition pressTransition;
+        private readonly UiTransition menuTransition;
+        private readonly UiTransition dockAnim;
+        private Rectangle animStartBounds;
+        private Rectangle animTargetBounds;
+        private double animStartOpacity = 0.96;
+        private double animTargetOpacity = 0.96;
 
         private UuControlCenterSession activeMenuSession;
         private readonly ContextMenuStrip quickRightMenu = new ContextMenuStrip();
@@ -140,6 +150,11 @@ namespace DualRemote
             this.onDisconnect = onDisconnect;
             this.onClosed = onClosed;
             this.freeMouseGuardEnabled = getFreeMouseActive == null || getFreeMouseActive();
+
+            hoverTransition = new UiTransition(this);
+            pressTransition = new UiTransition(this);
+            menuTransition = new UiTransition(this);
+            dockAnim = new UiTransition(this, 1f, StepDockedAnimation);
 
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -376,6 +391,7 @@ namespace DualRemote
                 s.CloseAll();
             }
             menuOpen = false;
+            menuTransition.AnimateTo(0f, 150, UiEase.EaseOutQuint);
         }
 
         internal void CloseSafely()
@@ -565,19 +581,49 @@ namespace DualRemote
         {
             if (hiddenAtEdge == hide) return;
             hiddenAtEdge = hide;
-            ApplyDockedGeometry();
+            ApplyDockedGeometry(true);
             Invalidate();
         }
 
         private void ApplyDockedGeometry()
         {
+            ApplyDockedGeometry(false);
+        }
+
+        private void ApplyDockedGeometry(bool animate)
+        {
             Screen scr = ResolveTargetScreen();
             if (scr == null) scr = Screen.PrimaryScreen;
             float scale = Theme.GetDpiScale(this);
             Rectangle r = ComputeDockedSquareBounds(scr.Bounds, dockEdge, dockRatio, hiddenAtEdge && !menuOpen && !dragging, scale);
+            double nextOpacity = (hiddenAtEdge && !hovered && !menuOpen) ? 0.72 : 0.97;
+            if (animate && IsHandleCreated && Visible && UiTransition.AreAnimationsEnabled() && Bounds != r)
+            {
+                animStartBounds = Bounds;
+                animTargetBounds = r;
+                animStartOpacity = Opacity;
+                animTargetOpacity = nextOpacity;
+                dockAnim.RestartFrom(0f, 1f, 185, UiEase.EaseOutQuint);
+                return;
+            }
+            dockAnim.SnapTo(1f);
             Bounds = r;
-            Opacity = (hiddenAtEdge && !hovered && !menuOpen) ? 0.72 : 0.97;
+            Opacity = nextOpacity;
             ApplyRoundedRegion();
+        }
+
+        private void StepDockedAnimation()
+        {
+            if (IsDisposed || dragging) return;
+            float t = Math.Max(0f, Math.Min(1f, dockAnim.Value));
+            int x = (int)Math.Round(animStartBounds.X + (animTargetBounds.X - animStartBounds.X) * t);
+            int y = (int)Math.Round(animStartBounds.Y + (animTargetBounds.Y - animStartBounds.Y) * t);
+            int w = Math.Max(4, (int)Math.Round(animStartBounds.Width + (animTargetBounds.Width - animStartBounds.Width) * t));
+            int h = Math.Max(4, (int)Math.Round(animStartBounds.Height + (animTargetBounds.Height - animStartBounds.Height) * t));
+            Bounds = new Rectangle(x, y, w, h);
+            Opacity = Math.Max(0.2, Math.Min(1.0, animStartOpacity + (animTargetOpacity - animStartOpacity) * t));
+            ApplyRoundedRegion();
+            Invalidate();
         }
 
         private void ApplyRoundedRegion()
@@ -630,7 +676,7 @@ namespace DualRemote
                 dockRatio = (float)(centerScreen.X - b.Left) / Math.Max(1f, b.Width);
             }
             dockRatio = Math.Max(0.06f, Math.Min(0.94f, dockRatio));
-            ApplyDockedGeometry();
+            ApplyDockedGeometry(true);
         }
 
         private void OpenControlCenter()
@@ -648,9 +694,11 @@ namespace DualRemote
 
             StreamControlCenterModel model = buildControlCenterModel != null ? buildControlCenterModel() : new StreamControlCenterModel();
             menuOpen = true;
+            menuTransition.AnimateTo(1f, 160, UiEase.EaseOutQuint);
             activeMenuSession = new UuControlCenterSession(model, delegate
             {
                 menuOpen = false;
+                menuTransition.AnimateTo(0f, 150, UiEase.EaseOutQuint);
                 if (IsDisposed) return;
                 Invalidate();
                 if (!Bounds.Contains(Cursor.Position))
@@ -726,6 +774,7 @@ namespace DualRemote
         {
             base.OnMouseEnter(e);
             hovered = true;
+            hoverTransition.AnimateTo(1f, 120, UiEase.EaseOutExpo);
             edgeHideTimer.Stop();
             Engines.ReleaseCursorClip();
             if (hiddenAtEdge)
@@ -740,6 +789,12 @@ namespace DualRemote
         {
             base.OnMouseLeave(e);
             hovered = false;
+            if (pressed)
+            {
+                pressed = false;
+                pressTransition.AnimateTo(0f, 175, UiEase.EaseOutQuint);
+            }
+            hoverTransition.AnimateTo(0f, 120, UiEase.EaseOutExpo);
             Invalidate();
             if (!menuOpen && !dragging)
             {
@@ -760,8 +815,11 @@ namespace DualRemote
             }
             if (e.Button != MouseButtons.Left) return;
 
+            dockAnim.SnapTo(1f);
             dragging = true;
             dragMoved = false;
+            pressed = true;
+            pressTransition.AnimateTo(1f, 55, UiEase.EaseOutQuint);
             dragStartCursor = Cursor.Position;
             if (hiddenAtEdge)
             {
@@ -794,6 +852,11 @@ namespace DualRemote
         {
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left) return;
+            if (pressed)
+            {
+                pressed = false;
+                pressTransition.AnimateTo(0f, 175, UiEase.EaseOutQuint);
+            }
             if (!dragging) return;
 
             bool moved = dragMoved;
@@ -813,6 +876,24 @@ namespace DualRemote
             }
         }
 
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (Capture) return;
+            if (pressed)
+            {
+                pressed = false;
+                pressTransition.AnimateTo(0f, 175, UiEase.EaseOutQuint);
+            }
+            if (dragging)
+            {
+                dragging = false;
+                dragMoved = false;
+                edgeHideTimer.Stop();
+                edgeHideTimer.Start();
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -821,8 +902,11 @@ namespace DualRemote
             float s = Theme.GetDpiScale(this);
             bool free = getFreeMouseActive == null || getFreeMouseActive();
             Color statusDot = free ? Theme.Success : Theme.Warning;
+            float hover = hoverTransition.Value;
+            float press = pressTransition.Value;
+            float menuT = menuTransition.Value;
 
-            if (hiddenAtEdge && !menuOpen && !dragging)
+            if (hiddenAtEdge && !menuOpen && !dragging && !dockAnim.IsRunning)
             {
                 g.Clear(Theme.SurfaceSubtle);
                 Theme.Surface(g, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f),
@@ -848,11 +932,12 @@ namespace DualRemote
                 return;
             }
 
-            Color cardFill = menuOpen ? Theme.AccentLight : hovered ? Theme.SurfaceSubtle : Theme.Paper;
-            Color cardBorder = menuOpen ? Theme.AccentBorder : Theme.StrokeStrong;
+            Color cardFill = BlendOverlayColor(BlendOverlayColor(Theme.Paper, Theme.SurfaceSubtle, Math.Max(hover, press * 0.65f)), Theme.AccentLight, menuT);
+            Color cardBorder = BlendOverlayColor(BlendOverlayColor(Theme.StrokeStrong, Theme.AccentBorder, press * 0.5f), Theme.AccentBorder, menuT);
 
             g.Clear(cardFill);
-            Theme.Surface(g, new RectangleF(0.6f, 0.6f, Width - 1.6f, Height - 1.6f),
+            float inset = press * 1.1f * s;
+            Theme.Surface(g, new RectangleF(0.6f + inset, 0.6f + inset, Math.Max(4f, Width - 1.6f - inset * 2f), Math.Max(4f, Height - 1.6f - inset * 2f)),
                 11f * s, cardFill, cardBorder);
 
             // Centered BoBo brand logo (or crisp control-center icon fallback)
@@ -888,6 +973,17 @@ namespace DualRemote
                 g.FillEllipse(ring, dx - 1.2f, dy - 1.2f, dotSize + 2.4f, dotSize + 2.4f);
                 g.FillEllipse(dot, dx, dy, dotSize, dotSize);
             }
+        }
+
+        private static Color BlendOverlayColor(Color a, Color b, float t)
+        {
+            if (t <= 0f) return a;
+            if (t >= 1f) return b;
+            return Color.FromArgb(
+                (int)Math.Round(a.A + (b.A - a.A) * t),
+                (int)Math.Round(a.R + (b.R - a.R) * t),
+                (int)Math.Round(a.G + (b.G - a.G) * t),
+                (int)Math.Round(a.B + (b.B - a.B) * t));
         }
     }
 }

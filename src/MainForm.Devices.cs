@@ -1376,6 +1376,9 @@ namespace DualRemote
 
         private sealed class DevicePreviewCanvas : Control
         {
+            private readonly UiTransition ctaHoverTransition;
+            private readonly UiTransition shuffleHoverTransition;
+            private readonly UiTransition pressTransition;
             private string deviceName = "";
             private string deviceAddress = "";
             private string linkText = "";
@@ -1383,6 +1386,7 @@ namespace DualRemote
             private bool controlling;
             private bool hovered;
             private bool hoverShuffle;
+            private bool pressed;
             private int wallpaperIndex;
             private RectangleF shuffleRect = RectangleF.Empty;
 
@@ -1391,6 +1395,9 @@ namespace DualRemote
 
             internal DevicePreviewCanvas()
             {
+                ctaHoverTransition = new UiTransition(this);
+                shuffleHoverTransition = new UiTransition(this);
+                pressTransition = new UiTransition(this);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 Cursor = Cursors.Hand;
@@ -1417,14 +1424,63 @@ namespace DualRemote
                 Invalidate();
             }
 
-            protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+            private void SyncHoverState()
+            {
+                ctaHoverTransition.AnimateTo(hovered && !hoverShuffle ? 1f : 0f, 135, UiEase.EaseOutExpo);
+                shuffleHoverTransition.AnimateTo(hoverShuffle ? 1f : 0f, 110, UiEase.EaseOutExpo);
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hovered = true;
+                SyncHoverState();
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
 
             protected override void OnMouseLeave(EventArgs e)
             {
                 hovered = false;
                 hoverShuffle = false;
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                }
+                SyncHoverState();
                 Invalidate();
                 base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    pressed = true;
+                    pressTransition.AnimateTo(1f, 60, UiEase.EaseOutQuint);
+                    Invalidate();
+                }
+                base.OnMouseDown(e);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                if (pressed)
+                {
+                    pressed = false;
+                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                    Invalidate();
+                }
+                base.OnMouseUp(e);
+            }
+
+            protected override void OnMouseCaptureChanged(EventArgs e)
+            {
+                base.OnMouseCaptureChanged(e);
+                if (!pressed || Capture) return;
+                pressed = false;
+                pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
+                Invalidate();
             }
 
             protected override void OnMouseMove(MouseEventArgs e)
@@ -1434,6 +1490,7 @@ namespace DualRemote
                 if (overShuffle != hoverShuffle)
                 {
                     hoverShuffle = overShuffle;
+                    SyncHoverState();
                     Invalidate();
                 }
             }
@@ -1467,6 +1524,9 @@ namespace DualRemote
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
                 float scale = g.DpiX / 96f;
+                float ctaHover = ctaHoverTransition.Value;
+                float shuffleHover = shuffleHoverTransition.Value;
+                float press = pressTransition.Value;
 
                 var rect = new RectangleF(1f, 1f, Math.Max(2f, Width - 2f), Math.Max(2f, Height - 1f));
                 var clipState = g.Save();
@@ -1504,9 +1564,13 @@ namespace DualRemote
                         float sw = ssz.Width + 22f * scale;
                         float sh = 24f * scale;
                         shuffleRect = new RectangleF(w - sw - 14f * scale, 14f * scale, sw, sh);
-                        Color sBg = hoverShuffle ? Color.FromArgb(215, 22, 34, 52) : Color.FromArgb(148, 18, 28, 44);
-                        Theme.Surface(g, shuffleRect, sh * 0.5f, sBg, Color.FromArgb(95, 255, 255, 255), 1f);
-                        TextRenderer.DrawText(g, shuffleLabel, sf, Rectangle.Round(shuffleRect), Color.FromArgb(245, 249, 255),
+                        float shufflePress = hoverShuffle ? press : 0f;
+                        RectangleF drawShuffle = shuffleRect;
+                        drawShuffle.Y += shufflePress * 0.7f * scale;
+                        int sAlpha = (int)Math.Round(148f + 70f * Math.Max(shuffleHover, shufflePress));
+                        Color sBg = Color.FromArgb(sAlpha, 20, 31, 48);
+                        Theme.Surface(g, drawShuffle, sh * 0.5f, sBg, Color.FromArgb(95 + (int)Math.Round(45f * shuffleHover), 255, 255, 255), 1f);
+                        TextRenderer.DrawText(g, shuffleLabel, sf, Rectangle.Round(drawShuffle), Color.FromArgb(245, 249, 255),
                             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
                     }
 
@@ -1521,18 +1585,28 @@ namespace DualRemote
                             TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                         float contentW = iconSz + gap + textSz.Width;
                         float ctaW = Math.Max(154f * scale, contentW + 46f * scale);
-                        var ctaRect = new RectangleF((w - ctaW) / 2f, (h - ctaH) / 2f - 4f * scale, ctaW, ctaH);
+                        float ctaPress = hoverShuffle ? 0f : press;
+                        float liftY = (-1.1f * ctaHover + 1.2f * ctaPress) * scale;
+                        var ctaRect = new RectangleF((w - ctaW) / 2f, (h - ctaH) / 2f - 4f * scale + liftY, ctaW, ctaH);
                         // Soft elevation shadow so pill stands out crisply over bright scenic photos
-                        var shadowRect = new RectangleF(ctaRect.X, ctaRect.Y + 3f * scale, ctaRect.Width, ctaRect.Height);
-                        Theme.Surface(g, shadowRect, ctaH * 0.5f, Color.FromArgb(72, 10, 18, 32), Color.Transparent, 0f);
+                        int shadowAlpha = (int)Math.Round((68f + 26f * ctaHover) * (1f - 0.35f * ctaPress));
+                        var shadowRect = new RectangleF(ctaRect.X, ctaRect.Y + (3f - 1.2f * ctaPress + 0.8f * ctaHover) * scale, ctaRect.Width, ctaRect.Height);
+                        Theme.Surface(g, shadowRect, ctaH * 0.5f, Color.FromArgb(Math.Max(20, shadowAlpha), 10, 18, 32), Color.Transparent, 0f);
 
                         Color ctaBg;
                         if (controlling)
-                            ctaBg = hovered && !hoverShuffle ? ControlPaint.Dark(Theme.Alert, 0.08f) : Theme.Alert;
+                        {
+                            Color hotAlert = ControlPaint.Dark(Theme.Alert, 0.08f);
+                            ctaBg = MixPreviewColor(Theme.Alert, hotAlert, Math.Max(ctaHover, ctaPress));
+                        }
                         else if (!online)
+                        {
                             ctaBg = Color.FromArgb(204, 102, 112, 128);
+                        }
                         else
-                            ctaBg = (hovered && !hoverShuffle) ? Theme.AccentHover : Theme.Accent;
+                        {
+                            ctaBg = MixPreviewColor(MixPreviewColor(Theme.Accent, Theme.AccentHover, ctaHover), Theme.AccentPressed, ctaPress);
+                        }
 
                         Theme.Surface(g, ctaRect, ctaH * 0.5f, ctaBg, Color.FromArgb(130, 255, 255, 255), 1.1f);
 
@@ -1557,6 +1631,17 @@ namespace DualRemote
                     }
                 }
                 g.Restore(clipState);
+            }
+
+            private static Color MixPreviewColor(Color a, Color b, float t)
+            {
+                if (t <= 0f) return a;
+                if (t >= 1f) return b;
+                return Color.FromArgb(
+                    (int)Math.Round(a.A + (b.A - a.A) * t),
+                    (int)Math.Round(a.R + (b.R - a.R) * t),
+                    (int)Math.Round(a.G + (b.G - a.G) * t),
+                    (int)Math.Round(a.B + (b.B - a.B) * t));
             }
         }
 

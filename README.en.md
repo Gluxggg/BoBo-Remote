@@ -26,13 +26,13 @@
 
 **BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + pure Go + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no BoBo vendor accounts** and **bundles zero external third-party remote desktop engine binaries**.
 
-### At a Glance (`v7.3.0`)
+### At a Glance (`v7.3.2`)
 
-- **Four-Platform Standard AEAD `AES-128-GCM` UDP + FEC/NACK**: `v7.3.0` completes the P1 cryptography audit and cross-platform rollout — UDP media/input/feedback (`UDP 49811`) upgrades from `AES-128-CTR + truncated HMAC` to **standard `AES-128-GCM` (128-bit auth tag)** using native Windows CNG `bcrypt.dll`, Android `javax.crypto`, and Apple `CryptoKit`, enforcing verify-before-replay-mutation, `0xFFFFFF00` sequence caps, and explicit key zeroization while bringing interleaved `XOR FEC` + selective `NACK` to **Windows, Android, macOS, and iOS** (auto-falling back to TCP+TLS after `> 3.5s` UDP silence).
-- **GCC-Inspired Congestion Control & Dynamic FEC**: Smoothed RTT delay-gradient detector (`Normal / Hold / Overuse`) with multi-sample noise gating (single-spike immunity), client `jitterX10` feedback, adaptive pacing headroom (`1.35x / 1.22x / 1.12x`), and dynamic RTT/jitter/burst-aware `SelectFecParams` redundancy scaling.
-- **Compressed `AAC-LC 96 kbps` Audio + Automatic ADPCM Fallback**: OS-native Windows Media Foundation `AAC-LC` (`96 kbps` ADTS framing with zero extra third-party DLLs) negotiated via `audioCodecs` (`0x07 AudioAac` / UDP `11`), reducing audio bandwidth by ~75% vs `384 kbps IMA-ADPCM` while falling back automatically to ADPCM when needed.
-- **Zero-Install Embedded Tailnet + Multi-VPS Load-Aware Relay**: Pure-Go user-space `tsnet` embedded in Windows allows one-click in-app Tailscale sign-in across PCs with zero TUN drivers or VPN conflicts, alongside concurrent probing and overload-aware failover across self-hosted [`tools/bobo-relay`](tools/bobo-relay/README.md) nodes.
-- **Business-Minimalist Desktop UI Redesign**: Unified pure-white grouped cards with crisp `1px` hairlines (`Theme.Divider`), calm slate-grey typography hierarchy, trimmed subtitles, and `WM_PRINTCLIENT`-clean `StyledChoiceBox` controls across Devices, Privacy/Display, and Settings.
+- **120 Hz On-Demand Micro-Interaction & Spring Engine (`v7.3.2`)**: [`UiTransition`](src/UiTransition.cs) adds ref-counted on-demand `timeBeginPeriod(1)` 120 Hz ticking (`ActiveHighResCount == 0` when idle, honoring Windows animation accessibility) with `EaseOutQuint` / `EaseOutExpo` / `SpringSettle` curves across buttons (tactile compression + cursor-origin ripple), sliding nav/tab indicators, rotating chevrons, pill-stretching switches, focus halos, lifted preview CTAs, gliding Control Center hover pills, and smooth 4-edge ball docking.
+- **2 ms Burst Z-Order Curtain Hardening (`v7.3.1`)**: Dedicated Windows STA privacy shield thread triggers a `2 ms` burst topmost guard on edge/bottom-bar clicks, keystrokes, activated taskbar thumbnails, reused-HWND silent IME popups, and `WM_WINDOWPOSCHANGING` demotion attempts.
+- **Four-Platform Standard AEAD `AES-128-GCM` UDP + FEC/NACK**: UDP media/input/feedback (`UDP 49811`) runs **standard `AES-128-GCM` (128-bit auth tag)** via native Windows CNG `bcrypt.dll`, Android `javax.crypto`, and Apple `CryptoKit`, enforcing verify-before-replay-mutation, `0xFFFFFF00` sequence caps, and explicit key zeroization while bringing interleaved `XOR FEC` + selective `NACK` to **Windows, Android, macOS, and iOS** (auto-falling back to TCP+TLS after `> 3.5s` UDP silence).
+- **GCC-Inspired Congestion Control & `AAC-LC 96 kbps` Audio**: Smoothed RTT delay-gradient detector (`Normal / Hold / Overuse`) with single-spike immunity, client `jitterX10` feedback, adaptive pacing headroom (`1.35x / 1.22x / 1.12x`), dynamic FEC scaling, and OS-native Windows Media Foundation `AAC-LC` (`~75%` audio bandwidth savings vs ADPCM with seamless fallback).
+- **Zero-Install Embedded Tailnet + Multi-VPS Load-Aware Relay + Minimalist UI**: Pure-Go user-space `tsnet` embedded in Windows allows one-click in-app Tailscale sign-in alongside concurrent probing/failover across self-hosted [`tools/bobo-relay`](tools/bobo-relay/README.md) nodes, paired with pure-white grouped cards and `1px` `Theme.Divider` hairlines.
 
 <p align="center">
   <a href="#why-bobo-remote">Comparison</a> ·
@@ -46,20 +46,20 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.3.0 business-minimalist Devices workspace" width="900" />
+  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.3.2 business-minimalist Devices workspace" width="900" />
 </p>
 
 ---
 
 ## Why BoBo Remote?
 
-| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.3.0`) |
+| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.3.2`) |
 | --- | --- | --- |
 | **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No BoBo vendor accounts, zero telemetry**: config & keys stay local; 1-click **in-app Tailscale user-space sign-in** or **self-hosted BYO-VPS relay** |
 | **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: HW codecs, Super Display, privacy shield, and 2 GiB file transfer out of the box |
 | **Footprint & Background Services** | Tens to hundreds of MB, multiple external processes, always-on background services | **~9.2 MB Windows portable ZIP / ~9.4 MB Setup**: embedded `BoBoCore.dll` + user-space `BoBoTsNet`; closing immediately terminates children, closes `49810`, and unhooks filters |
 | **Weak-Network Media Engine** | Black-box transport and throttled vendor relays | **Four-platform `AES-128-GCM` UDP + interleaved `XOR FEC` + selective `NACK` + GCC delay-gradient ABR + `AAC-LC 96 kbps`** with automatic TCP+TLS fallback |
-| **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + physical-grade privacy**: TLS 1.2 leaf-cert SHA-256 TOFU + RSA proofs + 4-digit PIN + `WDA_EXCLUDEFROMCAPTURE` + native low-level input locks |
+| **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + `WDA_EXCLUDEFROMCAPTURE` + 2ms burst curtain + low-level input locks + 120 Hz on-demand tactile UI** |
 
 ---
 
@@ -82,24 +82,24 @@
 - **Windows (`BoBoCore.dll`)**: **DXGI Desktop Duplication** (GDI fallback) → GPU D3D11 NV12 → **Media Foundation HW H.264 encode** → **Bounded low-latency decode queue (`12 frames / 4 MiB / 250 ms` hard caps + anti-artifact IDR auto-recovery) + D3D11 Flip-Model render** → **WASAPI 48 kHz stereo + OS-native Media Foundation `AAC-LC 96 kbps` ADTS** (`AudioAac`, zero extra DLLs) with seamless `IMA-ADPCM` fallback.
 - **Android / macOS / iOS**: Android `MediaCodec` zero-copy decode + rootless `MediaProjection` + `AccessibilityService` host; macOS driverless `ScreenCaptureKit` + VideoToolbox + `CGEventTap` + `⌘ → Ctrl`; iOS foreground controller + `ReplayKit Broadcast Extension`.
 
-### 5. Business-Minimalist Desktop UI, Super Display v2 & 3-Line HUD
-- **Grouped Pure-White Hairline Design (`v7.3.0`)**: Consolidated fragmented card stacks across Devices, Privacy & Display, and Settings (General / Stream / Network & Engines) into unified pure-white sheets with `1px` `Theme.Divider` hairlines, calmer typography hierarchy, concise labels, and `WM_PRINTCLIENT`-clean `StyledChoiceBox` dropdowns.
-- **Super Display v2 & Control Center**: Viewport aspect-matching display negotiation restored cleanly on exit; host-scaled cursor + `Ctrl + Alt` instant mouse release; 4-edge dockable ball, opacity mini-window, jump-free volume slider, and **3-line frame-pipeline HUD** (`FPS / Res / Transport`, `RTT ± Jitter / Loss / FEC+NACK`, `Queue / Decode / Render` ms & drop/reset warnings).
+### 5. Business-Minimalist Desktop UI, 120 Hz Tactile Motion & 3-Line HUD
+- **Grouped Pure-White Hairlines & 120 Hz On-Demand Micro-Interactions (`v7.3.0` – `v7.3.2`)**: Consolidated Devices, Privacy & Display, and Settings into pure-white grouped sheets with `1px` `Theme.Divider` hairlines and `WM_PRINTCLIENT`-clean `StyledChoiceBox` dropdowns. `v7.3.2` upgrades [`UiTransition`](src/UiTransition.cs) with ref-counted on-demand `timeBeginPeriod(1)` 120 Hz ticking and `EaseOutQuint` / `EaseOutExpo` / `SpringSettle` easing for button press compression, clipped cursor-origin click ripples, animated nav/tab indicators, rotating chevrons, pill-stretching spring switches, smooth focus halos, gliding Control Center hover pills + fade-in, and smooth 4-edge ball docking (honoring Windows animation settings with zero idle overhead).
+- **Super Display v2 & Control Center**: Viewport aspect-matching display negotiation restored cleanly on exit; host-scaled cursor + `Ctrl + Alt` instant mouse release; smooth 4-edge dockable ball, opacity mini-window, jump-free volume slider, and **3-line frame-pipeline HUD** (`FPS / Res / Transport`, `RTT ± Jitter / Loss / FEC+NACK`, `Queue / Decode / Render` ms & drop/reset warnings).
 
 ### 6. Zero-Trust Pairing, Physical Privacy Shield & 2 GiB File Transfer
 - **RSA-2048 TOFU + 4-Digit Brute-Force-Hardened PIN**: TLS 1.2 host cert `SHA-256` pinning + asymmetric client proof + single-use 4-digit PIN (120s TTL, locked after 5 failures); built-in **2 GiB** encrypted file transfer with mandatory **SHA-256** verification.
-- **Dedicated STA Curtain Thread (`WDA_EXCLUDEFROMCAPTURE`) & Hardware Input Lock**: Resists IME popup z-order flashes; blocks host `WH_MOUSE_LL` / `WH_KEYBOARD_LL` (Windows) and `CGEventTap` (macOS) physical input while honoring `Ctrl+Alt+Shift+P` / `⌘+⌥+⇧+P`; optional non-HDR-safe `VCP 0x10` DDC/CI backlight dimming.
+- **Dedicated STA Curtain Thread (`v7.3.1` 2 ms Burst Z-Order Lock) & Hardware Input Lock**: `WDA_EXCLUDEFROMCAPTURE` + `SetWinEventHook` + `2 ms` burst pulse & `WM_WINDOWPOSCHANGING` anti-demotion block activated taskbar hover/thumbnails and reused-HWND IME popups; enforces host `WH_MOUSE_LL` / `WH_KEYBOARD_LL` / `CGEventTap` input lock (`Ctrl+Alt+Shift+P` / `⌘+⌥+⇧+P` escape) with optional non-HDR `VCP 0x10` DDC/CI dimming.
 
 ---
 
 ## Four-Platform Matrix & Release Sizes
 
-| Platform | OS Requirement | `v7.3.0` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| Platform | OS Requirement | `v7.3.2` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (9.2 MB)<br>`BoBoRemote-Update-x64.zip` (9.2 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264/AAC + WASAPI | Embedded `BoBoCore.dll` (12f/4MiB decode caps + `AAC-LC 96k`) + **zero-install `BoBoTsNet`**, load-aware relay scheduler, **`AES-128-GCM` UDP+FEC/NACK + GCC ABR**, physical privacy shield, minimalist UI |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>`MediaCodec` decode + 48kHz stereo | ✅ **Rootless Full**<br>`MediaProjection` + Accessibility | **`v7.3` `AES-128-GCM` UDP+FEC/NACK**, trackpad/touch modes, floating ball, PC shortcut bar, Bluetooth VK map |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | **`v7.3` `CryptoKit AES-128-GCM` UDP+FEC/NACK**, Super Display, `⌘ → Ctrl`, capture-excluded shield + `CGEventTap` |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | **`v7.3` `AES-128-GCM` UDP+FEC/NACK**, embedded ReplayKit Broadcast Extension; sign via Sideloadly / AltStore / SideStore / Xcode |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (9.2 MB)<br>`BoBoRemote-Update-x64.zip` (9.2 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264/AAC + WASAPI | Embedded `BoBoCore.dll` (12f/4MiB decode caps + `AAC-LC 96k`) + **zero-install `BoBoTsNet`**, load-aware relay scheduler, `AES-128-GCM` UDP+FEC/NACK + GCC ABR, **2ms curtain shield**, **120 Hz tactile minimalist UI** |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>`MediaCodec` decode + 48kHz stereo | ✅ **Rootless Full**<br>`MediaProjection` + Accessibility | **`AES-128-GCM` UDP+FEC/NACK**, trackpad/touch modes, floating ball, PC shortcut bar, Bluetooth VK map |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | **`CryptoKit AES-128-GCM` UDP+FEC/NACK**, Super Display, `⌘ → Ctrl`, capture-excluded shield + `CGEventTap` |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | **`AES-128-GCM` UDP+FEC/NACK**, embedded ReplayKit Broadcast Extension; sign via Sideloadly / AltStore / SideStore / Xcode |
 
 > Full permission & multi-platform setup steps live in [**Cross-Platform Installation & Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md).
 
@@ -107,7 +107,7 @@
 
 ## Architecture & Protocol Pipeline
 
-### Shipped Architecture (`BoBo6.2` · `v7.3.0`)
+### Shipped Architecture (`BoBo6.2` · `v7.3.2`)
 
 ```mermaid
 flowchart LR
@@ -144,7 +144,7 @@ flowchart LR
 ## UI Previews
 
 <p align="center">
-  <img src="assets/screenshot-privacy-display.png" alt="BoBo Remote v7.3.0 Privacy & Display unified policy card" width="450" />
+  <img src="assets/screenshot-privacy-display.png" alt="BoBo Remote v7.3.2 Privacy & Display unified policy card" width="450" />
   <img src="assets/screenshot-onboarding.png" alt="7-step ClearType spotlight onboarding tour" width="450" />
 </p>
 
@@ -212,12 +212,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.3.1`)**
+**Verified Test Coverage (`v7.3.2`)**
 - **Local Windows suite**:
   - **12/12** native `BoBoCore.dll` self-tests (H.264 encode/decode loopback, D3D11, WASAPI ADPCM, Media Foundation `AAC-LC 48 kHz` stereo ADTS round-trip, hardware input lock, and bounded `12f / 4 MiB / 250 ms` decode queue + IDR recovery; non-interactive sessions fall back to synthetic NV12)
   - **7/7** pure-Go `native/bobo-tsnet` unit tests + `--self-test` and **3/3** pure-Go `tools/bobo-relay` unit tests
-  - **150/150** managed `BoBo远程.exe --self-test` checks (`udpAesGcm` golden vector, `AES-128-GCM` verify-before-replay, 512-packet anti-replay, `0xFFFFFF00` sequence cap & `Dispose()` key zeroization, GCC delay-gradient congestion control & single-spike immunity, dynamic FEC, `AudioAac`, edge/taskbar & IME curtain trigger classification, relay scheduler, embedded Tailnet SOCKS5, and 3-line HUD ABI)
-  - **7/7** GUI installer `--self-test` checks, **85/85** `UiSmoke731` UI checks, **15/15** `CurtainSmoke731` threaded privacy curtain checks (including activated taskbar/thumbnail and silent IME 2 ms burst override + `WM_WINDOWPOSCHANGING` anti-demotion), and **5/5** PowerShell UTF-8 BOM + AST syntax checks
+  - **153/153** managed `BoBo远程.exe --self-test` checks (`udpAesGcm` golden vector, `AES-128-GCM` verify-before-replay, 512-packet anti-replay, `0xFFFFFF00` sequence cap & `Dispose()` key zeroization, GCC delay-gradient congestion control & single-spike immunity, dynamic FEC, `AudioAac`, edge/taskbar & IME curtain trigger classification, 120 Hz easing bounds & high-res timer ref-count balance, relay scheduler, embedded Tailnet SOCKS5, and 3-line HUD ABI)
+  - **7/7** GUI installer `--self-test` checks, **107/107** `UiSmoke732` tactile animation & minimalist UI checks, **15/15** `CurtainSmoke731` threaded privacy curtain checks, and **5/5** PowerShell UTF-8 BOM + AST syntax checks
 - **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` including `BoBoProtocolGoldenTest` + `assembleRelease`), macOS (`swift test` including `BoBoGoldenVectorsTests` + Universal 2 DMG), and iOS (unsigned IPA), publishing all 6 artifacts alongside `SHA256SUMS.txt`.
 
 ---
@@ -288,7 +288,7 @@ BoBo-Remote/
 | **V1 – V5** | Custom WinForms theme & 7-step tour, privacy curtain & GUI installer/updater, embedded native stream window, Control Center & 4-edge ball | ✅ Done |
 | **V6.0 – V6.2** | In-process C++17 `BoBoCore.dll`, `BoBo6.2` unified wire spec, physical input-lock shield, **4-platform Windows / Android / macOS / iOS release** | ✅ Done |
 | **V7.0 – V7.2 (`v7.2.1`)** | Super Display v2, host-sized cursor, pure-Go zero-install `tsnet` Tailnet, load-aware BYO-VPS relay scheduling ([`tools/bobo-relay`](tools/bobo-relay/README.md)), **P0 bounded `12f/4MiB/250ms` decode queue + 3-line HUD** | ✅ Done |
-| **V7.3 (`v7.3.0` – `v7.3.1`)** | **Full P1 + Minimalist UI & 2ms Curtain Z-Order Hardening**: ① Standard AEAD **`AES-128-GCM`** & crypto audit; ② **GCC-inspired delay-gradient ABR** & dynamic FEC; ③ **Four-platform encrypted `UDP+FEC/NACK`**; ④ **OS-native `AAC-LC 96 kbps`** audio + ADPCM fallback; ⑤ **Business-minimalist grouped-card UI redesign**; ⑥ `v7.3.1` **2 ms high-res curtain burst pump blocking taskbar/sidebar & IME bleed-through** | ✅ Done |
+| **V7.3 (`v7.3.0` – `v7.3.2`)** | **Full P1 + Minimalist UI, 2ms Curtain Hardening & 120 Hz Tactile Motion**: ① Standard AEAD **`AES-128-GCM`** & crypto audit; ② **GCC-inspired delay-gradient ABR** & dynamic FEC; ③ **Four-platform encrypted `UDP+FEC/NACK`**; ④ **OS-native `AAC-LC 96 kbps`** audio + ADPCM fallback; ⑤ **Business-minimalist grouped-card UI redesign**; ⑥ `v7.3.1` **2 ms high-res curtain burst pump blocking taskbar/sidebar & IME bleed-through**; ⑦ `v7.3.2` **on-demand 120 Hz micro-interaction & spring easing engine** | ✅ Done |
 | **V8 / P2** | `HEVC (H.265)` / `AV1` / `H.264 4:4:4` codec negotiation (ultra-crisp text & IDE rendering), HDR / high-refresh multi-monitor parity, self-hosted Connection Coordinator + native STUN/ICE + BYO-VPS UDP TURN / `TCP 443`, community relay & Linux exploration | 🚧 Planned / Evolving |
 
 ---

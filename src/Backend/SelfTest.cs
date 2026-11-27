@@ -634,6 +634,7 @@ namespace DualRemote
             Log("");
             Info("Tailscale CLI：" + (Engines.TailscalePresent ? "已找到" : "未找到") + " " + Tailscale.ExePath);
             Info("最近目标目录：" + RecentStore.DirPath);
+            RunUiMotionSelfTests();
             // V6 全内置架构端到端闭环自检：内嵌 BoBoCore.dll + 严格双端必开 TLS 1.2 + 4 位临时配对码 + 视频帧 + 防窥指令 + 文件 SHA-256 互传
             RunV6AllInOneSelfTests();
 
@@ -653,6 +654,49 @@ namespace DualRemote
                 }
             }
             return _failures == 0 ? 0 : 1;
+        }
+
+        private static void RunUiMotionSelfTests()
+        {
+            UiEase[] eases =
+            {
+                UiEase.EaseOutCubic,
+                UiEase.EaseOutQuart,
+                UiEase.EaseOutQuint,
+                UiEase.EaseOutExpo,
+                UiEase.EaseOutBackSoft,
+                UiEase.SpringSettle
+            };
+            bool boundsOk = true;
+            for (int i = 0; i < eases.Length; i++)
+            {
+                float f0 = UiTransition.EvaluateCurve(0f, eases[i]);
+                float fMid = UiTransition.EvaluateCurve(0.25f, eases[i]);
+                float f1 = UiTransition.EvaluateCurve(1f, eases[i]);
+                if (f0 != 0f || Math.Abs(f1 - 1f) > 0.0005f || float.IsNaN(fMid) || float.IsInfinity(fMid) || fMid <= 0f)
+                {
+                    boundsOk = false;
+                    break;
+                }
+            }
+            float quintQuarter = UiTransition.EvaluateCurve(0.25f, UiEase.EaseOutQuint);
+            float cubicQuarter = UiTransition.EvaluateCurve(0.25f, UiEase.EaseOutCubic);
+            float backPeak = UiTransition.EvaluateCurve(0.68f, UiEase.EaseOutBackSoft);
+            Check("V7.3.2 前端缓动曲线：6 种曲线边界收敛且 Quint 启动快于 Cubic、BackSoft 轻微过冲收尾",
+                boundsOk && quintQuarter > cubicQuarter && backPeak > 1.0f && backPeak < 1.06f,
+                "quint=" + quintQuarter.ToString("F3") + " cubic=" + cubicQuarter.ToString("F3") + " back=" + backPeak.ToString("F3"));
+
+            using (var ctl = new System.Windows.Forms.Control())
+            {
+                var tr = new UiTransition(ctl, 0f, delegate { });
+                tr.MoveTo(1f, 120);
+                Check("V7.3.2 按需 120Hz 节拍器：无句柄隐藏控件同步瞬移且零计时器引用泄漏",
+                    tr.Value == 1f && !tr.IsRunning && UiTransition.ActiveHighResCount == 0,
+                    "val=" + tr.Value + " active=" + UiTransition.ActiveHighResCount);
+            }
+            Check("V7.3.2 前端高刷动效：闲置状态下高精度计时器引用计数严格归零",
+                UiTransition.ActiveHighResCount == 0,
+                "active=" + UiTransition.ActiveHighResCount);
         }
 
         private static void RunV6AllInOneSelfTests()
