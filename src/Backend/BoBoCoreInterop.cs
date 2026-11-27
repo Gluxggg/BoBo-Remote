@@ -138,6 +138,8 @@ namespace DualRemote
         internal const int PushVideoNeedKeyframe = 2;
         internal const int AudioCodecAdpcm = 0;
         internal const int AudioCodecAac = 1;
+        internal const int VideoCodecH264 = 0;
+        internal const int VideoCodecHevc = 1;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryW(string lpFileName);
@@ -158,6 +160,27 @@ namespace DualRemote
         private delegate int FnIsAacAudioSupported();
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnIsHevcEncodeSupported();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnIsHevcDecodeSupported();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate IntPtr FnHostCreateV3(
+            int monitorIndex,
+            int targetWidth,
+            int targetHeight,
+            int fps,
+            int bitrateKbps,
+            int muteHostSpeakers,
+            int compositeCursor,
+            int preferAacAudio,
+            int preferHevcVideo,
+            BoBoVideoFrameNativeCallback onVideo,
+            BoBoAudioFrameNativeCallback onAudio,
+            IntPtr userCtx);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate IntPtr FnHostCreateV2(
             int monitorIndex,
             int targetWidth,
@@ -173,6 +196,9 @@ namespace DualRemote
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int FnHostGetAudioCodec(IntPtr handle);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostGetVideoCodec(IntPtr handle);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate IntPtr FnHostCreate(
@@ -281,6 +307,16 @@ namespace DualRemote
             int srcHeight);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnClientPushVideoEx(
+            IntPtr handle,
+            byte[] videoData,
+            int length,
+            int isKeyframe,
+            int srcWidth,
+            int srcHeight,
+            int codecId);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientPushAudio(
             IntPtr handle,
             byte[] adpcmData,
@@ -348,10 +384,14 @@ namespace DualRemote
         private static FnGetMonitorCount fnGetMonitorCount;
         private static FnGetMonitorInfo fnGetMonitorInfo;
         private static FnIsAacAudioSupported fnIsAacAudioSupported;
+        private static FnIsHevcEncodeSupported fnIsHevcEncodeSupported;
+        private static FnIsHevcDecodeSupported fnIsHevcDecodeSupported;
         private static FnHostCreate fnHostCreate;
         private static FnHostCreateEx fnHostCreateEx;
         private static FnHostCreateV2 fnHostCreateV2;
+        private static FnHostCreateV3 fnHostCreateV3;
         private static FnHostGetAudioCodec fnHostGetAudioCodec;
+        private static FnHostGetVideoCodec fnHostGetVideoCodec;
         private static FnHostReconfigure fnHostReconfigure;
         private static FnHostSetBitrate fnHostSetBitrate;
         private static FnHostSetFps fnHostSetFps;
@@ -372,6 +412,7 @@ namespace DualRemote
         private static BoBoPrivacyEscapeNativeCallback activePrivacyEscapeKeepAlive;
         private static FnClientCreate fnClientCreate;
         private static FnClientPushVideo fnClientPushVideo;
+        private static FnClientPushVideoEx fnClientPushVideoEx;
         private static FnClientPushAudio fnClientPushAudio;
         private static FnClientPushAudioEx fnClientPushAudioEx;
         private static FnClientResize fnClientResize;
@@ -435,10 +476,14 @@ namespace DualRemote
                     fnGetMonitorCount = Bind<FnGetMonitorCount>(mod, "BoBoCore_GetMonitorCount");
                     fnGetMonitorInfo = Bind<FnGetMonitorInfo>(mod, "BoBoCore_GetMonitorInfo");
                     fnIsAacAudioSupported = TryBind<FnIsAacAudioSupported>(mod, "BoBoCore_IsAacAudioSupported");
+                    fnIsHevcEncodeSupported = TryBind<FnIsHevcEncodeSupported>(mod, "BoBoCore_IsHevcEncodeSupported");
+                    fnIsHevcDecodeSupported = TryBind<FnIsHevcDecodeSupported>(mod, "BoBoCore_IsHevcDecodeSupported");
                     fnHostCreate = Bind<FnHostCreate>(mod, "BoBoHost_Create");
                     fnHostCreateEx = TryBind<FnHostCreateEx>(mod, "BoBoHost_CreateEx");
                     fnHostCreateV2 = TryBind<FnHostCreateV2>(mod, "BoBoHost_CreateV2");
+                    fnHostCreateV3 = TryBind<FnHostCreateV3>(mod, "BoBoHost_CreateV3");
                     fnHostGetAudioCodec = TryBind<FnHostGetAudioCodec>(mod, "BoBoHost_GetAudioCodec");
+                    fnHostGetVideoCodec = TryBind<FnHostGetVideoCodec>(mod, "BoBoHost_GetVideoCodec");
                     fnHostReconfigure = Bind<FnHostReconfigure>(mod, "BoBoHost_Reconfigure");
                     fnHostSetBitrate = TryBind<FnHostSetBitrate>(mod, "BoBoHost_SetBitrate");
                     fnHostSetFps = TryBind<FnHostSetFps>(mod, "BoBoHost_SetFps");
@@ -457,6 +502,7 @@ namespace DualRemote
                     fnHostSetPrivacyCursorMask = TryBind<FnHostSetPrivacyCursorMask>(mod, "BoBoHost_SetPrivacyCursorMask");
                     fnClientCreate = Bind<FnClientCreate>(mod, "BoBoClient_Create");
                     fnClientPushVideo = Bind<FnClientPushVideo>(mod, "BoBoClient_PushVideo");
+                    fnClientPushVideoEx = TryBind<FnClientPushVideoEx>(mod, "BoBoClient_PushVideoEx");
                     fnClientPushAudio = Bind<FnClientPushAudio>(mod, "BoBoClient_PushAudio");
                     fnClientPushAudioEx = TryBind<FnClientPushAudioEx>(mod, "BoBoClient_PushAudioEx");
                     fnClientResize = Bind<FnClientResize>(mod, "BoBoClient_Resize");
@@ -795,6 +841,20 @@ namespace DualRemote
             try { return fnIsAacAudioSupported() != 0; } catch { return false; }
         }
 
+        internal static bool IsHevcEncodeSupported()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnIsHevcEncodeSupported == null) return false;
+            try { return fnIsHevcEncodeSupported() != 0; } catch { return false; }
+        }
+
+        internal static bool IsHevcDecodeSupported()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnIsHevcDecodeSupported == null) return false;
+            try { return fnIsHevcDecodeSupported() != 0; } catch { return false; }
+        }
+
         internal static BoBoHostNativeHandle CreateHostSession(
             int monitorIndex,
             int targetWidth,
@@ -806,7 +866,8 @@ namespace DualRemote
             Action<byte[], int, int, int> onAudio,
             out string error,
             bool compositeCursor = true,
-            bool preferAacAudio = false)
+            bool preferAacAudio = false,
+            bool preferHevcVideo = false)
         {
             if (!EnsureLoaded(out error)) return null;
 
@@ -834,14 +895,17 @@ namespace DualRemote
                 catch { }
             };
 
-            IntPtr ptr = fnHostCreateV2 != null
-                ? fnHostCreateV2(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                    muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, preferAacAudio ? 1 : 0, vidCb, audCb, IntPtr.Zero)
-                : (fnHostCreateEx != null
-                    ? fnHostCreateEx(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                        muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, vidCb, audCb, IntPtr.Zero)
-                    : fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                        muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero));
+            IntPtr ptr = fnHostCreateV3 != null
+                ? fnHostCreateV3(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                    muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, preferAacAudio ? 1 : 0, preferHevcVideo ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                : (fnHostCreateV2 != null
+                    ? fnHostCreateV2(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                        muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, preferAacAudio ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                    : (fnHostCreateEx != null
+                        ? fnHostCreateEx(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                            muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                        : fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                            muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero)));
             if (ptr == IntPtr.Zero)
             {
                 error = "创建进程内主机采编引擎失败。";
@@ -913,6 +977,18 @@ namespace DualRemote
                     {
                         if (handle == IntPtr.Zero || fnHostGetAudioCodec == null) return AudioCodecAdpcm;
                         try { return fnHostGetAudioCodec(handle); } catch { return AudioCodecAdpcm; }
+                    }
+                }
+            }
+
+            internal int VideoCodec
+            {
+                get
+                {
+                    lock (gate)
+                    {
+                        if (handle == IntPtr.Zero || fnHostGetVideoCodec == null) return VideoCodecH264;
+                        try { return fnHostGetVideoCodec(handle); } catch { return VideoCodecH264; }
                     }
                 }
             }
@@ -1002,12 +1078,20 @@ namespace DualRemote
 
             internal int PushVideo(byte[] h264Data, int length, bool isKeyframe, int srcWidth, int srcHeight)
             {
-                if (h264Data == null || length <= 0) return 0;
+                return PushVideoEx(h264Data, length, isKeyframe, srcWidth, srcHeight, VideoCodecH264);
+            }
+
+            internal int PushVideoEx(byte[] videoData, int length, bool isKeyframe, int srcWidth, int srcHeight, int codecId)
+            {
+                if (videoData == null || length <= 0) return 0;
                 rwLock.EnterReadLock();
                 try
                 {
                     if (handle == IntPtr.Zero) return 0;
-                    return fnClientPushVideo(handle, h264Data, length, isKeyframe ? 1 : 0, srcWidth, srcHeight);
+                    if (fnClientPushVideoEx != null)
+                        return fnClientPushVideoEx(handle, videoData, length, isKeyframe ? 1 : 0, srcWidth, srcHeight, codecId);
+                    if (codecId != VideoCodecH264) return 0;
+                    return fnClientPushVideo(handle, videoData, length, isKeyframe ? 1 : 0, srcWidth, srcHeight);
                 }
                 finally { rwLock.ExitReadLock(); }
             }

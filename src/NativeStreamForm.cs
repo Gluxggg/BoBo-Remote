@@ -31,6 +31,10 @@ namespace DualRemote
         private int targetPort = BoBoProtocol.DefaultTcpPort;
         private bool hostAudio;
         private bool preferHevc;
+        private bool isCustomRelayRoute;
+        private int relayUdpPort;
+        private string customStunHost = "";
+        private int customStunPort;
         private bool preferCompressedAudio = true;
         private int currentWidth;
         private int currentHeight;
@@ -1322,11 +1326,16 @@ namespace DualRemote
                 FreeMouse = freeMouseMode,
                 MuteHostAudio = !hostAudio,
                 PreferCompressedAudio = preferCompressedAudio,
+                PreferHevc = preferHevc,
                 RequestPrivacy = autoRemotePrivacyOnConnect,
                 SuperDisplay = lastSuperDisplayRequestEnabled,
                 ClientWidth = lastRequestedViewport.Width,
                 ClientHeight = lastRequestedViewport.Height,
-                ClientFullscreen = lastRequestedFullscreen
+                ClientFullscreen = lastRequestedFullscreen,
+                IsCustomRelay = isCustomRelayRoute,
+                RelayUdpPort = relayUdpPort,
+                CustomStunHost = customStunHost,
+                CustomStunPort = customStunPort
             };
 
             Tuple<bool, string, string> connRes;
@@ -1365,15 +1374,30 @@ namespace DualRemote
 
             if (!remoteSessionConnected)
             {
-                ShowStatusOverlay("正在加载实时画面", "已完成双端 TLS 身份校验，正在接收首帧 H.264 画面…", false);
+                ShowStatusOverlay("正在加载实时画面", "已完成双端 TLS 身份校验，正在接收首帧视频画面…", false);
             }
+        }
+
+        internal void SetRouteTransportHints(BoBoConnectionRoute route)
+        {
+            if (route == null) return;
+            isCustomRelayRoute = (route.Kind == BoBoRouteKind.CustomRelay);
+            relayUdpPort = route.CustomRelayUdpPort;
+            customStunHost = route.RemoteAddress != null ? route.RemoteAddress.ToString() : "";
+            customStunPort = route.CustomRelayStunPort;
         }
 
         private string GetConnectionPath(BoBoStreamClient client)
         {
             if (client == null || !remoteSessionConnected) return "";
             string route = ConnectionRouteLabelProvider != null ? ConnectionRouteLabelProvider() : "";
-            return string.IsNullOrEmpty(route) ? client.ActiveTransportLabel : route + " · " + client.ActiveTransportLabel;
+            string tr = client.ActiveTransportLabel;
+            string pathLabel = client.ActiveUdpPathLabel;
+            if (!string.IsNullOrEmpty(pathLabel) && tr.IndexOf(pathLabel, StringComparison.Ordinal) < 0)
+            {
+                tr = pathLabel + " · " + tr;
+            }
+            return string.IsNullOrEmpty(route) ? tr : route + " · " + tr;
         }
 
         private void StartStatsPollingTimer()
@@ -1388,6 +1412,7 @@ namespace DualRemote
                 if (nc == null || sc == null) return;
                 int liveBps = sc.ActiveBitrateKbps > 0 ? sc.ActiveBitrateKbps : currentBitrateKbps;
                 NativeStreamStats stats = nc.GetStats(sc.LatestRttMs, liveBps);
+                stats.Codec = sc.ActiveVideoCodecLabel;
                 stats.PacketLossPct = sc.LatestPacketLossPct;
                 stats.JitterMs = sc.LatestJitterMs;
                 stats.FecRecoveredPackets = sc.UdpFecRecoveredPackets;
@@ -2155,8 +2180,9 @@ namespace DualRemote
                 string tr = s.Transport ?? "";
                 bool isUdp = tr.IndexOf("UDP", StringComparison.OrdinalIgnoreCase) >= 0;
                 line1 = string.Format(CultureInfo.InvariantCulture,
-                    "{0:F1} FPS | {1}x{2} | {3} | {4}",
+                    "{0:F1} FPS | {1}x{2} {3} | {4} | {5}",
                     s.Fps, s.Width, s.Height,
+                    string.IsNullOrEmpty(s.Codec) ? "H.264" : s.Codec,
                     tr,
                     string.IsNullOrEmpty(s.Decoder) ? "D3D11VA" : s.Decoder);
                 line2 = isUdp

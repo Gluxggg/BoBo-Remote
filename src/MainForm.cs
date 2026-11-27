@@ -1594,6 +1594,8 @@ namespace DualRemote
                 targetPort,
                 preferCompressedAudio);
 
+            if (route != null) nativeForm.SetRouteTransportHints(route);
+
             nativeForm.LocalPrivacyActiveProvider = delegate { return privacyCurtain.IsActive; };
 
             nativeForm.PlayerProcessStarted += delegate(int pid)

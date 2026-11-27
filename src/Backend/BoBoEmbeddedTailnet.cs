@@ -52,6 +52,7 @@ namespace DualRemote
         internal int ControlPort;
         internal int SocksPort;
         internal bool Listening49810;
+        internal bool Listening49811;
         internal string Error = "";
         internal readonly List<EmbeddedTailnetPeer> Peers = new List<EmbeddedTailnetPeer>();
     }
@@ -654,6 +655,7 @@ namespace DualRemote
                 ControlPort = GetInt(dict, "controlPort", 0),
                 SocksPort = GetInt(dict, "socksPort", 0),
                 Listening49810 = GetBool(dict, "listening49810", false),
+                Listening49811 = GetBool(dict, "listening49811", false),
                 Error = GetStr(dict, "error", "")
             };
             if (dict.ContainsKey("peers"))
@@ -742,6 +744,46 @@ namespace DualRemote
                 tok = sessionToken;
             }
             return SendHttpSync(method, pathAndQuery, timeoutMs, port, tok);
+        }
+
+        internal async Task<int> OpenUdpBridgeAsync(
+            string peerIp,
+            int remotePort,
+            int localClientUdpPort,
+            int timeoutMs = 4000,
+            CancellationToken ct = default(CancellationToken))
+        {
+            if (string.IsNullOrWhiteSpace(peerIp) || remotePort <= 0 || localClientUdpPort <= 0) return 0;
+            string path = "/udp-bridge?peerIp=" + Uri.EscapeDataString(peerIp.Trim()) +
+                "&remotePort=" + remotePort.ToString(CultureInfo.InvariantCulture) +
+                "&localPort=" + localClientUdpPort.ToString(CultureInfo.InvariantCulture);
+            string json = await SendHttpAsync("POST", path, Math.Max(1500, timeoutMs), ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(json)) return 0;
+            try
+            {
+                var serializer = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 };
+                var dict = serializer.DeserializeObject(json) as IDictionary<string, object>;
+                if (dict == null || !GetBool(dict, "ok", false)) return 0;
+                return GetInt(dict, "bridgePort", 0);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        internal async Task CloseUdpBridgeAsync(int bridgePort)
+        {
+            if (bridgePort <= 0) return;
+            try
+            {
+                await SendHttpAsync(
+                    "DELETE",
+                    "/udp-bridge?port=" + bridgePort.ToString(CultureInfo.InvariantCulture),
+                    1500,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch { }
         }
 
         private static string SendHttpSync(string method, string pathAndQuery, int timeoutMs, int port, string tok)

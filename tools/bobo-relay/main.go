@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +21,10 @@ import (
 	"time"
 )
 
-const relayVersion = "7.2.0"
+const (
+	relayVersion    = "7.4.0"
+	stunMagicCookie = uint32(0x2112A442)
+)
 
 type HealthSnapshot struct {
 	OK               bool    `json:"ok"`
@@ -31,6 +36,8 @@ type HealthSnapshot struct {
 	BandwidthMbps    float64 `json:"bandwidthMbps"`
 	MaxBandwidthMbps float64 `json:"maxBandwidthMbps"`
 	Region           string  `json:"region"`
+	UDPPort          int     `json:"udpPort,omitempty"`
+	STUNPort         int     `json:"stunPort,omitempty"`
 	UptimeSeconds    int64   `json:"uptimeSeconds"`
 	Version          string  `json:"version"`
 }
@@ -38,6 +45,9 @@ type HealthSnapshot struct {
 type RelayConfig struct {
 	ListenAddr       string
 	TargetAddr       string
+	UDPListenAddr    string
+	UDPTargetAddr    string
+	STUNListenAddr   string
 	HealthListenAddr string
 	MaxSessions      int
 	MaxBandwidthMbps float64
@@ -59,11 +69,31 @@ type RelayServer struct {
 
 	cpu       cpuSampler
 	ln        net.Listener
+	udpConn   *net.UDPConn
+	stunConn  *net.UDPConn
+	udpPort   int
+	stunPort  int
 	httpSrv   *http.Server
 	httpLn    net.Listener
 	stopCh    chan struct{}
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
+}
+
+func deriveUdpTargetAddr(tcpTarget, explicitUdp string) string {
+	explicitUdp = strings.TrimSpace(explicitUdp)
+	if explicitUdp != "" {
+		return explicitUdp
+	}
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(tcpTarget))
+	if err != nil {
+		return ""
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 || p >= 65535 {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p+1))
 }
 
 func NewRelayServer(cfg RelayConfig) *RelayServer {
@@ -86,9 +116,63 @@ func (s *RelayServer) Start() error {
 	}
 	s.ln = ln
 
+	if strings.TrimSpace(s.cfg.UDPListenAddr) != "" {
+		udpTgtStr := deriveUdpTargetAddr(s.cfg.TargetAddr, s.cfg.UDPTargetAddr)
+		if udpTgtStr != "" {
+			udpTgt, uErr := net.ResolveUDPAddr("udp", udpTgtStr)
+			if uErr != nil {
+				_ = ln.Close()
+				return uErr
+			}
+			uAddr, uErr := net.ResolveUDPAddr("udp", s.cfg.UDPListenAddr)
+			if uErr != nil {
+				_ = ln.Close()
+				return uErr
+			}
+			uc, uErr := net.ListenUDP("udp", uAddr)
+			if uErr != nil {
+				_ = ln.Close()
+				return uErr
+			}
+			s.udpConn = uc
+			s.udpPort = uc.LocalAddr().(*net.UDPAddr).Port
+			s.wg.Add(1)
+			go s.serveUdpRelay(uc, udpTgt)
+		}
+	}
+
+	if strings.TrimSpace(s.cfg.STUNListenAddr) != "" {
+		stAddr, sErr := net.ResolveUDPAddr("udp", s.cfg.STUNListenAddr)
+		if sErr != nil {
+			if s.udpConn != nil {
+				_ = s.udpConn.Close()
+			}
+			_ = ln.Close()
+			return sErr
+		}
+		sc, sErr := net.ListenUDP("udp", stAddr)
+		if sErr != nil {
+			if s.udpConn != nil {
+				_ = s.udpConn.Close()
+			}
+			_ = ln.Close()
+			return sErr
+		}
+		s.stunConn = sc
+		s.stunPort = sc.LocalAddr().(*net.UDPAddr).Port
+		s.wg.Add(1)
+		go s.serveStun(sc)
+	}
+
 	if strings.TrimSpace(s.cfg.HealthListenAddr) != "" {
 		hLn, err := net.Listen("tcp", s.cfg.HealthListenAddr)
 		if err != nil {
+			if s.stunConn != nil {
+				_ = s.stunConn.Close()
+			}
+			if s.udpConn != nil {
+				_ = s.udpConn.Close()
+			}
 			_ = ln.Close()
 			return err
 		}
@@ -120,6 +204,20 @@ func (s *RelayServer) RelayAddr() string {
 	return s.ln.Addr().String()
 }
 
+func (s *RelayServer) UdpAddr() string {
+	if s.udpConn == nil {
+		return ""
+	}
+	return s.udpConn.LocalAddr().String()
+}
+
+func (s *RelayServer) StunAddr() string {
+	if s.stunConn == nil {
+		return ""
+	}
+	return s.stunConn.LocalAddr().String()
+}
+
 func (s *RelayServer) HealthAddr() string {
 	if s.httpLn == nil {
 		return ""
@@ -137,6 +235,12 @@ func (s *RelayServer) Close() {
 		close(s.stopCh)
 		if s.ln != nil {
 			_ = s.ln.Close()
+		}
+		if s.udpConn != nil {
+			_ = s.udpConn.Close()
+		}
+		if s.stunConn != nil {
+			_ = s.stunConn.Close()
 		}
 		if s.httpSrv != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -229,6 +333,8 @@ func (s *RelayServer) Snapshot() HealthSnapshot {
 		BandwidthMbps:    bwMbps,
 		MaxBandwidthMbps: s.cfg.MaxBandwidthMbps,
 		Region:           s.cfg.Region,
+		UDPPort:          s.udpPort,
+		STUNPort:         s.stunPort,
 		UptimeSeconds:    int64(time.Since(s.startedAt).Seconds()),
 		Version:          relayVersion,
 	}
@@ -325,9 +431,206 @@ func (s *RelayServer) relayConn(client net.Conn) {
 	pipeWg.Wait()
 }
 
+type udpRelayClient struct {
+	clientAddr *net.UDPAddr
+	upConn     *net.UDPConn
+	lastUnix   atomic.Int64
+	closeOnce  sync.Once
+}
+
+func (c *udpRelayClient) close() {
+	c.closeOnce.Do(func() {
+		if c.upConn != nil {
+			_ = c.upConn.Close()
+		}
+	})
+}
+
+func (s *RelayServer) serveUdpRelay(uc *net.UDPConn, target *net.UDPAddr) {
+	defer s.wg.Done()
+	var mu sync.Mutex
+	clients := make(map[string]*udpRelayClient)
+	maxUdpClients := 128
+	if s.cfg.MaxSessions > 0 && s.cfg.MaxSessions*2 > maxUdpClients {
+		maxUdpClients = s.cfg.MaxSessions * 2
+	}
+
+	reapStop := make(chan struct{})
+	defer func() {
+		close(reapStop)
+		mu.Lock()
+		for k, c := range clients {
+			c.close()
+			delete(clients, k)
+		}
+		mu.Unlock()
+	}()
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reapStop:
+				return
+			case <-s.stopCh:
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Unix() - 90
+				mu.Lock()
+				for k, c := range clients {
+					if c.lastUnix.Load() < cutoff {
+						c.close()
+						delete(clients, k)
+					}
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+
+	buf := make([]byte, 2048)
+	for {
+		n, clientAddr, err := uc.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				continue
+			}
+		}
+		if n <= 0 || clientAddr == nil {
+			continue
+		}
+		s.bytesThisWindow.Add(int64(n))
+		key := clientAddr.String()
+		nowUnix := time.Now().Unix()
+
+		mu.Lock()
+		cl := clients[key]
+		if cl == nil {
+			if len(clients) >= maxUdpClients {
+				mu.Unlock()
+				continue
+			}
+			upConn, dErr := net.DialUDP("udp", nil, target)
+			if dErr != nil {
+				mu.Unlock()
+				continue
+			}
+			cl = &udpRelayClient{
+				clientAddr: clientAddr,
+				upConn:     upConn,
+			}
+			cl.lastUnix.Store(nowUnix)
+			clients[key] = cl
+			mu.Unlock()
+
+			s.wg.Add(1)
+			go func(k string, ent *udpRelayClient) {
+				defer s.wg.Done()
+				defer func() {
+					ent.close()
+					mu.Lock()
+					if clients[k] == ent {
+						delete(clients, k)
+					}
+					mu.Unlock()
+				}()
+				rbuf := make([]byte, 2048)
+				for {
+					rn, rErr := ent.upConn.Read(rbuf)
+					if rErr != nil {
+						return
+					}
+					if rn > 0 {
+						ent.lastUnix.Store(time.Now().Unix())
+						s.bytesThisWindow.Add(int64(rn))
+						if _, wErr := uc.WriteToUDP(rbuf[:rn], ent.clientAddr); wErr != nil {
+							return
+						}
+					}
+				}
+			}(key, cl)
+		} else {
+			cl.lastUnix.Store(nowUnix)
+			mu.Unlock()
+		}
+		_, _ = cl.upConn.Write(buf[:n])
+	}
+}
+
+func (s *RelayServer) serveStun(sc *net.UDPConn) {
+	defer s.wg.Done()
+	buf := make([]byte, 1500)
+	for {
+		n, peer, err := sc.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				continue
+			}
+		}
+		// RFC 5389 Binding Request: >=20 bytes, msgType 0x0001, magic cookie 0x2112A442
+		if n < 20 || peer == nil || peer.IP == nil {
+			continue
+		}
+		if binary.BigEndian.Uint16(buf[0:2]) != 0x0001 || binary.BigEndian.Uint32(buf[4:8]) != stunMagicCookie {
+			continue
+		}
+		ip4 := peer.IP.To4()
+		var resp [44]byte
+		binary.BigEndian.PutUint16(resp[0:2], 0x0101) // Binding Success Response
+		binary.BigEndian.PutUint32(resp[4:8], stunMagicCookie)
+		copy(resp[8:20], buf[8:20]) // Transaction ID
+		binary.BigEndian.PutUint16(resp[20:22], 0x0020) // XOR-MAPPED-ADDRESS
+		xorPort := uint16(peer.Port) ^ uint16(stunMagicCookie>>16)
+
+		var totalLen int
+		if ip4 != nil {
+			binary.BigEndian.PutUint16(resp[2:4], 12)   // attr header (4) + body (8)
+			binary.BigEndian.PutUint16(resp[22:24], 8)
+			resp[24] = 0
+			resp[25] = 0x01 // IPv4
+			binary.BigEndian.PutUint16(resp[26:28], xorPort)
+			for i := 0; i < 4; i++ {
+				resp[28+i] = ip4[i] ^ resp[4+i]
+			}
+			totalLen = 32
+		} else {
+			ip6 := peer.IP.To16()
+			if ip6 == nil {
+				continue
+			}
+			binary.BigEndian.PutUint16(resp[2:4], 24)   // attr header (4) + body (20)
+			binary.BigEndian.PutUint16(resp[22:24], 20)
+			resp[24] = 0
+			resp[25] = 0x02 // IPv6
+			binary.BigEndian.PutUint16(resp[26:28], xorPort)
+			for i := 0; i < 16; i++ {
+				resp[28+i] = ip6[i] ^ resp[4+i]
+			}
+			totalLen = 44
+		}
+		_, _ = sc.WriteToUDP(resp[:totalLen], peer)
+	}
+}
+
 func main() {
 	listenAddr := flag.String("listen", ":49810", "TCP listen address forwarded to -target")
 	targetAddr := flag.String("target", "", "upstream BoBo host address host:port (required)")
+	udpListenAddr := flag.String("udp-listen", ":49811", "UDP blind relay listen address (empty to disable)")
+	udpTargetAddr := flag.String("udp-target", "", "upstream BoBo UDP host:port (default derived as target port+1)")
+	stunListenAddr := flag.String("stun-listen", ":49812", "built-in RFC 5389 STUN UDP listen address (empty to disable)")
 	healthAddr := flag.String("health-listen", ":49811", "HTTP load/health listen address (empty to disable)")
 	maxSessions := flag.Int("max-sessions", 64, "maximum concurrent relayed sessions (<=0 unlimited)")
 	maxBwMbps := flag.Float64("max-bandwidth-mbps", 200.0, "reference relay bandwidth capacity in Mbps")
@@ -347,6 +650,9 @@ func main() {
 	srv := NewRelayServer(RelayConfig{
 		ListenAddr:       *listenAddr,
 		TargetAddr:       strings.TrimSpace(*targetAddr),
+		UDPListenAddr:    strings.TrimSpace(*udpListenAddr),
+		UDPTargetAddr:    strings.TrimSpace(*udpTargetAddr),
+		STUNListenAddr:   strings.TrimSpace(*stunListenAddr),
 		HealthListenAddr: *healthAddr,
 		MaxSessions:      *maxSessions,
 		MaxBandwidthMbps: *maxBwMbps,
@@ -355,8 +661,8 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("start bobo-relay failed: %v", err)
 	}
-	log.Printf("bobo-relay %s listening=%s -> target=%s health=%s max_sessions=%d max_bw=%.0fMbps",
-		relayVersion, srv.RelayAddr(), strings.TrimSpace(*targetAddr), srv.HealthAddr(), *maxSessions, *maxBwMbps)
+	log.Printf("bobo-relay %s tcp=%s udp=%s stun=%s -> target=%s health=%s max_sessions=%d max_bw=%.0fMbps",
+		relayVersion, srv.RelayAddr(), srv.UdpAddr(), srv.StunAddr(), strings.TrimSpace(*targetAddr), srv.HealthAddr(), *maxSessions, *maxBwMbps)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

@@ -24,6 +24,8 @@ namespace DualRemote
         internal double MaxBandwidthMbps;
         internal bool Accepting = true;
         internal string Region = "";
+        internal int UdpPort;
+        internal int StunPort;
         internal double Score = double.PositiveInfinity;
         internal string Summary = "";
     }
@@ -63,6 +65,27 @@ namespace DualRemote
             out double maxBwMbps,
             out string region)
         {
+            int udpPort, stunPort;
+            return ParseHealthJson(
+                json, out ok, out accepting, out load, out cpuPct,
+                out activeSessions, out maxSessions, out bwMbps, out maxBwMbps,
+                out region, out udpPort, out stunPort);
+        }
+
+        internal static bool ParseHealthJson(
+            string json,
+            out bool ok,
+            out bool accepting,
+            out double load,
+            out double cpuPct,
+            out int activeSessions,
+            out int maxSessions,
+            out double bwMbps,
+            out double maxBwMbps,
+            out string region,
+            out int udpPort,
+            out int stunPort)
+        {
             ok = false;
             accepting = true;
             load = 0.0;
@@ -72,6 +95,8 @@ namespace DualRemote
             bwMbps = 0.0;
             maxBwMbps = 0.0;
             region = "";
+            udpPort = 0;
+            stunPort = 0;
 
             if (string.IsNullOrWhiteSpace(json)) return false;
             try
@@ -88,6 +113,8 @@ namespace DualRemote
                 bwMbps = Math.Max(0.0, ReadDouble(dict, "bandwidthMbps", 0.0));
                 maxBwMbps = Math.Max(0.0, ReadDouble(dict, "maxBandwidthMbps", 0.0));
                 region = ReadString(dict, "region", "");
+                udpPort = Math.Max(0, Math.Min(65535, ReadInt(dict, "udpPort", 0)));
+                stunPort = Math.Max(0, Math.Min(65535, ReadInt(dict, "stunPort", 0)));
 
                 double rawLoad;
                 if (TryReadDouble(dict, "load", out rawLoad))
@@ -181,9 +208,9 @@ namespace DualRemote
 
             bool ok, accepting;
             double load, cpuPct, bwMbps, maxBwMbps;
-            int activeSessions, maxSessions;
+            int activeSessions, maxSessions, udpPort, stunPort;
             string region;
-            if (ParseHealthJson(healthJson, out ok, out accepting, out load, out cpuPct, out activeSessions, out maxSessions, out bwMbps, out maxBwMbps, out region))
+            if (ParseHealthJson(healthJson, out ok, out accepting, out load, out cpuPct, out activeSessions, out maxSessions, out bwMbps, out maxBwMbps, out region, out udpPort, out stunPort))
             {
                 snap.HasServerLoad = true;
                 snap.ServerLoad = load;
@@ -194,6 +221,8 @@ namespace DualRemote
                 snap.MaxBandwidthMbps = maxBwMbps;
                 snap.Accepting = accepting;
                 snap.Region = region;
+                snap.UdpPort = udpPort;
+                snap.StunPort = stunPort;
             }
             else
             {

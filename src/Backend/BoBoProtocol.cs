@@ -19,7 +19,8 @@ namespace DualRemote
         InputEvent = 0x04,
         FileChunk = 0x05,
         CursorShape = 0x06,
-        AudioAac = 0x07
+        AudioAac = 0x07,
+        VideoHevc = 0x08
     }
 
     internal sealed class BoBoMonitorDescriptor
@@ -227,7 +228,9 @@ namespace DualRemote
             int length = ReadInt32LE(header, 1);
             uint flags = ReadUInt32LE(header, 5);
 
-            int maxAllowed = type == BoBoPacketType.VideoH264 ? MaxVideoPayloadBytes : MaxControlPayloadBytes;
+            int maxAllowed = (type == BoBoPacketType.VideoH264 || type == BoBoPacketType.VideoHevc)
+                ? MaxVideoPayloadBytes
+                : MaxControlPayloadBytes;
             if (maxPayloadOverride > 0 && maxPayloadOverride < maxAllowed)
             {
                 maxAllowed = maxPayloadOverride;

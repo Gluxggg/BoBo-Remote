@@ -92,6 +92,12 @@ BOBO_API int32_t __stdcall BoBoCore_GetMonitorCount(void);
 BOBO_API int32_t __stdcall BoBoCore_GetMonitorInfo(int32_t index, BoBoMonitorInfo* outInfo);
 BOBO_API int32_t __stdcall BoBoCore_IsAacAudioSupported(void);
 
+static constexpr int32_t kVideoCodecH264 = 0;
+static constexpr int32_t kVideoCodecHevc = 1;
+
+BOBO_API int32_t __stdcall BoBoCore_IsHevcEncodeSupported(void);
+BOBO_API int32_t __stdcall BoBoCore_IsHevcDecodeSupported(void);
+
 // ---- Host Engine (In-Process Capture + H.264 Encode + WASAPI Loopback + SendInput) ----
 BOBO_API void* __stdcall BoBoHost_Create(
     int32_t monitorIndex,
@@ -116,6 +122,20 @@ BOBO_API void* __stdcall BoBoHost_CreateEx(
     BoBoAudioFrameCallback onAudio,
     void* userCtx);
 
+BOBO_API void* __stdcall BoBoHost_CreateV3(
+    int32_t monitorIndex,
+    int32_t targetWidth,
+    int32_t targetHeight,
+    int32_t fps,
+    int32_t bitrateKbps,
+    int32_t muteHostSpeakers,
+    int32_t compositeCursor,
+    int32_t preferAacAudio,
+    int32_t preferHevcVideo,
+    BoBoVideoFrameCallback onVideo,
+    BoBoAudioFrameCallback onAudio,
+    void* userCtx);
+
 BOBO_API void* __stdcall BoBoHost_CreateV2(
     int32_t monitorIndex,
     int32_t targetWidth,
@@ -130,6 +150,7 @@ BOBO_API void* __stdcall BoBoHost_CreateV2(
     void* userCtx);
 
 BOBO_API int32_t __stdcall BoBoHost_GetAudioCodec(void* handle); // 0=adpcm, 1=aac
+BOBO_API int32_t __stdcall BoBoHost_GetVideoCodec(void* handle); // 0=h264, 1=hevc
 
 BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
     void* handle,
@@ -188,6 +209,15 @@ BOBO_API int32_t __stdcall BoBoClient_PushVideo(
     int32_t isKeyframe,
     int32_t srcWidth,
     int32_t srcHeight);
+
+BOBO_API int32_t __stdcall BoBoClient_PushVideoEx(
+    void* handle,
+    const uint8_t* videoData,
+    int32_t length,
+    int32_t isKeyframe,
+    int32_t srcWidth,
+    int32_t srcHeight,
+    int32_t codecId);
 
 BOBO_API void __stdcall BoBoClient_PushAudio(
     void* handle,

@@ -240,3 +240,117 @@ func TestControlLogoutClearsStateDir(t *testing.T) {
 		t.Fatalf("expected stateDir to be cleared after /logout")
 	}
 }
+
+func TestDeriveUdpForwardTarget(t *testing.T) {
+	if got := deriveUdpForwardTarget("127.0.0.1:49810"); got != "127.0.0.1:49811" {
+		t.Fatalf("expected 127.0.0.1:49811, got %q", got)
+	}
+	if got := deriveUdpForwardTarget("[::1]:50000"); got != "[::1]:50001" {
+		t.Fatalf("expected [::1]:50001, got %q", got)
+	}
+}
+
+func TestUdpBridgeRelayAndAuth(t *testing.T) {
+	echoUdp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoUdp.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, peer, rErr := echoUdp.ReadFromUDP(buf)
+			if rErr != nil {
+				return
+			}
+			_, _ = echoUdp.WriteToUDP(buf[:n], peer)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := newTsManager(ctx, cancel, "", "udp-pc", defaultForwardTarget, "tok-udp")
+	mgr.udpDialFn = func(_ context.Context, _ string) (net.Conn, error) {
+		return net.Dial("udp", echoUdp.LocalAddr().String())
+	}
+	mux := buildControlMux("tok-udp", mgr, nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	// 1. Non-tailnet destination must return 403 Forbidden
+	badReq, _ := http.NewRequest(http.MethodPost,
+		"http://"+ln.Addr().String()+"/udp-bridge?peerIp=192.168.1.50&remotePort=49811&localPort=40000", nil)
+	badReq.Header.Set("X-BoBo-Token", "tok-udp")
+	badResp, err := http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badResp.Body.Close()
+	if badResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for LAN peerIp, got %d", badResp.StatusCode)
+	}
+
+	// 2. Valid tailnet peer relays UDP packets bidirectionally via local bridgePort
+	clientUdp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientUdp.Close()
+	clientPort := clientUdp.LocalAddr().(*net.UDPAddr).Port
+
+	openReq, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://%s/udp-bridge?peerIp=100.64.0.12&remotePort=49811&localPort=%d", ln.Addr().String(), clientPort), nil)
+	openReq.Header.Set("X-BoBo-Token", "tok-udp")
+	openResp, err := http.DefaultClient.Do(openReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openResp.Body.Close()
+	if openResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from POST /udp-bridge, got %d", openResp.StatusCode)
+	}
+	var openOut struct {
+		OK         bool `json:"ok"`
+		BridgePort int  `json:"bridgePort"`
+	}
+	if err := json.NewDecoder(openResp.Body).Decode(&openOut); err != nil {
+		t.Fatal(err)
+	}
+	if !openOut.OK || openOut.BridgePort <= 0 {
+		t.Fatalf("unexpected openOut: %+v", openOut)
+	}
+
+	bridgeAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: openOut.BridgePort}
+	want := []byte("BOBO-TSNET-UDP-OK")
+	if _, err := clientUdp.WriteToUDP(want, bridgeAddr); err != nil {
+		t.Fatal(err)
+	}
+	_ = clientUdp.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got := make([]byte, 128)
+	n, _, err := clientUdp.ReadFromUDP(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[:n]) != string(want) {
+		t.Fatalf("udp bridge echo mismatch: got %q want %q", string(got[:n]), string(want))
+	}
+
+	// 3. DELETE /udp-bridge closes cleanly
+	delReq, _ := http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("http://%s/udp-bridge?port=%d", ln.Addr().String(), openOut.BridgePort), nil)
+	delReq.Header.Set("X-BoBo-Token", "tok-udp")
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from DELETE /udp-bridge, got %d", delResp.StatusCode)
+	}
+}

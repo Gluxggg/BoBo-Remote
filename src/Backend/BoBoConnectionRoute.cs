@@ -38,6 +38,8 @@ namespace DualRemote
         internal bool CustomRelayAccepting { get; private set; }
         internal bool CustomRelayAutoScheduled { get; private set; }
         internal BoBoRelaySelectionMode CustomRelaySelectionMode { get; private set; }
+        internal int CustomRelayUdpPort { get; private set; }
+        internal int CustomRelayStunPort { get; private set; }
 
         internal bool IsTailnet
         {
@@ -126,6 +128,13 @@ namespace DualRemote
                 Kind = BoBoRouteKind.TailnetUnknown;
             else if (IsOnLocalSubnet(RemoteAddress, local))
                 Kind = BoBoRouteKind.Lan;
+        }
+
+        internal void UpdateCustomRelayPorts(int udpPort, int stunPort)
+        {
+            if (Kind != BoBoRouteKind.CustomRelay) return;
+            if (udpPort > 0 && udpPort <= 65535) CustomRelayUdpPort = udpPort;
+            if (stunPort > 0 && stunPort <= 65535) CustomRelayStunPort = stunPort;
         }
 
         internal static BoBoConnectionRoute CreateCustomRelay(

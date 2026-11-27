@@ -701,12 +701,14 @@ namespace DualRemote
     internal static class BoBoUdpFec
     {
         internal const int MaxShardPayloadBytes = 1140;
+        internal const int DefaultSendShardPayloadBytes = 1060;
         internal const int ShardHeaderBytes = 19;
         internal const int MaxDataShardsPerFrame = 4096;
         internal const byte FlagKeyframe = 1;
         internal const byte FlagParity = 2;
         internal const byte FlagInterleaved = 4;
         internal const byte FlagRetransmit = 8;
+        internal const byte FlagHevc = 16;
 
         internal static void SelectFecParams(
             int dataCount,
@@ -790,13 +792,15 @@ namespace DualRemote
             bool nackEnabled,
             double rttMs,
             double jitterMs,
-            int burstLossStreak)
+            int burstLossStreak,
+            bool isHevc = false)
         {
             var shards = new List<byte[]>();
             if (h264Data == null || h264Data.Length == 0) return shards;
 
             int totalLen = h264Data.Length;
-            int dataCount = (totalLen + MaxShardPayloadBytes - 1) / MaxShardPayloadBytes;
+            int sendShardBytes = DefaultSendShardPayloadBytes;
+            int dataCount = (totalLen + sendShardBytes - 1) / sendShardBytes;
             if (dataCount > MaxDataShardsPerFrame) return shards;
 
             int groupSize;
@@ -811,13 +815,13 @@ namespace DualRemote
                 parityCount = (dataCount + groupSize - 1) / groupSize;
             }
 
-            // Flag 0x04 selects stride-interleaved parity for clients that negotiated it.
+            // Flag 0x04 selects stride-interleaved parity; Flag 0x10 signals H.265 (HEVC).
             bool useInterleavedFec = interleavedFec && parityCount > 0;
-            byte dataFlags = (byte)((isKeyframe ? FlagKeyframe : 0) | (useInterleavedFec ? FlagInterleaved : 0));
+            byte dataFlags = (byte)((isKeyframe ? FlagKeyframe : 0) | (useInterleavedFec ? FlagInterleaved : 0) | (isHevc ? FlagHevc : 0));
             for (int i = 0; i < dataCount; i++)
             {
-                int off = i * MaxShardPayloadBytes;
-                int len = Math.Min(MaxShardPayloadBytes, totalLen - off);
+                int off = i * sendShardBytes;
+                int len = Math.Min(sendShardBytes, totalLen - off);
                 byte[] pkt = new byte[ShardHeaderBytes + len];
                 WriteShardHeader(pkt, frameId, timestampMs, width, height,
                     dataFlags, (ushort)i, (ushort)dataCount, (byte)groupSize, (byte)parityCount);
@@ -831,7 +835,7 @@ namespace DualRemote
                 int start = useInterleavedFec ? g : g * groupSize;
                 int end = useInterleavedFec ? dataCount : Math.Min(dataCount, start + groupSize);
                 int step = useInterleavedFec ? parityCount : 1;
-                int maxMemberLen = Math.Min(MaxShardPayloadBytes, totalLen - start * MaxShardPayloadBytes);
+                int maxMemberLen = Math.Min(sendShardBytes, totalLen - start * sendShardBytes);
 
                 byte[] pkt = new byte[ShardHeaderBytes + 2 + maxMemberLen];
                 WriteShardHeader(pkt, frameId, timestampMs, width, height,
@@ -840,8 +844,8 @@ namespace DualRemote
                 ushort xorLen = 0;
                 for (int i = start; i < end; i += step)
                 {
-                    int off = i * MaxShardPayloadBytes;
-                    int len = Math.Min(MaxShardPayloadBytes, totalLen - off);
+                    int off = i * sendShardBytes;
+                    int len = Math.Min(sendShardBytes, totalLen - off);
                     xorLen ^= (ushort)len;
                     for (int k = 0; k < len; k++)
                     {
@@ -1064,6 +1068,7 @@ namespace DualRemote
         internal int Width;
         internal int Height;
         internal bool IsKeyframe;
+        internal bool IsHevc;
         internal byte[] H264Data;
     }
 
@@ -1075,6 +1080,14 @@ namespace DualRemote
     /// </summary>
     internal sealed class BoBoUdpVideoAssembler
     {
+        internal static int ComputeMaxAheadFrames(bool nackEnabled, double baseRttMs)
+        {
+            int rttFrames = (int)Math.Ceiling(Math.Max(15.0, baseRttMs) / 11.0);
+            return nackEnabled
+                ? Math.Max(12, Math.Min(24, rttFrames + 6))
+                : Math.Max(8, Math.Min(16, rttFrames + 4));
+        }
+
         private sealed class FrameBucket
         {
             internal uint FrameId;
@@ -1082,6 +1095,7 @@ namespace DualRemote
             internal int Width;
             internal int Height;
             internal bool IsKeyframe;
+            internal bool IsHevc;
             internal int DataCount;
             internal int GroupSize;
             internal int ParityCount;
@@ -1242,6 +1256,7 @@ namespace DualRemote
             bool isParity = (flags & BoBoUdpFec.FlagParity) != 0;
             bool interleaved = (flags & BoBoUdpFec.FlagInterleaved) != 0;
             bool isRetransmit = (flags & BoBoUdpFec.FlagRetransmit) != 0;
+            bool isHevc = (flags & BoBoUdpFec.FlagHevc) != 0;
             int shardIdx = BoBoUdpCrypto.ReadUInt16LE(payload, 13);
             int dataCount = BoBoUdpCrypto.ReadUInt16LE(payload, 15);
             int groupSize = payload[17];
@@ -1257,7 +1272,7 @@ namespace DualRemote
             double effectiveGraceMs = NackEnabled
                 ? Math.Max(jitterGraceMs, Math.Min(220.0, baseRtt * 1.8 + 30.0))
                 : jitterGraceMs;
-            int maxAhead = NackEnabled ? 8 : 6;
+            int maxAhead = ComputeMaxAheadFrames(NackEnabled, baseRtt);
 
             lock (gate)
             {
@@ -1284,6 +1299,7 @@ namespace DualRemote
                         Width = width,
                         Height = height,
                         IsKeyframe = isKey,
+                        IsHevc = isHevc,
                         DataCount = dataCount,
                         GroupSize = groupSize,
                         ParityCount = parityCount,
@@ -1403,7 +1419,7 @@ namespace DualRemote
             double nackGraceMs = NackEnabled
                 ? Math.Max(jitterGraceMs, Math.Min(220.0, baseRtt * 1.8 + 30.0))
                 : jitterGraceMs;
-            int maxAhead = NackEnabled ? 8 : 6;
+            int maxAhead = ComputeMaxAheadFrames(NackEnabled, baseRtt);
 
             lock (gate)
             {
@@ -1604,6 +1620,7 @@ namespace DualRemote
                     Width = cur.Width,
                     Height = cur.Height,
                     IsKeyframe = cur.IsKeyframe,
+                    IsHevc = cur.IsHevc,
                     H264Data = cur.AssembledData
                 });
                 lastDeliveredFrameId = fid;
@@ -1773,6 +1790,12 @@ namespace DualRemote
         private long lastIncreaseTicks;
         private long lowBitrateSinceTicks;
 
+        internal static int ComputeTcpQueueLimit(int fps)
+        {
+            int safeFps = Math.Max(15, Math.Min(144, fps));
+            return Math.Max(4, Math.Min(8, (int)Math.Ceiling(safeFps / 14.0)));
+        }
+
         internal BoBoAdaptiveBitrateController(bool autoEnabled, int targetBitrateKbps, int targetFps, double initialRttMs, bool isLan = true)
         {
             enabled = autoEnabled;
@@ -1781,16 +1804,17 @@ namespace DualRemote
             this.targetFps = ClampFps(targetFps);
             this.currentFps = this.targetFps;
 
-            // On WAN / Campus / Cellular / Tailscale links, start conservatively and ramp up smoothly with 0% loss
-            if (autoEnabled && initialRttMs > 60.0)
+            // On WAN / Campus / Cellular / Tailscale links, preserve high frame rate when RTT is moderate
+            // and ramp smoothly toward 30 Mbps without unnecessarily throttling 90Hz down to 60fps.
+            if (autoEnabled && initialRttMs > 95.0)
             {
-                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 2500);
-                this.currentFps = Math.Min(this.targetFps, 30);
+                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 3500);
+                this.currentFps = Math.Min(this.targetFps, 45);
             }
             else if (autoEnabled && !isLanLink)
             {
-                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 4500);
-                this.currentFps = Math.Min(this.targetFps, 60);
+                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 6000);
+                this.currentFps = Math.Min(this.targetFps, 90);
             }
             else
             {
@@ -1843,8 +1867,8 @@ namespace DualRemote
                     currentFps = targetFps;
                     return;
                 }
-                int maxBitrate = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, enablingAuto ? 4500 : 14000);
-                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 60);
+                int maxBitrate = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, enablingAuto ? 18000 : 30000);
+                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 90);
                 currentBitrateKbps = Math.Min(currentBitrateKbps, maxBitrate);
                 currentFps = Math.Min(currentFps, maxFps);
                 if (enablingAuto) lastIncreaseTicks = Stopwatch.GetTimestamp();
@@ -2029,7 +2053,7 @@ namespace DualRemote
                 }
                 else if (congestionSignal == BoBoCongestionSignal.Normal && smoothedLossPct < 0.5 && queueDelayMs < 30.0 && effectiveJitterMs < 35.0)
                 {
-                    int maxBps = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, 14000);
+                    int maxBps = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, 30000);
                     if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= 2000.0)
                     {
                         int step = Math.Max(400, (int)(currentBitrateKbps * 0.12));
@@ -2044,7 +2068,7 @@ namespace DualRemote
                 }
 
                 // Adaptive FPS step-down on severely constrained links (<=2.0Mbps -> 30fps keeps per-frame clarity high)
-                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 60);
+                int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 90);
                 if (currentBitrateKbps <= 2000)
                 {
                     if (lowBitrateSinceTicks == 0) lowBitrateSinceTicks = now;

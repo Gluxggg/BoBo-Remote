@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net"
@@ -167,4 +168,132 @@ func TestNormalizeHealthMath(t *testing.T) {
 	if got := computeNormalizedLoad(100, 64, 10.0, 400.0, 200.0); got != 1.0 {
 		t.Fatalf("expected clamped 1.0 load, got %v", got)
 	}
+}
+
+func TestUdpRelayEchoAndHealthPorts(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpEcho.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, rErr := udpEcho.ReadFromUDP(buf)
+			if rErr != nil {
+				return
+			}
+			_, _ = udpEcho.WriteToUDP(buf[:n], addr)
+		}
+	}()
+
+	srv := NewRelayServer(RelayConfig{
+		ListenAddr:       "127.0.0.1:0",
+		TargetAddr:       echoAddr,
+		UDPListenAddr:    "127.0.0.1:0",
+		UDPTargetAddr:    udpEcho.LocalAddr().String(),
+		STUNListenAddr:   "127.0.0.1:0",
+		HealthListenAddr: "127.0.0.1:0",
+		MaxSessions:      8,
+		MaxBandwidthMbps: 100,
+		Region:           "cn-udp",
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	snap := fetchHealth(t, srv.HealthAddr())
+	if snap.UDPPort <= 0 || snap.STUNPort <= 0 || !snap.OK {
+		t.Fatalf("expected udpPort and stunPort > 0 in health snapshot, got %+v", snap)
+	}
+
+	client, err := net.DialTimeout("udp", srv.UdpAddr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	msg := []byte("BOBO-UDP-BLIND-RELAY-OK")
+	if _, err := client.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, len(msg)+16)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != string(msg) {
+		t.Fatalf("udp relay echo mismatch: got %q want %q", string(buf[:n]), string(msg))
+	}
+}
+
+func TestStunBindingResponse(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	srv := NewRelayServer(RelayConfig{
+		ListenAddr:       "127.0.0.1:0",
+		TargetAddr:       echoAddr,
+		STUNListenAddr:   "127.0.0.1:0",
+		HealthListenAddr: "127.0.0.1:0",
+		MaxSessions:      4,
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	c, err := net.DialTimeout("udp", srv.StunAddr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	txId := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	req := make([]byte, 20)
+	binary.BigEndian.PutUint16(req[0:2], 0x0001)
+	binary.BigEndian.PutUint16(req[2:4], 0)
+	binary.BigEndian.PutUint32(req[4:8], stunMagicCookie)
+	copy(req[8:20], txId)
+
+	if _, err := c.Write(req); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp := make([]byte, 128)
+	n, err := c.Read(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 32 || binary.BigEndian.Uint16(resp[0:2]) != 0x0101 || binary.BigEndian.Uint32(resp[4:8]) != stunMagicCookie {
+		t.Fatalf("unexpected STUN binding response len=%d head=%x", n, resp[:minInt(n, 20)])
+	}
+	for i := 0; i < 12; i++ {
+		if resp[8+i] != txId[i] {
+			t.Fatalf("transaction id mismatch at %d", i)
+		}
+	}
+	if binary.BigEndian.Uint16(resp[20:22]) != 0x0020 || resp[25] != 0x01 {
+		t.Fatalf("missing XOR-MAPPED-ADDRESS IPv4 attribute: %x", resp[20:n])
+	}
+	xorPort := binary.BigEndian.Uint16(resp[26:28]) ^ uint16(stunMagicCookie>>16)
+	localPort := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+	if xorPort != localPort {
+		t.Fatalf("mapped port mismatch: got %d want %d", xorPort, localPort)
+	}
+	mappedIp := net.IPv4(resp[28]^resp[4], resp[29]^resp[5], resp[30]^resp[6], resp[31]^resp[7])
+	if !mappedIp.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("mapped ip mismatch: got %v want 127.0.0.1", mappedIp)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

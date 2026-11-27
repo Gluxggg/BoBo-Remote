@@ -46,6 +46,7 @@ struct BoBoHostSession {
     std::atomic<bool> compositeCursor{ true }; // Default true for V6.2 legacy clients; V6.3 sets 0 in Free Mouse for 0ms local cursor + zero-copy GPU!
     std::atomic<int32_t> liveBitratePending{ 0 };
     std::atomic<int32_t> liveFpsTarget{ 60 };
+    std::atomic<int32_t> activeVideoCodec{ kVideoCodecH264 };
 
     std::mutex cfgMutex;
     int32_t monitorIndex = 0;
@@ -53,6 +54,7 @@ struct BoBoHostSession {
     int32_t targetHeight = 1080;
     int32_t fps = 60;
     int32_t bitrateKbps = 14000;
+    bool preferHevcVideo = false;
 
     BoBoVideoFrameCallback onVideo = nullptr;
     BoBoAudioFrameCallback onAudio = nullptr;
@@ -125,8 +127,10 @@ struct BoBoHostSession {
                     ID3D11Device* zeroCopyDev = (capOk && capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
                     if (capOk &&
                         encoder.Open(capturer.OutputWidth(), capturer.OutputHeight(),
-                                     static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps), err, zeroCopyDev)) {
+                                     static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps),
+                                     err, zeroCopyDev, preferHevcVideo, true)) {
                         initialized = true;
+                        activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
                         curCapDeviceGen = capturer.DeviceGeneration();
                         consecutiveEncodeFailures = 0;
                         sentFrameCount = 0;
@@ -173,7 +177,9 @@ struct BoBoHostSession {
                 std::string rebindErr;
                 ID3D11Device* freshDev = (capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
                 if (encoder.Open(capturer.OutputWidth(), capturer.OutputHeight(),
-                                 static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps), rebindErr, freshDev)) {
+                                 static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps),
+                                 rebindErr, freshDev, preferHevcVideo, true)) {
+                    activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
                     curCapDeviceGen = capturer.DeviceGeneration();
                     keyframePending.store(true);
                     forceKey = true;
@@ -275,6 +281,7 @@ struct QueuedH264Frame {
     bool isKeyframe = false;
     uint32_t width = 0;
     uint32_t height = 0;
+    VideoCodec codec = VideoCodec::H264;
     std::chrono::steady_clock::time_point enqueueTime{};
 };
 
@@ -477,6 +484,7 @@ struct BoBoClientSession {
 
     uint32_t videoW = 1920;
     uint32_t videoH = 1080;
+    VideoCodec activeDecoderCodec = VideoCodec::H264;
     bool decoderOpened = false;
     HANDLE decodeDoneEvent = nullptr;
 
@@ -1335,14 +1343,19 @@ static bool RegisterClientViewportClass() {
     return false;
 }
 
-static bool HasH264FillerNal(const uint8_t* data, size_t len) {
+static bool HasFillerNal(const uint8_t* data, size_t len, bool isHevc) {
     size_t i = 0;
     while (i + 3 < len) {
         size_t sc = 0;
         if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) sc = 3;
         else if (i + 3 < len && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) sc = 4;
         if (sc == 0) { ++i; continue; }
-        if (i + sc < len && (data[i + sc] & 0x1F) == 12) return true;
+        if (i + sc < len) {
+            uint8_t nalType = isHevc
+                ? static_cast<uint8_t>((data[i + sc] >> 1) & 0x3F)
+                : static_cast<uint8_t>(data[i + sc] & 0x1F);
+            if ((!isHevc && nalType == 12) || (isHevc && nalType == 38)) return true;
+        }
         i += sc + 1;
     }
     return false;
@@ -1370,11 +1383,19 @@ void BoBoClientSession::RunDecodeLoop() {
         uint32_t w = item.width > 0 ? item.width : videoW;
         uint32_t h = item.height > 0 ? item.height : videoH;
         std::string err;
-        if (!decoderOpened || w != videoW || h != videoH) {
+        if (!decoderOpened || w != videoW || h != videoH || item.codec != activeDecoderCodec) {
             videoW = w;
             videoH = h;
             renderer.SetVideoSourceDimensions(w, h);
-            decoderOpened = decoder.OpenCodec(VideoCodec::H264, w, h, err);
+            decoderOpened = decoder.OpenCodec(item.codec, w, h, err);
+            if (decoderOpened) {
+                activeDecoderCodec = item.codec;
+            } else if (item.codec == VideoCodec::HEVC) {
+                decoderOpened = decoder.OpenCodec(VideoCodec::H264, w, h, err);
+                if (decoderOpened) {
+                    activeDecoderCodec = VideoCodec::H264;
+                }
+            }
             {
                 std::lock_guard<std::mutex> slk(statsMutex);
                 statsVideoW = w;
@@ -1561,7 +1582,7 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
             }
         }
     }
-    bool noFiller = !encodedIdr.empty() && !HasH264FillerNal(encodedIdr.data(), encodedIdr.size());
+    bool noFiller = !encodedIdr.empty() && !HasFillerNal(encodedIdr.data(), encodedIdr.size(), false);
     bool liveBpsOk = encOpen && encoder.UpdateBitrateLive(2500);
     int32_t curShape = ScreenCapturer::DetectStandardCursorShape();
     check("H.264 Annex-B IDR encode (zero NAL12 filler + live ABR bitrate)",
@@ -1747,6 +1768,56 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
         }
     }
 
+    // 8. Hardware H.265 (HEVC) probe + graceful H.264 fallback (or full HEVC encode->decode loopback when supported)
+    {
+        bool hevcEncAvail = IsMfHevcEncodeSupported();
+        bool hevcDecAvail = (BoBoCore_IsHevcDecodeSupported() != 0);
+        MfH264Encoder hevcEnc;
+        std::string hErr;
+        bool openFallbackOk = hevcEnc.Open(640, 360, 30, 2500, hErr, nullptr, true, true);
+        std::vector<uint8_t> hevcChunk;
+        if (openFallbackOk && !nv12.empty()) {
+            for (int attempt = 0; attempt < 8 && hevcChunk.empty(); ++attempt) {
+                bool isKey = false;
+                std::vector<uint8_t> pkt;
+                if (hevcEnc.EncodeNv12(nv12.data(), nv12.size(), static_cast<int64_t>(attempt) * 333333LL, attempt == 0, pkt, isKey, hErr) && !pkt.empty()) {
+                    hevcChunk = std::move(pkt);
+                }
+            }
+        }
+        bool usedHevc = openFallbackOk && hevcEnc.IsHevc();
+        bool noHevcFiller = !hevcChunk.empty() && !HasFillerNal(hevcChunk.data(), hevcChunk.size(), usedHevc);
+        int hevcDecoded = 0;
+        if (usedHevc && d3dOk && hevcDecAvail && !hevcChunk.empty()) {
+            MfHardwareDecoder hDec;
+            std::string hdErr;
+            if (hDec.Initialize(renderer.Device(), hdErr) && hDec.OpenCodec(VideoCodec::HEVC, 640, 360, hdErr)) {
+                for (int f = 0; f < 6 && hevcDecoded == 0; ++f) {
+                    if (hDec.SubmitAccessUnit(hevcChunk.data(), hevcChunk.size(), static_cast<int64_t>(f) * 333333LL, hdErr)) {
+                        bool more = false;
+                        DecodedFrame df;
+                        while (hDec.PullDecodedFrame(df, more)) {
+                            ++hevcDecoded;
+                            df = DecodedFrame{};
+                        }
+                    }
+                }
+                hDec.CloseCodec();
+            }
+        }
+        std::string encName = hevcEnc.EncoderName();
+        hevcEnc.Close();
+        bool loopOk = openFallbackOk && (nv12.empty() || (!hevcChunk.empty() && noHevcFiller)) &&
+                      (!usedHevc || !hevcDecAvail || !d3dOk || hevcDecoded > 0);
+        check("MF HEVC (H.265) capability probe & H.264 fallback/loopback",
+              loopOk,
+              "hevcEnc=" + std::to_string(hevcEncAvail ? 1 : 0) +
+                  " hevcDec=" + std::to_string(hevcDecAvail ? 1 : 0) +
+                  " used=" + (usedHevc ? "HEVC" : "H264") +
+                  " decFrames=" + std::to_string(hevcDecoded) +
+                  (encName.empty() ? "" : (" (" + encName + ")")));
+    }
+
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
 
     std::string finalReport = log.str();
@@ -1775,6 +1846,67 @@ BOBO_API int32_t __stdcall BoBoCore_IsAacAudioSupported(void) {
     return IsMfAacAudioSupported() ? 1 : 0;
 }
 
+BOBO_API int32_t __stdcall BoBoCore_IsHevcEncodeSupported(void) {
+    return IsMfHevcEncodeSupported() ? 1 : 0;
+}
+
+static bool ProbeMfHevcDecodeSupportUncached() {
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    D3D11Renderer probeRenderer;
+    std::string err;
+    if (!probeRenderer.InitializeDevice(true, err)) {
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+        return false;
+    }
+    MfHardwareDecoder probeDecoder;
+    bool ok = probeDecoder.Initialize(probeRenderer.Device(), err) &&
+              probeDecoder.OpenCodec(VideoCodec::HEVC, 640, 360, err);
+    probeDecoder.CloseCodec();
+    if (SUCCEEDED(hrCo)) CoUninitialize();
+    return ok;
+}
+
+BOBO_API int32_t __stdcall BoBoCore_IsHevcDecodeSupported(void) {
+    static std::once_flag once;
+    static bool supported = false;
+    std::call_once(once, []() {
+        supported = ProbeMfHevcDecodeSupportUncached();
+    });
+    return supported ? 1 : 0;
+}
+
+BOBO_API void* __stdcall BoBoHost_CreateV3(
+    int32_t monitorIndex,
+    int32_t targetWidth,
+    int32_t targetHeight,
+    int32_t fps,
+    int32_t bitrateKbps,
+    int32_t muteHostSpeakers,
+    int32_t compositeCursor,
+    int32_t preferAacAudio,
+    int32_t preferHevcVideo,
+    BoBoVideoFrameCallback onVideo,
+    BoBoAudioFrameCallback onAudio,
+    void* userCtx) {
+    auto* session = new BoBoHostSession();
+    session->monitorIndex = monitorIndex;
+    session->targetWidth = targetWidth > 0 ? targetWidth : 1920;
+    session->targetHeight = targetHeight > 0 ? targetHeight : 1080;
+    session->fps = fps > 0 ? fps : 60;
+    session->bitrateKbps = bitrateKbps > 0 ? bitrateKbps : 14000;
+    session->preferHevcVideo = (preferHevcVideo != 0);
+    session->compositeCursor.store(compositeCursor != 0, std::memory_order_release);
+    session->onVideo = onVideo;
+    session->onAudio = onAudio;
+    session->userCtx = userCtx;
+    session->running.store(true);
+    session->videoThread = std::thread([session]() { session->RunVideoLoop(); });
+    if (onAudio) {
+        session->audioCap.Start(muteHostSpeakers != 0, preferAacAudio != 0, onAudio, userCtx);
+    }
+    return session;
+}
+
 BOBO_API void* __stdcall BoBoHost_CreateV2(
     int32_t monitorIndex,
     int32_t targetWidth,
@@ -1787,22 +1919,9 @@ BOBO_API void* __stdcall BoBoHost_CreateV2(
     BoBoVideoFrameCallback onVideo,
     BoBoAudioFrameCallback onAudio,
     void* userCtx) {
-    auto* session = new BoBoHostSession();
-    session->monitorIndex = monitorIndex;
-    session->targetWidth = targetWidth > 0 ? targetWidth : 1920;
-    session->targetHeight = targetHeight > 0 ? targetHeight : 1080;
-    session->fps = fps > 0 ? fps : 60;
-    session->bitrateKbps = bitrateKbps > 0 ? bitrateKbps : 14000;
-    session->compositeCursor.store(compositeCursor != 0, std::memory_order_release);
-    session->onVideo = onVideo;
-    session->onAudio = onAudio;
-    session->userCtx = userCtx;
-    session->running.store(true);
-    session->videoThread = std::thread([session]() { session->RunVideoLoop(); });
-    if (onAudio) {
-        session->audioCap.Start(muteHostSpeakers != 0, preferAacAudio != 0, onAudio, userCtx);
-    }
-    return session;
+    return BoBoHost_CreateV3(
+        monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+        muteHostSpeakers, compositeCursor, preferAacAudio, 0, onVideo, onAudio, userCtx);
 }
 
 BOBO_API void* __stdcall BoBoHost_CreateEx(
@@ -1825,6 +1944,12 @@ BOBO_API int32_t __stdcall BoBoHost_GetAudioCodec(void* handle) {
     auto* session = static_cast<BoBoHostSession*>(handle);
     if (!session) return kAudioCodecAdpcm;
     return session->audioCap.ActiveCodec();
+}
+
+BOBO_API int32_t __stdcall BoBoHost_GetVideoCodec(void* handle) {
+    auto* session = static_cast<BoBoHostSession*>(handle);
+    if (!session) return kVideoCodecH264;
+    return session->activeVideoCodec.load(std::memory_order_acquire);
 }
 
 BOBO_API void* __stdcall BoBoHost_Create(
@@ -2516,16 +2641,28 @@ BOBO_API int32_t __stdcall BoBoClient_PushVideo(
     int32_t isKeyframe,
     int32_t srcWidth,
     int32_t srcHeight) {
+    return BoBoClient_PushVideoEx(handle, h264Data, length, isKeyframe, srcWidth, srcHeight, kVideoCodecH264);
+}
+
+BOBO_API int32_t __stdcall BoBoClient_PushVideoEx(
+    void* handle,
+    const uint8_t* videoData,
+    int32_t length,
+    int32_t isKeyframe,
+    int32_t srcWidth,
+    int32_t srcHeight,
+    int32_t codecId) {
     auto* st = static_cast<BoBoClientSession*>(handle);
-    if (!st || !st->alive.load(std::memory_order_acquire) || !h264Data || length <= 0) {
+    if (!st || !st->alive.load(std::memory_order_acquire) || !videoData || length <= 0) {
         return BOBO_PUSH_VIDEO_IGNORED;
     }
 
     QueuedH264Frame pkt;
-    pkt.data.assign(h264Data, h264Data + length);
+    pkt.data.assign(videoData, videoData + length);
     pkt.isKeyframe = (isKeyframe != 0);
     pkt.width = srcWidth > 0 ? static_cast<uint32_t>(srcWidth) : 0;
     pkt.height = srcHeight > 0 ? static_cast<uint32_t>(srcHeight) : 0;
+    pkt.codec = (codecId == kVideoCodecHevc) ? VideoCodec::HEVC : VideoCodec::H264;
 
     int32_t rc = BOBO_PUSH_VIDEO_IGNORED;
     bool shouldNotify = false;

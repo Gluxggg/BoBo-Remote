@@ -22,6 +22,8 @@
 
 namespace bobo {
 
+bool IsMfHevcEncodeSupported();
+
 struct AsyncMftEventState {
     std::mutex mtx;
     std::condition_variable cv;
@@ -37,7 +39,8 @@ public:
     ~MfH264Encoder();
 
     bool Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrateKbps,
-              std::string& outError, ID3D11Device* d3dDevice = nullptr);
+              std::string& outError, ID3D11Device* d3dDevice = nullptr,
+              bool preferHevc = false, bool allowH264Fallback = true);
     void Close();
 
     // Zero-stall live bitrate adjustment via ICodecAPI (works natively on AMD AMF / NVENC / QSV / MS MFT).
@@ -57,15 +60,17 @@ public:
     std::string EncoderName() const { return encoderName_; }
     bool IsHardware() const { return isHardware_; }
     bool IsD3D11ZeroCopy() const { return isD3D11ZeroCopy_; }
+    bool IsHevc() const { return isHevc_; }
     uint32_t BitrateKbps() const { return bitrateKbps_; }
 
 private:
-    bool TryOpenCandidate(IMFActivate* activate, bool hardware, uint32_t width, uint32_t height,
+    bool TryOpenCandidate(IMFActivate* activate, bool hardware, bool hevc, uint32_t width, uint32_t height,
                           uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice, std::string& outError);
     bool TryOpenBuiltinSoftware(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrateKbps, std::string& outError);
-    bool ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t width, uint32_t height,
+    bool ConfigureTransform(IMFTransform* mft, bool isAsync, bool hevc, uint32_t width, uint32_t height,
                             uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice,
                             bool& outD3D11Bound, std::string& outError);
+    bool isHevc_ = false;
     void ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps);
     bool EncodeSampleInternal(IMFSample* inSample, bool forceKeyframe,
                               std::vector<uint8_t>& outAnnexB, bool& outIsKeyframe, std::string& outError);

@@ -637,6 +637,7 @@ namespace DualRemote
             RunUiMotionSelfTests();
             // V6 全内置架构端到端闭环自检：内嵌 BoBoCore.dll + 严格双端必开 TLS 1.2 + 4 位临时配对码 + 视频帧 + 防窥指令 + 文件 SHA-256 互传
             RunV6AllInOneSelfTests();
+            RunV74CrossNetAndHevcSelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -1258,7 +1259,7 @@ namespace DualRemote
                 fecExact && oooDeliveredInOrder,
                 "fec=" + fecExact + " recovered=" + asm.FecRecoveredPackets + " oooOrder=" + oooDeliveredInOrder + " batch=" + batch.Count);
 
-            byte[] burstIdr = new byte[11 * BoBoUdpFec.MaxShardPayloadBytes + 63];
+            byte[] burstIdr = new byte[11 * BoBoUdpFec.DefaultSendShardPayloadBytes + 63];
             for (int i = 0; i < burstIdr.Length; i++) burstIdr[i] = (byte)(i * 37 + i / 256);
             var burstShards = BoBoUdpFec.BuildVideoShards(1u, 100u, 1280, 720, true, burstIdr, 1.0, true);
             var burstAssembler = new BoBoUdpVideoAssembler();
@@ -1308,7 +1309,7 @@ namespace DualRemote
                 nackRoundTripOk, "decoded=" + decodedNack.Count);
 
             // 2c. Hybrid FEC + Selective NACK burst recovery + RetransmitCache cooldown
-            byte[] burstNackPayload = new byte[5 * BoBoUdpFec.MaxShardPayloadBytes + 123];
+            byte[] burstNackPayload = new byte[5 * BoBoUdpFec.DefaultSendShardPayloadBytes + 123];
             for (int i = 0; i < burstNackPayload.Length; i++) burstNackPayload[i] = (byte)((i * 29 + 7) & 0xFF);
             List<byte[]> nackShards = BoBoUdpFec.BuildVideoShards(10u, 200u, 1920, 1080, false, burstNackPayload, 0.0, false, true);
             var rtxCache = new BoBoUdpRetransmitCache();
@@ -1402,7 +1403,7 @@ namespace DualRemote
                 " pDuringKfPli=" + pfWhileKfInFlightPli + " latePli=" + gracePliLate);
 
             // 2f. Reorder margin before triggering selective NACK (interleaved & multi-shard P-frame)
-            byte[] reorderPayload = new byte[5 * BoBoUdpFec.MaxShardPayloadBytes + 100]; // 6 data shards
+            byte[] reorderPayload = new byte[5 * BoBoUdpFec.DefaultSendShardPayloadBytes + 100]; // 6 data shards
             List<byte[]> rInterleaved = BoBoUdpFec.BuildVideoShards(50u, 500u, 1920, 1080, false, reorderPayload, 0.9, true, true);
             var rAsm1 = new BoBoUdpVideoAssembler { NackEnabled = true };
             var rBatch1 = new List<BoBoReassembledVideoFrame>();
@@ -1411,7 +1412,7 @@ namespace DualRemote
             var rNacks1 = new List<BoBoUdpNackRequest>();
             rAsm1.PollRecovery(Stopwatch.GetTimestamp(), 25.0, rNacks1, out rDummyPli);
 
-            byte[] fourShardPayload = new byte[3 * BoBoUdpFec.MaxShardPayloadBytes + 200]; // 4 data shards
+            byte[] fourShardPayload = new byte[3 * BoBoUdpFec.DefaultSendShardPayloadBytes + 200]; // 4 data shards
             List<byte[]> rPlain = BoBoUdpFec.BuildVideoShards(51u, 516u, 1920, 1080, false, fourShardPayload, 0.0, false, true);
             var rAsm2 = new BoBoUdpVideoAssembler { NackEnabled = true };
             var rBatch2 = new List<BoBoReassembledVideoFrame>();
@@ -1439,22 +1440,22 @@ namespace DualRemote
                 inOk,
                 "first=" + rFirst.Count + " second=" + rSecond.Count);
 
-            // 4. Adaptive Bitrate Controller (WAN conservative start + congestion backoff + FPS step-down)
+            // 4. Adaptive Bitrate Controller (WAN 2K 90Hz preservation + congestion backoff + high-RTT fallback)
             var abr = new BoBoAdaptiveBitrateController(true, 22000, 90, 45.0, false);
-            var highRtt = new BoBoAdaptiveBitrateController(true, 22000, 90, 85.0, false);
+            var highRtt = new BoBoAdaptiveBitrateController(true, 22000, 90, 115.0, false);
             var lan = new BoBoAdaptiveBitrateController(true, 22000, 90, 4.0, true);
             int startBps = abr.CurrentBitrateKbps;
             int bps1, fps1;
             bool backedOff = abr.OnTelemetry(140.0, 5.5, out bps1, out fps1);
             abr.UpdateTarget(true, 36000, 144);
-            bool retainedBackoff = abr.CurrentBitrateKbps == bps1 && abr.CurrentFps <= 60;
+            bool retainedBackoff = abr.CurrentBitrateKbps == bps1 && abr.CurrentFps <= 90;
             abr.UpdateTarget(false, 22000, 90);
             bool manualTarget = abr.CurrentBitrateKbps == 22000 && abr.CurrentFps == 90;
             abr.UpdateTarget(true, 22000, 90);
-            Check("自适应码率：跨网保守起流、拥塞回退与重新选档",
-                startBps == 4500 && backedOff && bps1 < startBps && retainedBackoff && manualTarget &&
-                abr.CurrentBitrateKbps <= 4500 && abr.CurrentFps <= 60 &&
-                highRtt.CurrentBitrateKbps == 2500 && highRtt.CurrentFps == 30 &&
+            Check("自适应码率：跨网 90Hz 保帧起流、拥塞回退与重新选档",
+                startBps == 6000 && abr.CurrentFps <= 90 && backedOff && bps1 < startBps && retainedBackoff && manualTarget &&
+                abr.CurrentBitrateKbps <= 18000 && abr.CurrentFps <= 90 &&
+                highRtt.CurrentBitrateKbps == 3500 && highRtt.CurrentFps == 45 &&
                 lan.CurrentBitrateKbps == 22000 && lan.CurrentFps == 90,
                 "start=" + startBps + " backoff=" + bps1 + "kbps/" + fps1 + "fps");
 
@@ -1474,8 +1475,8 @@ namespace DualRemote
             abrJitter.OnTelemetry(40.0, 0.0, jT0 + (long)(Stopwatch.Frequency * 2.5), out jBps, out jFps);
             abrJitter.OnTelemetry(220.0, 0.0, jT0 + (long)(Stopwatch.Frequency * 4.6), out jBps, out jFps);
             Check("自适应码率：12 秒基线重校准与高抖动抑制误升码率",
-                abrShift.CurrentBaselineRttMs >= 70.0 && abrShift.CurrentBitrateKbps > 4500 &&
-                abrJitter.LatestJitterMs >= 35.0 && abrJitter.CurrentBitrateKbps <= 4500,
+                abrShift.CurrentBaselineRttMs >= 70.0 && abrShift.CurrentBitrateKbps > 6000 &&
+                abrJitter.LatestJitterMs >= 35.0 && abrJitter.CurrentBitrateKbps <= 6000,
                 "shiftBase=" + abrShift.CurrentBaselineRttMs + " shiftBps=" + abrShift.CurrentBitrateKbps +
                 " jitter=" + Math.Round(abrJitter.LatestJitterMs, 1) + " jBps=" + abrJitter.CurrentBitrateKbps);
 
@@ -1963,6 +1964,205 @@ namespace DualRemote
             {
                 try { listener.Stop(); } catch { }
             }
+        }
+
+        private static void RunV74CrossNetAndHevcSelfTests()
+        {
+            Log("");
+            Log("—— v7.4.0 H.265 协商 + 防分片 MTU + 90Hz 抖动/TCP队限 + RFC 5389 STUN 打洞自检 ——");
+
+            // 1. DefaultSendShardPayloadBytes (1060B) + FlagHevc round-trip + VideoHevc packet type
+            byte[] hevcAu = new byte[2500];
+            for (int i = 0; i < hevcAu.Length; i++) hevcAu[i] = (byte)((i * 19 + 3) & 0xFF);
+            List<byte[]> shards = BoBoUdpFec.BuildVideoShards(
+                7u, 420u, 2560, 1440, true, hevcAu, 0.5, true, true, 40.0, 5.0, 0, true);
+            bool mtuOk = shards.Count > 0;
+            for (int i = 0; i < shards.Count; i++)
+            {
+                if (shards[i].Length > BoBoUdpFec.ShardHeaderBytes + 2 + BoBoUdpFec.DefaultSendShardPayloadBytes)
+                {
+                    mtuOk = false;
+                }
+            }
+            var asm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var ready = new List<BoBoReassembledVideoFrame>();
+            bool dummyPli;
+            for (int i = 0; i < shards.Count; i++)
+            {
+                asm.ProcessShardBatch(shards[i], 40.0, ready, out dummyPli);
+            }
+            bool hevcFlagOk = ready.Count == 1 && ready[0].IsHevc && ready[0].IsKeyframe &&
+                              ready[0].Width == 2560 && ready[0].Height == 1440 &&
+                              ready[0].H264Data.SequenceEqual(hevcAu);
+            Check("V7.4 MTU 防分片载荷（1060B）+ UDP FlagHevc(0x10) 与 VideoHevc(0x08) 协议标识",
+                BoBoUdpFec.DefaultSendShardPayloadBytes == 1060 &&
+                BoBoUdpFec.FlagHevc == 16 &&
+                (byte)BoBoPacketType.VideoHevc == 0x08 &&
+                mtuOk && hevcFlagOk,
+                "shards=" + shards.Count + " reassembled=" + ready.Count + " isHevc=" + (ready.Count == 1 && ready[0].IsHevc));
+
+            // 2. RTT-adaptive maxAhead & TCP queue depth for 90Hz
+            int maxAheadLow = BoBoUdpVideoAssembler.ComputeMaxAheadFrames(true, 20.0);
+            int maxAheadHigh = BoBoUdpVideoAssembler.ComputeMaxAheadFrames(true, 140.0);
+            int maxAheadNoNack = BoBoUdpVideoAssembler.ComputeMaxAheadFrames(false, 60.0);
+            int tcpCap30 = BoBoAdaptiveBitrateController.ComputeTcpQueueLimit(30);
+            int tcpCap90 = BoBoAdaptiveBitrateController.ComputeTcpQueueLimit(90);
+            Check("V7.4 90Hz RTT 自适应乱序窗口与动态 TCP 队列深度",
+                maxAheadLow >= 12 && maxAheadHigh >= maxAheadLow && maxAheadHigh <= 24 &&
+                maxAheadNoNack >= 8 && tcpCap30 >= 4 && tcpCap90 >= 6,
+                "ahead=" + maxAheadLow + "/" + maxAheadHigh + " tcpCap=" + tcpCap30 + "/" + tcpCap90);
+
+            // 3. RFC 5389 STUN Binding Request/Response (IPv4 & IPv6 XOR-MAPPED-ADDRESS) + live dual-stack loopback probe
+            byte[] txId = new byte[] { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC };
+            byte[] stunReq = BoBoNatTraversal.BuildStunBindingRequest(txId);
+            bool reqOk = stunReq.Length == 20 && stunReq[0] == 0x00 && stunReq[1] == 0x01 &&
+                         stunReq[4] == 0x21 && stunReq[5] == 0x12 && stunReq[6] == 0xA4 && stunReq[7] == 0x42;
+
+            byte[] v4Resp = new byte[32];
+            v4Resp[0] = 0x01; v4Resp[1] = 0x01; v4Resp[3] = 12;
+            v4Resp[4] = 0x21; v4Resp[5] = 0x12; v4Resp[6] = 0xA4; v4Resp[7] = 0x42;
+            Buffer.BlockCopy(txId, 0, v4Resp, 8, 12);
+            v4Resp[20] = 0x00; v4Resp[21] = 0x20; v4Resp[23] = 8;
+            v4Resp[25] = 0x01;
+            ushort xorP4 = (ushort)(54321 ^ 0x2112);
+            v4Resp[26] = (byte)(xorP4 >> 8); v4Resp[27] = (byte)(xorP4 & 0xFF);
+            byte[] rawV4 = new byte[] { 198, 51, 100, 42 };
+            for (int i = 0; i < 4; i++) v4Resp[28 + i] = (byte)(rawV4[i] ^ v4Resp[4 + i]);
+
+            byte[] v6Resp = new byte[44];
+            v6Resp[0] = 0x01; v6Resp[1] = 0x01; v6Resp[3] = 24;
+            v6Resp[4] = 0x21; v6Resp[5] = 0x12; v6Resp[6] = 0xA4; v6Resp[7] = 0x42;
+            Buffer.BlockCopy(txId, 0, v6Resp, 8, 12);
+            v6Resp[20] = 0x00; v6Resp[21] = 0x20; v6Resp[23] = 20;
+            v6Resp[25] = 0x02;
+            ushort xorP6 = (ushort)(41000 ^ 0x2112);
+            v6Resp[26] = (byte)(xorP6 >> 8); v6Resp[27] = (byte)(xorP6 & 0xFF);
+            byte[] rawV6 = System.Net.IPAddress.Parse("2409:8a00::77").GetAddressBytes();
+            for (int i = 0; i < 16; i++) v6Resp[28 + i] = (byte)(rawV6[i] ^ v6Resp[4 + i]);
+
+            byte[] outTx4, outTx6;
+            System.Net.IPEndPoint parsedV4, parsedV6;
+            bool v4Ok = BoBoNatTraversal.TryParseStunBindingResponse(v4Resp, v4Resp.Length, txId, out outTx4, out parsedV4) &&
+                        parsedV4 != null && parsedV4.Address.ToString() == "198.51.100.42" && parsedV4.Port == 54321;
+            bool v6Ok = BoBoNatTraversal.TryParseStunBindingResponse(v6Resp, v6Resp.Length, txId, out outTx6, out parsedV6) &&
+                        parsedV6 != null && parsedV6.Address.ToString() == "2409:8a00::77" && parsedV6.Port == 41000;
+
+            bool liveStunOk = false;
+            System.Net.Sockets.Socket stunSrvSock = null;
+            System.Net.Sockets.Socket clientDualSock = null;
+            try
+            {
+                stunSrvSock = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Dgram,
+                    System.Net.Sockets.ProtocolType.Udp);
+                stunSrvSock.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+                int stunPort = ((System.Net.IPEndPoint)stunSrvSock.LocalEndPoint).Port;
+
+                clientDualSock = BoBoNatTraversal.CreateDualStackUdpSocket(0);
+                var stunSess = new BoBoNatTraversal.StunProbeSession();
+                using (var stunCts = new System.Threading.CancellationTokenSource(3000))
+                {
+                    System.Threading.Tasks.Task srvTask = System.Threading.Tasks.Task.Run(delegate
+                    {
+                        try
+                        {
+                            stunSrvSock.ReceiveTimeout = 2500;
+                            byte[] rbuf = new byte[512];
+                            System.Net.EndPoint ep = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0);
+                            int rn = stunSrvSock.ReceiveFrom(rbuf, 0, rbuf.Length, System.Net.Sockets.SocketFlags.None, ref ep);
+                            if (rn >= 20 && ep is System.Net.IPEndPoint)
+                            {
+                                var rep = (System.Net.IPEndPoint)ep;
+                                byte[] reply = new byte[32];
+                                reply[0] = 0x01; reply[1] = 0x01; reply[3] = 12;
+                                reply[4] = 0x21; reply[5] = 0x12; reply[6] = 0xA4; reply[7] = 0x42;
+                                Buffer.BlockCopy(rbuf, 8, reply, 8, 12);
+                                reply[20] = 0x00; reply[21] = 0x20; reply[23] = 8;
+                                reply[25] = 0x01;
+                                ushort xp = (ushort)(rep.Port ^ 0x2112);
+                                reply[26] = (byte)(xp >> 8); reply[27] = (byte)(xp & 0xFF);
+                                byte[] ip4 = rep.Address.GetAddressBytes();
+                                for (int i = 0; i < 4; i++) reply[28 + i] = (byte)(ip4[i] ^ reply[4 + i]);
+                                stunSrvSock.SendTo(reply, reply.Length, System.Net.Sockets.SocketFlags.None, rep);
+                            }
+                        }
+                        catch { }
+                    });
+
+                    System.Threading.Tasks.Task rxTask = System.Threading.Tasks.Task.Run(delegate
+                    {
+                        try
+                        {
+                            clientDualSock.ReceiveTimeout = 2500;
+                            byte[] cbuf = new byte[512];
+                            System.Net.EndPoint cep = new System.Net.IPEndPoint(
+                                clientDualSock.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+                                    ? System.Net.IPAddress.IPv6Any
+                                    : System.Net.IPAddress.Any, 0);
+                            int cn = clientDualSock.ReceiveFrom(cbuf, 0, cbuf.Length, System.Net.Sockets.SocketFlags.None, ref cep);
+                            stunSess.TryHandlePacket(cbuf, cn);
+                        }
+                        catch { }
+                    });
+
+                    System.Net.IPEndPoint mapped = stunSess.ProbeServerAsync(
+                        clientDualSock, "127.0.0.1", stunPort, 2000, stunCts.Token).GetAwaiter().GetResult();
+                    int clientPort = ((System.Net.IPEndPoint)clientDualSock.LocalEndPoint).Port;
+                    liveStunOk = mapped != null && mapped.Port == clientPort &&
+                                 mapped.Address.ToString() == "127.0.0.1";
+                    try { System.Threading.Tasks.Task.WaitAll(new[] { srvTask, rxTask }, 800); } catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (stunSrvSock != null) { try { stunSrvSock.Close(); } catch { } }
+                if (clientDualSock != null) { try { clientDualSock.Close(); } catch { } }
+            }
+
+            Check("V7.4 RFC 5389 STUN 编解码（IPv4/IPv6 XOR-MAPPED）与双栈 Socket 环回实测",
+                reqOk && v4Ok && v6Ok && liveStunOk,
+                "req=" + reqOk + " v4=" + v4Ok + " v6=" + v6Ok + " live=" + liveStunOk);
+
+            // 4. SSRF candidate validation + candidate parse + relay health udpPort/stunPort + HEVC safe probe
+            bool ssrfOk =
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Loopback) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.IPv6Loopback) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("169.254.1.2")) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("fe80::1")) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("100.64.0.12")) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("fd7a:115c:a1e0::1")) &&
+                !BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("2001:db8::1")) &&
+                BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("192.168.1.20")) &&
+                BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("2409:8a00:1234::1")) &&
+                BoBoNatTraversal.IsAllowedRemoteCandidateIp(System.Net.IPAddress.Parse("198.51.100.42"));
+
+            var mixedMsg = new Dictionary<string, object>();
+            mixedMsg["candidates"] = new object[]
+            {
+                new Dictionary<string, object> { { "kind", "lan" }, { "host", "127.0.0.1" }, { "port", 49811 }, { "priority", 99 } },
+                new Dictionary<string, object> { { "kind", "ipv6" }, { "host", "2409:8a00:1234::1" }, { "port", 49811 }, { "priority", 110 } },
+                new Dictionary<string, object> { { "kind", "srflx" }, { "host", "198.51.100.42" }, { "port", 54321 }, { "priority", 100 } }
+            };
+            List<BoBoUdpCandidate> parsedCands = BoBoNatTraversal.ParseCandidatesFromMessage(mixedMsg);
+
+            bool hOk, hAcc;
+            double hLoad, hCpu, hBw, hMaxBw;
+            int hAct, hMax, hUdpP, hStunP;
+            string hReg;
+            bool healthParsed = BoBoRelayScheduler.ParseHealthJson(
+                "{\"ok\":true,\"accepting\":true,\"load\":0.25,\"udpPort\":49811,\"stunPort\":49812,\"region\":\"cn-test\"}",
+                out hOk, out hAcc, out hLoad, out hCpu, out hAct, out hMax, out hBw, out hMaxBw, out hReg, out hUdpP, out hStunP);
+
+            bool hevcEnc = BoBoCoreInterop.IsHevcEncodeSupported();
+            bool hevcDec = BoBoCoreInterop.IsHevcDecodeSupported();
+            Check("V7.4 候选地址 SSRF 拦截 + 中继 UDP/STUN 端口解析 + 系统 H.265 能力探测",
+                ssrfOk && parsedCands.Count == 2 &&
+                parsedCands[0].Host == "2409:8a00:1234::1" && parsedCands[1].Port == 54321 &&
+                healthParsed && hUdpP == 49811 && hStunP == 49812 &&
+                BoBoCoreInterop.VideoCodecH264 == 0 && BoBoCoreInterop.VideoCodecHevc == 1,
+                "cands=" + parsedCands.Count + " relay=" + hUdpP + "/" + hStunP + " hevcEnc=" + hevcEnc + " hevcDec=" + hevcDec);
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

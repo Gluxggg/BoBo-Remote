@@ -1103,6 +1103,10 @@ namespace DualRemote
                     selectedRelaySnap != null && selectedRelaySnap.HasServerLoad,
                     selectedRelaySnap != null ? selectedRelaySnap.ServerLoad : 0.0,
                     selectedRelaySnap == null || selectedRelaySnap.Accepting);
+                if (selectedRelaySnap != null)
+                {
+                    route.UpdateCustomRelayPorts(selectedRelaySnap.UdpPort, selectedRelaySnap.StunPort);
+                }
                 effectiveHost = selectedRelay.Host;
                 clientPairPort = selectedRelay.Port;
                 clientPairDisplayInput = selectedRelay.EndpointText;

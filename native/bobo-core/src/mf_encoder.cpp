@@ -182,6 +182,7 @@ void MfH264Encoder::Close() {
     isAsync_ = false;
     isHardware_ = false;
     isD3D11ZeroCopy_ = false;
+    isHevc_ = false;
     encoderName_.clear();
     if (mfStarted_) {
         MFShutdown();
@@ -190,7 +191,8 @@ void MfH264Encoder::Close() {
 }
 
 bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrateKbps,
-                         std::string& outError, ID3D11Device* d3dDevice) {
+                         std::string& outError, ID3D11Device* d3dDevice,
+                         bool preferHevc, bool allowH264Fallback) {
     Close();
 
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -209,44 +211,158 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
     bitrateKbps_ = bitrateKbps;
     keyframeRequested_.store(true);
 
-    // 1. Try hardware H.264 encoder MFTs first (NVENC / AMD AMF / Intel QSV).
-    // When d3dDevice is provided, try zero-copy D3D11 surface mode first, then CPU NV12 hardware mode.
-    MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, MFVideoFormat_NV12 };
-    MFT_REGISTER_TYPE_INFO outType = { MFMediaType_Video, MFVideoFormat_H264 };
-    IMFActivate** activates = nullptr;
-    UINT32 count = 0;
-    hr = MFTEnumEx(
-        MFT_CATEGORY_VIDEO_ENCODER,
-        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-        &inType,
-        &outType,
-        &activates,
-        &count);
-    if (SUCCEEDED(hr) && activates) {
-        for (UINT32 i = 0; i < count; ++i) {
-            std::string hwErr;
-            if (d3dDevice && TryOpenCandidate(activates[i], true, width_, height_, fps_, bitrateKbps_, d3dDevice, hwErr)) {
-                for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-                CoTaskMemFree(activates);
-                return true;
+    auto tryCodec = [&](bool hevc) -> bool {
+        MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, MFVideoFormat_NV12 };
+        MFT_REGISTER_TYPE_INFO outType = { MFMediaType_Video, hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264 };
+        IMFActivate** activates = nullptr;
+        UINT32 count = 0;
+        HRESULT ehr = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            &inType,
+            &outType,
+            &activates,
+            &count);
+        if (SUCCEEDED(ehr) && activates) {
+            for (UINT32 i = 0; i < count; ++i) {
+                std::string hwErr;
+                if (d3dDevice && TryOpenCandidate(activates[i], true, hevc, width_, height_, fps_, bitrateKbps_, d3dDevice, hwErr)) {
+                    for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
+                    CoTaskMemFree(activates);
+                    return true;
+                }
+                if (TryOpenCandidate(activates[i], true, hevc, width_, height_, fps_, bitrateKbps_, nullptr, hwErr)) {
+                    for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
+                    CoTaskMemFree(activates);
+                    return true;
+                }
             }
-            if (TryOpenCandidate(activates[i], true, width_, height_, fps_, bitrateKbps_, nullptr, hwErr)) {
-                for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-                CoTaskMemFree(activates);
-                return true;
+            for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
+            CoTaskMemFree(activates);
+        }
+
+        if (hevc) {
+            // Also check non-hardware local/Store HEVC encoders if available, verifying output via probe.
+            IMFActivate** swActivates = nullptr;
+            UINT32 swCount = 0;
+            HRESULT sehr = MFTEnumEx(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                &inType,
+                &outType,
+                &swActivates,
+                &swCount);
+            if (SUCCEEDED(sehr) && swActivates) {
+                for (UINT32 i = 0; i < swCount; ++i) {
+                    std::string swErr;
+                    if (TryOpenCandidate(swActivates[i], true, true, width_, height_, fps_, bitrateKbps_, nullptr, swErr)) {
+                        for (UINT32 j = 0; j < swCount; ++j) swActivates[j]->Release();
+                        CoTaskMemFree(swActivates);
+                        return true;
+                    }
+                }
+                for (UINT32 j = 0; j < swCount; ++j) swActivates[j]->Release();
+                CoTaskMemFree(swActivates);
             }
         }
-        for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-        CoTaskMemFree(activates);
+        return false;
+    };
+
+    // 1. If HEVC is preferred, try hardware/certified HEVC MFTs first.
+    if (preferHevc) {
+        if (tryCodec(true)) {
+            return true;
+        }
+        if (!allowH264Fallback) {
+            outError = "No usable HEVC encoder MFT found";
+            Close();
+            return false;
+        }
     }
 
-    // 2. Reliable universal fallback: Microsoft in-box synchronous H.264 Encoder MFT (100% Win10/11)
+    // 2. Try hardware H.264 encoder MFTs (NVENC / AMD AMF / Intel QSV).
+    if (tryCodec(false)) {
+        return true;
+    }
+
+    // 3. Reliable universal fallback: Microsoft in-box synchronous H.264 Encoder MFT (100% Win10/11)
     if (TryOpenBuiltinSoftware(width_, height_, fps_, bitrateKbps_, outError)) {
         return true;
     }
 
     Close();
     return false;
+}
+
+static bool ProbeMfHevcEncodeSupportUncached() {
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HRESULT hrMf = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    if (FAILED(hrMf)) {
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+        return false;
+    }
+
+    MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, MFVideoFormat_NV12 };
+    MFT_REGISTER_TYPE_INFO outType = { MFMediaType_Video, MFVideoFormat_HEVC };
+    IMFActivate** acts = nullptr;
+    UINT32 count = 0;
+    HRESULT ehr = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_ENCODER,
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+        MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &inType,
+        &outType,
+        &acts,
+        &count);
+    if (acts) {
+        for (UINT32 i = 0; i < count; ++i) acts[i]->Release();
+        CoTaskMemFree(acts);
+    }
+    if (FAILED(ehr) || count == 0) {
+        MFShutdown();
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+        return false;
+    }
+
+    bool supported = false;
+    {
+        Microsoft::WRL::ComPtr<ID3D11Device> d3dDev;
+        D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+        static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+        HRESULT dhr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            levels,
+            2,
+            D3D11_SDK_VERSION,
+            d3dDev.GetAddressOf(),
+            &fl,
+            nullptr);
+        if (FAILED(dhr)) {
+            d3dDev.Reset();
+        }
+        MfH264Encoder probeEnc;
+        std::string err;
+        if (probeEnc.Open(640, 360, 30, 2000, err, d3dDev.Get(), true, false)) {
+            supported = probeEnc.IsHevc();
+            probeEnc.Close();
+        }
+    }
+
+    MFShutdown();
+    if (SUCCEEDED(hrCo)) CoUninitialize();
+    return supported;
+}
+
+bool IsMfHevcEncodeSupported() {
+    static std::once_flag once;
+    static bool supported = false;
+    std::call_once(once, []() {
+        supported = ProbeMfHevcEncodeSupportUncached();
+    });
+    return supported;
 }
 
 void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps) {
@@ -337,13 +453,15 @@ bool MfH264Encoder::UpdateBitrateLive(uint32_t bitrateKbps) {
     return SUCCEEDED(hr);
 }
 
-bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, uint32_t width, uint32_t height,
+bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool hevc, uint32_t width, uint32_t height,
                                      uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice,
                                      std::string& outError) {
     if (!activate) return false;
     wchar_t* friendly = nullptr;
     UINT32 friendlyLen = 0;
-    std::string name = hardware ? "Hardware H.264 MFT" : "Software H.264 MFT";
+    std::string name = hevc
+        ? (hardware ? "Hardware HEVC MFT" : "Software HEVC MFT")
+        : (hardware ? "Hardware H.264 MFT" : "Software H.264 MFT");
     if (SUCCEEDED(activate->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &friendlyLen)) && friendly) {
         name = WideToUtf8Enc(friendly);
         CoTaskMemFree(friendly);
@@ -368,7 +486,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, uint3
     }
 
     bool d3dBound = false;
-    if (!ConfigureTransform(mft.Get(), asyncMft, width, height, fps, bitrateKbps, d3dDevice, d3dBound, outError)) {
+    if (!ConfigureTransform(mft.Get(), asyncMft, hevc, width, height, fps, bitrateKbps, d3dDevice, d3dBound, outError)) {
         d3dMgr_.Reset();
         activate->ShutdownObject();
         return false;
@@ -378,6 +496,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, uint3
     isAsync_ = asyncMft;
     isHardware_ = hardware;
     isD3D11ZeroCopy_ = d3dBound;
+    isHevc_ = hevc;
     encoderName_ = d3dBound ? (name + " [D3D11]") : name;
 
     if (isAsync_) {
@@ -447,6 +566,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, uint3
             isAsync_ = false;
             isHardware_ = false;
             isD3D11ZeroCopy_ = false;
+            isHevc_ = false;
             encoderName_.clear();
             if (outError.empty()) outError = "Hardware MFT produced no output during probe";
             return false;
@@ -468,7 +588,7 @@ bool MfH264Encoder::TryOpenBuiltinSoftware(uint32_t width, uint32_t height, uint
         if (SUCCEEDED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
                                 &inType, &outType, &activates, &count)) && activates) {
             for (UINT32 i = 0; i < count; ++i) {
-                if (TryOpenCandidate(activates[i], false, width, height, fps, bitrateKbps, nullptr, outError)) {
+                if (TryOpenCandidate(activates[i], false, false, width, height, fps, bitrateKbps, nullptr, outError)) {
                     for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
                     CoTaskMemFree(activates);
                     return true;
@@ -482,18 +602,19 @@ bool MfH264Encoder::TryOpenBuiltinSoftware(uint32_t width, uint32_t height, uint
     }
 
     bool d3dBound = false;
-    if (!ConfigureTransform(mft.Get(), false, width, height, fps, bitrateKbps, nullptr, d3dBound, outError)) {
+    if (!ConfigureTransform(mft.Get(), false, false, width, height, fps, bitrateKbps, nullptr, d3dBound, outError)) {
         return false;
     }
     encoder_ = mft;
     isAsync_ = false;
     isHardware_ = false;
     isD3D11ZeroCopy_ = false;
+    isHevc_ = false;
     encoderName_ = "Microsoft H264 Encoder MFT";
     return true;
 }
 
-bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t width, uint32_t height,
+bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hevc, uint32_t width, uint32_t height,
                                        uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice,
                                        bool& outD3D11Bound, std::string& outError) {
     (void)isAsync;
@@ -547,20 +668,24 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, uint32_t
     hr = MFCreateMediaType(outMt.GetAddressOf());
     if (FAILED(hr)) { outError = "MFCreateMediaType(out) failed"; return false; }
     outMt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    outMt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    outMt->SetGUID(MF_MT_SUBTYPE, hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
     outMt->SetUINT32(MF_MT_AVG_BITRATE, bitrateKbps * 1000u);
     outMt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+    outMt->SetUINT32(MF_MT_MPEG2_PROFILE, hevc ? eAVEncH265VProfile_Main_420_8 : eAVEncH264VProfile_Main);
     MFSetAttributeSize(outMt.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(outMt.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(outMt.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
     hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
     if (FAILED(hr)) {
-        outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+        if (hevc) {
+            outMt->DeleteItem(MF_MT_MPEG2_PROFILE);
+        } else {
+            outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+        }
         hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
         if (FAILED(hr)) {
-            outError = FormatEncHr("SetOutputType(H264) failed", hr);
+            outError = FormatEncHr(hevc ? "SetOutputType(HEVC) failed" : "SetOutputType(H264) failed", hr);
             return false;
         }
     }
@@ -624,7 +749,10 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
 
         size_t nalStart = i + scLen;
         if (nalStart >= len) break;
-        uint8_t nalType = data[nalStart] & 0x1F;
+        const bool isHevc = isHevc_;
+        uint8_t nalType = isHevc
+            ? static_cast<uint8_t>((data[nalStart] >> 1) & 0x3F)
+            : static_cast<uint8_t>(data[nalStart] & 0x1F);
 
         size_t nextSc = nalStart + 1;
         while (nextSc + 2 < len) {
@@ -636,8 +764,11 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
         }
         if (nextSc + 2 >= len) nextSc = len;
 
-        // Strip H.264 Filler Data (NAL 12 - up to 99% waste on CBR!) and AUD (NAL 9)
-        if (nalType == 12 || nalType == 9) {
+        // Strip Filler Data (H.264 NAL 12 / HEVC NAL 38) and AUD (H.264 NAL 9 / HEVC NAL 35)
+        const bool isFillerOrAud = isHevc
+            ? (nalType == 38 || nalType == 35)
+            : (nalType == 12 || nalType == 9);
+        if (isFillerOrAud) {
             if (!strippedAny) {
                 filtered.reserve(len);
                 if (i > 0) filtered.insert(filtered.end(), data, data + i);
@@ -647,9 +778,14 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
             continue;
         }
 
-        if (nalType == 5) hasIdr = true;
-        if (nalType == 7) hasSps = true;
-        if (nalType == 7 || nalType == 8) {
+        const bool isIdrNal = isHevc ? (nalType >= 19 && nalType <= 21) : (nalType == 5);
+        const bool isSpsNal = isHevc ? (nalType == 33) : (nalType == 7);
+        const bool isParamSet = isHevc
+            ? (nalType == 32 || nalType == 33 || nalType == 34)
+            : (nalType == 7 || nalType == 8);
+        if (isIdrNal) hasIdr = true;
+        if (isSpsNal) hasSps = true;
+        if (isParamSet) {
             foundSpsPps.insert(foundSpsPps.end(), data + i, data + nextSc);
         }
 
