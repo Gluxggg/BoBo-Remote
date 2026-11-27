@@ -212,12 +212,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.3.0`)**
+**Verified Test Coverage (`v7.3.1`)**
 - **Local Windows suite**:
   - **12/12** native `BoBoCore.dll` self-tests (H.264 encode/decode loopback, D3D11, WASAPI ADPCM, Media Foundation `AAC-LC 48 kHz` stereo ADTS round-trip, hardware input lock, and bounded `12f / 4 MiB / 250 ms` decode queue + IDR recovery; non-interactive sessions fall back to synthetic NV12)
   - **7/7** pure-Go `native/bobo-tsnet` unit tests + `--self-test` and **3/3** pure-Go `tools/bobo-relay` unit tests
-  - **148/148** managed `BoBo远程.exe --self-test` checks (`udpAesGcm` golden vector, `AES-128-GCM` verify-before-replay, 512-packet anti-replay, `0xFFFFFF00` sequence fail-closed guard & `Dispose()` key zeroization, GCC delay-gradient congestion control & single-spike immunity, dynamic FEC, `AudioAac`, relay scheduler, embedded Tailnet SOCKS5, and 3-line HUD ABI)
-  - **7/7** GUI installer `--self-test` checks, **85/85** UI smoke checks (minimalist grouped cards, AAC toggle, `StyledChoiceBox` single-chevron rendering, relay scheduler, Tailnet card, 3-line HUD, and 4 visual screenshot checks), **12/12** threaded privacy curtain checks, and **5/5** PowerShell UTF-8 BOM + AST syntax checks
+  - **150/150** managed `BoBo远程.exe --self-test` checks (`udpAesGcm` golden vector, `AES-128-GCM` verify-before-replay, 512-packet anti-replay, `0xFFFFFF00` sequence cap & `Dispose()` key zeroization, GCC delay-gradient congestion control & single-spike immunity, dynamic FEC, `AudioAac`, edge/taskbar & IME curtain trigger classification, relay scheduler, embedded Tailnet SOCKS5, and 3-line HUD ABI)
+  - **7/7** GUI installer `--self-test` checks, **85/85** `UiSmoke731` UI checks, **15/15** `CurtainSmoke731` threaded privacy curtain checks (including activated taskbar/thumbnail and silent IME 2 ms burst override + `WM_WINDOWPOSCHANGING` anti-demotion), and **5/5** PowerShell UTF-8 BOM + AST syntax checks
 - **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` including `BoBoProtocolGoldenTest` + `assembleRelease`), macOS (`swift test` including `BoBoGoldenVectorsTests` + Universal 2 DMG), and iOS (unsigned IPA), publishing all 6 artifacts alongside `SHA256SUMS.txt`.
 
 ---
@@ -288,7 +288,7 @@ BoBo-Remote/
 | **V1 – V5** | Custom WinForms theme & 7-step tour, privacy curtain & GUI installer/updater, embedded native stream window, Control Center & 4-edge ball | ✅ Done |
 | **V6.0 – V6.2** | In-process C++17 `BoBoCore.dll`, `BoBo6.2` unified wire spec, physical input-lock shield, **4-platform Windows / Android / macOS / iOS release** | ✅ Done |
 | **V7.0 – V7.2 (`v7.2.1`)** | Super Display v2, host-sized cursor, pure-Go zero-install `tsnet` Tailnet, load-aware BYO-VPS relay scheduling ([`tools/bobo-relay`](tools/bobo-relay/README.md)), **P0 bounded `12f/4MiB/250ms` decode queue + 3-line HUD** | ✅ Done |
-| **V7.3 (`v7.3.0`)** | **Full P1 + Minimalist UI Milestone**: ① Standard AEAD **`AES-128-GCM`** & crypto audit (`0xFFFFFF00` sequence cap / verify-before-replay / key zeroization / `udpAesGcm` vector); ② **GCC-inspired delay-gradient ABR**, dynamic pacing headroom & dynamic FEC; ③ **Four-platform encrypted `UDP+FEC/NACK`** (Windows, Android, macOS, iOS); ④ **OS-native `AAC-LC 96 kbps`** compressed audio + ADPCM fallback; ⑤ **Business-minimalist grouped-card UI redesign** | ✅ Done |
+| **V7.3 (`v7.3.0` – `v7.3.1`)** | **Full P1 + Minimalist UI & 2ms Curtain Z-Order Hardening**: ① Standard AEAD **`AES-128-GCM`** & crypto audit; ② **GCC-inspired delay-gradient ABR** & dynamic FEC; ③ **Four-platform encrypted `UDP+FEC/NACK`**; ④ **OS-native `AAC-LC 96 kbps`** audio + ADPCM fallback; ⑤ **Business-minimalist grouped-card UI redesign**; ⑥ `v7.3.1` **2 ms high-res curtain burst pump blocking taskbar/sidebar & IME bleed-through** | ✅ Done |
 | **V8 / P2** | `HEVC (H.265)` / `AV1` / `H.264 4:4:4` codec negotiation (ultra-crisp text & IDE rendering), HDR / high-refresh multi-monitor parity, self-hosted Connection Coordinator + native STUN/ICE + BYO-VPS UDP TURN / `TCP 443`, community relay & Linux exploration | 🚧 Planned / Evolving |
 
 ---

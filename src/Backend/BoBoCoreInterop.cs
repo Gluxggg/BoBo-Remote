@@ -699,11 +699,16 @@ namespace DualRemote
             return 1;
         }
 
+        internal static volatile Action<BoBoInputPacket> RemoteInputHook;
+        internal static volatile Action RemoteTextInputHook;
+
         internal static void InjectInput(int monitorIndex, BoBoInputPacket pkt)
         {
             string err;
             if (!EnsureLoaded(out err)) return;
             fnHostInjectInput(monitorIndex, ref pkt);
+            Action<BoBoInputPacket> hook = RemoteInputHook;
+            if (hook != null) hook(pkt);
         }
 
         internal static void InjectUnicodeText(string text)
@@ -712,6 +717,8 @@ namespace DualRemote
             string err;
             if (!EnsureLoaded(out err)) return;
             fnHostInjectUnicodeText(text, text.Length);
+            Action textHook = RemoteTextInputHook;
+            if (textHook != null) textHook();
         }
 
         internal static bool ApplySuperDisplay(int monitorIndex, int clientWidth, int clientHeight, out int actualWidth, out int actualHeight)

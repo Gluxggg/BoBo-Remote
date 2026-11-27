@@ -218,12 +218,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**`v7.3.0` 已验证测试矩阵**：
+**`v7.3.1` 已验证测试矩阵**：
 - **本地 Windows 全量回归**：
   - 原生 `BoBoCore.dll` 自检 **`12/12`** 通过（H.264 编解码环回、D3D11 渲染、WASAPI ADPCM、Media Foundation `AAC-LC 48 kHz` 立体声 ADTS 往返、物理键鼠锁、以及 `12 帧 / 4 MiB / 250 ms` 有界解码队列与 IDR 恢复；无桌面交互会话下采屏按预期平滑降级合成 NV12 测试）
   - 纯 Go `native/bobo-tsnet` **`7/7`** 单测与 `--self-test` 通过；纯 Go `tools/bobo-relay` **`3/3`** 并发回环与负载饱和单测通过
-  - 托管核心 `BoBo远程.exe --self-test` **`148/148`** 全部通过（协议黄金向量含 `udpAesGcm`、`AES-128-GCM` 先验签后窗口 / 512 窗防重放 / `0xFFFFFF00` Nonce 封顶 / `Dispose` 密钥清零、GCC 延迟梯度过载与单峰免疫、动态 FEC 分组缩放、`AudioAac` 封装与能力探测、多中转动态调度、内置 SOCKS5 与 3 行 HUD ABI 对齐）
-  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`** 通过；`UiSmoke730` **`85/85`** 控件与分组卡片 UI 冒烟（含 4 场景离屏截图复检）通过；`CurtainSmoke` **`12/12`** 独立防窥线程冒烟通过；**`5/5`** PowerShell 脚本 UTF-8 BOM + AST 语法校验通过
+  - 托管核心 `BoBo远程.exe --self-test` **`150/150`** 全部通过（协议黄金向量含 `udpAesGcm`、`AES-128-GCM` 先验签后窗口 / 512 窗防重放 / `0xFFFFFF00` Nonce 封顶 / `Dispose` 密钥清零、GCC 延迟梯度过载与单峰免疫、动态 FEC、`AudioAac`、底边栏输入突发触发 & 任务栏/输入法窗口识别、多中转动态调度与 3 行 HUD ABI）
+  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`** 通过；`UiSmoke731` **`85/85`** UI 冒烟通过；`CurtainSmoke731` **`15/15`** 独立防窥线程压测通过（含激活态任务栏 + 悬停缩略图与静默 IME 突发强压）；**`5/5`** PowerShell 脚本 UTF-8 BOM + AST 语法校验通过
 - **GitHub Actions 四端 CI / Release 流水线**：自动跨平台跑通 `tools/bobo-relay`、`native/bobo-tsnet`、Windows x64 全量包、Android 单元测试（含 `BoBoProtocolGoldenTest` AES-128-GCM 与交错 FEC/NACK 向量）与 Release APK 构建、Apple `BoBoAppleCore` Swift XCTest 与 macOS DMG / iOS IPA 构建，并对全部 6 个平台包自动生成 `SHA256SUMS.txt` 发布验证。（实时浏览器 Tailscale OAuth 授权及公网多 VPS 实际带宽吞吐依赖真实网络对端与用户自建节点环境。）
 
 ---
@@ -296,7 +296,7 @@ BoBo-Remote/
 | **V1 – V5** | WinForms 自绘主题与 7 步新手引导、独立防窥守护与安装/更新器、原生内嵌串流窗、控制中心与贴边悬浮球 | ✅ 已完成 |
 | **V6.0 – V6.2** | 内嵌 C++17 `BoBoCore.dll`（零外置引擎）、`BoBo6.2` 统一跨端协议、物理级键鼠锁防窥、**Windows / Android / macOS / iOS 四端发布** | ✅ 已完成 |
 | **V7.0 – V7.2 (`v7.2.1`)** | 超级屏 v2、主机尺寸光标、纯 Go 内嵌免安装 `tsnet` Tailscale、多自建 VPS 并发测速与负载调度（[`tools/bobo-relay`](tools/bobo-relay/README.md)）、**P0 有界 `12f/4MiB/250ms` 视频解码队列 + 3 行帧管线 HUD** | ✅ 已完成 |
-| **V7.3 (`v7.3.0`)** | **全量 P1 + 商务简约重构落地**：① 标准 AEAD **`AES-128-GCM`** 与加密安全审计（`0xFFFFFF00` Nonce 封顶 / 先验签后窗口 / 密钥清零 / `udpAesGcm` 向量）；② **GCC 延迟梯度拥塞控制**、发包节奏调整与动态 FEC；③ **全四端加密 `UDP+FEC/NACK`**（Android + macOS + iOS 全面对齐）；④ **OS 原生 `AAC-LC 96 kbps`** 压缩音频协商与 ADPCM 自动兜底；⑤ **商务简约分组白卡 UI 重构** | ✅ 已完成 |
+| **V7.3 (`v7.3.0` – `v7.3.1`)** | **全量 P1 + 商务简约重构与防窥 2ms Z序加固落地**：① 标准 AEAD **`AES-128-GCM`** 与安全审计；② **GCC 拥塞控制**与动态 FEC；③ **全四端加密 `UDP+FEC/NACK`**；④ **OS 原生 `AAC-LC 96 kbps`** 压缩音频与兜底；⑤ **商务简约分组白卡 UI 重构**；⑥ `v7.3.1` **2 ms 防窥突发 Z 序泵 + 任务栏/底边栏与输入法突发拦截** | ✅ 已完成 |
 | **V8 / P2** | `HEVC (H.265)` / `AV1` / `H.264 4:4:4` 编码协商（代码/设计极致锐度）、HDR 与高刷新率多屏增强、自部署信令协调 + 原生 STUN/ICE P2P 与 TURN/TCP 443 穿透、社区公益中继与 Linux 客户端探索 | 🚧 规划 / 演进中 |
 
 ---

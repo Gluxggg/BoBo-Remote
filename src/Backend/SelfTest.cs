@@ -1561,6 +1561,31 @@ namespace DualRemote
             Check("超级屏：保留桌面比例，并遵守编码像素预算",
                 fitOriginal && fitBudget && videoWidth == 1280 && videoHeight == 720, videoWidth + "×" + videoHeight);
 
+            // 4d. v7.3.1 Privacy curtain taskbar/edge hover & IME burst trigger classification
+            bool centerMoveTrigger = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 1, A = unchecked((short)32768), B = unchecked((short)32768) });
+            bool bottomTaskbarMove = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 1, A = unchecked((short)32768), B = unchecked((short)64000) });
+            bool leftSidebarMove = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 1, A = 1200, B = unchecked((short)32768) });
+            bool rightEdgeMove = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 1, A = unchecked((short)64000), B = unchecked((short)32768) });
+            bool clickTrigger = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 3, A = unchecked((short)32768), B = unchecked((short)32768) });
+            bool keyTrigger = PrivacyCurtainManager.IsEdgeOrPopupTriggerInput(new BoBoInputPacket { Kind = 5, A = 0, B = 0 });
+            var monBounds = new[] { new System.Drawing.Rectangle(0, 0, 1920, 1080) };
+            bool relEdgeTrigger = PrivacyCurtainManager.IsPointNearCurtainEdge(960, 1045, monBounds, 96)
+                && !PrivacyCurtainManager.IsPointNearCurtainEdge(960, 540, monBounds, 96);
+            Check("防窥底栏与侧边触发判定：屏幕中心移动静默，底栏/侧边与按键点击触发高频Z序守护",
+                !centerMoveTrigger && bottomTaskbarMove && leftSidebarMove && rightEdgeMove && clickTrigger && keyTrigger && relEdgeTrigger,
+                "center=" + centerMoveTrigger + " bottom=" + bottomTaskbarMove + " left=" + leftSidebarMove + " rel=" + relEdgeTrigger);
+
+            bool shellImeMatch = PrivacyCurtainManager.IsShellOrImeClassName("Shell_TrayWnd")
+                && PrivacyCurtainManager.IsShellOrImeClassName("TaskListThumbnailWnd")
+                && PrivacyCurtainManager.IsShellOrImeClassName("MSTaskListWClass")
+                && PrivacyCurtainManager.IsShellOrImeClassName("Sogou_TSF_UIWnd")
+                && PrivacyCurtainManager.IsShellOrImeClassName("WeTypeCandidateWnd")
+                && PrivacyCurtainManager.IsShellOrImeClassName("Microsoft.IME.UIManager.CandidateWindow.Host")
+                && !PrivacyCurtainManager.IsShellOrImeClassName("Notepad")
+                && !PrivacyCurtainManager.IsShellOrImeClassName("");
+            Check("防窥窗口识别：准确识别任务栏/缩略图与系统及主流输入法候选窗类名",
+                shellImeMatch, "matched=" + shellImeMatch);
+
             // 5. V6 All-In-One Auto-Updater Light ZIP selection check
             var fakeRel = AppUpdater.BuildReleaseFromTag("v6.9.0");
             var fakeHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
