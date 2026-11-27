@@ -271,13 +271,19 @@ bool ScreenCapturer::InitDxgiForMonitor(const BoBoMonitorInfo& mon) {
 
 bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
     if (!device_ || !context_ || !videoDevice_ || !videoContext_) return false;
-    if (vp_ && nv12GpuTex_[0] && nv12GpuTex_[1] && nv12StagingTex_ && vpSrcW_ == srcW && vpSrcH_ == srcH) return true;
+    bool allSlotsReady = (vp_ != nullptr && nv12StagingTex_ != nullptr && vpSrcW_ == srcW && vpSrcH_ == srcH);
+    if (allSlotsReady) {
+        for (int s = 0; s < kGpuNv12Slots; ++s) {
+            if (!nv12GpuTex_[s]) { allSlotsReady = false; break; }
+        }
+        if (allSlotsReady) return true;
+    }
 
     vp_.Reset();
     vpEnum_.Reset();
-    nv12GpuTex_[0].Reset();
-    nv12GpuTex_[1].Reset();
+    for (int s = 0; s < kGpuNv12Slots; ++s) nv12GpuTex_[s].Reset();
     lastProducedGpuTex_ = nullptr;
+    lastProducedGpuSlot_ = -1;
     nv12StagingTex_.Reset();
 
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc = {};
@@ -321,7 +327,7 @@ bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    for (int s = 0; s < 2; ++s) {
+    for (int s = 0; s < kGpuNv12Slots; ++s) {
         if (FAILED(device_->CreateTexture2D(&td, nullptr, nv12GpuTex_[s].GetAddressOf()))) {
             td.BindFlags = D3D11_BIND_RENDER_TARGET;
             if (FAILED(device_->CreateTexture2D(&td, nullptr, nv12GpuTex_[s].GetAddressOf()))) return false;
@@ -337,11 +343,14 @@ bool ScreenCapturer::EnsureColorConverter(uint32_t srcW, uint32_t srcH) {
     vpSrcW_ = srcW;
     vpSrcH_ = srcH;
     gpuSlot_ = 0;
+    lastProducedGpuSlot_ = -1;
     return true;
 }
 
-bool ScreenCapturer::ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D11Texture2D** outGpuNv12) {
+bool ScreenCapturer::ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D11Texture2D** outGpuNv12,
+                                                 int targetGpuSlot, int* outUsedGpuSlot) {
     if (outGpuNv12) *outGpuNv12 = nullptr;
+    if (outUsedGpuSlot) *outUsedGpuSlot = -1;
     if (!bgraTex || !device_ || !context_) return false;
     D3D11_TEXTURE2D_DESC srcDesc = {};
     bgraTex->GetDesc(&srcDesc);
@@ -355,7 +364,8 @@ bool ScreenCapturer::ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D1
     videoContext_->VideoProcessorSetOutputTargetRect(vp_.Get(), TRUE, &dstRect);
 
     ID3D11Texture2D* vpSrcTex = lastDesktopTex_ ? lastDesktopTex_.Get() : bgraTex;
-    ID3D11Texture2D* targetTex = nv12GpuTex_[gpuSlot_].Get();
+    int slot = (targetGpuSlot >= 0 && targetGpuSlot < kGpuNv12Slots) ? targetGpuSlot : gpuSlot_;
+    ID3D11Texture2D* targetTex = nv12GpuTex_[slot].Get();
 
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc = {};
     inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
@@ -390,9 +400,14 @@ bool ScreenCapturer::ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D1
         return false;
     }
 
-    gpuSlot_ ^= 1;
+    context_->Flush();
+    if (targetGpuSlot < 0 || targetGpuSlot >= kGpuNv12Slots) {
+        gpuSlot_ = (slot + 1) % kGpuNv12Slots;
+    }
     lastProducedGpuTex_ = targetTex;
+    lastProducedGpuSlot_ = slot;
     if (outGpuNv12) *outGpuNv12 = targetTex;
+    if (outUsedGpuSlot) *outUsedGpuSlot = slot;
     return true;
 }
 
@@ -462,8 +477,12 @@ bool ScreenCapturer::CaptureNv12Frame(int timeoutMs, std::vector<uint8_t>& outNv
 
 bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compositeCursor, bool forceProduce,
                                   ID3D11Texture2D** outGpuNv12, std::vector<uint8_t>& outCpuNv12,
-                                  bool& outChanged, std::string& outError) {
+                                  bool& outChanged, std::string& outError,
+                                  int targetGpuSlot, int* outGpuSlot,
+                                  bool* outDeviceResetRequested) {
     if (outGpuNv12) *outGpuNv12 = nullptr;
+    if (outGpuSlot) *outGpuSlot = -1;
+    if (outDeviceResetRequested) *outDeviceResetRequested = false;
     outChanged = false;
     HRESULT lastDxgiHr = S_OK;
 
@@ -507,8 +526,10 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
 
                     if (preferGpuNv12 && !compositeCursor) {
                         ID3D11Texture2D* gpuTex = nullptr;
-                        if (ConvertBgraTextureToGpuNv12(desktopTex.Get(), &gpuTex) && gpuTex) {
+                        int usedSlot = -1;
+                        if (ConvertBgraTextureToGpuNv12(desktopTex.Get(), &gpuTex, targetGpuSlot, &usedSlot) && gpuTex) {
                             if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            if (outGpuSlot) *outGpuSlot = usedSlot;
                             hasFirstFrame_ = true;
                             outChanged = true;
                             ok = true;
@@ -532,7 +553,19 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
                 // Pointer-only DXGI update: zero desktop pixels changed!
                 duplication_->ReleaseFrame();
                 if (preferGpuNv12 && !compositeCursor && lastProducedGpuTex_) {
-                    if (forceProduce && outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                    if (forceProduce) {
+                        if (targetGpuSlot < 0 || lastProducedGpuSlot_ == targetGpuSlot) {
+                            if (outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                            if (outGpuSlot) *outGpuSlot = lastProducedGpuSlot_;
+                        } else if (lastDesktopTex_) {
+                            ID3D11Texture2D* gpuTex = nullptr;
+                            int usedSlot = -1;
+                            if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex, targetGpuSlot, &usedSlot) && gpuTex) {
+                                if (outGpuNv12) *outGpuNv12 = gpuTex;
+                                if (outGpuSlot) *outGpuSlot = usedSlot;
+                            }
+                        }
+                    }
                     outChanged = false;
                     return true;
                 }
@@ -549,8 +582,10 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
                 if (lastDesktopTex_ && forceProduce) {
                     if (preferGpuNv12 && !compositeCursor) {
                         ID3D11Texture2D* gpuTex = nullptr;
-                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex) && gpuTex) {
+                        int usedSlot = -1;
+                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex, targetGpuSlot, &usedSlot) && gpuTex) {
                             if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            if (outGpuSlot) *outGpuSlot = usedSlot;
                             return true;
                         }
                     }
@@ -565,7 +600,19 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
         } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (hasFirstFrame_) {
                 if (preferGpuNv12 && !compositeCursor && lastProducedGpuTex_) {
-                    if (forceProduce && outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                    if (forceProduce) {
+                        if (targetGpuSlot < 0 || lastProducedGpuSlot_ == targetGpuSlot) {
+                            if (outGpuNv12) *outGpuNv12 = lastProducedGpuTex_;
+                            if (outGpuSlot) *outGpuSlot = lastProducedGpuSlot_;
+                        } else if (lastDesktopTex_) {
+                            ID3D11Texture2D* gpuTex = nullptr;
+                            int usedSlot = -1;
+                            if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex, targetGpuSlot, &usedSlot) && gpuTex) {
+                                if (outGpuNv12) *outGpuNv12 = gpuTex;
+                                if (outGpuSlot) *outGpuSlot = usedSlot;
+                            }
+                        }
+                    }
                     outChanged = false;
                     return true;
                 }
@@ -590,8 +637,10 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
                     }
                     if (preferGpuNv12 && !compositeCursor) {
                         ID3D11Texture2D* gpuTex = nullptr;
-                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex) && gpuTex) {
+                        int usedSlot = -1;
+                        if (ConvertBgraTextureToGpuNv12(lastDesktopTex_.Get(), &gpuTex, targetGpuSlot, &usedSlot) && gpuTex) {
                             if (outGpuNv12) *outGpuNv12 = gpuTex;
+                            if (outGpuSlot) *outGpuSlot = usedSlot;
                             return true;
                         }
                     }
@@ -616,15 +665,21 @@ bool ScreenCapturer::CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compos
             outError = diag;
             return false;
         } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
+            if (outDeviceResetRequested) {
+                duplication_.Reset();
+                *outDeviceResetRequested = true;
+                outError = "DXGI_ACCESS_LOST_REINIT";
+                return false;
+            }
             duplication_.Reset();
             lastDesktopTex_.Reset();
             lastDesktopW_ = 0;
             lastDesktopH_ = 0;
             vp_.Reset();
             vpEnum_.Reset();
-            nv12GpuTex_[0].Reset();
-            nv12GpuTex_[1].Reset();
+            for (int s = 0; s < kGpuNv12Slots; ++s) nv12GpuTex_[s].Reset();
             lastProducedGpuTex_ = nullptr;
+            lastProducedGpuSlot_ = -1;
             nv12StagingTex_.Reset();
             bgraStagingTex_.Reset();
             bgraStageW_ = 0;
@@ -1020,9 +1075,9 @@ void ScreenCapturer::Shutdown() {
     bgraStagingTex_.Reset();
     bgraStageW_ = 0;
     bgraStageH_ = 0;
-    nv12GpuTex_[0].Reset();
-    nv12GpuTex_[1].Reset();
+    for (int s = 0; s < kGpuNv12Slots; ++s) nv12GpuTex_[s].Reset();
     lastProducedGpuTex_ = nullptr;
+    lastProducedGpuSlot_ = -1;
     gpuSlot_ = 0;
     vp_.Reset();
     vpEnum_.Reset();

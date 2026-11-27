@@ -163,6 +163,7 @@ namespace DualRemote
         private volatile string activeUdpPathKind = "";
         private volatile int activeUdpPathRank;
         private int embeddedUdpBridgePort;
+        private UdpClient preBoundUdp;
         private readonly BoBoNatTraversal.StunProbeSession clientStunSession = new BoBoNatTraversal.StunProbeSession();
         private readonly ConcurrentDictionary<uint, UdpProbeCandidate> udpProbeTable =
             new ConcurrentDictionary<uint, UdpProbeCandidate>();
@@ -210,6 +211,7 @@ namespace DualRemote
 
         internal bool IsConnected { get { return connected; } }
         internal bool IsUdpActive { get { return udpActive; } }
+        internal bool IsDirectUdpPromoted { get { return udpActive && activeUdpPathRank >= 40; } }
         internal bool IsUdpNackActive { get { return udpActive && udpNackNegotiated; } }
         internal string ActiveVideoCodecLabel
         {
@@ -826,6 +828,25 @@ namespace DualRemote
                 startReq["nativeLocalCursor"] = true;
                 startReq["cursorMetrics"] = true;
                 startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
+                try
+                {
+                    UdpClient preUc = CreateDualStackMediaUdp();
+                    if (preUc != null)
+                    {
+                        int prePort = ((IPEndPoint)preUc.Client.LocalEndPoint).Port;
+                        lock (udpGate)
+                        {
+                            if (preBoundUdp != null) { try { preBoundUdp.Close(); } catch { } }
+                            preBoundUdp = preUc;
+                        }
+                        List<BoBoUdpCandidate> initClientCands = BoBoNatTraversal.GatherLocalCandidates(prePort, null, false);
+                        if (initClientCands.Count > 0)
+                        {
+                            startReq["udpCandidates"] = BoBoNatTraversal.ToProtocolObjects(initClientCands);
+                        }
+                    }
+                }
+                catch { }
                 await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
                 Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
@@ -948,9 +969,10 @@ namespace DualRemote
                                 ? BoBoUdpCipherMode.Aes128Gcm
                                 : BoBoUdpCipherMode.Aes128CtrHmac;
                             bool hostUdpNack = BoBoProtocol.GetBool(msg, "udpNack", false);
+                            List<BoBoUdpCandidate> hostInitCands = BoBoNatTraversal.ParseCandidatesFromKey(msg, "udpCandidates");
                             if (udpPort > 0 && udpSidLong != 0 && !string.IsNullOrEmpty(udpKeyB64))
                             {
-                                TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, hostUdpNack, udpCipherMode, ct);
+                                TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, hostUdpNack, udpCipherMode, hostInitCands, ct);
                             }
 
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
@@ -1141,6 +1163,60 @@ namespace DualRemote
             return cand;
         }
 
+        private static UdpClient CreateDualStackMediaUdp()
+        {
+            UdpClient uc = null;
+            try
+            {
+                uc = new UdpClient(AddressFamily.InterNetworkV6);
+                uc.Client.DualMode = true;
+                BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
+                BoBoNatTraversal.ConfigureLowLatencyUdpSocket(uc.Client);
+                uc.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                return uc;
+            }
+            catch
+            {
+                if (uc != null) { try { uc.Close(); } catch { } }
+                uc = new UdpClient(AddressFamily.InterNetwork);
+                BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
+                BoBoNatTraversal.ConfigureLowLatencyUdpSocket(uc.Client);
+                uc.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                return uc;
+            }
+        }
+
+        private List<UdpProbeCandidate> RegisterCandidateList(List<BoBoUdpCandidate> candidates)
+        {
+            var newlyAdded = new List<UdpProbeCandidate>();
+            if (candidates == null || candidates.Count == 0) return newlyAdded;
+            int[] symDeltas = new int[] { 1, -1, 2, -2 };
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                BoBoUdpCandidate c = candidates[i];
+                IPEndPoint ep;
+                if (c == null || !c.TryGetIPEndPoint(out ep)) continue;
+                UdpProbeCandidate reg = RegisterUdpCandidate(c.Kind, ep);
+                if (reg != null) newlyAdded.Add(reg);
+
+                if (c.SymmetricHint)
+                {
+                    IPAddress addr = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
+                    if (addr.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        for (int d = 0; d < symDeltas.Length; d++)
+                        {
+                            int np = ep.Port + symDeltas[d];
+                            if (np < 1024 || np > 65535) continue;
+                            UdpProbeCandidate symReg = RegisterUdpCandidate(c.Kind, new IPEndPoint(addr, np));
+                            if (symReg != null) newlyAdded.Add(symReg);
+                        }
+                    }
+                }
+            }
+            return newlyAdded;
+        }
+
         private void AddUdpCandidatesAndProbe(List<BoBoUdpCandidate> candidates)
         {
             if (candidates == null || candidates.Count == 0) return;
@@ -1153,15 +1229,7 @@ namespace DualRemote
             }
             if (uc == null || cr == null) return;
 
-            var newlyAdded = new List<UdpProbeCandidate>();
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                BoBoUdpCandidate c = candidates[i];
-                IPEndPoint ep;
-                if (c == null || !c.TryGetIPEndPoint(out ep)) continue;
-                UdpProbeCandidate reg = RegisterUdpCandidate(c.Kind, ep);
-                if (reg != null) newlyAdded.Add(reg);
-            }
+            List<UdpProbeCandidate> newlyAdded = RegisterCandidateList(candidates);
             for (int i = 0; i < newlyAdded.Count; i++)
             {
                 UdpProbeCandidate p = newlyAdded[i];
@@ -1169,7 +1237,14 @@ namespace DualRemote
             }
         }
 
-        private void TryStartUdpChannel(int udpPort, uint udpSessionId, string udpKeyB64, bool hostUdpNack, BoBoUdpCipherMode cipherMode, CancellationToken ct)
+        private void TryStartUdpChannel(
+            int udpPort,
+            uint udpSessionId,
+            string udpKeyB64,
+            bool hostUdpNack,
+            BoBoUdpCipherMode cipherMode,
+            List<BoBoUdpCandidate> hostInitCands,
+            CancellationToken ct)
         {
             try
             {
@@ -1184,19 +1259,15 @@ namespace DualRemote
                 if (targetIp.IsIPv4MappedToIPv6) targetIp = targetIp.MapToIPv4();
 
                 UdpClient uc = null;
-                try
+                lock (udpGate)
                 {
-                    uc = new UdpClient(AddressFamily.InterNetworkV6);
-                    uc.Client.DualMode = true;
-                    BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 262144, 4 * 1024 * 1024);
-                    uc.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                    uc = preBoundUdp;
+                    preBoundUdp = null;
+                    DisposeUdpLocked();
                 }
-                catch
+                if (uc == null)
                 {
-                    if (uc != null) { try { uc.Close(); } catch { } }
-                    uc = new UdpClient(AddressFamily.InterNetwork);
-                    BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 262144, 4 * 1024 * 1024);
-                    uc.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                    uc = CreateDualStackMediaUdp();
                 }
 
                 int localUdpPort = ((IPEndPoint)uc.Client.LocalEndPoint).Port;
@@ -1207,7 +1278,6 @@ namespace DualRemote
 
                 lock (udpGate)
                 {
-                    DisposeUdpLocked();
                     udpClient = uc;
                     udpRemoteEp = null;
                     udpCrypto = crypto;
@@ -1220,6 +1290,11 @@ namespace DualRemote
                     lastUdpRxTicks = 0;
                     Interlocked.Exchange(ref udpFallbackSuppressUntilTicks, 0);
                     lastCursorSeq = 0;
+                }
+
+                if (hostInitCands != null && hostInitCands.Count > 0)
+                {
+                    RegisterCandidateList(hostInitCands);
                 }
 
                 IPEndPoint fallbackEp = null;
@@ -1255,6 +1330,17 @@ namespace DualRemote
                 {
                     BoBoStreamStartOptions optsSnap = lastStartOptions;
                     string peerHost = optsSnap != null ? optsSnap.Host : "";
+                    IPAddress tailnetDirectIp = BoBoEmbeddedTailnet.Default.TryGetPeerDirectPublicIp(peerHost);
+                    if (tailnetDirectIp != null)
+                    {
+                        string directKind = BoBoProtocol.IsPrivateLanIp(tailnetDirectIp.ToString())
+                            ? BoBoUdpCandidate.KindLan
+                            : (tailnetDirectIp.AddressFamily == AddressFamily.InterNetworkV6
+                                ? BoBoUdpCandidate.KindDirectIPv6
+                                : BoBoUdpCandidate.KindDirectIPv4);
+                        RegisterUdpCandidate(directKind, new IPEndPoint(tailnetDirectIp, udpPort));
+                    }
+
                     Task _bridgeTask = Task.Run(async delegate
                     {
                         int bPort = 0;
@@ -1290,7 +1376,7 @@ namespace DualRemote
                     });
                 }
 
-                // Concurrent RFC 5389 STUN probe on the SAME bound socket + client UDP_CANDIDATES exchange
+                // Concurrent Dual-Stack RFC 5389 STUN probe on the SAME bound socket + client UDP_CANDIDATES exchange
                 BoBoStreamStartOptions stunOpts = lastStartOptions;
                 string stunHost = stunOpts != null ? stunOpts.CustomStunHost : "";
                 int stunPort = stunOpts != null ? stunOpts.CustomStunPort : 0;
@@ -1298,15 +1384,17 @@ namespace DualRemote
                 {
                     try
                     {
-                        IPEndPoint mapped = null;
+                        BoBoNatTraversal.StunDualProbeResult stunRes = null;
                         try
                         {
                             var servers = BoBoNatTraversal.BuildDefaultStunServers(stunHost, stunPort);
-                            mapped = await clientStunSession.ProbeFirstValidAsync(uc.Client, servers, 900, ct).ConfigureAwait(false);
+                            stunRes = await clientStunSession.ProbeDualStackAsync(uc.Client, servers, 900, ct).ConfigureAwait(false);
                         }
                         catch { }
                         if (ct.IsCancellationRequested || !connected || udpClient != uc) return;
-                        List<BoBoUdpCandidate> localCands = BoBoNatTraversal.GatherLocalCandidates(localUdpPort, mapped);
+                        IList<IPEndPoint> mappedList = stunRes != null ? stunRes.AllEndpoints() : null;
+                        bool symHint = stunRes != null && stunRes.IsSymmetricIPv4;
+                        List<BoBoUdpCandidate> localCands = BoBoNatTraversal.GatherLocalCandidates(localUdpPort, mappedList, symHint);
                         if (localCands.Count > 0)
                         {
                             var candMsg = new Dictionary<string, object>();
@@ -1405,6 +1493,7 @@ namespace DualRemote
                                     (matchedCand.Rank == activeUdpPathRank && udpRemoteEp != null && matchedCand.EndPoint.Equals(udpRemoteEp));
                                 if (shouldPromote)
                                 {
+                                    bool wasUdpActive = udpActive;
                                     bool switchedEp = !udpActive || udpRemoteEp == null || !matchedCand.EndPoint.Equals(udpRemoteEp);
                                     udpRemoteEp = matchedCand.EndPoint;
                                     activeUdpPathKind = matchedCand.Kind;
@@ -1412,9 +1501,18 @@ namespace DualRemote
                                     udpActive = true;
                                     if (switchedEp)
                                     {
-                                        assembler.ResetForRecovery(rxNow);
-                                        lastRecoveryPollTicks = rxNow;
+                                        latestRttMs = 0.0;
+                                        prevUdpRttMs = 0.0;
+                                        latestJitterMs = 0.0;
+                                        if (!wasUdpActive)
+                                        {
+                                            assembler.ResetForRecovery(rxNow);
+                                            lastRecoveryPollTicks = rxNow;
+                                        }
                                         SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, matchedCand.ForceHelloPayload, matchedCand.EndPoint);
+                                        byte[] immediatePing = new byte[8];
+                                        BoBoUdpCrypto.WriteInt64LE(immediatePing, 0, Stopwatch.GetTimestamp());
+                                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, immediatePing, matchedCand.EndPoint);
                                     }
                                 }
                             }
@@ -1550,33 +1648,53 @@ namespace DualRemote
             CancellationToken ct)
         {
             byte[] legacyHello = new byte[] { 0x42, 0x4F, 0x36, 0x33 };
-            // 1. Rapid multi-candidate NAT hole punch (up to ~750ms) so direct IPv6/STUN activates immediately when reachable
-            for (int attempt = 0; attempt < 15 && !ct.IsCancellationRequested && connected; attempt++)
+            // 1. Rapid continuous bidirectional ICE check (~3.4s) until Direct LAN/IPv6/IPv4/STUN (Rank >= 40) activates
+            for (int attempt = 0; attempt < 75 && !ct.IsCancellationRequested && connected; attempt++)
             {
-                if (udpActive && !udpCandidatesUpdated) break;
+                if (udpActive && activeUdpPathRank >= 40 && !udpCandidatesUpdated) break;
                 udpCandidatesUpdated = false;
                 bool sentAny = false;
+                int minRank = udpActive ? activeUdpPathRank + 1 : 0;
                 foreach (UdpProbeCandidate cand in udpProbeTable.Values)
                 {
-                    if (cand != null && cand.EndPoint != null)
+                    if (cand != null && cand.EndPoint != null && cand.Rank >= minRank)
                     {
                         SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, cand.HelloPayload, cand.EndPoint);
                         sentAny = true;
                     }
                 }
-                if (!sentAny && fallbackEp != null)
+                if (!udpActive && !sentAny && fallbackEp != null)
                 {
                     SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, legacyHello, fallbackEp);
                 }
-                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch { return; }
+                if (udpActive && (attempt % 4) == 0)
+                {
+                    IPEndPoint activeEp = udpRemoteEp ?? fallbackEp;
+                    if (activeEp != null)
+                    {
+                        byte[] pingBuf = new byte[8];
+                        BoBoUdpCrypto.WriteInt64LE(pingBuf, 0, Stopwatch.GetTimestamp());
+                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, pingBuf, activeEp);
+                        assembler.RefreshLossWindow(Stopwatch.GetTimestamp());
+                        latestPacketLossPct = assembler.LatestLossPct;
+                        SendUdpFeedback(uc, crypto, assembler, false);
+                    }
+                }
+                try { await Task.Delay(45, ct).ConfigureAwait(false); } catch { return; }
             }
 
             // 2. Steady-state 200ms RTT ping + loss/ABR feedback + opportunistic direct-path upgrade & UDP-silence fallback
             int tick = 0;
+            int burstRemaining = 0;
             while (!ct.IsCancellationRequested && connected)
             {
                 try
                 {
+                    if (udpCandidatesUpdated)
+                    {
+                        udpCandidatesUpdated = false;
+                        if (activeUdpPathRank < 40) burstRemaining = 25;
+                    }
                     if (udpActive)
                     {
                         long rxTicks = Interlocked.Read(ref lastUdpRxTicks);
@@ -1599,22 +1717,25 @@ namespace DualRemote
                         }
                         else
                         {
-                            IPEndPoint activeEp = udpRemoteEp ?? fallbackEp;
-                            if (activeEp != null)
+                            bool pingTurn = (burstRemaining == 0) || ((tick % 4) == 0);
+                            if (pingTurn)
                             {
-                                byte[] pingBuf = new byte[8];
-                                BoBoUdpCrypto.WriteInt64LE(pingBuf, 0, Stopwatch.GetTimestamp());
-                                SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, pingBuf, activeEp);
+                                IPEndPoint activeEp = udpRemoteEp ?? fallbackEp;
+                                if (activeEp != null)
+                                {
+                                    byte[] pingBuf = new byte[8];
+                                    BoBoUdpCrypto.WriteInt64LE(pingBuf, 0, Stopwatch.GetTimestamp());
+                                    SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, pingBuf, activeEp);
 
-                                assembler.RefreshLossWindow(Stopwatch.GetTimestamp());
-                                latestPacketLossPct = assembler.LatestLossPct;
-                                SendUdpFeedback(uc, crypto, assembler, false);
+                                    assembler.RefreshLossWindow(Stopwatch.GetTimestamp());
+                                    latestPacketLossPct = assembler.LatestLossPct;
+                                    SendUdpFeedback(uc, crypto, assembler, false);
+                                }
                             }
 
-                            // While connected over relay/tsnet (<40 rank), periodically race higher-rank direct candidates (~6s)
-                            if (activeUdpPathRank < 40 && (udpCandidatesUpdated || (tick % 30) == 0))
+                            // While connected over relay/tsnet (<40 rank), race higher-rank direct candidates (burst or every ~1.4s)
+                            if (activeUdpPathRank < 40 && (burstRemaining > 0 || (tick % 7) == 0))
                             {
-                                udpCandidatesUpdated = false;
                                 foreach (UdpProbeCandidate cand in udpProbeTable.Values)
                                 {
                                     if (cand != null && cand.Rank > activeUdpPathRank && cand.EndPoint != null)
@@ -1625,9 +1746,8 @@ namespace DualRemote
                             }
                         }
                     }
-                    else if (udpCandidatesUpdated || (tick % 22) == 0)
+                    else if (burstRemaining > 0 || (tick % 10) == 0)
                     {
-                        udpCandidatesUpdated = false;
                         bool sentAny = false;
                         foreach (UdpProbeCandidate cand in udpProbeTable.Values)
                         {
@@ -1643,7 +1763,9 @@ namespace DualRemote
                         }
                     }
                     tick++;
-                    await Task.Delay(200, ct).ConfigureAwait(false);
+                    int delayMs = burstRemaining > 0 ? 50 : 200;
+                    if (burstRemaining > 0) burstRemaining--;
+                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
                 }
                 catch { break; }
             }
@@ -1710,6 +1832,7 @@ namespace DualRemote
             prevUdpRttMs = 0.0;
             latestPacketLossPct = 0.0;
             Interlocked.Exchange(ref lastDecodeQueueIdrReqTicks, 0);
+            if (preBoundUdp != null) { try { preBoundUdp.Close(); } catch { } preBoundUdp = null; }
             if (udpClient != null) { try { udpClient.Close(); } catch { } udpClient = null; }
             if (udpCrypto != null) { try { udpCrypto.Dispose(); } catch { } udpCrypto = null; }
             udpRemoteEp = null;

@@ -26,13 +26,13 @@
 
 **BoBo Remote（BoBo远程）** 是一款从零自主研发、MIT 开源的四端原生远程桌面与加密文件传输软件：包含 **Windows（C++17 原生媒体内核 + 纯 Go `tsnet` + C# WinForms）**、**Android（Kotlin + Jetpack Compose）** 与 **macOS / iOS / iPadOS（Swift / SwiftUI）**。四端共享同一套确定性二进制协议 [**BoBo6.2**](protocol/BOBO6-SPEC.md) 与跨语言测试向量 [`golden-vectors.json`](protocol/golden-vectors.json)，**无需注册 BoBo 官方账号**，安装包**不含任何外置第三方远程桌面引擎二进制**。
 
-### 核心速览（`v7.4.0`）
+### 核心速览（`v7.5.0`）
 
-- **跨网 UDP/STUN/IPv6 直连竞速 + 2K @ 90 Hz 极速内核（`v7.4.0` 重大架构升级）**：
-  - **真跨网硬件 `H.265 (HEVC)` 端到端协商**：[`BoBoCore.dll`](native/bobo-core/src/mf_encoder.cpp) 新增 Media Foundation `H.265`（NVENC / AMF / QSV）硬件编码与自动能力探测，结合 D3D11VA 硬解在同等清晰度下大幅压缩公网码流（无系统 HEVC 扩展时自动优雅回落 H.264），HUD 实时展示当前 `H.265 / H.264` 管线；
-  - **解除内置跨网 UDP 封锁（[`BoBoTsNet`](native/bobo-tsnet/main.go)）**：宿主侧新增 `:49811` UDP 监听转发，主控端经鉴权 `/udp-bridge` 打通内置 `tsnet` UDP，并将分片默认荷载收敛至 **`1060 B`** 严守 `1280 B` IPv6 + WireGuard MTU 不分片；
-  - **IPv6 直连竞速 + 国内 STUN / ICE-Lite 双向打洞（[`BoBoNatTraversal`](src/Backend/BoBoNatTraversal.cs)）**：TLS 建连后交换全局 IPv6 与并发探测的国内 RFC 5389 STUN 映射端点，双端并发双向打洞并按 `局域网 > 直连 IPv6 / IPv4 / STUN 打洞 > VPS UDP 中转 > 内置跨网 UDP` 自动升级；
-  - **开源中转双栈 TCP+UDP + 内置 STUN（[`tools/bobo-relay`](tools/bobo-relay/README.md)）**：新增 `-udp-listen :49811` 与 `-stun-listen :49812`，配合 `/bobo-relay/health` 的 `udpPort` / `stunPort` 接管双对称 NAT 高清中转，并彻底修复旧版 TCP 回退 `depth>2 + 1500ms` 僵死与公网 `60 fps` 上限（全面开放至 **2K @ 90 Hz / 30 Mbps**）。
+- **跨网低延迟直连穿透、全时抗缓冲膨胀与 90 Hz 解耦管线（`v7.5.0` 深度根治升级）**：
+  - **90 Hz 采集与编码双线程解耦（[`BoBoCore.dll`](native/bobo-core/src/bobo_core.cpp) · [`screen_capture.cpp`](native/bobo-core/src/screen_capture.cpp)）**：将 DXGI 采集与 Media Foundation 硬件编码解耦为独立生产/消费线程，配备 **4 槽 D3D11 GPU NV12 零拷贝环形纹理池**与微秒级 VBlank `YieldProcessor` 节拍，彻底消除整数 `Sleep` 与串行等待导致的 `30 FPS` 半频阶梯；
+  - **全时 GCC 抗缓冲膨胀 + 4ms 步调微突发发送（[`BoBoUdpTransport.cs`](src/Backend/BoBoUdpTransport.cs)）**：即使用户固定「高清 8M」等非自动档位，拥塞控制器仍作为**用户上限模式（Ceiling Mode）**全时监测 RTT 梯度、压低跨网缓冲膨胀并优先保障 `90 fps` 流畅度；主控/被控与 `BoBoTsNet` 本地 UDP 缓冲同步扩容至 **`2–4 MiB`**；
+  - **IPv6/STUN 双栈持续竞速 + 对称 NAT 相邻端口扩展（[`BoBoNatTraversal.cs`](src/Backend/BoBoNatTraversal.cs) · [`BoBoHostServer.cs`](src/Backend/BoBoHostServer.cs) · [`BoBoStreamClient.cs`](src/Backend/BoBoStreamClient.cs)）**：安装与启动阶段按权限自动放行 Windows 公用网络防火墙规则，OS 内核路由优选全局 IPv6 与 `DAD=Preferred` 候选地址并识别对称 NAT 扩展 `+1/-1/+2/-2` 相邻端口、`1.4s` 持续打洞竞速及路径无感升优（不丢包、秒清旧路由 RTT）；
+  - **高 RTT `36 帧 / 4 MiB` NACK 协同与 `v7.4.0` 底座**：放宽 NACK 缓存与乱序/宽限窗口（最高 `380 ms`、`320–450 ms` RTT 容限）消除 `200ms+` 下 `N0` 退回关键帧死锁，与 `v7.4.0` 的硬件 **`H.265 (HEVC)`** 协商、`1060 B` MTU 防分片及 `bobo-relay` TCP+UDP `:49811` + STUN `:49812` 无缝叠加。
 - **120 Hz 按需微交互与 2 ms 突发 Z 序防窥（`v7.3.1` – `v7.3.2`）**：[`UiTransition`](src/UiTransition.cs) 采用按需引用计数 `timeBeginPeriod(1)` 节拍器（闲置归零功耗），提供按压水波纹、指示条/下划线滑入、旋转箭头、拨片弹变及控制中心悬浮高亮；独立 STA 防窥守护在底栏/输入法击键时触发 `2 ms` 突发置顶防穿泵，阻断任务栏与复用 HWND 输入法弹窗透出。
 - **全四端 AEAD `AES-128-GCM` + GCC 拥塞控制 + `AAC-LC 96 kbps`**：UDP 通道统一采用原生 `AES-128-GCM`（先验签后窗口 + `0xFFFFFF00` Nonce 封顶），结合 GCC 延迟梯度步调冗余、交错 `XOR FEC` + 选择性 `NACK` 及 Media Foundation `AAC-LC` 立体声音频，兼容商务简约纯白分组 UI 与 7 步新手引导。
 
@@ -48,14 +48,14 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.4.0 商务简约设备管理主界面" width="900" />
+  <img src="assets/screenshot-devices.png" alt="BoBo Remote v7.5.0 商务简约设备管理主界面" width="900" />
 </p>
 
 ---
 
 ## 对比传统商业方案与同类开源
 
-| 对比维度 | 商业闭源远控 | 开源套壳 / 单协议串流 | BoBo Remote (`v7.4.0`) |
+| 对比维度 | 商业闭源远控 | 开源套壳 / 单协议串流 | BoBo Remote (`v7.5.0`) |
 | --- | --- | --- | --- |
 | **账号体系与控制权** | 强制注册厂商云账号，设备列表与路由受第三方控制 | 仅专注本地游戏串流或依赖第三方完整 Daemon | **零 BoBo 官方账号、零遥测**：配置与密钥全存本机；内置免安装用户态 `tsnet` + **IPv6/STUN 打洞** + **自建 VPS TCP+UDP 盲中转** |
 | **功能限制与授权** | 高刷、2K/4K、防窥屏、移动端常设会员付费墙 | 缺少防窥、文件传输或跨端移动宿主 | **MIT 100% 开源全解锁**：**硬件 H.265 / H.264**、**2K @ 90 Hz 跨网**、超级屏、物理键鼠锁防窥、2 GiB 文件传输与 4 端互通全部开放 |
@@ -103,9 +103,9 @@
 
 ## 四端矩阵与发行产物
 
-| 平台 | 系统要求 | `v7.4.0` 发行产物 | 主控端 (Controller) | 被控端 (Host) | 核心特性 |
+| 平台 | 系统要求 | `v7.5.0` 发行产物 | 主控端 (Controller) | 被控端 (Host) | 核心特性 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (9.2 MB)<br>`BoBoRemote-Update-x64.zip` (9.2 MB) | ✅ **完整功能**<br>含 Android 导航与 iOS 观看 | ✅ **完整功能**<br>DXGI/GDI + MF HEVC/H.264/AAC + WASAPI | 内嵌 `BoBoCore.dll`（硬件 **H.265** 协商 + 12f/4MiB 队列 + `AAC-LC 96k`）+ **免安装 `BoBoTsNet` UDP 桥** + **IPv6/STUN 打洞** + **2K @ 90 Hz ABR** + **2ms 防穿物理防窥** + **120 Hz 微交互 UI** |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (9.2 MB)<br>`BoBoRemote-Update-x64.zip` (9.2 MB) | ✅ **完整功能**<br>含 Android 导航与 iOS 观看 | ✅ **完整功能**<br>DXGI/GDI + MF HEVC/H.264/AAC + WASAPI | 内嵌 `BoBoCore.dll`（**90 Hz 解耦采集编码 + 4 槽 GPU NV12 环** + **H.265** + `AAC-LC 96k`）+ **IPv6/STUN 对称端口持续打洞** + **全时 GCC 抗缓冲膨胀 + 4 MiB `BoBoTsNet`** + **2ms 防窥** |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **完整功能**<br>`MediaCodec` 硬解 + 48kHz 立体声 | ✅ **免 Root 完整宿主**<br>`MediaProjection` + 无障碍触控 | **`AES-128-GCM` UDP+FEC/NACK**、触控板/直触模式、悬浮球、PC 快捷键栏与蓝牙键映射 |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2（Apple Silicon & Intel） | ✅ **完整功能**<br>`AVSampleBufferDisplayLayer` | ✅ **完整功能**<br>`ScreenCaptureKit` 音视频 + VideoToolbox | **`CryptoKit AES-128-GCM` UDP+FEC/NACK**、超级屏、`⌘→Ctrl`、防截屏遮罩 + `CGEventTap` 物理锁键鼠 |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **前台完整主控**<br>VideoToolbox 硬解 + 触控板 | 👁️ **ReplayKit 仅观看** | **`AES-128-GCM` UDP+FEC/NACK**、内嵌 ReplayKit 录屏扩展与本地回环桥接；支持 Sideloadly / AltStore / SideStore / Xcode 自签 |
@@ -116,7 +116,7 @@
 
 ## 系统架构与协议管线
 
-### 当前已落地架构（`BoBo6.2` · `v7.4.0`）
+### 当前已落地架构（`BoBo6.2` · `v7.5.0`）
 
 ```mermaid
 flowchart LR
@@ -221,12 +221,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**`v7.4.0` 已验证测试矩阵**：
+**`v7.5.0` 已验证测试矩阵**：
 - **本地 Windows 全量回归**：
-  - 原生 `BoBoCore.dll` 自检 **`13/13`** 通过（新增 H.265/HEVC 编解码能力探测与 H.264 自动回退环回实测——本机探测到 `AMDh265Encoder`，并覆盖 D3D11 渲染、WASAPI ADPCM、Media Foundation `AAC-LC 48 kHz` 立体声 ADTS 往返、物理键鼠锁、以及 `12 帧 / 4 MiB / 250 ms` 有界解码队列与 IDR 恢复）
-  - 纯 Go `native/bobo-tsnet` **`9/9`** 单测（含 `:49811` UDP 转发与 `/udp-bridge`）与 `--self-test` 通过；纯 Go `tools/bobo-relay` **`5/5`** 单测（含 `-udp-listen :49811` UDP 盲中继与 `-stun-listen :49812` RFC 5389 STUN 服务）通过
-  - 托管核心 `BoBo远程.exe --self-test` **`157/157`** 全部通过（覆盖 `VideoHevc = 0x08` / `FlagHevc = 16`、`1060 B` MTU 安全分片、`ComputeMaxAheadFrames` `12–24` 与 `ComputeTcpQueueLimit`、2K @ 90 Hz WAN ABR、RFC 5389 STUN / IPv6 穿透与路径升级、协议黄金向量含 `udpAesGcm`、`AES-128-GCM` / GCC / 动态 FEC、`AudioAac`、底边栏与 120 Hz 动效、多中转动态调度与 3 行 HUD ABI）
-  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`**（`EXIT=0`）通过；`UiSmoke740` **`108/108`** UI 冒烟与 `H.265` / `7.4.0` 校验通过，且 **`4/4`** 主界面关键截图（`shot-devices.png`、`shot-privacy.png`、`shot-settings-general.png`、`shot-settings-stream.png`）视觉复核通过；`CurtainSmoke731` **`15/15`** 独立防窥线程压测通过；**`5/5`** PowerShell 脚本 UTF-8 BOM + AST 语法校验通过
+  - 原生 `BoBoCore.dll` 自检 **`14/14`** 通过（新增 `90 Hz` 解耦采集编码线程 + 4 槽 GPU NV12 环形池安全启停实测，并覆盖 `AMDh265Encoder` H.265/HEVC 探测与 H.264 回退环回、D3D11 渲染、WASAPI ADPCM、Media Foundation `AAC-LC 48 kHz`、物理键鼠锁及 `12 帧 / 4 MiB / 250 ms` 有界解码队列）
+  - 纯 Go `native/bobo-tsnet` **`9/9`** 单测（含 `4 MB` 套接字缓冲 `:49811` UDP 与 `/udp-bridge`）与 `--self-test` 通过；纯 Go `tools/bobo-relay` **`5/5`** 单测通过
+  - 托管核心 `BoBo远程.exe --self-test` **`160/160`** 全部通过（零 `/warn:4` 警告，在 `v7.4.0` 全套检查基础上新增内核路由候选优选 + 对称 NAT 相邻端口扩展、`8M @ 90 Hz` 固定档位全时抗缓冲膨胀降码保帧率 + 升优解锁、`225 ms` 高 RTT 多分片 NACK+FEC 协同与 `36 帧 / 4 MiB` 缓存检验）
+  - 安装器 `BoBoRemote-Setup-x64.exe --self-test` **`7/7`**（零 `/warnaserror+` 警告，`EXIT=0`）通过；`UiSmoke750` **`108/108`** UI 冒烟与 `7.5.0` 校验通过，且 **`4/4`** 主界面关键截图（`shot-devices.png`、`shot-privacy.png`、`shot-settings-general.png`、`shot-settings-stream.png`）视觉复核通过；`CurtainSmoke731` **`15/15`** 独立防窥线程压测通过；全部 PowerShell 脚本 UTF-8 BOM + AST 语法校验（`Errors=0`）通过
 - **GitHub Actions 四端 CI / Release 流水线**：自动跨平台跑通 `tools/bobo-relay`、`native/bobo-tsnet`、Windows x64 全量包、Android 单元测试（含 `BoBoProtocolGoldenTest` AES-128-GCM 与交错 FEC/NACK 向量）与 Release APK 构建、Apple `BoBoAppleCore` Swift XCTest 与 macOS DMG / iOS IPA 构建，并对全部 6 个平台包自动生成 `SHA256SUMS.txt` 发布验证。（实时浏览器 Tailscale OAuth 授权及公网跨网 IPv6/STUN/VPS 实际带宽吞吐依赖真实网络对端与用户自建节点环境。）
 
 ---
@@ -301,6 +301,7 @@ BoBo-Remote/
 | **V7.0 – V7.2 (`v7.2.1`)** | 超级屏 v2、主机尺寸光标、纯 Go 内嵌免安装 `tsnet` Tailscale、多自建 VPS 并发测速与负载调度（[`tools/bobo-relay`](tools/bobo-relay/README.md)）、**P0 有界 `12f/4MiB/250ms` 视频解码队列 + 3 行帧管线 HUD** | ✅ 已完成 |
 | **V7.3 (`v7.3.0` – `v7.3.2`)** | **全量 P1 + 商务简约重构、防窥 2ms Z序加固与 120 Hz 微交互动画**：① 标准 AEAD **`AES-128-GCM`**；② **GCC 拥塞控制**与动态 FEC；③ **全四端加密 `UDP+FEC/NACK`**；④ **`AAC-LC 96 kbps`** 音频；⑤ **商务简约分组白卡 UI**、`v7.3.1` **2 ms 防窥突发守卫**与 `v7.3.2` **按需 120 Hz 微交互动效引擎** | ✅ 已完成 |
 | **V7.4 (`v7.4.0`)** | **校园网/热点跨网直连与 2K @ 90 Hz 架构升级**：① 端到端硬件 **`H.265 (HEVC)`** 协商与平滑 H.264 回退；② 内置 `BoBoTsNet` **`:49811` UDP 监听 + `/udp-bridge`** 与 `1060 B` MTU 防分片；③ **IPv6 直连竞速 + 国内 RFC 5389 STUN / ICE-Lite 双向打洞**与路径自动升优；④ **`bobo-relay` UDP `:49811` 盲中转 + 内置 `:49812` STUN 服务**；⑤ 消除 TCP `depth>2 + 1500ms` 僵死并将跨网 ABR 全面开放至 **2K @ 90 Hz / 30 Mbps** | ✅ 已完成 |
+| **V7.5 (`v7.5.0`)** | **跨网低延迟直连穿透、全时抗缓冲膨胀与 90 Hz 解耦管线**：① **Capture+Encode 双线程解耦 + 4 槽 GPU NV12 环形池**与微秒 VBlank 节拍消除 `30 FPS` 半频阶梯；② 固定档位启用 **全时 GCC 抗缓冲膨胀上限模式（保 90 Hz）** + `4ms` 微突发步调；③ **OS 内核路由 IPv6/STUN + 对称 NAT 相邻端口扩展 + `1.4s` 持续打洞与无感升优** + `2–4 MiB` 本地/中继缓冲；④ **`36 帧 / 4 MiB` 高 RTT NACK 恢复与乱序宽限放宽** | ✅ 已完成 |
 | **V8 / P2** | `AV1` / `H.264 4:4:4` 编码协商（代码/设计极致锐度）、HDR 与高刷新率多屏增强、Android/Apple 原生 HEVC 硬编互通、TURN/TCP 443 穿透、社区公益中继与 Linux 客户端探索 | 🚧 规划 / 演进中 |
 
 ---

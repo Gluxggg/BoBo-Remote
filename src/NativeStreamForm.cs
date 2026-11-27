@@ -1397,6 +1397,11 @@ namespace DualRemote
             {
                 tr = pathLabel + " · " + tr;
             }
+            if (client.IsDirectUdpPromoted &&
+                (route.StartsWith("Tailscale", StringComparison.Ordinal) || route.StartsWith("自建兜底中转", StringComparison.Ordinal)))
+            {
+                return tr;
+            }
             return string.IsNullOrEmpty(route) ? tr : route + " · " + tr;
         }
 

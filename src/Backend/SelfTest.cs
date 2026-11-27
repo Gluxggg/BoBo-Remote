@@ -638,6 +638,7 @@ namespace DualRemote
             // V6 全内置架构端到端闭环自检：内嵌 BoBoCore.dll + 严格双端必开 TLS 1.2 + 4 位临时配对码 + 视频帧 + 防窥指令 + 文件 SHA-256 互传
             RunV6AllInOneSelfTests();
             RunV74CrossNetAndHevcSelfTests();
+            RunV75ZeroLagSelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -2163,6 +2164,156 @@ namespace DualRemote
                 healthParsed && hUdpP == 49811 && hStunP == 49812 &&
                 BoBoCoreInterop.VideoCodecH264 == 0 && BoBoCoreInterop.VideoCodecHevc == 1,
                 "cands=" + parsedCands.Count + " relay=" + hUdpP + "/" + hStunP + " hevcEnc=" + hevcEnc + " hevcDec=" + hevcDec);
+        }
+
+        private static void RunV75ZeroLagSelfTests()
+        {
+            Log("");
+            Log("—— v7.5.0 路由候选对称端口扩展 + 全时抗缓冲膨胀(保90Hz) + 225ms 高RTT NACK 恢复自检 ——");
+
+            // 1. Kernel-routed local IP + Symmetric NAT adjacent port punch expansion
+            System.Net.IPAddress routed4 = BoBoNatTraversal.TryGetKernelRoutedLocalAddress(
+                System.Net.Sockets.AddressFamily.InterNetwork);
+            bool routedOk = (routed4 == null) ||
+                (routed4.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+            List<BoBoUdpCandidate> gathered = BoBoNatTraversal.GatherLocalCandidates(
+                49811,
+                new[] { new System.Net.IPEndPoint(System.Net.IPAddress.Parse("198.51.100.77"), 51000) },
+                true);
+            var candMsg = new Dictionary<string, object>();
+            candMsg["candidates"] = BoBoNatTraversal.ToProtocolObjects(gathered);
+            List<BoBoUdpCandidate> roundTripped = BoBoNatTraversal.ParseCandidatesFromKey(candMsg, "candidates");
+            bool hasSymSrflx = false;
+            for (int i = 0; i < roundTripped.Count; i++)
+            {
+                if (roundTripped[i].Host == "198.51.100.77" &&
+                    roundTripped[i].Port == 51000 &&
+                    roundTripped[i].SymmetricHint)
+                {
+                    hasSymSrflx = true;
+                }
+            }
+            List<System.Net.IPEndPoint> punchEps = BoBoNatTraversal.ExpandPunchEndpoints(roundTripped, 24);
+            var portsFound = new HashSet<int>();
+            for (int i = 0; i < punchEps.Count; i++)
+            {
+                if (punchEps[i].Address.ToString() == "198.51.100.77")
+                {
+                    portsFound.Add(punchEps[i].Port);
+                }
+            }
+            bool symExpandOk = portsFound.Contains(51000) &&
+                portsFound.Contains(51001) &&
+                portsFound.Contains(50999) &&
+                portsFound.Contains(51002) &&
+                portsFound.Contains(50998);
+            Check("V7.5 内核路由候选优选 + 对称 NAT 相邻端口(+1/-1/+2/-2)打洞扩展",
+                routedOk && hasSymSrflx && symExpandOk,
+                "routed=" + (routed4 != null ? routed4.ToString() : "none") + " sym=" + hasSymSrflx + " ports=" + portsFound.Count);
+
+            // 2. Always-on anti-bufferbloat ceiling mode (autoEnabled=false, "高清 8M" @ 90Hz) + direct path promotion
+            var ceilAbr = new BoBoAdaptiveBitrateController(false, 8000, 90, 42.0, false);
+            bool initCeilOk = ceilAbr.CurrentBitrateKbps == 8000 && ceilAbr.CurrentFps == 90;
+            long t = Stopwatch.GetTimestamp();
+            long step900Ms = (Stopwatch.Frequency * 950L) / 1000L;
+            long step1100Ms = (Stopwatch.Frequency * 1100L) / 1000L;
+            int outBps, outFps;
+            ceilAbr.OnTelemetry(42.0, 0.0, 2.0, t, out outBps, out outFps);
+            for (int i = 0; i < 4; i++)
+            {
+                t += step900Ms;
+                ceilAbr.OnTelemetry(225.0, 0.5, 45.0, t, out outBps, out outFps);
+            }
+            int backedOffBps = ceilAbr.CurrentBitrateKbps;
+            bool backoffPreserved90 = (backedOffBps < 8000) && (ceilAbr.CurrentFps == 90);
+            for (int i = 0; i < 16; i++)
+            {
+                t += step1100Ms;
+                ceilAbr.OnTelemetry(43.0, 0.0, 3.0, t, out outBps, out outFps);
+            }
+            int recoveredBps = ceilAbr.CurrentBitrateKbps;
+            bool recoveredToCap = (recoveredBps == 8000) && (ceilAbr.CurrentFps == 90);
+            t += step1100Ms;
+            ceilAbr.OnTelemetry(240.0, 5.5, 45.0, t, out outBps, out outFps);
+            int promBps, promFps;
+            ceilAbr.OnDirectPathPromoted(out promBps, out promFps);
+            bool promoOk = promBps == 8000 && promFps == 90 &&
+                ceilAbr.CurrentSignal == BoBoCongestionSignal.Normal;
+            Check("V7.5 固定档位(8M@90Hz)全时抗缓冲膨胀降码保帧率 + 升优直连秒解锁",
+                initCeilOk && backoffPreserved90 && recoveredToCap && promoOk,
+                "backedOff=" + backedOffBps + " recovered=" + recoveredBps + " prom=" + promBps + "/" + promFps);
+
+            // 3. 225ms high-RTT P-frame multi-shard loss NACK recovery & 36-frame cache without awaitingKeyframe wipe
+            bool cacheConstOk = BoBoUdpRetransmitCache.MaxCachedFrames == 36 &&
+                BoBoUdpRetransmitCache.MaxCachedBytes == 4 * 1024 * 1024;
+            var cache = new BoBoUdpRetransmitCache();
+            var asm = new BoBoUdpVideoAssembler { NackEnabled = true };
+            var ready = new List<BoBoReassembledVideoFrame>();
+            var deliveredIds = new HashSet<uint>();
+            bool needPli;
+
+            byte[] keyPayload = new byte[500];
+            for (int i = 0; i < keyPayload.Length; i++) keyPayload[i] = (byte)(i & 0xFF);
+            List<byte[]> f1Shards = BoBoUdpFec.BuildVideoShards(1u, 10u, 1920, 1080, true, keyPayload, 0.35, true, false, 225.0, 0.0, 0, false);
+            for (int i = 0; i < f1Shards.Count; i++)
+            {
+                ready.Clear();
+                asm.ProcessShardBatch(f1Shards[i], 225.0, ready, out needPli);
+                for (int r = 0; r < ready.Count; r++) deliveredIds.Add(ready[r].FrameId);
+            }
+
+            byte[] p2Payload = new byte[2600];
+            for (int i = 0; i < p2Payload.Length; i++) p2Payload[i] = (byte)((i * 7 + 5) & 0xFF);
+            List<byte[]> p2Shards = BoBoUdpFec.BuildVideoShards(2u, 22u, 1920, 1080, false, p2Payload, 0.35, false, false, 225.0, 0.0, 0, false);
+            cache.StoreFrame(2u, p2Shards);
+            for (int i = 0; i < p2Shards.Count; i++)
+            {
+                byte[] sh = p2Shards[i];
+                bool isParity = (sh[12] & BoBoUdpFec.FlagParity) != 0;
+                int sIdx = BoBoUdpCrypto.ReadUInt16LE(sh, 13);
+                if (!isParity && (sIdx == 0 || sIdx == 1)) continue; // Drop 2 data shards of frame 2
+                ready.Clear();
+                asm.ProcessShardBatch(sh, 225.0, ready, out needPli);
+                for (int r = 0; r < ready.Count; r++) deliveredIds.Add(ready[r].FrameId);
+            }
+
+            for (uint fid = 3u; fid <= 12u; fid++)
+            {
+                byte[] pf = new byte[400];
+                pf[0] = (byte)fid;
+                List<byte[]> fShards = BoBoUdpFec.BuildVideoShards(fid, 22u + fid * 11u, 1920, 1080, false, pf, 0.35, true, false, 225.0, 0.0, 0, false);
+                for (int i = 0; i < fShards.Count; i++)
+                {
+                    ready.Clear();
+                    asm.ProcessShardBatch(fShards[i], 225.0, ready, out needPli);
+                    for (int r = 0; r < ready.Count; r++) deliveredIds.Add(ready[r].FrameId);
+                }
+            }
+
+            var nacks = new List<BoBoUdpNackRequest>();
+            bool pollPli;
+            long pollNow = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 20;
+            asm.PollRecovery(pollNow, 225.0, nacks, out pollPli);
+            bool flagRetxOk = true;
+            for (int i = 0; i < nacks.Count; i++)
+            {
+                byte[] retx = cache.TryGetForRetransmit(nacks[i].FrameId, nacks[i].ShardIdx, pollNow, 0.0, 2);
+                if (retx == null || (retx[12] & BoBoUdpFec.FlagRetransmit) == 0)
+                {
+                    flagRetxOk = false;
+                    continue;
+                }
+                ready.Clear();
+                asm.ProcessShardBatch(retx, 225.0, ready, out needPli);
+                for (int r = 0; r < ready.Count; r++) deliveredIds.Add(ready[r].FrameId);
+            }
+            Check("V7.5 高RTT(225ms) 多分片丢失 NACK 补发 + 36帧缓存不退回关键帧等待",
+                cacheConstOk && !pollPli && nacks.Count >= 2 && flagRetxOk &&
+                deliveredIds.Count == 12 && asm.NackRecoveredPackets >= 1 &&
+                (asm.NackRecoveredPackets + asm.FecRecoveredPackets) >= 2 &&
+                asm.DroppedIncompleteFrames == 0 && !asm.IsAwaitingKeyframe,
+                "nacks=" + nacks.Count + " delivered=" + deliveredIds.Count + " nackRec=" + asm.NackRecoveredPackets +
+                " fecRec=" + asm.FecRecoveredPackets + " dropped=" + asm.DroppedIncompleteFrames);
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

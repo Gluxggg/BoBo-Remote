@@ -786,6 +786,48 @@ namespace DualRemote
             catch { }
         }
 
+        internal IPAddress TryGetPeerDirectPublicIp(string peerIpOrHost)
+        {
+            if (string.IsNullOrWhiteSpace(peerIpOrHost)) return null;
+            string needle = peerIpOrHost.Trim().TrimEnd('.');
+            EmbeddedTailnetSnapshot snap = LatestSnapshot;
+            if (snap == null || snap.Peers == null) return null;
+
+            for (int i = 0; i < snap.Peers.Count; i++)
+            {
+                EmbeddedTailnetPeer p = snap.Peers[i];
+                if (p == null) continue;
+                bool matched = string.Equals(p.Ip4, needle, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.Ip6, needle, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.HostName, needle, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.DnsName != null ? p.DnsName.TrimEnd('.') : "", needle, StringComparison.OrdinalIgnoreCase);
+                if (!matched || string.IsNullOrWhiteSpace(p.CurAddr)) continue;
+
+                string raw = p.CurAddr.Trim();
+                string ipText = raw;
+                if (raw.StartsWith("[", StringComparison.Ordinal))
+                {
+                    int close = raw.IndexOf(']');
+                    if (close > 1) ipText = raw.Substring(1, close - 1);
+                }
+                else
+                {
+                    int firstColon = raw.IndexOf(':');
+                    int lastColon = raw.LastIndexOf(':');
+                    if (firstColon > 0 && firstColon == lastColon)
+                    {
+                        ipText = raw.Substring(0, lastColon);
+                    }
+                }
+                IPAddress ip;
+                if (IPAddress.TryParse(ipText, out ip) && BoBoNatTraversal.IsAllowedRemoteCandidateIp(ip))
+                {
+                    return ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+                }
+            }
+            return null;
+        }
+
         private static string SendHttpSync(string method, string pathAndQuery, int timeoutMs, int port, string tok)
         {
             if (port <= 0 || string.IsNullOrEmpty(tok)) return "";

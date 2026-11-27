@@ -46,7 +46,9 @@ public:
     // When !forceProduce and neither desktop nor cursor changed, returns true with outChanged=false without GPU/CPU copy!
     bool CaptureFrame(int timeoutMs, bool preferGpuNv12, bool compositeCursor, bool forceProduce,
                       ID3D11Texture2D** outGpuNv12, std::vector<uint8_t>& outCpuNv12,
-                      bool& outChanged, std::string& outError);
+                      bool& outChanged, std::string& outError,
+                      int targetGpuSlot = -1, int* outGpuSlot = nullptr,
+                      bool* outDeviceResetRequested = nullptr);
 
     uint32_t OutputWidth() const { return outW_; }
     uint32_t OutputHeight() const { return outH_; }
@@ -58,13 +60,15 @@ public:
 private:
     bool InitDxgiForMonitor(const BoBoMonitorInfo& mon);
     bool EnsureColorConverter(uint32_t srcW, uint32_t srcH);
-    bool ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D11Texture2D** outGpuNv12);
+    bool ConvertBgraTextureToGpuNv12(ID3D11Texture2D* bgraTex, ID3D11Texture2D** outGpuNv12,
+                                     int targetGpuSlot = -1, int* outUsedGpuSlot = nullptr);
     bool ConvertBgraTextureToCpuNv12(ID3D11Texture2D* bgraTex, std::vector<uint8_t>& outNv12);
     bool CaptureViaGdi(std::vector<uint8_t>& outNv12);
     static void BgraBufferToNv12(const uint8_t* bgra, uint32_t srcW, uint32_t srcH, uint32_t srcStride,
                                  uint8_t* nv12Out, uint32_t dstW, uint32_t dstH);
     bool HasCursorMovedOrChanged(bool& outVisible, POINT& outPt, HCURSOR& outHandle) const;
 
+    static constexpr int kGpuNv12Slots = 4;
     BoBoMonitorInfo activeMonitor_ = {};
     int monitorIndex_ = 0;
     uint32_t outW_ = 1920;
@@ -84,9 +88,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnum_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessor> vp_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> nv12GpuTex_[2];
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> nv12GpuTex_[kGpuNv12Slots];
     int gpuSlot_ = 0;
     ID3D11Texture2D* lastProducedGpuTex_ = nullptr;
+    int lastProducedGpuSlot_ = -1;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> nv12StagingTex_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> bgraStagingTex_;
     uint32_t bgraStageW_ = 0;

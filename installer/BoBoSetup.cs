@@ -8,6 +8,7 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -388,7 +389,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "7.4.0";
+            return "7.5.0";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -624,6 +625,8 @@ namespace BoBoSetup
             {
                 SetAutoStart(mainExe, options.AutoStart);
             }
+            Report(report, 98, "正在配置低延迟直连防火墙规则…");
+            ConfigureWindowsFirewallRules(mainExe, true);
 
             Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
         }
@@ -647,6 +650,7 @@ namespace BoBoSetup
             try { Registry.CurrentUser.DeleteSubKeyTree(UninstallRegSubKey, false); }
             catch { }
             SetAutoStart(null, false);
+            ConfigureWindowsFirewallRules(Path.Combine(fullDir, MainExeName), false);
 
             if (purgeUserData)
             {
@@ -703,6 +707,46 @@ namespace BoBoSetup
             }
             if (File.Exists(targetPath)) File.Delete(targetPath);
             File.Move(tmp, targetPath);
+        }
+
+        private static void ConfigureWindowsFirewallRules(string exePath, bool add)
+        {
+            try
+            {
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                {
+                    if (id == null) return;
+                    var principal = new WindowsPrincipal(id);
+                    if (!principal.IsInRole(WindowsBuiltInRole.Administrator)) return;
+                }
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (UDP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (TCP-In)\"");
+                if (add && !string.IsNullOrWhiteSpace(exePath))
+                {
+                    string quoted = "\"" + exePath + "\"";
+                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (UDP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=UDP localport=49811,49812");
+                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (TCP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=TCP localport=49810");
+                }
+            }
+            catch { }
+        }
+
+        private static void RunHiddenNetsh(string args)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("netsh", args)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (p != null) p.WaitForExit(2000);
+                }
+            }
+            catch { }
         }
 
         private static void CreateShortcut(string shortcutPath, string targetPath, string arguments, string workingDir, string iconLocation, string description)

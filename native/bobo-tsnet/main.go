@@ -382,6 +382,14 @@ func (m *tsManager) ensureHostUdpListener(srv *tsnet.Server) {
 	go m.serveHostUdp(pc)
 }
 
+func tuneLocalUdpConn(c *net.UDPConn) {
+	if c == nil {
+		return
+	}
+	_ = c.SetReadBuffer(4 * 1024 * 1024)
+	_ = c.SetWriteBuffer(4 * 1024 * 1024)
+}
+
 func (m *tsManager) serveHostUdp(pc net.PacketConn) {
 	defer pc.Close()
 	targetAddr, err := net.ResolveUDPAddr("udp", m.udpForwardTarget)
@@ -422,7 +430,7 @@ func (m *tsManager) serveHostUdp(pc net.PacketConn) {
 		}
 	}()
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	for {
 		n, remoteAddr, err := pc.ReadFrom(buf)
 		if err != nil {
@@ -445,6 +453,7 @@ func (m *tsManager) serveHostUdp(pc net.PacketConn) {
 				peerMu.Unlock()
 				continue
 			}
+			tuneLocalUdpConn(dstConn)
 			entry = &hostUdpPeerForward{
 				remoteAddr: remoteAddr,
 				dstConn:    dstConn,
@@ -462,7 +471,7 @@ func (m *tsManager) serveHostUdp(pc net.PacketConn) {
 					}
 					peerMu.Unlock()
 				}()
-				rbuf := make([]byte, 2048)
+				rbuf := make([]byte, 4096)
 				for {
 					rn, rErr := ent.dstConn.Read(rbuf)
 					if rErr != nil {
@@ -542,6 +551,7 @@ func (m *tsManager) openUdpBridge(ctx context.Context, peerIp string, remotePort
 		_ = remoteConn.Close()
 		return 0, err
 	}
+	tuneLocalUdpConn(localConn)
 	bridgePort := localConn.LocalAddr().(*net.UDPAddr).Port
 	clientAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: localPort}
 	sess := &udpBridgeSession{
@@ -569,7 +579,7 @@ func (m *tsManager) openUdpBridge(ctx context.Context, peerIp string, remotePort
 
 	go func() {
 		defer cleanup()
-		buf := make([]byte, 2048)
+		buf := make([]byte, 4096)
 		for {
 			_ = localConn.SetReadDeadline(time.Now().Add(180 * time.Second))
 			n, src, rErr := localConn.ReadFromUDP(buf)
@@ -587,7 +597,7 @@ func (m *tsManager) openUdpBridge(ctx context.Context, peerIp string, remotePort
 
 	go func() {
 		defer cleanup()
-		buf := make([]byte, 2048)
+		buf := make([]byte, 4096)
 		for {
 			_ = remoteConn.SetReadDeadline(time.Now().Add(180 * time.Second))
 			n, rErr := remoteConn.Read(buf)

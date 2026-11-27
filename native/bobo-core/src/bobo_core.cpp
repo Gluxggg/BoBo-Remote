@@ -40,6 +40,22 @@ struct ScopedTimerResolution1ms {
 
 // ==================== Host Session (In-Process Zero-Copy Capture + H.264 Encode + WASAPI Loopback) ====================
 struct BoBoHostSession {
+    struct StagedCaptureFrame {
+        bool pending = false;
+        ID3D11Texture2D* gpuTex = nullptr;
+        int gpuSlot = -1;
+        std::vector<uint8_t> cpuNv12;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        int64_t sampleTimeHns = 0;
+        bool forceKey = false;
+        bool compositeCursor = true;
+        bool preferHevc = false;
+        int32_t bitrateKbps = 14000;
+        int32_t fps = 60;
+        ID3D11Device* zeroCopyDev = nullptr;
+    };
+
     std::atomic<bool> running{ false };
     std::atomic<bool> reconfigPending{ false };
     std::atomic<bool> keyframePending{ true };
@@ -47,6 +63,10 @@ struct BoBoHostSession {
     std::atomic<int32_t> liveBitratePending{ 0 };
     std::atomic<int32_t> liveFpsTarget{ 60 };
     std::atomic<int32_t> activeVideoCodec{ kVideoCodecH264 };
+    std::atomic<bool> encoderAllowZeroCopy{ true };
+    std::atomic<bool> encoderResetRequested{ false };
+    std::atomic<int64_t> sentFrameCount{ 0 };
+    std::atomic<int64_t> lastEncodedMs{ -2000 };
 
     std::mutex cfgMutex;
     int32_t monitorIndex = 0;
@@ -63,34 +83,229 @@ struct BoBoHostSession {
     WasapiLoopbackCapturer audioCap;
     std::thread videoThread;
 
+    std::mutex frameMutex;
+    std::condition_variable frameCv;
+    std::condition_variable pauseCv;
+    StagedCaptureFrame staged;
+    bool encodePauseRequested = false;
+    bool encodePaused = false;
+    bool encodeStop = false;
+    int stagedGpuSlot = -1;
+    int encodingGpuSlot = -1;
+    std::chrono::steady_clock::time_point startClock = std::chrono::steady_clock::now();
+
+    void RunEncodeLoop() {
+        HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        MfH264Encoder encoder;
+        std::vector<uint8_t> h264Buf;
+        uint32_t encW = 0, encH = 0;
+        int32_t encBps = 0;
+        bool encOpen = false;
+        int consecutiveEncodeFailures = 0;
+
+        while (true) {
+            StagedCaptureFrame work;
+            {
+                std::unique_lock<std::mutex> lk(frameMutex);
+                frameCv.wait(lk, [&]() {
+                    return encodeStop || !running.load(std::memory_order_acquire) || encodePauseRequested || staged.pending;
+                });
+
+                if (encodePauseRequested) {
+                    staged.pending = false;
+                    staged.gpuTex = nullptr;
+                    staged.gpuSlot = -1;
+                    stagedGpuSlot = -1;
+                    lk.unlock();
+                    if (encOpen) {
+                        encoder.Close();
+                        encOpen = false;
+                        encW = encH = 0;
+                    }
+                    lk.lock();
+                    encodingGpuSlot = -1;
+                    encodePaused = true;
+                    pauseCv.notify_all();
+                    frameCv.wait(lk, [&]() {
+                        return encodeStop || !running.load(std::memory_order_acquire) || !encodePauseRequested;
+                    });
+                    encodePaused = false;
+                    pauseCv.notify_all();
+                    if (encodeStop || !running.load(std::memory_order_acquire)) break;
+                    continue;
+                }
+
+                if (encodeStop || (!running.load(std::memory_order_acquire) && !staged.pending)) {
+                    break;
+                }
+
+                work = std::move(staged);
+                staged.pending = false;
+                staged.gpuTex = nullptr;
+                staged.gpuSlot = -1;
+                stagedGpuSlot = -1;
+                encodingGpuSlot = work.gpuSlot;
+            }
+
+            if (work.width < 16 || work.height < 16) {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                encodingGpuSlot = -1;
+                continue;
+            }
+
+            bool needZeroCopy = (!work.compositeCursor && work.zeroCopyDev != nullptr && work.gpuTex != nullptr);
+            bool zeroCopyMismatch = encOpen &&
+                ((needZeroCopy && !encoder.IsD3D11ZeroCopy() && encoderAllowZeroCopy.load(std::memory_order_acquire)) ||
+                 (!needZeroCopy && encoder.IsD3D11ZeroCopy()));
+            if (!encOpen || encW != work.width || encH != work.height || zeroCopyMismatch ||
+                encoderResetRequested.exchange(false)) {
+                encoder.Close();
+                encOpen = false;
+                std::string encOpenErr;
+                ID3D11Device* zcDev = (!work.compositeCursor) ? work.zeroCopyDev : nullptr;
+                if (encoder.Open(work.width, work.height,
+                                 static_cast<uint32_t>(work.fps > 0 ? work.fps : 60),
+                                 static_cast<uint32_t>(work.bitrateKbps > 0 ? work.bitrateKbps : 14000),
+                                 encOpenErr, zcDev, work.preferHevc, true)) {
+                    encOpen = true;
+                    encW = work.width;
+                    encH = work.height;
+                    encBps = work.bitrateKbps;
+                    consecutiveEncodeFailures = 0;
+                    activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
+                    encoderAllowZeroCopy.store(encoder.IsD3D11ZeroCopy(), std::memory_order_release);
+                    keyframePending.store(true, std::memory_order_release);
+                    work.forceKey = true;
+                } else {
+                    std::lock_guard<std::mutex> lk(frameMutex);
+                    encodingGpuSlot = -1;
+                    keyframePending.store(true, std::memory_order_release);
+                    Sleep(20);
+                    continue;
+                }
+            } else if (work.bitrateKbps != encBps && work.bitrateKbps >= 500 && work.bitrateKbps <= 60000) {
+                encoder.UpdateBitrateLive(static_cast<uint32_t>(work.bitrateKbps));
+                encBps = work.bitrateKbps;
+            }
+
+            bool useGpuThisFrame = encoder.IsD3D11ZeroCopy() && (work.gpuTex != nullptr);
+            if (!useGpuThisFrame && work.cpuNv12.empty()) {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                encodingGpuSlot = -1;
+                encoderAllowZeroCopy.store(false, std::memory_order_release);
+                keyframePending.store(true, std::memory_order_release);
+                continue;
+            }
+
+            bool isKey = false;
+            std::string encErr;
+            h264Buf.clear();
+            bool encOk = useGpuThisFrame
+                ? encoder.EncodeD3D11Texture(work.gpuTex, work.sampleTimeHns, work.forceKey, h264Buf, isKey, encErr)
+                : encoder.EncodeNv12(work.cpuNv12.data(), work.cpuNv12.size(), work.sampleTimeHns, work.forceKey, h264Buf, isKey, encErr);
+
+            {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                encodingGpuSlot = -1;
+            }
+
+            if (encOk) {
+                consecutiveEncodeFailures = 0;
+                if (!h264Buf.empty() && onVideo) {
+                    auto nowClock = std::chrono::steady_clock::now();
+                    int64_t msSinceStart = std::chrono::duration_cast<std::chrono::milliseconds>(nowClock - startClock).count();
+                    lastEncodedMs.store(msSinceStart, std::memory_order_release);
+                    sentFrameCount.fetch_add(1, std::memory_order_release);
+                    uint32_t tsMs = static_cast<uint32_t>(msSinceStart);
+                    onVideo(h264Buf.data(),
+                            static_cast<int32_t>(h264Buf.size()),
+                            isKey ? 1 : 0,
+                            static_cast<int32_t>(work.width),
+                            static_cast<int32_t>(work.height),
+                            tsMs,
+                            userCtx);
+                }
+            } else {
+                if (work.forceKey) keyframePending.store(true, std::memory_order_release);
+                if (++consecutiveEncodeFailures >= 5) {
+                    encoderResetRequested.store(true, std::memory_order_release);
+                    consecutiveEncodeFailures = 0;
+                }
+            }
+        }
+
+        encoder.Close();
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+    }
+
     void RunVideoLoop() {
         ScopedTimerResolution1ms timerGuard;
         HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         ScreenCapturer capturer;
-        MfH264Encoder encoder;
         std::vector<uint8_t> nv12Buf;
-        std::vector<uint8_t> h264Buf;
 
         int32_t curMon = -1, curW = 0, curH = 0, curFps = 60, curBps = 14000;
         bool curCompositeCursor = true;
         bool initialized = false;
         uint64_t curCapDeviceGen = 0;
         int64_t frameIndex = 0;
-        int64_t sentFrameCount = 0;
-        int consecutiveEncodeFailures = 0;
-        auto startClock = std::chrono::steady_clock::now();
-        auto lastSentClock = startClock - std::chrono::seconds(2);
 
-        while (running.load()) {
+        {
+            std::lock_guard<std::mutex> lk(frameMutex);
+            encodePauseRequested = false;
+            encodePaused = false;
+            encodeStop = false;
+            staged = StagedCaptureFrame{};
+            stagedGpuSlot = -1;
+            encodingGpuSlot = -1;
+            startClock = std::chrono::steady_clock::now();
+        }
+        sentFrameCount.store(0, std::memory_order_release);
+        lastEncodedMs.store(-2000, std::memory_order_release);
+        encoderAllowZeroCopy.store(true, std::memory_order_release);
+        encoderResetRequested.store(false, std::memory_order_release);
+
+        std::thread encodeThread([this]() { RunEncodeLoop(); });
+
+        auto pauseEncodeAndDrain = [&]() {
+            std::unique_lock<std::mutex> lk(frameMutex);
+            encodePauseRequested = true;
+            frameCv.notify_all();
+            pauseCv.wait(lk, [&]() {
+                return encodePaused || encodeStop || !running.load(std::memory_order_acquire);
+            });
+        };
+        auto resumeEncode = [&]() {
+            {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                encodePauseRequested = false;
+            }
+            frameCv.notify_all();
+        };
+        auto pickFreeGpuSlotLocked = [&]() -> int {
+            for (int s = 0; s < 4; ++s) {
+                if (s != encodingGpuSlot && s != stagedGpuSlot) {
+                    return s;
+                }
+            }
+            for (int s = 0; s < 4; ++s) {
+                if (s != encodingGpuSlot) {
+                    return s;
+                }
+            }
+            return 0;
+        };
+
+        auto nextDeadline = std::chrono::steady_clock::now();
+
+        while (running.load(std::memory_order_acquire)) {
             bool wantComposite = compositeCursor.load(std::memory_order_acquire);
-            bool cursorModeFlipped = initialized &&
-                ((!wantComposite && !encoder.IsD3D11ZeroCopy() && capturer.UsingDxgi()) ||
-                 (wantComposite && encoder.IsD3D11ZeroCopy()));
-            bool capDeviceChanged = initialized && encoder.IsD3D11ZeroCopy() &&
-                (!capturer.UsingDxgi() || capturer.DeviceGeneration() != curCapDeviceGen);
+            bool allowZeroCopy = encoderAllowZeroCopy.load(std::memory_order_acquire);
+            bool capDeviceChanged = initialized && capturer.UsingDxgi() && (capturer.DeviceGeneration() != curCapDeviceGen);
 
-            if (!initialized || cursorModeFlipped || capDeviceChanged || reconfigPending.exchange(false)) {
+            if (!initialized || capDeviceChanged || reconfigPending.exchange(false, std::memory_order_acq_rel)) {
                 int32_t reqMon, reqW, reqH, reqFps, reqBps;
+                bool reqHevc;
                 {
                     std::lock_guard<std::mutex> lk(cfgMutex);
                     reqMon = monitorIndex;
@@ -98,55 +313,50 @@ struct BoBoHostSession {
                     reqH = targetHeight;
                     reqFps = (fps >= 15 && fps <= 144) ? fps : 60;
                     reqBps = (bitrateKbps >= 500 && bitrateKbps <= 60000) ? bitrateKbps : 10000;
+                    reqHevc = preferHevcVideo;
                 }
                 liveFpsTarget.store(reqFps, std::memory_order_release);
 
-                bool geomChanged = !initialized || cursorModeFlipped || capDeviceChanged ||
+                bool geomChanged = !initialized || capDeviceChanged ||
                                    reqMon != curMon || reqW != curW || reqH != curH;
-                if (!geomChanged) {
-                    // Live bitrate / FPS update with ZERO encoder teardown or black frame!
-                    if (reqBps != curBps) {
-                        encoder.UpdateBitrateLive(static_cast<uint32_t>(reqBps));
-                        curBps = reqBps;
+                curBps = reqBps;
+                curFps = reqFps;
+                curCompositeCursor = wantComposite;
+
+                if (geomChanged) {
+                    pauseEncodeAndDrain();
+                    if (!running.load(std::memory_order_acquire)) {
+                        resumeEncode();
+                        break;
                     }
-                    curFps = reqFps;
-                } else {
                     curMon = reqMon;
                     curW = reqW;
                     curH = reqH;
-                    curFps = reqFps;
-                    curBps = reqBps;
-                    curCompositeCursor = wantComposite;
                     std::string err;
-                    bool capOk = true;
-                    if (!capDeviceChanged || !capturer.UsingDxgi() ||
-                        capturer.OutputWidth() != static_cast<uint32_t>((curW + 1) & ~1) ||
-                        capturer.OutputHeight() != static_cast<uint32_t>((curH + 1) & ~1)) {
-                        capOk = capturer.Initialize(curMon, static_cast<uint32_t>(curW), static_cast<uint32_t>(curH), err);
-                    }
-                    ID3D11Device* zeroCopyDev = (capOk && capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
-                    if (capOk &&
-                        encoder.Open(capturer.OutputWidth(), capturer.OutputHeight(),
-                                     static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps),
-                                     err, zeroCopyDev, preferHevcVideo, true)) {
+                    bool capOk = capturer.Initialize(curMon, static_cast<uint32_t>(curW), static_cast<uint32_t>(curH), err);
+                    if (capOk) {
                         initialized = true;
-                        activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
                         curCapDeviceGen = capturer.DeviceGeneration();
-                        consecutiveEncodeFailures = 0;
-                        sentFrameCount = 0;
-                        keyframePending.store(true);
+                        sentFrameCount.store(0, std::memory_order_release);
+                        encoderAllowZeroCopy.store(true, std::memory_order_release);
+                        keyframePending.store(true, std::memory_order_release);
+                        nextDeadline = std::chrono::steady_clock::now();
                     } else {
                         initialized = false;
+                        resumeEncode();
                         Sleep(200);
                         continue;
                     }
+                    resumeEncode();
+                } else {
+                    (void)reqHevc;
                 }
+            } else {
+                curCompositeCursor = wantComposite;
             }
 
-            // Apply zero-stall live bitrate / FPS changes from ABR controller
-            int32_t pendingBps = liveBitratePending.exchange(0);
-            if (pendingBps >= 500 && pendingBps <= 60000 && pendingBps != curBps) {
-                encoder.UpdateBitrateLive(static_cast<uint32_t>(pendingBps));
+            int32_t pendingBps = liveBitratePending.exchange(0, std::memory_order_acq_rel);
+            if (pendingBps >= 500 && pendingBps <= 60000) {
                 curBps = pendingBps;
             }
             int32_t targetFpsNow = liveFpsTarget.load(std::memory_order_acquire);
@@ -154,60 +364,74 @@ struct BoBoHostSession {
                 curFps = targetFpsNow;
             }
 
-            auto frameStart = std::chrono::steady_clock::now();
-            int framePeriodMs = 1000 / (curFps > 0 ? curFps : 60);
-            if (framePeriodMs < 6) framePeriodMs = 6;
-
-            bool forceKey = keyframePending.exchange(false);
-            auto sinceLastSentMs = std::chrono::duration_cast<std::chrono::milliseconds>(frameStart - lastSentClock).count();
-            bool needKeepalive = (sinceLastSentMs >= 1000);
-            bool warmup = (sentFrameCount < 3);
-            bool forceProduce = forceKey || warmup || needKeepalive;
-
-            bool changed = false;
-            std::string capErr;
-            ID3D11Texture2D* gpuNv12Tex = nullptr;
-            bool preferGpu = encoder.IsD3D11ZeroCopy() && !curCompositeCursor;
-            bool capOk = capturer.CaptureFrame(
-                framePeriodMs, preferGpu, curCompositeCursor, forceProduce,
-                &gpuNv12Tex, nv12Buf, changed, capErr);
-
-            // Detect DXGI_ERROR_ACCESS_LOST device recreation before passing GPU texture to an encoder bound to the old ID3D11Device
-            if (encoder.IsD3D11ZeroCopy() && (!capturer.UsingDxgi() || capturer.DeviceGeneration() != curCapDeviceGen)) {
-                std::string rebindErr;
-                ID3D11Device* freshDev = (capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
-                if (encoder.Open(capturer.OutputWidth(), capturer.OutputHeight(),
-                                 static_cast<uint32_t>(curFps), static_cast<uint32_t>(curBps),
-                                 rebindErr, freshDev, preferHevcVideo, true)) {
-                    activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
-                    curCapDeviceGen = capturer.DeviceGeneration();
-                    keyframePending.store(true);
-                    forceKey = true;
-                    preferGpu = encoder.IsD3D11ZeroCopy() && !curCompositeCursor;
-                } else {
-                    initialized = false;
-                    keyframePending.store(true);
-                    continue;
-                }
+            bool reqHevcNow = false;
+            {
+                std::lock_guard<std::mutex> lk(cfgMutex);
+                reqHevcNow = preferHevcVideo;
             }
 
-            bool hasGpuFrame = capOk && preferGpu && (gpuNv12Tex != nullptr);
+            auto frameStart = std::chrono::steady_clock::now();
+            int64_t periodUs = 1000000LL / (curFps > 0 ? curFps : 60);
+            if (periodUs < 6944LL) periodUs = 6944LL;
+            int capWaitMs = static_cast<int>(periodUs / 1000LL);
+            if (capWaitMs < 4) capWaitMs = 4;
+
+            bool forceKey = keyframePending.exchange(false, std::memory_order_acq_rel);
+            int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(frameStart - startClock).count();
+            bool needKeepalive = (nowMs - lastEncodedMs.load(std::memory_order_acquire) >= 1000);
+            bool warmup = (sentFrameCount.load(std::memory_order_acquire) < 3);
+            bool forceProduce = forceKey || warmup || needKeepalive;
+
+            int chosenSlot = 0;
+            {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                chosenSlot = pickFreeGpuSlotLocked();
+            }
+
+            bool changed = false;
+            bool devResetReq = false;
+            int outGpuSlot = -1;
+            std::string capErr;
+            ID3D11Texture2D* gpuNv12Tex = nullptr;
+            bool preferGpu = allowZeroCopy && !curCompositeCursor && capturer.UsingDxgi();
+            bool capOk = capturer.CaptureFrame(
+                capWaitMs, preferGpu, curCompositeCursor, forceProduce,
+                &gpuNv12Tex, nv12Buf, changed, capErr,
+                chosenSlot, &outGpuSlot, &devResetReq);
+
+            if (devResetReq) {
+                pauseEncodeAndDrain();
+                std::string resetErr;
+                if (capturer.Initialize(curMon, static_cast<uint32_t>(curW), static_cast<uint32_t>(curH), resetErr)) {
+                    curCapDeviceGen = capturer.DeviceGeneration();
+                    encoderAllowZeroCopy.store(true, std::memory_order_release);
+                    keyframePending.store(true, std::memory_order_release);
+                } else {
+                    initialized = false;
+                    resumeEncode();
+                    Sleep(150);
+                    continue;
+                }
+                resumeEncode();
+                nextDeadline = std::chrono::steady_clock::now();
+                continue;
+            }
+
+            bool hasGpuFrame = capOk && preferGpu && (gpuNv12Tex != nullptr) && (outGpuSlot >= 0);
             bool hasCpuFrame = capOk && !hasGpuFrame && !nv12Buf.empty();
 
-            // Variable Frame Rate (VFR): on idle static desktop, skip encoding & network transmission completely!
             if (capOk && !changed && !forceProduce) {
-                auto elapsedIdleMs = static_cast<int>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - frameStart).count());
-                int sleepIdle = framePeriodMs - elapsedIdleMs;
-                if (sleepIdle > 1 && running.load()) {
-                    Sleep(static_cast<DWORD>(sleepIdle));
+                auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - frameStart).count();
+                int sleepIdleMs = static_cast<int>((periodUs - elapsedUs) / 1000LL);
+                if (sleepIdleMs > 1 && running.load(std::memory_order_acquire)) {
+                    Sleep(static_cast<DWORD>(sleepIdleMs));
                 }
+                nextDeadline = std::chrono::steady_clock::now();
                 continue;
             }
 
             if (!hasGpuFrame && !hasCpuFrame && (frameIndex == 0 || forceKey)) {
-                // Non-interactive desktop (UAC/lockscreen/CI): emit dark neutral NV12 frame so stream stays alive
                 uint32_t fw = capturer.OutputWidth();
                 uint32_t fh = capturer.OutputHeight();
                 if (fw >= 320 && fh >= 240) {
@@ -219,55 +443,67 @@ struct BoBoHostSession {
                 }
             }
             if (!hasGpuFrame && !hasCpuFrame && forceKey) {
-                keyframePending.store(true);
+                keyframePending.store(true, std::memory_order_release);
             }
 
             if (hasGpuFrame || hasCpuFrame) {
-                // Real monotonic wall-clock PTS so VBR/CBR rate control remains accurate under VFR idle skipping
                 int64_t sampleTimeHns = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - startClock).count() * 10LL;
-                bool isKey = false;
-                std::string encErr;
-                bool encOk = hasGpuFrame
-                    ? encoder.EncodeD3D11Texture(gpuNv12Tex, sampleTimeHns, forceKey, h264Buf, isKey, encErr)
-                    : encoder.EncodeNv12(nv12Buf.data(), nv12Buf.size(), sampleTimeHns, forceKey, h264Buf, isKey, encErr);
-
-                if (encOk) {
-                    consecutiveEncodeFailures = 0;
-                    if (!h264Buf.empty() && onVideo) {
-                        auto nowClock = std::chrono::steady_clock::now();
-                        lastSentClock = nowClock;
-                        ++sentFrameCount;
-                        uint32_t tsMs = static_cast<uint32_t>(
-                            std::chrono::duration_cast<std::chrono::milliseconds>(nowClock - startClock).count());
-                        onVideo(h264Buf.data(),
-                                static_cast<int32_t>(h264Buf.size()),
-                                isKey ? 1 : 0,
-                                static_cast<int32_t>(capturer.OutputWidth()),
-                                static_cast<int32_t>(capturer.OutputHeight()),
-                                tsMs,
-                                userCtx);
+                {
+                    std::lock_guard<std::mutex> lk(frameMutex);
+                    bool inheritedKey = staged.pending && staged.forceKey;
+                    staged.pending = true;
+                    staged.gpuTex = hasGpuFrame ? gpuNv12Tex : nullptr;
+                    staged.gpuSlot = hasGpuFrame ? outGpuSlot : -1;
+                    if (hasCpuFrame) {
+                        staged.cpuNv12.swap(nv12Buf);
+                    } else {
+                        staged.cpuNv12.clear();
                     }
-                    ++frameIndex;
-                } else {
-                    if (forceKey) keyframePending.store(true);
-                    if (++consecutiveEncodeFailures >= 5) {
-                        initialized = false;
-                        consecutiveEncodeFailures = 0;
-                    }
+                    staged.width = capturer.OutputWidth();
+                    staged.height = capturer.OutputHeight();
+                    staged.sampleTimeHns = sampleTimeHns;
+                    staged.forceKey = forceKey || inheritedKey;
+                    staged.compositeCursor = curCompositeCursor;
+                    staged.preferHevc = reqHevcNow;
+                    staged.bitrateKbps = curBps;
+                    staged.fps = curFps;
+                    staged.zeroCopyDev = (capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
+                    stagedGpuSlot = staged.gpuSlot;
                 }
+                frameCv.notify_one();
+                ++frameIndex;
             }
 
-            auto elapsedMs = static_cast<int>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - frameStart).count());
-            int sleepMs = framePeriodMs - elapsedMs;
-            if (sleepMs > 1 && running.load()) {
-                Sleep(static_cast<DWORD>(sleepMs));
+            nextDeadline += std::chrono::microseconds(periodUs);
+            auto nowPaced = std::chrono::steady_clock::now();
+            auto maxLag = std::chrono::microseconds(periodUs * 2);
+            if (nextDeadline + maxLag < nowPaced) {
+                nextDeadline = nowPaced;
+            } else if (nextDeadline > nowPaced) {
+                auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(nextDeadline - nowPaced).count();
+                if (waitUs > 1800) {
+                    DWORD coarseMs = static_cast<DWORD>((waitUs - 1200) / 1000);
+                    if (coarseMs > 0 && running.load(std::memory_order_acquire)) {
+                        Sleep(coarseMs);
+                    }
+                }
+                while (running.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < nextDeadline) {
+                    YieldProcessor();
+                }
             }
         }
 
-        encoder.Close();
+        {
+            std::lock_guard<std::mutex> lk(frameMutex);
+            encodeStop = true;
+            encodePauseRequested = false;
+        }
+        frameCv.notify_all();
+        pauseCv.notify_all();
+        if (encodeThread.joinable()) {
+            encodeThread.join();
+        }
         capturer.Shutdown();
         if (SUCCEEDED(hrCo)) CoUninitialize();
     }
@@ -1816,6 +2052,30 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
                   " used=" + (usedHevc ? "HEVC" : "H264") +
                   " decFrames=" + std::to_string(hevcDecoded) +
                   (encName.empty() ? "" : (" (" + encName + ")")));
+    }
+
+    // 9. Decoupled dual-thread 90Hz capture+encode lifecycle & clean teardown self-test
+    {
+        std::atomic<int> cbFrames{ 0 };
+        std::atomic<bool> firstIsKey{ false };
+        struct DecoupledCtx {
+            std::atomic<int>* frames;
+            std::atomic<bool>* keySeen;
+        } ctx{ &cbFrames, &firstIsKey };
+        auto cb = [](const uint8_t* bytes, int32_t len, int32_t isKey, int32_t, int32_t, uint32_t, void* user) {
+            if (!bytes || len <= 0 || !user) return;
+            auto* c = static_cast<DecoupledCtx*>(user);
+            c->frames->fetch_add(1, std::memory_order_relaxed);
+            if (isKey) c->keySeen->store(true, std::memory_order_relaxed);
+        };
+        void* h = BoBoHost_CreateV3(0, 640, 360, 90, 4000, 0, 0, 0, 0, cb, nullptr, &ctx);
+        for (int waitIter = 0; waitIter < 80 && cbFrames.load() < 1; ++waitIter) {
+            Sleep(20);
+        }
+        BoBoHost_Destroy(h);
+        check("Decoupled capture+encode 90Hz session & clean teardown",
+              h != nullptr && cbFrames.load() >= 1 && firstIsKey.load(),
+              "frames=" + std::to_string(cbFrames.load()));
     }
 
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
