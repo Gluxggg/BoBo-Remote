@@ -9,7 +9,7 @@ namespace DualRemote
 {
     internal sealed partial class MainForm
     {
-        private readonly Theme.StatusBanner displayBanner = new Theme.StatusBanner("防窥壁纸采用系统级捕获排除（WDA_EXCLUDEFROMCAPTURE），物理屏遮挡、远控画面透明无干扰。");
+        private readonly Theme.StatusBanner displayBanner = new Theme.StatusBanner("全局紧急解除防窥快捷键：Ctrl + Alt + Shift + P");
         private readonly Theme.Badge curtainStateBadge = new Theme.Badge("防窥壁纸未开启", Theme.PillTone.Neutral);
         private readonly Button[] presetButtons = new Button[4];
         private WallpaperPreviewPanel wallpaperPreview;
@@ -39,16 +39,20 @@ namespace DualRemote
             privacyDesk = desk;
 
             curtainStateBadge.AlignRight = true;
-            AddPageHeader(desk, "防窥与显示", "设置被控端防窥壁纸、物理键鼠锁与背光亮度", curtainStateBadge, 164);
-            Theme.Row(desk, 18);
+            AddPageHeader(desk, "防窥与显示", null, curtainStateBadge, 148);
+            Theme.Row(desk, 16);
 
             var wallpaperCard = BuildPrivacyWallpaperCard();
             wallpaperCardRow = desk.RowCount;
             Theme.Row(desk, 330, wallpaperCard);
             Theme.Row(desk, 16);
 
-            Theme.Row(desk, 26, Theme.Text("防窥保护选项", Theme.TextSize.Label, Theme.Muted));
-            Theme.Row(desk, 10);
+            Theme.Row(desk, 24, Theme.Text("安全策略", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(desk, 8);
+
+            var policyCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var policyList = Theme.Grid(1);
+            Theme.FillColumn(policyList);
 
             var autoSwitch = BuildToggle("远控自动防窥", privacyConfig.AutoOnRemote);
             autoSwitch.CheckedChanged += delegate
@@ -58,11 +62,11 @@ namespace DualRemote
                 SyncRemoteGuardTimer();
                 UpdatePrivacyIndicators();
                 ShowDisplayBanner(autoSwitch.Checked
-                    ? "已开启自动防窥守护：检测到远控连接时自动遮挡物理屏并锁定物理键鼠，断开后自动恢复。"
-                    : "已关闭自动防窥守护。", Theme.PillTone.Info);
+                    ? "已开启：远控接入时自动开启防窥保护"
+                    : "已关闭远控自动防窥。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Shield, "远控接入时自动开启防窥",
-                "检测到 BoBo远程 会话连入时自动遮挡物理显示器并锁定现场键鼠，断开后自动恢复", autoSwitch);
+            AddGroupedSettingRow(policyList, false, Theme.Glyph.Shield, "接入自动防窥",
+                "被控接入时自动遮挡物理屏", autoSwitch);
 
             var blockInputSwitch = BuildToggle("防窥锁定物理键鼠", privacyConfig.BlockLocalInput);
             blockInputSwitch.CheckedChanged += delegate
@@ -74,11 +78,11 @@ namespace DualRemote
                     privacyCurtain.SetLocalInputBlock(blockInputSwitch.Checked);
                 }
                 ShowDisplayBanner(blockInputSwitch.Checked
-                    ? "已开启物理键鼠锁定：防窥期间旁人无法点击任务栏、开始菜单或右键刷新（仅放行远控与 Ctrl+Alt+Shift+P）。"
+                    ? "已开启：防窥期间仅放行远控与紧急快捷键"
                     : "已关闭防窥物理键鼠锁定。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "防窥时彻底锁定被控端物理键鼠",
-                "阻断被控端本机物理鼠标点击任务栏/开始页/右键刷新与键盘输入，仅放行远控操控及 Ctrl+Alt+Shift+P", blockInputSwitch);
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Lock, "锁定物理键鼠",
+                "屏蔽本机现场鼠标键盘操作", blockInputSwitch);
 
             var hwBlackoutSwitch = BuildToggle("物理屏背光降亮", privacyConfig.HardwareBlackout);
             hwBlackoutSwitch.CheckedChanged += delegate
@@ -91,26 +95,26 @@ namespace DualRemote
                     else PrivacyDisplayDimmer.RestoreAllAsync();
                 }
                 ShowDisplayBanner(hwBlackoutSwitch.Checked
-                    ? "已开启物理屏背光降亮（仅调节非 HDR 显示器 VCP 0x10 背光亮度，绝不修改对比度与 RGB 色温，断开后回读校验恢复）。"
-                    : "已关闭物理屏背光降亮。防窥期间使用防窥壁纸和已配置的物理键鼠锁定。", Theme.PillTone.Info);
+                    ? "已开启物理屏背光降亮（DDC/CI 仅调亮度）"
+                    : "已关闭物理屏背光降亮。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.EyeOff, "防窥时降低物理屏背光亮度（DDC/CI 仅调亮度，可选）",
-                "仅将非 HDR 显示器背光亮度（0x10）调低并回读校验恢复，绝不改对比度或 RGB 增益，杜绝退出后过曝偏色", hwBlackoutSwitch);
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.EyeOff, "物理屏背光降亮",
+                "DDC/CI 降亮并在退出后恢复", hwBlackoutSwitch);
 
             var lockSwitch = BuildToggle("退出防窥自动锁屏", privacyConfig.LockOnLocalExit);
             lockSwitch.CheckedChanged += delegate
             {
                 privacyConfig.LockOnLocalExit = lockSwitch.Checked;
                 SavePrivacyConfig();
-                ShowDisplayBanner(lockSwitch.Checked ? "物理键退出防窥后将自动锁定 Windows 桌面。" : "已关闭退出自动锁屏。", Theme.PillTone.Info);
+                ShowDisplayBanner(lockSwitch.Checked ? "快捷键退出防窥后将自动锁定 Windows。" : "已关闭退出自动锁屏。", Theme.PillTone.Info);
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "物理键退出防窥时自动锁屏",
-                "按下快捷键 Ctrl+Alt+Shift+P 退出防窥时立即锁定本机，防止旁人窥视", lockSwitch);
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Lock, "退出自动锁屏",
+                "快捷键解除防窥后立即锁屏", lockSwitch);
 
             privacyHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
-            AddStandaloneSettingCard(desk, Theme.Glyph.Lock, "远控退出后主机动作",
-                "远控会话结束时解除防窥，并按此设置保留登录或锁定 Windows",
-                Theme.WrapInput(privacyHostDisconnectActionCombo), 180);
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Lock, "断开后主机动作",
+                "远控结束并解除防窥后的系统状态",
+                Theme.WrapInput(privacyHostDisconnectActionCombo), 160);
 
             var badgeSwitch = BuildToggle("显示时间与提示文案", privacyConfig.ShowOverlayBadge);
             badgeSwitch.CheckedChanged += delegate
@@ -119,11 +123,13 @@ namespace DualRemote
                 SavePrivacyConfig();
                 if (wallpaperPreview != null) wallpaperPreview.Invalidate();
             };
-            AddStandaloneSettingCard(desk, Theme.Glyph.Eye, "壁纸居中显示时间与保护文案",
-                "关闭后仅展示纯壁纸画面；防窥壁纸不显示退出提示，仅进入时短暂提醒快捷键", badgeSwitch);
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Eye, "显示保护文案",
+                "居中显示时间与隐私保护提示", badgeSwitch);
 
-            Theme.Row(desk, 6);
-            Theme.Row(desk, 42, displayBanner);
+            policyCard.Controls.Add(policyList);
+            Theme.Row(desk, SumRows(policyList) + policyCard.Padding.Vertical, policyCard);
+            Theme.Row(desk, 12);
+            Theme.Row(desk, 40, displayBanner);
 
             ReloadPreviewImage();
             viewport.ContentWidthChanged += delegate(int contentW) { ApplyPrivacyWallpaperResponsiveLayout(contentW); };

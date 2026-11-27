@@ -55,6 +55,7 @@ Offset  Size  Type      Field
 | `0x04` | `InputEvent` | 固定 6 字节：`[0] uint8 kind`, `[1] uint8 flags`, `[2..3] int16 LE a`, `[4..5] int16 LE b` |
 | `0x05` | `FileChunk` | `[0..15] 16B ASCII transferId (右补 0x00)`, `[16..23] int64 LE fileOffset`, `[24..] 文件块原始字节`（单块 `<= 512 KiB`，单文件 `<= 2 GiB`，强制校验 `offset >= 0 && offset + len <= totalBytes` 及必填 64 位 SHA-256） |
 | `0x06` | `CursorShape` | `[0] uint8 standardCursorId (0=Hidden, 1=Arrow, 2=IBeam, ... 13=Help)`。客户端在 `START_STREAM` 声明 `cursorMetrics: true` 后，主机可追加 `[1] uint8 width`、`[2] uint8 height`，单位为主机桌面像素，每边最大 128。UDP 类型的载荷在此格式前另带 4 字节小端序号。旧端只发送和读取光标编号。 |
+| `0x07` | `AudioAac` | `[0..3] int32 LE sampleRate (48000)`, `[4] uint8 channels (2)`, `[5..6] uint16 LE sampleCount`, `[7..] ADTS 封装 AAC-LC 音频帧（当 `START_STREAM.audioCodecs` 协商 `"aac"` 时启用，否则保持 `0x03` IMA-ADPCM）` |
 
 ### 3.2 `InputEvent`（`0x04`）编码表
 
@@ -145,8 +146,8 @@ Host → Client:
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `nativeLocalCursor`, `initialRttMs`，支持交错 FEC 时发送 `udpInterleavedFec: true`，支持选择性 NACK 时发送 `udpNack: true`） |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpNack`） |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3 / v7.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `nativeLocalCursor`, `initialRttMs`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3 / v7.3 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`） |
 | `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps` |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |
 | `SET_CURSOR_MODE` / `CURSOR_MODE_STATE` | C ↔ H | `composite` / `hostCursorComposited` |
@@ -165,6 +166,18 @@ Windows 被控端可以在 `HELLO_ACK` 中声明 `superDisplayVersion: 2`。支�
 协商后的 `STREAM_STARTED`、`RECONFIGURED` 和 `SUPER_DISPLAY_STATE` 中，`width` / `height` 表示串流尺寸，`desktopWidth` / `desktopHeight` 表示被控显示器模式，`desktopModeChanged` 表示当前会话是否临时更改了该模式。`superDisplayNativeMatch`（更新回执中为 `nativeMatch`）要求桌面像素尺寸与视频区域完全一致。回执携带 `clientWidth`、`clientHeight` 和 `displayRequestId`。未协商版本的旧客户端仍收到原格式，`SUPER_DISPLAY_STATE.width` / `height` 对它们表示桌面尺寸。
 
 Windows 端在 `START_STREAM` 与 `STREAM_STARTED` 协商 `udpNack: true` 后，加密 UDP 通道支持分片级选择性重传：客户端通过报文类型 `10 (Nack)` 发送 `[uint16 LE count]` 与最多 48 条 `[uint32 LE frameId][uint16 LE shardIdx]` 请求补发；被控端在 18 帧 / 2 MiB 环形缓存与限速预算内补发原数据分片，并在分片标志位附加 `0x08`（重传标记）。
+
+### 4.4 加密 UDP 通道（`UDP 49811` · 四端互通 `AES-128-GCM`）
+
+1. **密码套件协商**：控制端在 `START_STREAM` 声明 `"udpCipher": "aes-128-gcm"`（可选数组 `"udpCiphers": ["aes-128-gcm", "aes-128-ctr-hmac"]`），被控端在 `STREAM_STARTED` 确认 `"udpCipher"`；旧版仅支持 `v7.2` 的节点回落为 `"aes-128-ctr-hmac"`。
+2. **AES-128-GCM 密钥派生与线格式**（详见 [`golden-vectors.json`](golden-vectors.json) `udpAesGcm`）：
+   - 方向密钥：`HMAC_SHA256(masterKey32, ASCII("BoBo7.3-UDP-GCM-H2C" | "BoBo7.3-UDP-GCM-C2H") || LE32(sessionId))[0..15]`。
+   - AAD（9 字节明文包头）：`LE32(sessionId) || LE32(seq) || pktType(1B)`。
+   - Nonce（12 字节）：`Header(9B) || dir(1B: 1=H2C, 0=C2H) || 0x00 || 0x00`。
+   - 数据报布局：`Header(9B) || Ciphertext(N) || GCMTag(16B)`（认证失败绝不更新 512 包防重放窗口；发送序号达 `0xFFFFFF00` 强制 fail-closed 停止复用）。
+3. **UDP 包类型（`pktType`）与反馈遥测**：
+   - `1=Hello`, `2=HelloAck`, `3=VideoShard`, `4=Audio`（ADPCM）, `5=Input`, `6=Ping`, `7=Pong`, `8=CursorShape`, `9=Feedback`, `10=Nack`, `11=AudioAac`。
+   - `Feedback`（11 字节）：`[0..1] lossX100`, `[2..3] rttX10`, `[4..5] jitterX10`, `[6..9] lastDeliveredFrameId`, `[10] flags (bit0=PLI)`。
 
 ---
 

@@ -124,6 +124,77 @@ final class BoBoGoldenVectorsTests: XCTestCase {
         XCTAssertEqual(BoBoProtocol.bytesToHex(fPayload), try XCTUnwrap(fc["payloadHex"] as? String))
         let fFrame = BoBoProtocol.encodeFrame(type: .fileChunk, flagsOrTimestamp: 0, payload: fPayload)
         XCTAssertEqual(BoBoProtocol.bytesToHex(fFrame), try XCTUnwrap(fc["frameHex"] as? String))
+
+        // 7. v7.3 Standard AEAD AES-128-GCM UDP golden vector + security & FEC/NACK tests
+        let gcm = try XCTUnwrap(root["udpAesGcm"] as? [String: Any])
+        let masterKey = BoBoProtocol.hexToBytes(try XCTUnwrap(gcm["masterKey32Hex"] as? String))
+        let sid = UInt32(try XCTUnwrap(gcm["sessionId"] as? Int))
+        let seq = UInt32(try XCTUnwrap(gcm["seq"] as? Int))
+        let pktType = UInt8(try XCTUnwrap(gcm["packetType"] as? Int))
+        let isH2c = try XCTUnwrap(gcm["isHostToClient"] as? Bool)
+        let derivedKey = BoBoUdpAesGcmCrypto.deriveDirectionKey(
+            masterKey32: masterKey,
+            sessionId: sid,
+            label: isH2c ? "BoBo7.3-UDP-GCM-H2C" : "BoBo7.3-UDP-GCM-C2H"
+        )
+        XCTAssertEqual(BoBoProtocol.bytesToHex(derivedKey), try XCTUnwrap(gcm["expectedKeyHex"] as? String))
+
+        let hostGcm = try BoBoUdpAesGcmCrypto(sessionId: sid, masterKey32: masterKey, isHost: isH2c)
+        let clientGcm = try BoBoUdpAesGcmCrypto(sessionId: sid, masterKey32: masterKey, isHost: !isH2c)
+        defer {
+            hostGcm.close()
+            clientGcm.close()
+        }
+        hostGcm.forceSendSeqForTest(seq - 1)
+        let plain = BoBoProtocol.hexToBytes(try XCTUnwrap(gcm["plaintextHex"] as? String))
+        let sealed = try XCTUnwrap(try hostGcm.seal(packetType: pktType, plaintext: plain))
+        XCTAssertEqual(BoBoProtocol.bytesToHex(sealed), try XCTUnwrap(gcm["expectedDatagramHex"] as? String))
+
+        // Tampered tag MUST fail without mutating replay window
+        var tampered = sealed
+        tampered[tampered.count - 1] ^= 0xFF
+        XCTAssertNil(clientGcm.open(datagram: tampered))
+
+        // Original packet still accepted, replay rejected
+        let opened = try XCTUnwrap(clientGcm.open(datagram: sealed))
+        XCTAssertEqual(opened.packetType, pktType)
+        XCTAssertEqual(opened.seq, seq)
+        XCTAssertEqual(opened.plaintext, plain)
+        XCTAssertNil(clientGcm.open(datagram: sealed))
+
+        // Empty payload round-trip
+        let emptySealed = try XCTUnwrap(try hostGcm.seal(packetType: BoBoUdpPacketType.ping.rawValue, plaintext: Data()))
+        let emptyOpened = try XCTUnwrap(clientGcm.open(datagram: emptySealed))
+        XCTAssertEqual(emptyOpened.plaintext.count, 0)
+
+        // Nonce exhaustion guard (0xFFFFFF00 fail-closed)
+        hostGcm.forceSendSeqForTest(BoBoUdpAesGcmCrypto.maxSafeSequence)
+        XCTAssertThrowsError(try hostGcm.seal(packetType: BoBoUdpPacketType.ping.rawValue, plaintext: Data()))
+
+        // Interleaved XOR FEC burst-loss recovery (drop consecutive shards 1 & 2)
+        var fakeIdrBytes = [UInt8](repeating: 0, count: 6800)
+        for i in 0..<fakeIdrBytes.count { fakeIdrBytes[i] = UInt8((i * 41 + 7) & 0xFF) }
+        let fakeIdr = Data(fakeIdrBytes)
+        let shards = BoBoUdpFec.buildVideoShards(
+            frameId: 1, timestampMs: 500, width: 1920, height: 1080, isKeyframe: true,
+            h264Data: fakeIdr, groupSize: 2, interleavedFec: true
+        )
+        let assembler = BoBoUdpVideoAssembler(nackEnabled: true)
+        var ready = [BoBoReassembledVideoFrame]()
+        for s in shards {
+            let isParity = (s[s.startIndex + 12] & BoBoUdpFec.flagParity) != 0
+            let sIdx = Int(BoBoProtocol.readUInt16LE(s, offset: 13))
+            if !isParity && (sIdx == 1 || sIdx == 2) { continue }
+            assembler.processShard(s, currentRttMs: 15.0, outReady: &ready)
+        }
+        XCTAssertEqual(ready.count, 1)
+        XCTAssertEqual(ready.first?.h264Data, fakeIdr)
+        XCTAssertGreaterThanOrEqual(assembler.fecRecoveredPackets, 2)
+
+        // Selective NACK round-trip
+        let nacksIn = [BoBoUdpNackRequest(frameId: 12, shardIdx: 3), BoBoUdpNackRequest(frameId: 12, shardIdx: 5)]
+        let nacksDecoded = BoBoUdpNackCodec.decode(try XCTUnwrap(BoBoUdpNackCodec.encode(nacksIn)))
+        XCTAssertEqual(nacksDecoded, nacksIn)
     }
 
     func testSelfSignedX509AndPkcs12AndTlsLoopback() async throws {

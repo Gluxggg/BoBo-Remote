@@ -258,7 +258,13 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --draft --verify-tag --target "$RELEASE_COMMIT" \
               --title "BoBo Remote $RELEASE_TAG" --generate-notes
-            releases=$(matching_releases)
+            for attempt in 1 2 3 4 5; do
+              releases=$(matching_releases)
+              if [[ "$(jq 'length' <<< "$releases")" == 1 ]]; then
+                break
+              fi
+              sleep 2
+            done
           fi
           if ! release_id=$(jq -er 'select(length == 1 and .[0].draft == true) | .[0].id' <<< "$releases"); then
             echo "Expected exactly one draft for $RELEASE_TAG." >&2

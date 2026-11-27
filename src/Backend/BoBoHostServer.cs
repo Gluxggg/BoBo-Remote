@@ -881,8 +881,25 @@ namespace DualRemote
                             bool muteHost = BoBoProtocol.GetBool(msg, "muteHost", false);
                             bool requestPrivacy = BoBoProtocol.GetBool(msg, "requestPrivacy", false);
                             bool reqUdp = BoBoProtocol.GetBool(msg, "udpTransport", false);
+                            string reqUdpCipher = BoBoProtocol.GetStr(msg, "udpCipher", "");
+                            List<string> reqUdpCiphers = BoBoProtocol.ParseStringList(msg, "udpCiphers");
+                            BoBoUdpCipherMode udpCipherMode =
+                                (string.Equals(reqUdpCipher, "aes-128-gcm", StringComparison.OrdinalIgnoreCase) ||
+                                 reqUdpCiphers.Contains("aes-128-gcm"))
+                                ? BoBoUdpCipherMode.Aes128Gcm
+                                : BoBoUdpCipherMode.Aes128CtrHmac;
                             bool interleavedFec = BoBoProtocol.GetBool(msg, "udpInterleavedFec", false);
                             bool udpNack = BoBoProtocol.GetBool(msg, "udpNack", false);
+                            List<string> reqAudioCodecs = BoBoProtocol.ParseStringList(msg, "audioCodecs");
+                            bool clientAcceptsAac = false;
+                            for (int ac = 0; ac < reqAudioCodecs.Count; ac++)
+                            {
+                                if (string.Equals(reqAudioCodecs[ac], "aac", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    clientAcceptsAac = true;
+                                    break;
+                                }
+                            }
                             bool clientNativeCursor = BoBoProtocol.GetBool(msg, "nativeLocalCursor", false);
                             bool cursorMetrics = BoBoProtocol.GetBool(msg, "cursorMetrics", false);
                             bool clientFreeMouse = BoBoProtocol.GetBool(msg, "freeMouse", true);
@@ -966,6 +983,7 @@ namespace DualRemote
                                 var uSess = new HostUdpSession(
                                     udpSid,
                                     udpKeyBytes,
+                                    udpCipherMode,
                                     mediaUdp,
                                     startBps,
                                     interleavedFec,
@@ -984,18 +1002,19 @@ namespace DualRemote
                                         BoBoCoreInterop.BoBoHostNativeHandle h = nativeHost;
                                         if (h != null) { try { h.RequestKeyframe(); } catch { } }
                                     },
-                                    delegate(double rttMs, double lossPct)
+                                    delegate(double rttMs, double lossPct, double jitterMs)
                                     {
                                         BoBoAdaptiveBitrateController abr = abrController;
                                         BoBoCoreInterop.BoBoHostNativeHandle h = nativeHost;
                                         HostUdpSession curU = activeUdpSession;
                                         if (abr == null || h == null) return;
                                         int nextBps, nextFps;
-                                        if (abr.OnTelemetry(rttMs, lossPct, out nextBps, out nextFps))
+                                        bool changed = abr.OnTelemetry(rttMs, lossPct, jitterMs, Stopwatch.GetTimestamp(), out nextBps, out nextFps);
+                                        if (curU != null) curU.SetPacingProfile(nextBps, abr.PacingHeadroomFactor);
+                                        if (changed)
                                         {
                                             h.SetBitrate(nextBps);
                                             h.SetFps(nextFps);
-                                            if (curU != null) curU.SetPacingBitrate(nextBps);
                                             var note = new Dictionary<string, object>();
                                             note["type"] = "BITRATE_UPDATED";
                                             note["bitrateKbps"] = nextBps;
@@ -1069,13 +1088,15 @@ namespace DualRemote
                                         }
                                     });
                                 },
-                                delegate(byte[] adpcm, int sr, int ch, int samples)
+                                delegate(byte[] audioBytes, int sr, int ch, int samples)
                                 {
                                     if (ct.IsCancellationRequested) return;
+                                    BoBoCoreInterop.BoBoHostNativeHandle nh = nativeHost;
+                                    bool isAac = (nh != null && nh.AudioCodec == BoBoCoreInterop.AudioCodecAac);
                                     HostUdpSession uSess = activeUdpSession;
                                     if (uSess != null && uSess.IsActivated)
                                     {
-                                        uSess.SendAudioFrame(sr, ch, samples, adpcm);
+                                        uSess.SendAudioFrame(sr, ch, samples, audioBytes, isAac);
                                         return;
                                     }
                                     // Bound TCP audio queue to <= 4 packets (40ms) so audio never clogs video/control
@@ -1085,14 +1106,17 @@ namespace DualRemote
                                         Interlocked.Decrement(ref audioQueueDepth);
                                         return;
                                     }
-                                    byte[] payload = BoBoProtocol.BuildAudioPayload(sr, ch, samples, adpcm);
-                                    conn.SendFrameFireAndForget(BoBoPacketType.AudioAdpcm, 0, payload, false, delegate
+                                    byte[] payload = BoBoProtocol.BuildAudioPayload(sr, ch, samples, audioBytes);
+                                    conn.SendFrameFireAndForget(
+                                        isAac ? BoBoPacketType.AudioAac : BoBoPacketType.AudioAdpcm,
+                                        0, payload, false, delegate
                                     {
                                         Interlocked.Decrement(ref audioQueueDepth);
                                     });
                                 },
                                 out hostErr,
-                                hostCompositeCursor);
+                                hostCompositeCursor,
+                                clientAcceptsAac);
 
                             if (nativeHost == null)
                             {
@@ -1164,13 +1188,16 @@ namespace DualRemote
                             started["platform"] = BoBoProtocol.PlatformWindows;
                             started["hostControlMode"] = BoBoProtocol.ControlModeFull;
                             started["hostCursorComposited"] = hostCompositeCursor;
+                            started["audioCodec"] = nativeHost.AudioCodec == BoBoCoreInterop.AudioCodecAac ? "aac" : "adpcm";
                             started["monitors"] = BoBoProtocol.SerializeMonitors(curMons);
                             if (activeUdpSession != null && udpKeyBytes != null)
                             {
                                 started["udpPort"] = boundUdpPort;
                                 started["udpSessionId"] = (long)udpSid;
                                 started["udpKey"] = Convert.ToBase64String(udpKeyBytes);
+                                started["udpCipher"] = udpCipherMode == BoBoUdpCipherMode.Aes128Gcm ? "aes-128-gcm" : "aes-128-ctr-hmac";
                                 started["udpNack"] = udpNack;
+                                Array.Clear(udpKeyBytes, 0, udpKeyBytes.Length);
                             }
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
                             continue;
@@ -1696,7 +1723,7 @@ namespace DualRemote
             private readonly Action onActivity;
             private readonly Action<BoBoInputPacket> onInput;
             private readonly Action onRequestKeyframe;
-            private readonly Action<double, double> onTelemetry;
+            private readonly Action<double, double, double> onTelemetry;
             private readonly Action onPacerBackpressure;
             private readonly bool interleavedFec;
             private readonly bool nackEnabled;
@@ -1714,15 +1741,20 @@ namespace DualRemote
             private volatile bool activated;
             private volatile bool disposed;
             private volatile int pacingBitrateKbps;
+            private double pacingHeadroom = 1.35;
             private bool dropUntilKeyframe;
             private int nextFrameId;
             private int nextCursorSeq;
             private long lastPliTicks;
             private double recentLossPct;
+            private double recentRttMs;
+            private double recentJitterMs;
+            private int burstLossStreak;
 
             internal HostUdpSession(
                 uint sessionId,
                 byte[] key32,
+                BoBoUdpCipherMode cipherMode,
                 UdpClient sharedUdp,
                 int initialBitrateKbps,
                 bool interleavedFec,
@@ -1730,10 +1762,10 @@ namespace DualRemote
                 Action activityHandler,
                 Action<BoBoInputPacket> inputHandler,
                 Action keyframeHandler,
-                Action<double, double> telemetryHandler,
+                Action<double, double, double> telemetryHandler,
                 Action backpressureHandler)
             {
-                crypto = new BoBoUdpCrypto(sessionId, key32, true);
+                crypto = new BoBoUdpCrypto(sessionId, key32, true, cipherMode);
                 udp = sharedUdp;
                 pacingBitrateKbps = Math.Max(600, initialBitrateKbps);
                 onActivity = activityHandler;
@@ -1762,10 +1794,21 @@ namespace DualRemote
                 if (kbps >= 600 && kbps <= 60000) pacingBitrateKbps = kbps;
             }
 
+            internal void SetPacingProfile(int kbps, double headroomFactor)
+            {
+                if (kbps >= 600 && kbps <= 60000) pacingBitrateKbps = kbps;
+                double clamped = Math.Max(1.05, Math.Min(1.50, headroomFactor));
+                Volatile.Write(ref pacingHeadroom, clamped);
+            }
+
             internal void Deactivate()
             {
                 activated = false;
                 Volatile.Write(ref recentLossPct, 0.0);
+                Volatile.Write(ref recentRttMs, 0.0);
+                Volatile.Write(ref recentJitterMs, 0.0);
+                Volatile.Write(ref burstLossStreak, 0);
+                Volatile.Write(ref pacingHeadroom, 1.35);
                 Interlocked.Exchange(ref lastPliTicks, 0);
                 lock (videoQueueGate)
                 {
@@ -1872,11 +1915,16 @@ namespace DualRemote
                 {
                     double lossPct = BoBoUdpCrypto.ReadUInt16LE(plain, 0) / 100.0;
                     double rttMs = BoBoUdpCrypto.ReadUInt16LE(plain, 2) / 10.0;
+                    double jitterMs = BoBoUdpCrypto.ReadUInt16LE(plain, 4) / 10.0;
                     byte flags = plain[10];
                     Volatile.Write(ref recentLossPct, lossPct);
+                    Volatile.Write(ref recentRttMs, rttMs);
+                    Volatile.Write(ref recentJitterMs, jitterMs);
+                    int prevStreak = Volatile.Read(ref burstLossStreak);
+                    Volatile.Write(ref burstLossStreak, (lossPct >= 1.5 || jitterMs >= 22.0) ? Math.Min(6, prevStreak + 1) : Math.Max(0, prevStreak - 1));
                     if (onTelemetry != null)
                     {
-                        try { onTelemetry(rttMs, lossPct); } catch { }
+                        try { onTelemetry(rttMs, lossPct, jitterMs); } catch { }
                     }
                     if ((flags & 1) != 0 && onRequestKeyframe != null)
                     {
@@ -1942,7 +1990,7 @@ namespace DualRemote
             private void VideoPacerLoop()
             {
                 const int burstAllowanceBytes = 3600;
-                const int packetHeadersBytes = BoBoUdpCrypto.OverheadBytes + 48; // UDP plus IPv6 header
+                int packetHeadersBytes = crypto.ActiveOverheadBytes + 48; // UDP plus IPv6 header
                 long ticksPerMs = Stopwatch.Frequency / 1000;
                 long nextSendTick = 0;
                 while (!disposed)
@@ -1970,9 +2018,11 @@ namespace DualRemote
                     uint fid = unchecked((uint)Interlocked.Increment(ref nextFrameId));
                     List<byte[]> shards = BoBoUdpFec.BuildVideoShards(
                         fid, frame.TimestampMs, frame.Width, frame.Height, frame.IsKey, frame.H264,
-                        Volatile.Read(ref recentLossPct), interleavedFec, nackEnabled);
+                        Volatile.Read(ref recentLossPct), interleavedFec, nackEnabled,
+                        Volatile.Read(ref recentRttMs), Volatile.Read(ref recentJitterMs), Volatile.Read(ref burstLossStreak));
                     if (retransmitCache != null) retransmitCache.StoreFrame(fid, shards);
-                    double ticksPerByte = Stopwatch.Frequency / (pacingBitrateKbps * 1.45 * 125.0);
+                    double headroom = Volatile.Read(ref pacingHeadroom);
+                    double ticksPerByte = Stopwatch.Frequency / (pacingBitrateKbps * headroom * 125.0);
                     long burstTicks = (long)(burstAllowanceBytes * ticksPerByte);
                     for (int i = 0; i < shards.Count && IsActivated; i++)
                     {
@@ -1993,12 +2043,12 @@ namespace DualRemote
                 }
             }
 
-            internal void SendAudioFrame(int sr, int ch, int samples, byte[] adpcm)
+            internal void SendAudioFrame(int sr, int ch, int samples, byte[] audioData, bool isAac = false)
             {
                 IPEndPoint ep = remoteEp;
-                if (!activated || disposed || ep == null || adpcm == null || adpcm.Length == 0) return;
-                byte[] payload = BoBoProtocol.BuildAudioPayload(sr, ch, samples, adpcm);
-                SendSealed(BoBoUdpPacketType.Audio, payload, 0, payload.Length, ep);
+                if (!activated || disposed || ep == null || audioData == null || audioData.Length == 0) return;
+                byte[] payload = BoBoProtocol.BuildAudioPayload(sr, ch, samples, audioData);
+                SendSealed(isAac ? BoBoUdpPacketType.AudioAac : BoBoUdpPacketType.Audio, payload, 0, payload.Length, ep);
             }
 
             internal void SendCursorShape(byte[] payload)

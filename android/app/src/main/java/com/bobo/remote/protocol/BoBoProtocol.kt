@@ -15,7 +15,8 @@ enum class BoBoPacketType(val code: Byte) {
     AUDIO_ADPCM(0x03),
     INPUT_EVENT(0x04),
     FILE_CHUNK(0x05),
-    CURSOR_SHAPE(0x06);
+    CURSOR_SHAPE(0x06),
+    AUDIO_AAC(0x07);
 
     companion object {
         fun fromCode(code: Byte): BoBoPacketType? = values().firstOrNull { it.code == code }

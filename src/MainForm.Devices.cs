@@ -117,13 +117,13 @@ namespace DualRemote
             var hostCard = BuildHostInfoCard();
             hostCardRow = desk.RowCount;
             Theme.Row(desk, HostCardHeight(), hostCard);
-            Theme.Row(desk, 14);
+            Theme.Row(desk, 12);
 
             // Built-in Zero-Install Tailscale (BoBoTsNet) Login & Mesh Card
             var embeddedCard = BuildEmbeddedTailnetCard();
             embeddedTailnetRow = desk.RowCount;
             Theme.Row(desk, EmbeddedTailnetCardHeight(), embeddedCard);
-            Theme.Row(desk, 18);
+            Theme.Row(desk, 14);
 
             // Collapsible "电脑 N" section header
             var groupRow = Theme.Grid(2);
@@ -136,16 +136,16 @@ namespace DualRemote
                 Theme.ChangeGlyph(computersGroupBtn, computersExpanded ? Theme.Glyph.ChevronDown : Theme.Glyph.ChevronRight);
                 SyncPeerListLayout();
             };
-            Theme.Row(groupRow, 30, computersGroupBtn, null);
-            Theme.Row(desk, 30, groupRow);
-            Theme.Row(desk, 10);
+            Theme.Row(groupRow, 28, computersGroupBtn, null);
+            Theme.Row(desk, 28, groupRow);
+            Theme.Row(desk, 8);
 
             peerListHost = Theme.Grid(1);
             Theme.FillColumn(peerListHost);
             peerListRow = desk.RowCount;
-            Theme.Row(desk, 156, peerListHost);
-            Theme.Row(desk, 16);
-            Theme.Row(desk, 42, deviceBanner);
+            Theme.Row(desk, 120, peerListHost);
+            Theme.Row(desk, 12);
+            Theme.Row(desk, 40, deviceBanner);
 
             viewport.ContentWidthChanged += delegate(int contentW) { SyncHostCardResponsiveMetrics(contentW); };
             DrawPeerRows(null);
@@ -157,7 +157,7 @@ namespace DualRemote
 
         private Control BuildHostInfoCard()
         {
-            var card = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
+            var card = new Theme.Card { Padding = new Padding(20, 14, 20, 14) };
             hostCardControl = card;
             var content = Theme.Grid(1);
             Theme.FillColumn(content);
@@ -168,49 +168,44 @@ namespace DualRemote
             Theme.FixedColumn(top, 10);
             Theme.FillColumn(top);
             Theme.FixedColumn(top, 10);
-            Theme.FixedColumn(top, 252);
+            Theme.FixedColumn(top, 132);
 
             var infoIcon = new Theme.IconTile(Theme.Glyph.Info, true, Theme.AccentLight, Theme.Accent, 8f);
             heroHostStatusBadge.AlignRight = true;
             heroPrivacyBadge.AlignRight = true;
-            var badges = Theme.Grid(3);
-            Theme.FixedColumn(badges, 126);
-            Theme.FixedColumn(badges, 8);
-            Theme.FixedColumn(badges, 118);
-            Theme.Row(badges, 28, heroHostStatusBadge, null, heroPrivacyBadge);
-            Theme.Row(top, 28, infoIcon, null, Theme.Text("添加或连接你的其他设备", Theme.TextSize.LabelBold, Theme.Ink), null, badges);
+            Theme.Row(top, 28, infoIcon, null, Theme.Text("本机与快速连接", Theme.TextSize.LabelBold, Theme.Ink), null, heroHostStatusBadge);
             Theme.Row(content, 28, top);
-            Theme.Row(content, 6);
+            Theme.Row(content, 4);
 
             var subWrap = Theme.Grid(2);
             Theme.FixedColumn(subWrap, 36);
             Theme.FillColumn(subWrap);
-            heroSubtitleLabel = Theme.Text("同局域网打开即连；跨外网可点击下方「一键登录账号」免安装直连，或使用自建兜底中转。", Theme.TextSize.Small, Theme.Muted);
+            heroSubtitleLabel = Theme.Text("局域网即连 · 跨网免安装直连 · 自建兜底中转", Theme.TextSize.Small, Theme.Muted);
             heroSubtitleLabel.AutoEllipsis = false;
             Theme.FillRow(subWrap);
             subWrap.Controls.Add(heroSubtitleLabel, 1, 0);
             hostSubtitleRow = content.RowCount;
-            Theme.Row(content, 26, subWrap);
-            Theme.Row(content, 12);
+            Theme.Row(content, 22, subWrap);
+            Theme.Row(content, 10);
 
             var actionsWrap = Theme.Grid(2);
             Theme.FixedColumn(actionsWrap, 36);
             Theme.FillColumn(actionsWrap);
 
-            var manualBtn = Theme.Action("手动连接设备", Theme.ButtonStyle.AccentSoft);
+            var manualBtn = Theme.Action("手动连接", Theme.ButtonStyle.AccentSoft);
             manualBtn.Click += delegate { OpenStreamPage(null); };
 
-            var pairBtn = Theme.Action("允许连接本机", Theme.ButtonStyle.Secondary);
+            var pairBtn = Theme.Action("允许被控", Theme.ButtonStyle.Secondary);
             pairBtn.Click += async delegate
             {
                 ShowPage(AssistPage);
                 await BeginLocalPairingAsync();
             };
 
-            heroPrivacyToggle = Theme.Action("开启防窥壁纸", Theme.ButtonStyle.Secondary);
+            heroPrivacyToggle = Theme.Action("开启防窥", Theme.ButtonStyle.Secondary);
             BindPrivacyToggleButton(heroPrivacyToggle);
 
-            var addrBtn = Theme.Action("查看本机地址", Theme.ButtonStyle.Link);
+            var addrBtn = Theme.Action("本机地址", Theme.ButtonStyle.Link);
             addrBtn.Click += delegate { ToggleHostDetails(addrBtn); };
 
             hostActionsBar = new HostActionBarPanel(manualBtn, pairBtn, heroPrivacyToggle, addrBtn);
@@ -251,22 +246,22 @@ namespace DualRemote
 
         private int EmbeddedTailnetCardHeight()
         {
-            return DevicePixels(86);
+            return DevicePixels(70);
         }
 
         private Control BuildEmbeddedTailnetCard()
         {
-            var card = new Theme.Card { Padding = new Padding(22, 16, 22, 16) };
+            var card = new Theme.Card { Padding = new Padding(20, 10, 20, 10) };
             embeddedTsCard = card;
             card.Paint += delegate(object sender, PaintEventArgs pe)
             {
                 Graphics g = pe.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 float scale = CurrentDpiScale();
-                float w = Math.Max(3f, 3.5f * scale);
-                float marginY = 12f * scale;
+                float w = Math.Max(3f, 3f * scale);
+                float marginY = 10f * scale;
                 float h = Math.Max(12f, card.Height - marginY * 2f);
-                Theme.Surface(g, new RectangleF(6f * scale, marginY, w, h), w * 0.5f, embeddedTsAccentColor, Color.Transparent);
+                Theme.Surface(g, new RectangleF(8f * scale, marginY, w, h), w * 0.5f, embeddedTsAccentColor, Color.Transparent);
             };
 
             var row = Theme.Grid(5);
@@ -285,16 +280,16 @@ namespace DualRemote
             Theme.FixedColumn(titleLine, 8);
             Theme.FixedColumn(titleLine, 178);
 
-            embeddedTsTitleLabel = Theme.Text("内置跨网通道（Tailscale 免安装）", Theme.TextSize.LabelBold, Theme.Ink);
+            embeddedTsTitleLabel = Theme.Text("跨网直连 (Tailscale)", Theme.TextSize.LabelBold, Theme.Ink);
             embeddedTsTitleLabel.AutoEllipsis = true;
             embeddedTsBadge = new Theme.Badge("未登录", Theme.PillTone.Neutral) { AlignRight = true };
-            Theme.Row(titleLine, 26, embeddedTsTitleLabel, null, embeddedTsBadge);
+            Theme.Row(titleLine, 24, embeddedTsTitleLabel, null, embeddedTsBadge);
 
-            embeddedTsSubtitleLabel = Theme.Text("无需安装官方 Tailscale 与虚拟网卡；两端登录同一账号即可跨网发现与直连。", Theme.TextSize.Small, Theme.Muted);
+            embeddedTsSubtitleLabel = Theme.Text("免装虚拟网卡 · 两端登录同一账号即可直连", Theme.TextSize.Small, Theme.Muted);
             embeddedTsSubtitleLabel.AutoEllipsis = true;
-            Theme.Row(info, 26, titleLine);
+            Theme.Row(info, 24, titleLine);
             Theme.Row(info, 2);
-            Theme.Row(info, 22, embeddedTsSubtitleLabel);
+            Theme.Row(info, 20, embeddedTsSubtitleLabel);
 
             embeddedTsLoginBtn = Theme.Action("一键登录账号", Theme.ButtonStyle.Primary, Theme.Glyph.Network);
             embeddedTsLoginBtn.Click += async delegate { await BeginEmbeddedTailnetLoginAsync(); };
@@ -476,32 +471,32 @@ namespace DualRemote
                     : (snap != null && !string.IsNullOrEmpty(snap.LoginName)) ? snap.LoginName
                     : (snap != null && !string.IsNullOrEmpty(snap.TailnetName)) ? snap.TailnetName
                     : "已登录";
-                embeddedTsTitleLabel.Text = "内置跨网已就绪 · " + account;
+                embeddedTsTitleLabel.Text = "跨网直连 · " + account;
                 string ipText = snap != null && !string.IsNullOrEmpty(snap.SelfIp4) ? snap.SelfIp4 : "分配中";
-                embeddedTsBadge.UpdateStatus("内置在线 · " + ipText, Theme.PillTone.Success);
+                embeddedTsBadge.UpdateStatus("在线 · " + ipText, Theme.PillTone.Success);
                 int count = snap != null && snap.Peers != null ? snap.Peers.Count : 0;
                 embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
-                embeddedTsSubtitleLabel.Text = "免驱动 WireGuard 已接管 49810 端口"
-                    + (count > 0 ? (" · 已发现 " + count + " 台同账号设备。") : " · 等待同账号其他设备上线。");
+                embeddedTsSubtitleLabel.Text = "49810 端口就绪"
+                    + (count > 0 ? (" · 已发现 " + count + " 台同账号设备") : " · 等待同账号设备上线");
                 embeddedTsActionsBar.SetMode(2, embeddedTsBusy, false);
             }
             else if (isWaiting || embeddedTsBusy)
             {
                 embeddedTsAccentColor = Theme.Warning;
                 if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.WarningLight, Theme.Warning);
-                embeddedTsTitleLabel.Text = hasUrl ? "请在浏览器完成 Tailscale 账号授权" : "正在启动内置跨网引擎…";
+                embeddedTsTitleLabel.Text = hasUrl ? "请在浏览器完成 Tailscale 授权" : "正在启动跨网通道…";
                 embeddedTsBadge.UpdateStatus(hasUrl ? "等待授权" : "正在连接", Theme.PillTone.Warning);
                 embeddedTsSubtitleLabel.ForeColor = Theme.Warning;
                 embeddedTsSubtitleLabel.Text = hasUrl
-                    ? "授权完成后本机将自动上线（如未弹出窗口，请点右侧「打开登录页」或「复制链接」）。"
-                    : (!string.IsNullOrEmpty(snap != null ? snap.Error : null) ? snap.Error : "正在初始化纯用户态跨网通道并向协调节点请求登录链接…");
+                    ? "授权完成后本机将自动上线"
+                    : (!string.IsNullOrEmpty(snap != null ? snap.Error : null) ? snap.Error : "正在初始化用户态跨网通道…");
                 embeddedTsActionsBar.SetMode(1, embeddedTsBusy, hasUrl);
             }
             else
             {
                 embeddedTsAccentColor = Theme.Accent;
                 if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.AccentLight, Theme.Accent);
-                embeddedTsTitleLabel.Text = "内置跨网通道（Tailscale 免安装）";
+                embeddedTsTitleLabel.Text = "跨网直连 (Tailscale)";
                 string err = snap != null ? snap.Error : "";
                 embeddedTsBadge.UpdateStatus("未登录", Theme.PillTone.Neutral);
                 if (!string.IsNullOrEmpty(err))
@@ -512,7 +507,7 @@ namespace DualRemote
                 else
                 {
                     embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
-                    embeddedTsSubtitleLabel.Text = "无需安装官方 Tailscale 与虚拟网卡；两端登录同一账号即可跨网发现与直连，不干扰本机 VPN。";
+                    embeddedTsSubtitleLabel.Text = "免装虚拟网卡 · 两端登录同账号直连 · 不干扰本地 VPN";
                 }
                 embeddedTsActionsBar.SetMode(0, embeddedTsBusy, false);
             }
@@ -770,7 +765,7 @@ namespace DualRemote
             }
             if (button != null)
             {
-                button.Text = hostDetailsExpanded ? "收起本机地址" : "查看本机地址";
+                button.Text = hostDetailsExpanded ? "收起地址" : "本机地址";
                 button.AccessibleName = button.Text;
             }
         }
@@ -948,14 +943,14 @@ namespace DualRemote
                 bool serverReady = boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl;
                 deviceBanner.Set(
                     serverReady
-                        ? ("BoBo V6 全内置服务运行中（本机设备码 " + BoBoIdentityStore.Default.FormattedDeviceCode + " · 已发现 " + merged.Count + " 台设备）。")
-                        : "提示：本机「允许本机被控」当前已关闭，如需被控制请在设置中开启。",
+                        ? ("本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + " · 端口 49810 就绪 · 已发现 " + merged.Count + " 台")
+                        : "允许本机被控已关闭，可在设置中开启",
                     serverReady ? Theme.PillTone.Success : Theme.PillTone.Warning);
             }
             catch
             {
                 if (!IsDisposed)
-                    deviceBanner.Set("暂时无法读取同网设备，可点击「手动连接设备」输入 IP 或 9 位 BoBo 设备码。", Theme.PillTone.Warning);
+                    deviceBanner.Set("暂未获取同网列表 · 可点「手动连接」输入 IP 或设备码", Theme.PillTone.Warning);
             }
             finally { if (!IsDisposed) refreshDevices.Enabled = true; }
         }
@@ -1021,11 +1016,12 @@ namespace DualRemote
                 float scale = CurrentDpiScale();
                 int totalDevices = 1; // Always includes This PC
 
-                // Row 1: This PC (UU Image 2 exact match: [Windows blue icon] MACHINE_NAME [本机] ... [i])
-                var selfCard = BuildThisPcRow();
-                if (scale != 1f) selfCard.Scale(new SizeF(scale, scale));
-                Theme.Row(peerListHost, 72f * scale, selfCard);
-                Theme.Row(peerListHost, 10f * scale);
+                var groupCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+                var list = Theme.Grid(1);
+                Theme.FillColumn(list);
+
+                var selfRow = BuildThisPcRow();
+                Theme.Row(list, 64, selfRow);
 
                 int peerCount = 0;
                 if (peers != null)
@@ -1034,20 +1030,22 @@ namespace DualRemote
                     {
                         if (string.IsNullOrWhiteSpace(peer.Ip)) continue;
                         peerCount++;
-                        var card = BuildPeerCardRow(peer);
-                        if (scale != 1f) card.Scale(new SizeF(scale, scale));
-                        Theme.Row(peerListHost, 76f * scale, card);
-                        Theme.Row(peerListHost, 10f * scale);
+                        Theme.Row(list, 1, Theme.Rule());
+                        Theme.Row(list, 64, BuildPeerCardRow(peer));
                     }
                 }
                 totalDevices += peerCount;
 
                 if (peerCount == 0)
                 {
-                    var hintCard = BuildEmptyPeersHintRow(issue);
-                    if (scale != 1f) hintCard.Scale(new SizeF(scale, scale));
-                    Theme.Row(peerListHost, 76f * scale, hintCard);
+                    Theme.Row(list, 1, Theme.Rule());
+                    Theme.Row(list, 58, BuildEmptyPeersHintRow(issue));
                 }
+
+                groupCard.Controls.Add(list);
+                int logicalH = SumRows(list) + groupCard.Padding.Vertical;
+                if (scale != 1f) groupCard.Scale(new SizeF(scale, scale));
+                Theme.Row(peerListHost, logicalH * scale, groupCard);
 
                 if (computersGroupBtn != null)
                     computersGroupBtn.Text = "电脑 " + totalDevices;
@@ -1070,7 +1068,10 @@ namespace DualRemote
 
         private Control BuildThisPcRow()
         {
-            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12) };
+            var rowWrap = Theme.Grid(1);
+            rowWrap.Padding = new Padding(18, 8, 18, 8);
+            Theme.FillColumn(rowWrap);
+
             var row = Theme.Grid(6);
             Theme.FixedColumn(row, 40);
             Theme.FixedColumn(row, 14);
@@ -1093,21 +1094,24 @@ namespace DualRemote
             openBtn.Click += delegate { ShowPage(AssistPage); };
 
             Theme.Row(row, 48, icon, null, selfTitle, null, infoBtn, openBtn);
-            card.Controls.Add(row);
-            return card;
+            Theme.Row(rowWrap, 48, row);
+            return rowWrap;
         }
 
         private Control BuildPeerCardRow(TsPeer peer)
         {
-            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12) };
+            var rowWrap = Theme.Grid(1);
+            rowWrap.Padding = new Padding(18, 8, 18, 8);
+            Theme.FillColumn(rowWrap);
+
             var row = Theme.Grid(7);
-            Theme.FixedColumn(row, 42);
+            Theme.FixedColumn(row, 40);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 14);
-            Theme.FixedColumn(row, 88);
+            Theme.FixedColumn(row, 84);
             Theme.FixedColumn(row, 8);
-            Theme.FixedColumn(row, 34);
+            Theme.FixedColumn(row, 32);
 
             Color tileBg = peer.Online ? Theme.AccentLight : Theme.SurfaceSubtle;
             var icon = new Theme.IconTile(PeerOsGlyph(peer), true, tileBg, peer.Online ? Theme.Accent : Theme.Muted, 8f);
@@ -1122,44 +1126,47 @@ namespace DualRemote
 
             var connectBtn = Theme.Action(peer.Online ? "连接" : "离线", peer.Online ? Theme.ButtonStyle.Primary : Theme.ButtonStyle.Secondary);
             connectBtn.Enabled = peer.Online;
-            connectBtn.Margin = new Padding(0, 8, 0, 8);
+            connectBtn.Margin = new Padding(0, 7, 0, 7);
             connectBtn.Click += async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); };
 
             var detailBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
             detailBtn.AccessibleName = "查看设备详情";
-            detailBtn.Margin = new Padding(0, 8, 0, 8);
+            detailBtn.Margin = new Padding(0, 7, 0, 7);
             detailBtn.Click += delegate { OpenDeviceDetail(displayName, peer.Ip, peer.Online, peer.LinkText, true); };
 
-            Theme.Row(row, 52, icon, null, identity, null, connectBtn, null, detailBtn);
-            card.Controls.Add(row);
-            return card;
+            Theme.Row(row, 48, icon, null, identity, null, connectBtn, null, detailBtn);
+            Theme.Row(rowWrap, 48, row);
+            return rowWrap;
         }
 
         private Control BuildEmptyPeersHintRow(string issue)
         {
-            var card = new Theme.Card { Padding = new Padding(18, 12, 18, 12), DashedBorder = true };
+            var rowWrap = Theme.Grid(1);
+            rowWrap.Padding = new Padding(18, 8, 18, 8);
+            Theme.FillColumn(rowWrap);
+
             var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 42);
+            Theme.FixedColumn(row, 40);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 14);
-            Theme.FixedColumn(row, 110);
+            Theme.FixedColumn(row, 102);
 
             var icon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.SurfaceSubtle, Theme.Muted, 7.5f);
             var text = new Theme.TwoLineText(
-                issue == null ? "暂未发现同网 Tailscale 远端电脑" : "未读取到 Tailscale 设备列表",
-                "可点击上方「登录内置跨网」在两台电脑登录同一账号，或点右侧「手动连接」输入 IP / 9 位设备码。",
+                issue == null ? "暂未发现同网设备" : "暂未读取到设备列表",
+                "可登录上方跨网账号，或直接输入 IP / 9 位设备码连接",
                 Theme.TextSize.Label,
-                Theme.Ink,
+                Theme.BodyInk,
                 Theme.Muted);
 
             var manual = Theme.Action("手动连接", Theme.ButtonStyle.Secondary);
-            manual.Margin = new Padding(0, 8, 0, 8);
+            manual.Margin = new Padding(0, 4, 0, 4);
             manual.Click += delegate { OpenStreamPage(null); };
 
-            Theme.Row(row, 52, icon, null, text, null, manual);
-            card.Controls.Add(row);
-            return card;
+            Theme.Row(row, 42, icon, null, text, null, manual);
+            Theme.Row(rowWrap, 42, row);
+            return rowWrap;
         }
 
         // ==================== DEVICE DETAIL PAGE (UU IMAGE 1 STYLE) ====================

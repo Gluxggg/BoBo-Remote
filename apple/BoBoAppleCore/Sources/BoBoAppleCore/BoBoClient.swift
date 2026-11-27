@@ -80,6 +80,7 @@ public final class BoBoStreamClient: @unchecked Sendable {
     private let txQueue = DispatchQueue(label: "com.bobo.remote.client.tx", qos: .userInteractive)
 
     private var framedConn: BoBoFramedConnection?
+    private var udpChannel: BoBoUdpChannel?
     private var rxTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var _isConnected = false
@@ -236,7 +237,13 @@ public final class BoBoStreamClient: @unchecked Sendable {
                     "requestPrivacy": options.requestPrivacy,
                     "superDisplay": options.superDisplay,
                     "clientWidth": options.clientWidth,
-                    "clientHeight": options.clientHeight
+                    "clientHeight": options.clientHeight,
+                    "udpTransport": true,
+                    "udpCipher": "aes-128-gcm",
+                    "udpCiphers": ["aes-128-gcm"],
+                    "udpInterleavedFec": true,
+                    "udpNack": true,
+                    "audioCodecs": ["adpcm"]
                 ]
                 try await conn.sendJson(startReq)
                 guard self.didConnect(conn) else { return }
@@ -245,10 +252,14 @@ public final class BoBoStreamClient: @unchecked Sendable {
                     guard let frame = try await conn.readFrame(timeoutSeconds: 12.0), self.isCurrent(conn) else { break }
                     switch frame.type {
                     case .videoH264:
+                        let udpOn = self.lock.withLock { self.udpChannel?.isActive == true }
+                        if udpOn { continue }
                         if let vp = BoBoProtocol.parseVideoPayload(frame.payload) {
                             delegate?.streamClientDidReceiveVideo(vp, timestampMs: frame.flagsOrTimestamp)
                         }
                     case .audioAdpcm:
+                        let udpOn = self.lock.withLock { self.udpChannel?.isActive == true }
+                        if udpOn { continue }
                         if let ap = BoBoProtocol.parseAudioPayload(frame.payload) {
                             delegate?.streamClientDidReceiveAudio(ap)
                         }
@@ -276,6 +287,23 @@ public final class BoBoStreamClient: @unchecked Sendable {
                             let fps = (msg["fps"] as? NSNumber)?.intValue ?? options.fps
                             let sdAct = (msg["superDisplayActive"] as? NSNumber)?.boolValue ?? false
                             let sdNat = (msg["superDisplayNativeMatch"] as? NSNumber)?.boolValue ?? false
+                            let udpPortNum = (msg["udpPort"] as? NSNumber)?.intValue ?? 0
+                            let udpSidNum = (msg["udpSessionId"] as? NSNumber)?.int64Value ?? 0
+                            let udpKeyStr = (msg["udpKey"] as? String) ?? ""
+                            let udpCipherStr = (msg["udpCipher"] as? String) ?? ""
+                            let udpNackFlag = (msg["udpNack"] as? NSNumber)?.boolValue ?? false
+                            if udpPortNum > 0 && udpPortNum <= 65535 && udpSidNum != 0 && !udpKeyStr.isEmpty &&
+                               udpCipherStr.caseInsensitiveCompare("aes-128-gcm") == .orderedSame {
+                                self.startUdpChannel(
+                                    host: options.host,
+                                    port: UInt16(udpPortNum),
+                                    sessionId: UInt32(truncatingIfNeeded: udpSidNum),
+                                    keyBase64: udpKeyStr,
+                                    nackEnabled: udpNackFlag,
+                                    conn: conn,
+                                    delegate: delegate
+                                )
+                            }
                             delegate?.streamClientDidStart(
                                 monitors: curMons,
                                 width: w,
@@ -522,9 +550,56 @@ public final class BoBoStreamClient: @unchecked Sendable {
         }
     }
 
+    private func startUdpChannel(
+        host: String,
+        port: UInt16,
+        sessionId: UInt32,
+        keyBase64: String,
+        nackEnabled: Bool,
+        conn: BoBoFramedConnection,
+        delegate: BoBoStreamClientDelegate?
+    ) {
+        guard let ch = BoBoUdpChannel(
+            host: host,
+            port: port,
+            sessionId: sessionId,
+            keyBase64: keyBase64,
+            nackEnabled: nackEnabled,
+            onVideo: { [weak self, weak delegate] vp, tsMs in
+                guard let self, self.isCurrent(conn) else { return }
+                delegate?.streamClientDidReceiveVideo(vp, timestampMs: tsMs)
+            },
+            onAudio: { [weak self, weak delegate] ap in
+                guard let self, self.isCurrent(conn) else { return }
+                delegate?.streamClientDidReceiveAudio(ap)
+            },
+            onRtt: { [weak self, weak delegate] rtt in
+                guard let self, self.isCurrent(conn) else { return }
+                delegate?.streamClientDidUpdateRtt(rtt)
+            },
+            onFallback: { [weak self] in
+                guard let self, self.isCurrent(conn) else { return }
+                self.sendJson(["type": "TRANSPORT_FALLBACK", "reason": "udp_timeout"])
+            }
+        ) else { return }
+
+        let old: BoBoUdpChannel? = lock.withLock {
+            guard framedConn === conn else { return ch }
+            let prev = udpChannel
+            udpChannel = ch
+            return prev
+        }
+        old?.close()
+        if old !== ch {
+            ch.start()
+        }
+    }
+
     private func clearConnectionLocked() {
         framedConn = nil
         _isConnected = false
+        udpChannel?.close()
+        udpChannel = nil
         pingTask?.cancel()
         pingTask = nil
         rxTask?.cancel()

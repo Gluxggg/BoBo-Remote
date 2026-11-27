@@ -8,6 +8,7 @@ import com.bobo.remote.protocol.BoBoMonitorDescriptor
 import com.bobo.remote.protocol.BoBoPacketType
 import com.bobo.remote.protocol.BoBoProtocol
 import com.bobo.remote.protocol.BoBoVideoPayload
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
@@ -93,6 +94,7 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
     private val connected = AtomicBoolean(false)
     private val lastRxNs = AtomicLong(0L)
     @Volatile private var socket: SSLSocket? = null
+    @Volatile private var udpChannel: BoBoUdpChannel? = null
     private val generation = AtomicLong(0L)
 
     @Volatile var remotePlatform: String = BoBoProtocol.PLATFORM_WINDOWS
@@ -200,6 +202,12 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                     put("superDisplay", options.superDisplay)
                     put("clientWidth", options.clientWidth)
                     put("clientHeight", options.clientHeight)
+                    put("udpTransport", true)
+                    put("udpCipher", "aes-128-gcm")
+                    put("udpCiphers", JSONArray(listOf("aes-128-gcm")))
+                    put("udpInterleavedFec", true)
+                    put("udpNack", true)
+                    put("audioCodecs", JSONArray(listOf("adpcm")))
                 }
                 BoBoProtocol.writeJson(out, startReq)
 
@@ -218,11 +226,13 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                     lastRxNs.set(System.nanoTime())
                     when (frame.type) {
                         BoBoPacketType.VIDEO_H264 -> {
+                            if (udpChannel?.isActive == true) continue
                             BoBoProtocol.parseVideoPayload(frame.payload)?.let {
                                 listener.onVideoFrame(it, frame.flagsOrTimestamp)
                             }
                         }
                         BoBoPacketType.AUDIO_ADPCM -> {
+                            if (udpChannel?.isActive == true) continue
                             BoBoProtocol.parseAudioPayload(frame.payload)?.let {
                                 listener.onAudioFrame(it)
                             }
@@ -246,6 +256,15 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                                     val comp = msg.optBoolean("hostCursorComposited", defaultComposited)
                                     hostCursorComposited = comp
                                     listener.onHostCursorCompositedChanged(comp)
+                                    val udpPort = msg.optInt("udpPort", 0)
+                                    val udpSid = msg.optLong("udpSessionId", 0L)
+                                    val udpKey = msg.optString("udpKey", "")
+                                    val udpCipher = msg.optString("udpCipher", "")
+                                    val udpNack = msg.optBoolean("udpNack", false)
+                                    if (udpPort > 0 && udpSid != 0L && udpKey.isNotBlank() &&
+                                        udpCipher.equals("aes-128-gcm", ignoreCase = true)) {
+                                        startUdpChannel(options.host, udpPort, udpSid, udpKey, udpNack, request, listener)
+                                    }
                                     listener.onStreamStarted(remoteMonitors, w, h, fps, remotePlatform, remoteHostControlMode)
                                     if (msg.has("privacyActive")) listener.onPrivacyStateChanged(msg.optBoolean("privacyActive"))
                                     listener.onSuperDisplayStateChanged(
@@ -491,9 +510,63 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
         return request
     }
 
+    private fun startUdpChannel(
+        host: String,
+        udpPort: Int,
+        udpSid: Long,
+        udpKey: String,
+        udpNack: Boolean,
+        request: Long,
+        listener: Listener
+    ) {
+        try {
+            val ch = BoBoUdpChannel(
+                host = host,
+                port = udpPort,
+                sessionId = udpSid,
+                keyBase64 = udpKey,
+                nackEnabled = udpNack,
+                onVideo = { vp, tsMs ->
+                    if (generation.get() == request && connected.get()) {
+                        lastRxNs.set(System.nanoTime())
+                        listener.onVideoFrame(vp, tsMs)
+                    }
+                },
+                onAudio = { ap ->
+                    if (generation.get() == request && connected.get()) {
+                        lastRxNs.set(System.nanoTime())
+                        listener.onAudioFrame(ap)
+                    }
+                },
+                onRtt = { rtt ->
+                    if (generation.get() == request && connected.get()) {
+                        listener.onRttUpdated(rtt)
+                    }
+                },
+                onFallback = {
+                    if (generation.get() == request && connected.get()) {
+                        sendJson(JSONObject().put("type", "TRANSPORT_FALLBACK").put("reason", "udp_timeout"))
+                    }
+                }
+            )
+            synchronized(sendLock) {
+                if (generation.get() != request || !connected.get()) {
+                    ch.close()
+                    return
+                }
+                udpChannel?.close()
+                udpChannel = ch
+            }
+            ch.start()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun clearConnectionLocked() {
         connected.set(false)
         socket = null
+        try { udpChannel?.close() } catch (_: Exception) {}
+        udpChannel = null
         sendQueue.clear()
         pendingAbsMove = null
         pendingRelDx = 0

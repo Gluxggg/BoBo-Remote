@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 
 namespace DualRemote
@@ -20,22 +22,103 @@ namespace DualRemote
         Pong = 7,
         CursorShape = 8,
         Feedback = 9,
-        Nack = 10
+        Nack = 10,
+        AudioAac = 11
+    }
+
+    internal enum BoBoUdpCipherMode : byte
+    {
+        Aes128CtrHmac = 0,
+        Aes128Gcm = 1
+    }
+
+    internal enum BoBoCongestionSignal : byte
+    {
+        Normal = 0,
+        Hold = 1,
+        Overuse = 2
     }
 
     /// <summary>
-    /// BoBo V6.3 加密低延迟 UDP 媒体与输入传输核心（AES-128-CTR + 64-bit HMAC-SHA256）：
-    /// - 密钥通过已认证的 TLS 1.2 通道按会话动态下发（32 字节：前 16B AES-128，后 16B HMAC-SHA256）；
-    /// - 单包总长严格控制在 ≤1220 字节（安全适配 Tailscale WireGuard 1280 MTU 与校园网 PPPoE，零 IP 分片）；
-    /// - 内置自适应分组 XOR FEC（单包丢失 0ms 额外 RTT 现场恢复）与 64-bit 滑动防重放窗口。
+    /// BoBo 加密低延迟 UDP 媒体与输入传输核心：
+    /// - 支持标准 AEAD `AES-128-GCM`（128-bit 认证标签 + Windows CNG 原生 bcrypt.dll，默认协商）并向后兼容 v7.2 `AES-128-CTR + HMAC-SHA256`；
+    /// - 密钥通过已认证的 TLS 1.2 通道按会话动态下发（32 字节会话主密钥），按方向派生独立子密钥防反射；
+    /// - 单包总长严格控制在 ≤1220 字节，严格执行序号上限（0xFFFFFF00）防 Nonce 复用、先验签后更新 512 包防重放窗口，并在 Dispose 时清零密钥材料。
     /// </summary>
     internal sealed class BoBoUdpCrypto : IDisposable
     {
-        internal const int HeaderBytes = 9;    // sessionId(4) + seq(4) + pktType(1)
-        internal const int TagBytes = 8;       // truncated HMAC-SHA256 (64-bit)
-        internal const int OverheadBytes = HeaderBytes + TagBytes;
+        internal const int HeaderBytes = 9;         // sessionId(4) + seq(4) + pktType(1)
+        internal const int TagBytes = 8;            // legacy truncated HMAC-SHA256 (64-bit)
+        internal const int GcmTagBytes = 16;        // standard AEAD AES-128-GCM tag (128-bit)
+        internal const int OverheadBytes = HeaderBytes + TagBytes;       // legacy min datagram overhead (17B)
+        internal const int GcmOverheadBytes = HeaderBytes + GcmTagBytes; // AEAD GCM datagram overhead (25B)
+        internal const uint MaxSafeSequence = 0xFFFFFF00u;               // fail-closed before 32-bit wrap / nonce reuse
+
+        private static readonly object CngInitGate = new object();
+        private static IntPtr sharedGcmAlgHandle;
+        private static int sharedGcmKeyObjLength;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+        {
+            public int cbSize;
+            public int dwInfoVersion;
+            public IntPtr pbNonce;
+            public int cbNonce;
+            public IntPtr pbAuthData;
+            public int cbAuthData;
+            public IntPtr pbTag;
+            public int cbTag;
+            public IntPtr pbMacContext;
+            public int cbMacContext;
+            public int cbAAD;
+            public long cbData;
+            public int dwFlags;
+        }
+
+        [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
+        private static extern int BCryptOpenAlgorithmProvider(out IntPtr phAlgorithm, string pszAlgId, string pszImplementation, uint dwFlags);
+
+        [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
+        private static extern int BCryptSetProperty(IntPtr hObject, string pszProperty, byte[] pbInput, int cbInput, uint dwFlags);
+
+        [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
+        private static extern int BCryptGetProperty(IntPtr hObject, string pszProperty, byte[] pbOutput, int cbOutput, out int pcbResult, uint dwFlags);
+
+        [DllImport("bcrypt.dll")]
+        private static extern int BCryptGenerateSymmetricKey(IntPtr hAlgorithm, out IntPtr phKey, IntPtr pbKeyObject, int cbKeyObject, byte[] pbSecret, int cbSecret, uint dwFlags);
+
+        [DllImport("bcrypt.dll")]
+        private static extern int BCryptDestroyKey(IntPtr hKey);
+
+        [DllImport("bcrypt.dll")]
+        private static extern int BCryptEncrypt(
+            IntPtr hKey,
+            byte[] pbInput,
+            int cbInput,
+            ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo,
+            byte[] pbIV,
+            int cbIV,
+            byte[] pbOutput,
+            int cbOutput,
+            out int pcbResult,
+            uint dwFlags);
+
+        [DllImport("bcrypt.dll")]
+        private static extern int BCryptDecrypt(
+            IntPtr hKey,
+            byte[] pbInput,
+            int cbInput,
+            ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo,
+            byte[] pbIV,
+            int cbIV,
+            byte[] pbOutput,
+            int cbOutput,
+            out int pcbResult,
+            uint dwFlags);
 
         private readonly uint sessionId;
+        private readonly BoBoUdpCipherMode cipherMode;
         private readonly byte sendDir;
         private readonly byte recvDir;
         private readonly byte[] encAesKey;
@@ -44,16 +127,31 @@ namespace DualRemote
         private readonly byte[] decHmacKey;
         private readonly object encGate = new object();
         private readonly object decGate = new object();
+
+        // Legacy CTR+HMAC primitives (when cipherMode == Aes128CtrHmac)
         private readonly AesCryptoServiceProvider encAes;
         private readonly AesCryptoServiceProvider decAes;
         private readonly ICryptoTransform encBlock;
         private readonly ICryptoTransform decBlock;
         private readonly HMACSHA256 encHmac;
         private readonly HMACSHA256 decHmac;
-        private byte[] encCtrBatch = new byte[1536];
-        private byte[] encKsBatch = new byte[1536];
-        private byte[] decCtrBatch = new byte[1536];
-        private byte[] decKsBatch = new byte[1536];
+        private byte[] encCtrBatch;
+        private byte[] encKsBatch;
+        private byte[] decCtrBatch;
+        private byte[] decKsBatch;
+
+        // Standard AEAD AES-128-GCM primitives (when cipherMode == Aes128Gcm)
+        private IntPtr encGcmKeyHandle;
+        private IntPtr encGcmKeyObj;
+        private IntPtr decGcmKeyHandle;
+        private IntPtr decGcmKeyObj;
+        private readonly byte[] encNonceScratch = new byte[12];
+        private readonly byte[] decNonceScratch = new byte[12];
+        private readonly byte[] encHeaderScratch = new byte[HeaderBytes];
+        private readonly byte[] decHeaderScratch = new byte[HeaderBytes];
+        private readonly byte[] encTagScratch = new byte[GcmTagBytes];
+        private readonly byte[] decTagScratch = new byte[GcmTagBytes];
+        private readonly byte[] emptyDummy = new byte[1];
 
         private uint sendSeq;
         private bool hasRecvSeq;
@@ -62,39 +160,135 @@ namespace DualRemote
         private volatile bool disposed;
 
         internal BoBoUdpCrypto(uint sessionId, byte[] key32, bool isHost)
+            : this(sessionId, key32, isHost, BoBoUdpCipherMode.Aes128CtrHmac)
+        {
+        }
+
+        internal BoBoUdpCrypto(uint sessionId, byte[] key32, bool isHost, BoBoUdpCipherMode cipherMode)
         {
             if (key32 == null || key32.Length < 32)
                 throw new ArgumentException("UDP session key must be at least 32 bytes.");
 
             this.sessionId = sessionId;
+            this.cipherMode = cipherMode;
             sendDir = isHost ? (byte)1 : (byte)0;
             recvDir = isHost ? (byte)0 : (byte)1;
 
-            byte[] h2c = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-H2C");
-            byte[] c2h = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-C2H");
-            byte[] txMat = isHost ? h2c : c2h;
-            byte[] rxMat = isHost ? c2h : h2c;
+            if (cipherMode == BoBoUdpCipherMode.Aes128Gcm)
+            {
+                byte[] h2c = DeriveDirectionKey(key32, sessionId, "BoBo7.3-UDP-GCM-H2C");
+                byte[] c2h = DeriveDirectionKey(key32, sessionId, "BoBo7.3-UDP-GCM-C2H");
+                byte[] txMat = isHost ? h2c : c2h;
+                byte[] rxMat = isHost ? c2h : h2c;
 
-            encAesKey = new byte[16];
-            encHmacKey = new byte[16];
-            decAesKey = new byte[16];
-            decHmacKey = new byte[16];
-            Buffer.BlockCopy(txMat, 0, encAesKey, 0, 16);
-            Buffer.BlockCopy(txMat, 16, encHmacKey, 0, 16);
-            Buffer.BlockCopy(rxMat, 0, decAesKey, 0, 16);
-            Buffer.BlockCopy(rxMat, 16, decHmacKey, 0, 16);
+                encAesKey = new byte[16];
+                decAesKey = new byte[16];
+                encHmacKey = null;
+                decHmacKey = null;
+                Buffer.BlockCopy(txMat, 0, encAesKey, 0, 16);
+                Buffer.BlockCopy(rxMat, 0, decAesKey, 0, 16);
+                Array.Clear(h2c, 0, h2c.Length);
+                Array.Clear(c2h, 0, c2h.Length);
 
-            encAes = new AesCryptoServiceProvider { Key = encAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
-            decAes = new AesCryptoServiceProvider { Key = decAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
-            encBlock = encAes.CreateEncryptor();
-            decBlock = decAes.CreateEncryptor();
-            encHmac = new HMACSHA256(encHmacKey);
-            decHmac = new HMACSHA256(decHmacKey);
+                CreateCngGcmKey(encAesKey, out encGcmKeyHandle, out encGcmKeyObj);
+                try
+                {
+                    CreateCngGcmKey(decAesKey, out decGcmKeyHandle, out decGcmKeyObj);
+                }
+                catch
+                {
+                    DestroyCngGcmKey(ref encGcmKeyHandle, ref encGcmKeyObj);
+                    throw;
+                }
+            }
+            else
+            {
+                byte[] h2c = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-H2C");
+                byte[] c2h = DeriveDirectionKey(key32, sessionId, "BoBo6.3-UDP-C2H");
+                byte[] txMat = isHost ? h2c : c2h;
+                byte[] rxMat = isHost ? c2h : h2c;
+
+                encAesKey = new byte[16];
+                encHmacKey = new byte[16];
+                decAesKey = new byte[16];
+                decHmacKey = new byte[16];
+                Buffer.BlockCopy(txMat, 0, encAesKey, 0, 16);
+                Buffer.BlockCopy(txMat, 16, encHmacKey, 0, 16);
+                Buffer.BlockCopy(rxMat, 0, decAesKey, 0, 16);
+                Buffer.BlockCopy(rxMat, 16, decHmacKey, 0, 16);
+                Array.Clear(h2c, 0, h2c.Length);
+                Array.Clear(c2h, 0, c2h.Length);
+
+                encCtrBatch = new byte[1536];
+                encKsBatch = new byte[1536];
+                decCtrBatch = new byte[1536];
+                decKsBatch = new byte[1536];
+                encAes = new AesCryptoServiceProvider { Key = encAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
+                decAes = new AesCryptoServiceProvider { Key = decAesKey, Mode = CipherMode.ECB, Padding = PaddingMode.None };
+                encBlock = encAes.CreateEncryptor();
+                decBlock = decAes.CreateEncryptor();
+                encHmac = new HMACSHA256(encHmacKey);
+                decHmac = new HMACSHA256(decHmacKey);
+            }
         }
 
-        private static byte[] DeriveDirectionKey(byte[] masterKey32, uint sid, string label)
+        private static void EnsureCngGcmProvider(out IntPtr hAlg, out int objLen)
         {
-            byte[] labelBytes = System.Text.Encoding.ASCII.GetBytes(label);
+            lock (CngInitGate)
+            {
+                if (sharedGcmAlgHandle == IntPtr.Zero)
+                {
+                    IntPtr alg;
+                    int st = BCryptOpenAlgorithmProvider(out alg, "AES", null, 0);
+                    if (st != 0) throw new CryptographicException("BCryptOpenAlgorithmProvider(AES) failed: 0x" + st.ToString("X8"));
+                    byte[] gcmMode = Encoding.Unicode.GetBytes("ChainingModeGCM\0");
+                    st = BCryptSetProperty(alg, "ChainingMode", gcmMode, gcmMode.Length, 0);
+                    if (st != 0) throw new CryptographicException("BCryptSetProperty(ChainingModeGCM) failed: 0x" + st.ToString("X8"));
+                    byte[] lenBuf = new byte[4];
+                    int cbRes;
+                    st = BCryptGetProperty(alg, "ObjectLength", lenBuf, 4, out cbRes, 0);
+                    if (st != 0 || cbRes != 4) throw new CryptographicException("BCryptGetProperty(ObjectLength) failed: 0x" + st.ToString("X8"));
+                    sharedGcmKeyObjLength = BitConverter.ToInt32(lenBuf, 0);
+                    sharedGcmAlgHandle = alg;
+                }
+                hAlg = sharedGcmAlgHandle;
+                objLen = sharedGcmKeyObjLength;
+            }
+        }
+
+        private static void CreateCngGcmKey(byte[] key16, out IntPtr hKey, out IntPtr hKeyObj)
+        {
+            IntPtr hAlg;
+            int objLen;
+            EnsureCngGcmProvider(out hAlg, out objLen);
+            hKeyObj = Marshal.AllocHGlobal(objLen);
+            hKey = IntPtr.Zero;
+            int st = BCryptGenerateSymmetricKey(hAlg, out hKey, hKeyObj, objLen, key16, key16.Length, 0);
+            if (st != 0 || hKey == IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(hKeyObj);
+                hKeyObj = IntPtr.Zero;
+                throw new CryptographicException("BCryptGenerateSymmetricKey(AES-GCM) failed: 0x" + st.ToString("X8"));
+            }
+        }
+
+        private static void DestroyCngGcmKey(ref IntPtr hKey, ref IntPtr hKeyObj)
+        {
+            if (hKey != IntPtr.Zero)
+            {
+                try { BCryptDestroyKey(hKey); } catch { }
+                hKey = IntPtr.Zero;
+            }
+            if (hKeyObj != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(hKeyObj);
+                hKeyObj = IntPtr.Zero;
+            }
+        }
+
+        internal static byte[] DeriveDirectionKey(byte[] masterKey32, uint sid, string label)
+        {
+            byte[] labelBytes = Encoding.ASCII.GetBytes(label);
             byte[] msg = new byte[labelBytes.Length + 4];
             Buffer.BlockCopy(labelBytes, 0, msg, 0, labelBytes.Length);
             WriteUInt32LE(msg, labelBytes.Length, sid);
@@ -105,6 +299,16 @@ namespace DualRemote
         }
 
         internal uint SessionId { get { return sessionId; } }
+        internal BoBoUdpCipherMode CipherModeKind { get { return cipherMode; } }
+        internal int ActiveOverheadBytes { get { return cipherMode == BoBoUdpCipherMode.Aes128Gcm ? GcmOverheadBytes : OverheadBytes; } }
+
+        internal void ForceSendSeqForTest(uint nextBeforeIncrement)
+        {
+            lock (encGate)
+            {
+                sendSeq = nextBeforeIncrement;
+            }
+        }
 
         internal static byte[] GenerateRandomKey32()
         {
@@ -131,23 +335,71 @@ namespace DualRemote
         {
             if (disposed) return null;
             int bodyLen = (plaintext != null && count > 0) ? count : 0;
-            byte[] packet = new byte[OverheadBytes + bodyLen];
+            int overhead = ActiveOverheadBytes;
+            byte[] packet = new byte[overhead + bodyLen];
 
             lock (encGate)
             {
                 if (disposed) return null;
-                uint seq = unchecked(++sendSeq);
+                if (sendSeq >= MaxSafeSequence)
+                    throw new CryptographicException("UDP_NONCE_EXHAUSTED");
+
+                uint seq = ++sendSeq;
                 WriteUInt32LE(packet, 0, sessionId);
                 WriteUInt32LE(packet, 4, seq);
                 packet[8] = (byte)type;
 
-                if (bodyLen > 0)
+                if (cipherMode == BoBoUdpCipherMode.Aes128Gcm)
                 {
-                    ApplyCtr(encBlock, ref encCtrBatch, ref encKsBatch, sessionId, seq, (byte)type, sendDir,
-                        plaintext, offset, packet, HeaderBytes, bodyLen);
+                    Buffer.BlockCopy(packet, 0, encHeaderScratch, 0, HeaderBytes);
+                    Buffer.BlockCopy(packet, 0, encNonceScratch, 0, HeaderBytes);
+                    encNonceScratch[9] = sendDir;
+                    encNonceScratch[10] = 0;
+                    encNonceScratch[11] = 0;
+
+                    byte[] inSlice = bodyLen > 0 ? new byte[bodyLen] : emptyDummy;
+                    if (bodyLen > 0) Buffer.BlockCopy(plaintext, offset, inSlice, 0, bodyLen);
+                    byte[] outSlice = bodyLen > 0 ? new byte[bodyLen] : emptyDummy;
+
+                    GCHandle hN = GCHandle.Alloc(encNonceScratch, GCHandleType.Pinned);
+                    GCHandle hA = GCHandle.Alloc(encHeaderScratch, GCHandleType.Pinned);
+                    GCHandle hT = GCHandle.Alloc(encTagScratch, GCHandleType.Pinned);
+                    try
+                    {
+                        var info = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+                        {
+                            cbSize = Marshal.SizeOf(typeof(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO)),
+                            dwInfoVersion = 1,
+                            pbNonce = hN.AddrOfPinnedObject(),
+                            cbNonce = 12,
+                            pbAuthData = hA.AddrOfPinnedObject(),
+                            cbAuthData = HeaderBytes,
+                            pbTag = hT.AddrOfPinnedObject(),
+                            cbTag = GcmTagBytes
+                        };
+                        int cbOut;
+                        int st = BCryptEncrypt(encGcmKeyHandle, inSlice, bodyLen, ref info, null, 0, outSlice, bodyLen, out cbOut, 0);
+                        if (st != 0) throw new CryptographicException("BCryptEncrypt(AES-GCM) failed: 0x" + st.ToString("X8"));
+                    }
+                    finally
+                    {
+                        hN.Free();
+                        hA.Free();
+                        hT.Free();
+                    }
+                    if (bodyLen > 0) Buffer.BlockCopy(outSlice, 0, packet, HeaderBytes, bodyLen);
+                    Buffer.BlockCopy(encTagScratch, 0, packet, HeaderBytes + bodyLen, GcmTagBytes);
                 }
-                byte[] mac = encHmac.ComputeHash(packet, 0, HeaderBytes + bodyLen);
-                Buffer.BlockCopy(mac, 0, packet, HeaderBytes + bodyLen, TagBytes);
+                else
+                {
+                    if (bodyLen > 0)
+                    {
+                        ApplyCtr(encBlock, ref encCtrBatch, ref encKsBatch, sessionId, seq, (byte)type, sendDir,
+                            plaintext, offset, packet, HeaderBytes, bodyLen);
+                    }
+                    byte[] mac = encHmac.ComputeHash(packet, 0, HeaderBytes + bodyLen);
+                    Buffer.BlockCopy(mac, 0, packet, HeaderBytes + bodyLen, TagBytes);
+                }
             }
             return packet;
         }
@@ -157,64 +409,129 @@ namespace DualRemote
             type = 0;
             seq = 0;
             plaintext = null;
-            if (disposed || datagram == null || length < OverheadBytes) return false;
+            int minLen = ActiveOverheadBytes;
+            if (disposed || datagram == null || length < minLen) return false;
             if (ReadUInt32LE(datagram, 0) != sessionId) return false;
 
             seq = ReadUInt32LE(datagram, 4);
             type = (BoBoUdpPacketType)datagram[8];
-            int bodyLen = length - OverheadBytes;
+            int bodyLen = length - minLen;
 
             lock (decGate)
             {
                 if (disposed) return false;
 
-                // Verify 64-bit directional HMAC-SHA256 tag in constant time before touching anti-replay state or decrypting
-                byte[] expected = decHmac.ComputeHash(datagram, 0, HeaderBytes + bodyLen);
-                int diff = 0;
-                int tagOff = HeaderBytes + bodyLen;
-                for (int i = 0; i < TagBytes; i++)
-                {
-                    diff |= (expected[i] ^ datagram[tagOff + i]);
-                }
-                if (diff != 0) return false;
+                // Read-only replay pre-check (never mutate state until cryptographic tag verification passes!)
+                if (!CheckReplayAcceptableLocked(seq)) return false;
 
-                // 512-packet sliding anti-replay window (tolerates heavy Wi-Fi/campus burst reordering cleanly)
-                if (hasRecvSeq)
+                if (cipherMode == BoBoUdpCipherMode.Aes128Gcm)
                 {
-                    int delta = unchecked((int)(seq - maxRecvSeq));
-                    if (delta == 0) return false;
-                    if (delta < 0)
+                    Buffer.BlockCopy(datagram, 0, decHeaderScratch, 0, HeaderBytes);
+                    Buffer.BlockCopy(datagram, 0, decNonceScratch, 0, HeaderBytes);
+                    decNonceScratch[9] = recvDir;
+                    decNonceScratch[10] = 0;
+                    decNonceScratch[11] = 0;
+                    Buffer.BlockCopy(datagram, HeaderBytes + bodyLen, decTagScratch, 0, GcmTagBytes);
+
+                    byte[] cipherSlice = bodyLen > 0 ? new byte[bodyLen] : emptyDummy;
+                    if (bodyLen > 0) Buffer.BlockCopy(datagram, HeaderBytes, cipherSlice, 0, bodyLen);
+                    byte[] plainSlice = bodyLen > 0 ? new byte[bodyLen] : emptyDummy;
+
+                    GCHandle hN = GCHandle.Alloc(decNonceScratch, GCHandleType.Pinned);
+                    GCHandle hA = GCHandle.Alloc(decHeaderScratch, GCHandleType.Pinned);
+                    GCHandle hT = GCHandle.Alloc(decTagScratch, GCHandleType.Pinned);
+                    int st;
+                    try
                     {
-                        int back = -delta;
-                        if (back >= 512) return false;
-                        int wordIdx = back >> 6;
-                        ulong bit = 1UL << (back & 63);
-                        if ((replayMask[wordIdx] & bit) != 0) return false;
-                        replayMask[wordIdx] |= bit;
+                        var info = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+                        {
+                            cbSize = Marshal.SizeOf(typeof(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO)),
+                            dwInfoVersion = 1,
+                            pbNonce = hN.AddrOfPinnedObject(),
+                            cbNonce = 12,
+                            pbAuthData = hA.AddrOfPinnedObject(),
+                            cbAuthData = HeaderBytes,
+                            pbTag = hT.AddrOfPinnedObject(),
+                            cbTag = GcmTagBytes
+                        };
+                        int cbOut;
+                        st = BCryptDecrypt(decGcmKeyHandle, cipherSlice, bodyLen, ref info, null, 0, plainSlice, bodyLen, out cbOut, 0);
                     }
-                    else
+                    finally
                     {
-                        ShiftReplayWindowLeft(replayMask, delta);
-                        replayMask[0] |= 1UL;
-                        maxRecvSeq = seq;
+                        hN.Free();
+                        hA.Free();
+                        hT.Free();
                     }
+                    if (st != 0) return false;
+                    if (!CommitReplayLocked(seq)) return false;
+                    plaintext = bodyLen > 0 ? plainSlice : new byte[0];
+                    return true;
                 }
                 else
                 {
-                    hasRecvSeq = true;
-                    maxRecvSeq = seq;
-                    Array.Clear(replayMask, 0, replayMask.Length);
-                    replayMask[0] = 1UL;
-                }
+                    // Verify 64-bit directional HMAC-SHA256 tag in constant time before touching anti-replay state or decrypting
+                    byte[] expected = decHmac.ComputeHash(datagram, 0, HeaderBytes + bodyLen);
+                    int diff = 0;
+                    int tagOff = HeaderBytes + bodyLen;
+                    for (int i = 0; i < TagBytes; i++)
+                    {
+                        diff |= (expected[i] ^ datagram[tagOff + i]);
+                    }
+                    if (diff != 0) return false;
 
-                plaintext = new byte[bodyLen];
-                if (bodyLen > 0)
-                {
-                    ApplyCtr(decBlock, ref decCtrBatch, ref decKsBatch, sessionId, seq, (byte)type, recvDir,
-                        datagram, HeaderBytes, plaintext, 0, bodyLen);
+                    if (!CommitReplayLocked(seq)) return false;
+
+                    plaintext = new byte[bodyLen];
+                    if (bodyLen > 0)
+                    {
+                        ApplyCtr(decBlock, ref decCtrBatch, ref decKsBatch, sessionId, seq, (byte)type, recvDir,
+                            datagram, HeaderBytes, plaintext, 0, bodyLen);
+                    }
+                    return true;
                 }
+            }
+        }
+
+        private bool CheckReplayAcceptableLocked(uint seq)
+        {
+            if (!hasRecvSeq) return true;
+            int delta = unchecked((int)(seq - maxRecvSeq));
+            if (delta == 0) return false;
+            if (delta > 0) return true;
+            int back = -delta;
+            if (back >= 512) return false;
+            int wordIdx = back >> 6;
+            ulong bit = 1UL << (back & 63);
+            return (replayMask[wordIdx] & bit) == 0;
+        }
+
+        private bool CommitReplayLocked(uint seq)
+        {
+            if (!hasRecvSeq)
+            {
+                hasRecvSeq = true;
+                maxRecvSeq = seq;
+                Array.Clear(replayMask, 0, replayMask.Length);
+                replayMask[0] = 1UL;
                 return true;
             }
+            int delta = unchecked((int)(seq - maxRecvSeq));
+            if (delta == 0) return false;
+            if (delta < 0)
+            {
+                int back = -delta;
+                if (back >= 512) return false;
+                int wordIdx = back >> 6;
+                ulong bit = 1UL << (back & 63);
+                if ((replayMask[wordIdx] & bit) != 0) return false;
+                replayMask[wordIdx] |= bit;
+                return true;
+            }
+            ShiftReplayWindowLeft(replayMask, delta);
+            replayMask[0] |= 1UL;
+            maxRecvSeq = seq;
+            return true;
         }
 
         private static void ShiftReplayWindowLeft(ulong[] words, int shift)
@@ -306,15 +623,25 @@ namespace DualRemote
             disposed = true;
             lock (encGate)
             {
-                try { encBlock.Dispose(); } catch { }
-                try { encAes.Dispose(); } catch { }
-                try { encHmac.Dispose(); } catch { }
+                DestroyCngGcmKey(ref encGcmKeyHandle, ref encGcmKeyObj);
+                if (encBlock != null) { try { encBlock.Dispose(); } catch { } }
+                if (encAes != null) { try { encAes.Dispose(); } catch { } }
+                if (encHmac != null) { try { encHmac.Dispose(); } catch { } }
+                if (encAesKey != null) Array.Clear(encAesKey, 0, encAesKey.Length);
+                if (encHmacKey != null) Array.Clear(encHmacKey, 0, encHmacKey.Length);
+                Array.Clear(encNonceScratch, 0, encNonceScratch.Length);
+                Array.Clear(encTagScratch, 0, encTagScratch.Length);
             }
             lock (decGate)
             {
-                try { decBlock.Dispose(); } catch { }
-                try { decAes.Dispose(); } catch { }
-                try { decHmac.Dispose(); } catch { }
+                DestroyCngGcmKey(ref decGcmKeyHandle, ref decGcmKeyObj);
+                if (decBlock != null) { try { decBlock.Dispose(); } catch { } }
+                if (decAes != null) { try { decAes.Dispose(); } catch { } }
+                if (decHmac != null) { try { decHmac.Dispose(); } catch { } }
+                if (decAesKey != null) Array.Clear(decAesKey, 0, decAesKey.Length);
+                if (decHmacKey != null) Array.Clear(decHmacKey, 0, decHmacKey.Length);
+                Array.Clear(decNonceScratch, 0, decNonceScratch.Length);
+                Array.Clear(decTagScratch, 0, decTagScratch.Length);
             }
         }
 
@@ -381,6 +708,61 @@ namespace DualRemote
         internal const byte FlagInterleaved = 4;
         internal const byte FlagRetransmit = 8;
 
+        internal static void SelectFecParams(
+            int dataCount,
+            bool isKeyframe,
+            double recentLossPct,
+            bool nackEnabled,
+            out int groupSize,
+            out bool emitFec)
+        {
+            SelectFecParams(dataCount, isKeyframe, recentLossPct, nackEnabled, 0.0, 0.0, 0, out groupSize, out emitFec);
+        }
+
+        internal static void SelectFecParams(
+            int dataCount,
+            bool isKeyframe,
+            double recentLossPct,
+            bool nackEnabled,
+            double rttMs,
+            double jitterMs,
+            int burstLossStreak,
+            out int groupSize,
+            out bool emitFec)
+        {
+            if (isKeyframe)
+            {
+                groupSize = (recentLossPct >= 2.0 || burstLossStreak >= 2 || jitterMs >= 25.0) ? 2 : 3;
+                emitFec = true;
+            }
+            else if (dataCount == 1)
+            {
+                groupSize = 1;
+                emitFec = (recentLossPct >= 0.4 || burstLossStreak >= 1 || jitterMs >= 20.0);
+            }
+            else if (recentLossPct >= 3.0 || burstLossStreak >= 2)
+            {
+                groupSize = 2;
+                emitFec = true;
+            }
+            else if (recentLossPct >= 0.8 || jitterMs >= 20.0 || rttMs >= 65.0)
+            {
+                // High RTT/jitter makes selective NACK costly (~1+ RTT repair), so proactively strengthen XOR FEC.
+                groupSize = 3;
+                emitFec = true;
+            }
+            else if (nackEnabled && recentLossPct < 0.3 && rttMs < 30.0 && jitterMs < 10.0)
+            {
+                groupSize = 8;
+                emitFec = true;
+            }
+            else
+            {
+                groupSize = 5;
+                emitFec = true;
+            }
+        }
+
         internal static List<byte[]> BuildVideoShards(
             uint frameId,
             uint timestampMs,
@@ -392,6 +774,24 @@ namespace DualRemote
             bool interleavedFec = false,
             bool nackEnabled = false)
         {
+            return BuildVideoShards(frameId, timestampMs, width, height, isKeyframe, h264Data,
+                recentLossPct, interleavedFec, nackEnabled, 0.0, 0.0, 0);
+        }
+
+        internal static List<byte[]> BuildVideoShards(
+            uint frameId,
+            uint timestampMs,
+            int width,
+            int height,
+            bool isKeyframe,
+            byte[] h264Data,
+            double recentLossPct,
+            bool interleavedFec,
+            bool nackEnabled,
+            double rttMs,
+            double jitterMs,
+            int burstLossStreak)
+        {
             var shards = new List<byte[]>();
             if (h264Data == null || h264Data.Length == 0) return shards;
 
@@ -399,42 +799,10 @@ namespace DualRemote
             int dataCount = (totalLen + MaxShardPayloadBytes - 1) / MaxShardPayloadBytes;
             if (dataCount > MaxDataShardsPerFrame) return shards;
 
-            // Choose adaptive XOR FEC group size:
-            // - Keyframes / lossy links (>1.5% loss): stronger FEC (groupSize = 2..3)
-            // - Tiny 1-shard P-frames: add 1 parity duplicate only when loss > 0.4%
-            // - Normal P-frames: when NACK is active on clean links (<0.3% loss), use lighter FEC (groupSize = 8)
             int groupSize;
             bool emitFec;
-            if (isKeyframe)
-            {
-                groupSize = recentLossPct >= 2.0 ? 2 : 3;
-                emitFec = true;
-            }
-            else if (dataCount == 1)
-            {
-                groupSize = 1;
-                emitFec = recentLossPct >= 0.4;
-            }
-            else if (recentLossPct >= 3.0)
-            {
-                groupSize = 2;
-                emitFec = true;
-            }
-            else if (recentLossPct >= 0.8)
-            {
-                groupSize = 3;
-                emitFec = true;
-            }
-            else if (nackEnabled && recentLossPct < 0.3)
-            {
-                groupSize = 8;
-                emitFec = true;
-            }
-            else
-            {
-                groupSize = 5;
-                emitFec = true;
-            }
+            SelectFecParams(dataCount, isKeyframe, recentLossPct, nackEnabled, rttMs, jitterMs, burstLossStreak,
+                out groupSize, out emitFec);
 
             int parityCount = emitFec ? ((dataCount + groupSize - 1) / groupSize) : 0;
             if (parityCount > 255)
@@ -1394,6 +1762,12 @@ namespace DualRemote
         private double smoothedRttMs = -1.0;
         private double prevRttMs = -1.0;
         private double rttJitterMs;
+        private double clientJitterMs;
+        private double delayTrendMs;
+        private double overuseThresholdMs = 12.0;
+        private int consecutiveOveruseTicks;
+        private long overuseStartTicks;
+        private BoBoCongestionSignal congestionSignal = BoBoCongestionSignal.Normal;
         private double smoothedLossPct;
         private long lastDecreaseTicks;
         private long lastIncreaseTicks;
@@ -1438,8 +1812,22 @@ namespace DualRemote
         internal int CurrentBitrateKbps { get { lock (gate) { return currentBitrateKbps; } } }
         internal int CurrentFps { get { lock (gate) { return currentFps; } } }
         internal bool AutoEnabled { get { lock (gate) { return enabled; } } }
-        internal double LatestJitterMs { get { lock (gate) { return rttJitterMs; } } }
+        internal double LatestJitterMs { get { lock (gate) { return Math.Max(rttJitterMs, clientJitterMs); } } }
         internal double CurrentBaselineRttMs { get { lock (gate) { return minRttMs; } } }
+        internal BoBoCongestionSignal CurrentSignal { get { lock (gate) { return congestionSignal; } } }
+        internal double CurrentDelayTrendMs { get { lock (gate) { return delayTrendMs; } } }
+        internal double PacingHeadroomFactor
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (congestionSignal == BoBoCongestionSignal.Overuse) return 1.12;
+                    if (congestionSignal == BoBoCongestionSignal.Hold) return 1.22;
+                    return 1.35;
+                }
+            }
+        }
 
         internal void UpdateTarget(bool autoEnabled, int newTargetBitrateKbps, int newTargetFps)
         {
@@ -1471,6 +1859,7 @@ namespace DualRemote
                 newFps = currentFps;
                 if (!enabled) return false;
 
+                congestionSignal = BoBoCongestionSignal.Overuse;
                 long now = Stopwatch.GetTimestamp();
                 if (lastDecreaseTicks != 0 && ElapsedMs(lastDecreaseTicks, now) < 600.0) return false;
 
@@ -1494,10 +1883,20 @@ namespace DualRemote
 
         internal bool OnTelemetry(double rttMs, double lossPct, out int newBitrateKbps, out int newFps)
         {
-            return OnTelemetry(rttMs, lossPct, Stopwatch.GetTimestamp(), out newBitrateKbps, out newFps);
+            return OnTelemetry(rttMs, lossPct, 0.0, Stopwatch.GetTimestamp(), out newBitrateKbps, out newFps);
         }
 
         internal bool OnTelemetry(double rttMs, double lossPct, long nowTicks, out int newBitrateKbps, out int newFps)
+        {
+            return OnTelemetry(rttMs, lossPct, 0.0, nowTicks, out newBitrateKbps, out newFps);
+        }
+
+        internal bool OnTelemetry(double rttMs, double lossPct, double reportedJitterMs, out int newBitrateKbps, out int newFps)
+        {
+            return OnTelemetry(rttMs, lossPct, reportedJitterMs, Stopwatch.GetTimestamp(), out newBitrateKbps, out newFps);
+        }
+
+        internal bool OnTelemetry(double rttMs, double lossPct, double reportedJitterMs, long nowTicks, out int newBitrateKbps, out int newFps)
         {
             lock (gate)
             {
@@ -1522,12 +1921,41 @@ namespace DualRemote
                     rttBucketStartTicks = now;
                 }
 
+                if (reportedJitterMs >= 0.0 && reportedJitterMs < 5000.0)
+                {
+                    clientJitterMs = reportedJitterMs;
+                }
+
                 if (rttMs > 0.1 && rttMs < 8000.0)
                 {
                     if (prevRttMs > 0.1)
                     {
-                        double delta = Math.Abs(rttMs - prevRttMs);
-                        rttJitterMs = rttJitterMs * 0.75 + delta * 0.25;
+                        double signedDelta = rttMs - prevRttMs;
+                        double absDelta = Math.Abs(signedDelta);
+                        rttJitterMs = rttJitterMs * 0.75 + absDelta * 0.25;
+                        // GCC-inspired smoothed delay gradient (+ = queue growing, <=0 = draining)
+                        double clampedGrad = Math.Max(-80.0, Math.Min(80.0, signedDelta));
+                        delayTrendMs = delayTrendMs * 0.75 + clampedGrad * 0.25;
+
+                        // Require >=2 consecutive upward ticks to ignore one-off baseline steps or Wi-Fi spikes
+                        if (signedDelta > 1.5 && delayTrendMs > overuseThresholdMs)
+                        {
+                            consecutiveOveruseTicks++;
+                            if (overuseStartTicks == 0) overuseStartTicks = now;
+                        }
+                        else if (delayTrendMs > overuseThresholdMs && consecutiveOveruseTicks >= 1 && signedDelta >= -1.0)
+                        {
+                            consecutiveOveruseTicks++;
+                        }
+                        else
+                        {
+                            consecutiveOveruseTicks = 0;
+                            overuseStartTicks = 0;
+                        }
+
+                        // Slowly adapt threshold toward observed noise floor (GCC adaptive gamma)
+                        double targetGamma = Math.Max(6.0, Math.Min(28.0, Math.Abs(delayTrendMs) * 1.15 + 6.0));
+                        overuseThresholdMs = overuseThresholdMs * 0.92 + targetGamma * 0.08;
                     }
                     prevRttMs = rttMs;
                     if (currentBucketMinRtt < 0 || rttMs < currentBucketMinRtt) currentBucketMinRtt = rttMs;
@@ -1547,8 +1975,28 @@ namespace DualRemote
                 }
 
                 double queueDelayMs = (minRttMs > 0 && smoothedRttMs > minRttMs) ? (smoothedRttMs - minRttMs) : 0.0;
-                bool changed = false;
+                double effectiveJitterMs = Math.Max(rttJitterMs, clientJitterMs);
+                bool trendOveruse = consecutiveOveruseTicks >= 2 &&
+                    (overuseStartTicks == 0 || ElapsedMs(overuseStartTicks, now) >= 180.0 || delayTrendMs >= overuseThresholdMs * 1.35);
 
+                if (lossPct >= 4.0 || queueDelayMs >= 110.0)
+                {
+                    congestionSignal = BoBoCongestionSignal.Overuse;
+                }
+                else if (lossPct >= 1.5 || queueDelayMs >= 55.0 || trendOveruse)
+                {
+                    congestionSignal = BoBoCongestionSignal.Overuse;
+                }
+                else if (delayTrendMs > overuseThresholdMs * 0.5 || effectiveJitterMs >= 18.0 || queueDelayMs >= 26.0)
+                {
+                    congestionSignal = BoBoCongestionSignal.Hold;
+                }
+                else
+                {
+                    congestionSignal = BoBoCongestionSignal.Normal;
+                }
+
+                bool changed = false;
                 if (lossPct >= 4.0 || queueDelayMs >= 110.0)
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 750.0)
@@ -1563,7 +2011,7 @@ namespace DualRemote
                         lastIncreaseTicks = now;
                     }
                 }
-                else if (lossPct >= 1.5 || queueDelayMs >= 55.0)
+                else if (congestionSignal == BoBoCongestionSignal.Overuse)
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= 950.0)
                     {
@@ -1575,9 +2023,11 @@ namespace DualRemote
                         }
                         lastDecreaseTicks = now;
                         lastIncreaseTicks = now;
+                        consecutiveOveruseTicks = 0;
+                        overuseStartTicks = 0;
                     }
                 }
-                else if (smoothedLossPct < 0.5 && queueDelayMs < 30.0 && rttJitterMs < 35.0)
+                else if (congestionSignal == BoBoCongestionSignal.Normal && smoothedLossPct < 0.5 && queueDelayMs < 30.0 && effectiveJitterMs < 35.0)
                 {
                     int maxBps = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, 14000);
                     if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= 2000.0)
@@ -1607,7 +2057,8 @@ namespace DualRemote
                 else
                 {
                     lowBitrateSinceTicks = 0;
-                    if (currentBitrateKbps >= 3600 && currentFps < maxFps && smoothedLossPct < 0.5 && queueDelayMs < 30.0 && rttJitterMs < 35.0)
+                    if (currentBitrateKbps >= 3600 && currentFps < maxFps && congestionSignal == BoBoCongestionSignal.Normal &&
+                        smoothedLossPct < 0.5 && queueDelayMs < 30.0 && effectiveJitterMs < 35.0)
                     {
                         currentFps = maxFps;
                         changed = true;

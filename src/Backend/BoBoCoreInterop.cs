@@ -136,6 +136,8 @@ namespace DualRemote
         internal const int PushVideoIgnored = 0;
         internal const int PushVideoAccepted = 1;
         internal const int PushVideoNeedKeyframe = 2;
+        internal const int AudioCodecAdpcm = 0;
+        internal const int AudioCodecAac = 1;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryW(string lpFileName);
@@ -151,6 +153,26 @@ namespace DualRemote
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int FnGetMonitorInfo(int index, ref BoBoNativeMonitorInfo outInfo);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnIsAacAudioSupported();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate IntPtr FnHostCreateV2(
+            int monitorIndex,
+            int targetWidth,
+            int targetHeight,
+            int fps,
+            int bitrateKbps,
+            int muteHostSpeakers,
+            int compositeCursor,
+            int preferAacAudio,
+            BoBoVideoFrameNativeCallback onVideo,
+            BoBoAudioFrameNativeCallback onAudio,
+            IntPtr userCtx);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostGetAudioCodec(IntPtr handle);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate IntPtr FnHostCreate(
@@ -268,6 +290,16 @@ namespace DualRemote
             int sampleCount);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnClientPushAudioEx(
+            IntPtr handle,
+            byte[] audioData,
+            int length,
+            int sampleRate,
+            int channels,
+            int sampleCount,
+            int codecId);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientResize(IntPtr handle, int width, int height);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -315,8 +347,11 @@ namespace DualRemote
         private static FnSelfTest fnSelfTest;
         private static FnGetMonitorCount fnGetMonitorCount;
         private static FnGetMonitorInfo fnGetMonitorInfo;
+        private static FnIsAacAudioSupported fnIsAacAudioSupported;
         private static FnHostCreate fnHostCreate;
         private static FnHostCreateEx fnHostCreateEx;
+        private static FnHostCreateV2 fnHostCreateV2;
+        private static FnHostGetAudioCodec fnHostGetAudioCodec;
         private static FnHostReconfigure fnHostReconfigure;
         private static FnHostSetBitrate fnHostSetBitrate;
         private static FnHostSetFps fnHostSetFps;
@@ -338,6 +373,7 @@ namespace DualRemote
         private static FnClientCreate fnClientCreate;
         private static FnClientPushVideo fnClientPushVideo;
         private static FnClientPushAudio fnClientPushAudio;
+        private static FnClientPushAudioEx fnClientPushAudioEx;
         private static FnClientResize fnClientResize;
         private static FnClientFocus fnClientFocus;
         private static FnClientSetMouseMode fnClientSetMouseMode;
@@ -398,8 +434,11 @@ namespace DualRemote
                     fnSelfTest = Bind<FnSelfTest>(mod, "BoBoCore_SelfTest");
                     fnGetMonitorCount = Bind<FnGetMonitorCount>(mod, "BoBoCore_GetMonitorCount");
                     fnGetMonitorInfo = Bind<FnGetMonitorInfo>(mod, "BoBoCore_GetMonitorInfo");
+                    fnIsAacAudioSupported = TryBind<FnIsAacAudioSupported>(mod, "BoBoCore_IsAacAudioSupported");
                     fnHostCreate = Bind<FnHostCreate>(mod, "BoBoHost_Create");
                     fnHostCreateEx = TryBind<FnHostCreateEx>(mod, "BoBoHost_CreateEx");
+                    fnHostCreateV2 = TryBind<FnHostCreateV2>(mod, "BoBoHost_CreateV2");
+                    fnHostGetAudioCodec = TryBind<FnHostGetAudioCodec>(mod, "BoBoHost_GetAudioCodec");
                     fnHostReconfigure = Bind<FnHostReconfigure>(mod, "BoBoHost_Reconfigure");
                     fnHostSetBitrate = TryBind<FnHostSetBitrate>(mod, "BoBoHost_SetBitrate");
                     fnHostSetFps = TryBind<FnHostSetFps>(mod, "BoBoHost_SetFps");
@@ -419,6 +458,7 @@ namespace DualRemote
                     fnClientCreate = Bind<FnClientCreate>(mod, "BoBoClient_Create");
                     fnClientPushVideo = Bind<FnClientPushVideo>(mod, "BoBoClient_PushVideo");
                     fnClientPushAudio = Bind<FnClientPushAudio>(mod, "BoBoClient_PushAudio");
+                    fnClientPushAudioEx = TryBind<FnClientPushAudioEx>(mod, "BoBoClient_PushAudioEx");
                     fnClientResize = Bind<FnClientResize>(mod, "BoBoClient_Resize");
                     fnClientFocus = Bind<FnClientFocus>(mod, "BoBoClient_Focus");
                     fnClientSetMouseMode = Bind<FnClientSetMouseMode>(mod, "BoBoClient_SetMouseMode");
@@ -741,6 +781,13 @@ namespace DualRemote
             try { return fnHostIsPrivacyInputBlocked() != 0; } catch { return false; }
         }
 
+        internal static bool IsAacAudioSupported()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnIsAacAudioSupported == null) return false;
+            try { return fnIsAacAudioSupported() != 0; } catch { return false; }
+        }
+
         internal static BoBoHostNativeHandle CreateHostSession(
             int monitorIndex,
             int targetWidth,
@@ -751,7 +798,8 @@ namespace DualRemote
             Action<byte[], bool, int, int, uint> onVideo,
             Action<byte[], int, int, int> onAudio,
             out string error,
-            bool compositeCursor = true)
+            bool compositeCursor = true,
+            bool preferAacAudio = false)
         {
             if (!EnsureLoaded(out error)) return null;
 
@@ -779,18 +827,21 @@ namespace DualRemote
                 catch { }
             };
 
-            IntPtr ptr = fnHostCreateEx != null
-                ? fnHostCreateEx(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                    muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, vidCb, audCb, IntPtr.Zero)
-                : fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
-                    muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero);
+            IntPtr ptr = fnHostCreateV2 != null
+                ? fnHostCreateV2(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                    muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, preferAacAudio ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                : (fnHostCreateEx != null
+                    ? fnHostCreateEx(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                        muteHostSpeakers ? 1 : 0, compositeCursor ? 1 : 0, vidCb, audCb, IntPtr.Zero)
+                    : fnHostCreate(monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+                        muteHostSpeakers ? 1 : 0, vidCb, audCb, IntPtr.Zero));
             if (ptr == IntPtr.Zero)
             {
                 error = "创建进程内主机采编引擎失败。";
                 return null;
             }
             var hostHandle = new BoBoHostNativeHandle(ptr, vidCb, audCb);
-            if (fnHostCreateEx == null) hostHandle.SetCompositeCursor(compositeCursor);
+            if (fnHostCreateV2 == null && fnHostCreateEx == null) hostHandle.SetCompositeCursor(compositeCursor);
             return hostHandle;
         }
 
@@ -845,6 +896,18 @@ namespace DualRemote
                 handle = ptr;
                 keepVid = vid;
                 keepAud = aud;
+            }
+
+            internal int AudioCodec
+            {
+                get
+                {
+                    lock (gate)
+                    {
+                        if (handle == IntPtr.Zero || fnHostGetAudioCodec == null) return AudioCodecAdpcm;
+                        try { return fnHostGetAudioCodec(handle); } catch { return AudioCodecAdpcm; }
+                    }
+                }
             }
 
             internal bool Reconfigure(int monitorIndex, int width, int height, int fps, int bitrateKbps)
@@ -944,12 +1007,20 @@ namespace DualRemote
 
             internal void PushAudio(byte[] adpcmData, int length, int sampleRate, int channels, int sampleCount)
             {
-                if (adpcmData == null || length <= 0) return;
+                PushAudioEx(adpcmData, length, sampleRate, channels, sampleCount, AudioCodecAdpcm);
+            }
+
+            internal void PushAudioEx(byte[] audioData, int length, int sampleRate, int channels, int sampleCount, int codecId)
+            {
+                if (audioData == null || length <= 0) return;
                 rwLock.EnterReadLock();
                 try
                 {
                     if (handle == IntPtr.Zero) return;
-                    fnClientPushAudio(handle, adpcmData, length, sampleRate, channels, sampleCount);
+                    if (fnClientPushAudioEx != null)
+                        fnClientPushAudioEx(handle, audioData, length, sampleRate, channels, sampleCount, codecId);
+                    else if (codecId == AudioCodecAdpcm)
+                        fnClientPushAudio(handle, audioData, length, sampleRate, channels, sampleCount);
                 }
                 finally { rwLock.ExitReadLock(); }
             }

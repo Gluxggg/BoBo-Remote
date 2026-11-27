@@ -18,7 +18,8 @@ namespace DualRemote
         AudioAdpcm = 0x03,
         InputEvent = 0x04,
         FileChunk = 0x05,
-        CursorShape = 0x06
+        CursorShape = 0x06,
+        AudioAac = 0x07
     }
 
     internal sealed class BoBoMonitorDescriptor
@@ -594,14 +595,14 @@ namespace DualRemote
         {
             var list = new List<string>();
             object val;
-            if (map == null || !map.TryGetValue(key, out val)) return list;
-            object[] arr = val as object[];
-            if (arr == null) return list;
-            for (int i = 0; i < arr.Length; i++)
+            if (map == null || !map.TryGetValue(key, out val) || val == null) return list;
+            var enumerable = val as System.Collections.IEnumerable;
+            if (enumerable == null || val is string) return list;
+            foreach (object item in enumerable)
             {
-                if (arr[i] != null)
+                if (item != null)
                 {
-                    string s = arr[i].ToString().Trim();
+                    string s = item.ToString().Trim();
                     if (s.Length > 0 && !list.Contains(s)) list.Add(s);
                 }
             }

@@ -90,6 +90,7 @@ typedef void(__stdcall* BoBoPrivacyEscapeCallback)(void* userCtx);
 BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufLen);
 BOBO_API int32_t __stdcall BoBoCore_GetMonitorCount(void);
 BOBO_API int32_t __stdcall BoBoCore_GetMonitorInfo(int32_t index, BoBoMonitorInfo* outInfo);
+BOBO_API int32_t __stdcall BoBoCore_IsAacAudioSupported(void);
 
 // ---- Host Engine (In-Process Capture + H.264 Encode + WASAPI Loopback + SendInput) ----
 BOBO_API void* __stdcall BoBoHost_Create(
@@ -114,6 +115,21 @@ BOBO_API void* __stdcall BoBoHost_CreateEx(
     BoBoVideoFrameCallback onVideo,
     BoBoAudioFrameCallback onAudio,
     void* userCtx);
+
+BOBO_API void* __stdcall BoBoHost_CreateV2(
+    int32_t monitorIndex,
+    int32_t targetWidth,
+    int32_t targetHeight,
+    int32_t fps,
+    int32_t bitrateKbps,
+    int32_t muteHostSpeakers,
+    int32_t compositeCursor,
+    int32_t preferAacAudio,
+    BoBoVideoFrameCallback onVideo,
+    BoBoAudioFrameCallback onAudio,
+    void* userCtx);
+
+BOBO_API int32_t __stdcall BoBoHost_GetAudioCodec(void* handle); // 0=adpcm, 1=aac
 
 BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
     void* handle,
@@ -180,6 +196,15 @@ BOBO_API void __stdcall BoBoClient_PushAudio(
     int32_t sampleRate,
     int32_t channels,
     int32_t sampleCount);
+
+BOBO_API void __stdcall BoBoClient_PushAudioEx(
+    void* handle,
+    const uint8_t* audioData,
+    int32_t length,
+    int32_t sampleRate,
+    int32_t channels,
+    int32_t sampleCount,
+    int32_t codecId); // 0=adpcm, 1=aac
 
 BOBO_API void __stdcall BoBoClient_Resize(void* handle, int32_t width, int32_t height);
 BOBO_API void __stdcall BoBoClient_Focus(void* handle);

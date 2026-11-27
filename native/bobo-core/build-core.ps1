@@ -102,6 +102,7 @@ try {
             'src\bobo_core.cpp',
             'src\screen_capture.cpp',
             'src\mf_encoder.cpp',
+            'src\mf_audio_aac.cpp',
             'src\wasapi_loopback.cpp',
             '..\bobo-stream-player\src\d3d11_renderer.cpp',
             '..\bobo-stream-player\src\mf_decoder.cpp'

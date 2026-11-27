@@ -19,13 +19,35 @@ WasapiLoopbackCapturer::~WasapiLoopbackCapturer() {
 }
 
 bool WasapiLoopbackCapturer::Start(bool muteSpeakers, BoBoAudioFrameCallback cb, void* userCtx) {
+    return Start(muteSpeakers, false, cb, userCtx);
+}
+
+bool WasapiLoopbackCapturer::Start(bool muteSpeakers, bool preferAac, BoBoAudioFrameCallback cb, void* userCtx) {
     Stop();
     callback_ = cb;
     userCtx_ = userCtx;
     desiredMute_.store(muteSpeakers);
+    preferAac_.store(preferAac, std::memory_order_release);
+    activeCodec_.store(kAudioCodecAdpcm, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(startMutex_);
+        startReady_ = false;
+    }
     running_.store(true);
     worker_ = std::thread([this]() { CaptureLoop(); });
+
+    std::unique_lock<std::mutex> lk(startMutex_);
+    startCv_.wait_for(lk, std::chrono::milliseconds(150), [this]() { return startReady_; });
     return true;
+}
+
+void WasapiLoopbackCapturer::SignalStartupComplete(int codecId) {
+    activeCodec_.store(codecId, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(startMutex_);
+        startReady_ = true;
+    }
+    startCv_.notify_all();
 }
 
 void WasapiLoopbackCapturer::SetMuteSpeakers(bool mute) {
@@ -91,12 +113,14 @@ void WasapiLoopbackCapturer::CaptureLoop() {
     if (FAILED(CoCreateInstance(kClsidMmDevEnum, nullptr, CLSCTX_ALL, kIidMmDevEnum, reinterpret_cast<void**>(en.GetAddressOf()))) ||
         FAILED(en->GetDefaultAudioEndpoint(eRender, eConsole, dev.GetAddressOf())) ||
         FAILED(dev->Activate(kIidAudioClient, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.GetAddressOf())))) {
+        SignalStartupComplete(kAudioCodecAdpcm);
         if (SUCCEEDED(hrCo)) CoUninitialize();
         return;
     }
 
     WAVEFORMATEX* mixFmt = nullptr;
     if (FAILED(client->GetMixFormat(&mixFmt)) || !mixFmt) {
+        SignalStartupComplete(kAudioCodecAdpcm);
         if (SUCCEEDED(hrCo)) CoUninitialize();
         return;
     }
@@ -115,13 +139,22 @@ void WasapiLoopbackCapturer::CaptureLoop() {
     if (FAILED(hr) ||
         FAILED(client->GetService(kIidAudioCaptureClient, reinterpret_cast<void**>(cap.GetAddressOf()))) ||
         FAILED(client->Start())) {
+        SignalStartupComplete(kAudioCodecAdpcm);
         if (SUCCEEDED(hrCo)) CoUninitialize();
         return;
     }
 
+    MfAacEncoder aacEnc;
+    bool usingAac = false;
+    if (preferAac_.load(std::memory_order_acquire) && aacEnc.Open(srcRate, 2, 96000)) {
+        usingAac = true;
+    }
+    SignalStartupComplete(usingAac ? kAudioCodecAac : kAudioCodecAdpcm);
+
     std::vector<int16_t> stereoBuf;
     std::vector<uint8_t> adpcmBuf;
-    const int kChunkFrames = 480; // 10ms @ 48kHz
+    std::vector<std::vector<uint8_t>> aacFrames;
+    const int kChunkFrames = 480; // 10ms @ 48kHz for ADPCM
 
     while (running_.load()) {
         UINT32 packetLen = 0;
@@ -156,12 +189,26 @@ void WasapiLoopbackCapturer::CaptureLoop() {
                     stereoBuf.push_back(sR);
                 }
 
-                while (static_cast<int>(stereoBuf.size() / 2) >= kChunkFrames) {
-                    ImaAdpcmCodec::EncodeStereo(stereoBuf.data(), kChunkFrames, adpcmBuf);
-                    if (callback_ && !adpcmBuf.empty()) {
-                        callback_(adpcmBuf.data(), static_cast<int32_t>(adpcmBuf.size()), srcRate, 2, kChunkFrames, userCtx_);
+                if (usingAac) {
+                    int totalFrames = static_cast<int>(stereoBuf.size() / 2);
+                    if (totalFrames > 0) {
+                        if (aacEnc.PushPcm(stereoBuf.data(), totalFrames, aacFrames)) {
+                            for (const auto& pkt : aacFrames) {
+                                if (callback_ && !pkt.empty()) {
+                                    callback_(pkt.data(), static_cast<int32_t>(pkt.size()), srcRate, 2, 1024, userCtx_);
+                                }
+                            }
+                        }
+                        stereoBuf.clear();
                     }
-                    stereoBuf.erase(stereoBuf.begin(), stereoBuf.begin() + static_cast<ptrdiff_t>(kChunkFrames * 2));
+                } else {
+                    while (static_cast<int>(stereoBuf.size() / 2) >= kChunkFrames) {
+                        ImaAdpcmCodec::EncodeStereo(stereoBuf.data(), kChunkFrames, adpcmBuf);
+                        if (callback_ && !adpcmBuf.empty()) {
+                            callback_(adpcmBuf.data(), static_cast<int32_t>(adpcmBuf.size()), srcRate, 2, kChunkFrames, userCtx_);
+                        }
+                        stereoBuf.erase(stereoBuf.begin(), stereoBuf.begin() + static_cast<ptrdiff_t>(kChunkFrames * 2));
+                    }
                 }
             }
             cap->ReleaseBuffer(numFrames);
@@ -169,6 +216,7 @@ void WasapiLoopbackCapturer::CaptureLoop() {
         }
     }
 
+    aacEnc.Close();
     client->Stop();
     if (SUCCEEDED(hrCo)) CoUninitialize();
 }
@@ -298,7 +346,37 @@ void WasapiAdpcmPlayer::PlayAdpcm(const uint8_t* adpcmData, int len, int sampleR
 
     if (!ImaAdpcmCodec::DecodeStereo(adpcmData, len, pcmBuf_) || pcmBuf_.empty()) return;
     uint32_t frames = static_cast<uint32_t>(pcmBuf_.size() / 2);
+    RenderPcmStereoLocked(pcmBuf_.data(), frames);
+}
 
+void WasapiAdpcmPlayer::PlayAac(const uint8_t* aacData, int len, int sampleRate, int channels) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!aacData || len < 7) return;
+    if (sampleRate <= 0) sampleRate = 48000;
+    int ch = channels > 0 ? channels : 2;
+    if (!active_ || activeRate_ != sampleRate) {
+        if (!InitializeLocked(sampleRate, ch)) return;
+    }
+    if (!aacDec_.IsOpen() || aacDec_.SampleRate() != sampleRate || aacDec_.Channels() != ch) {
+        if (!aacDec_.Open(sampleRate, ch)) return;
+    }
+    if (!aacDec_.DecodeAdts(aacData, len, pcmBuf_) || pcmBuf_.empty()) return;
+    uint32_t frames = static_cast<uint32_t>(pcmBuf_.size() / static_cast<size_t>(ch));
+    if (ch == 1) {
+        // Upsample mono to stereo interleaved for shared renderer
+        std::vector<int16_t> stereo(frames * 2);
+        for (uint32_t i = 0; i < frames; ++i) {
+            stereo[i * 2] = pcmBuf_[i];
+            stereo[i * 2 + 1] = pcmBuf_[i];
+        }
+        RenderPcmStereoLocked(stereo.data(), frames);
+    } else {
+        RenderPcmStereoLocked(pcmBuf_.data(), frames);
+    }
+}
+
+void WasapiAdpcmPlayer::RenderPcmStereoLocked(const int16_t* pcmStereo, uint32_t frames) {
+    if (!pcmStereo || frames == 0 || !audioClient_ || !renderClient_) return;
     UINT32 padding = 0;
     HRESULT padHr = audioClient_->GetCurrentPadding(&padding);
     if (FAILED(padHr)) {
@@ -325,8 +403,8 @@ void WasapiAdpcmPlayer::PlayAdpcm(const uint8_t* adpcmData, int len, int sampleR
         float* fdst = reinterpret_cast<float*>(dst);
         if (ch > 2) std::memset(dst, 0, totalBytes);
         for (uint32_t i = 0; i < frames; ++i) {
-            float l = (static_cast<float>(pcmBuf_[i * 2]) / 32768.0f) * gain;
-            float r = (static_cast<float>(pcmBuf_[i * 2 + 1]) / 32768.0f) * gain;
+            float l = (static_cast<float>(pcmStereo[i * 2]) / 32768.0f) * gain;
+            float r = (static_cast<float>(pcmStereo[i * 2 + 1]) / 32768.0f) * gain;
             if (ch >= 2) {
                 fdst[static_cast<size_t>(i) * ch + 0] = l;
                 fdst[static_cast<size_t>(i) * ch + 1] = r;
@@ -338,8 +416,8 @@ void WasapiAdpcmPlayer::PlayAdpcm(const uint8_t* adpcmData, int len, int sampleR
         int16_t* sdst = reinterpret_cast<int16_t*>(dst);
         if (ch > 2) std::memset(dst, 0, totalBytes);
         for (uint32_t i = 0; i < frames; ++i) {
-            int16_t l = static_cast<int16_t>(static_cast<float>(pcmBuf_[i * 2]) * gain);
-            int16_t r = static_cast<int16_t>(static_cast<float>(pcmBuf_[i * 2 + 1]) * gain);
+            int16_t l = static_cast<int16_t>(static_cast<float>(pcmStereo[i * 2]) * gain);
+            int16_t r = static_cast<int16_t>(static_cast<float>(pcmStereo[i * 2 + 1]) * gain);
             if (ch >= 2) {
                 sdst[static_cast<size_t>(i) * ch + 0] = l;
                 sdst[static_cast<size_t>(i) * ch + 1] = r;
@@ -351,8 +429,8 @@ void WasapiAdpcmPlayer::PlayAdpcm(const uint8_t* adpcmData, int len, int sampleR
         int32_t* idst = reinterpret_cast<int32_t*>(dst);
         if (ch > 2) std::memset(dst, 0, totalBytes);
         for (uint32_t i = 0; i < frames; ++i) {
-            int32_t l = static_cast<int32_t>(static_cast<float>(pcmBuf_[i * 2]) * gain) << 16;
-            int32_t r = static_cast<int32_t>(static_cast<float>(pcmBuf_[i * 2 + 1]) * gain) << 16;
+            int32_t l = static_cast<int32_t>(static_cast<float>(pcmStereo[i * 2]) * gain) << 16;
+            int32_t r = static_cast<int32_t>(static_cast<float>(pcmStereo[i * 2 + 1]) * gain) << 16;
             if (ch >= 2) {
                 idst[static_cast<size_t>(i) * ch + 0] = l;
                 idst[static_cast<size_t>(i) * ch + 1] = r;
@@ -370,6 +448,7 @@ void WasapiAdpcmPlayer::ShutdownLocked() {
     active_ = false;
     activeRate_ = 0;
     bufferFrameCount_ = 0;
+    aacDec_.Close();
     if (audioClient_) {
         audioClient_->Stop();
     }

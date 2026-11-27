@@ -67,6 +67,7 @@ namespace DualRemote
         private bool playAudioOnHost = false;
         private bool windowedStream = false;
         private bool preferHevc = true;
+        private bool preferCompressedAudio = true;
         private bool useAbsoluteMouse = true;
         private bool minimizeToTray = false;
         private bool keepThisComputerAwake = false;
@@ -298,15 +299,15 @@ namespace DualRemote
             Theme.SetNavIndent(startAssistBtn, 14);
             Theme.SetGlyphTint(startAssistBtn, Theme.Accent);
             navStartAssistRow = rail.RowCount;
-            Theme.Row(rail, 38, startAssistBtn);
+            Theme.Row(rail, 36, startAssistBtn);
 
             var favoritesBtn = MakePageButton(FavoritesPage, Theme.Glyph.Star, "收藏设备");
             Theme.SetNavIndent(favoritesBtn, 14);
             Theme.SetGlyphTint(favoritesBtn, Theme.Accent);
             navFavoritesRow = rail.RowCount;
-            Theme.Row(rail, 38, favoritesBtn);
+            Theme.Row(rail, 36, favoritesBtn);
 
-            Theme.Row(rail, 10);
+            Theme.Row(rail, 6);
 
             // Group 3: 显示与隐私
             var privacyGroup = Theme.Action("防窥与显示", Theme.ButtonStyle.NavSection, Theme.Glyph.Shield);
@@ -317,20 +318,20 @@ namespace DualRemote
                 Theme.Highlight(privacyGroup, navPrivacyExpanded);
                 SyncNavigationSectionVisibility();
             };
-            Theme.Row(rail, 36, privacyGroup);
+            Theme.Row(rail, 34, privacyGroup);
 
-            var privacyBtn = MakePageButton(PrivacyPage, Theme.Glyph.Eye, "防窥壁纸与虚拟屏");
+            var privacyBtn = MakePageButton(PrivacyPage, Theme.Glyph.Eye, "防窥与显示");
             Theme.SetNavIndent(privacyBtn, 14);
             Theme.SetGlyphTint(privacyBtn, Theme.Accent);
             navPrivacyRow = rail.RowCount;
-            Theme.Row(rail, 38, privacyBtn);
+            Theme.Row(rail, 36, privacyBtn);
 
             Theme.FillRow(rail);
 
             // Compact Glacier-Blue Embedded Tailscale Status Card
             sidebarCrossNetCard = new CrossNetSidebarCard();
             sidebarCrossNetCard.Click += async delegate { await HandleCrossNetCardClickAsync(); };
-            Theme.Row(rail, 68, sidebarCrossNetCard);
+            Theme.Row(rail, 60, sidebarCrossNetCard);
             Theme.Row(rail, 8);
 
             // Bottom pinned divider + Settings + Direct Exit button (clear frontend exit!)
@@ -561,24 +562,31 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "开机自动启动",
-                "登录 Windows 后自动在后台启动 BoBo远程，随时准备连接",
+            Theme.Row(page, 22, Theme.Text("常用", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
+
+            var basicCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var basicList = Theme.Grid(1);
+            Theme.FillColumn(basicList);
+
+            AddGroupedSettingRow(basicList, false, Theme.Glyph.Desktop, "开机自动启动",
+                "登录后自动在后台待命",
                 SystemToggle("开机自动启动", WindowsSession.StartsAtSignIn(), WindowsSession.TrySetStartAtSignIn));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "防止电脑休眠",
-                "休眠将导致电脑无法远程控制（被控端强烈推荐开启）",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Bolt, "防止电脑休眠",
+                "保持被控端屏幕与网络在线",
                 SystemToggle("防止电脑休眠", false, ChangeKeepAwake));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Pin, "关闭窗口时最小化到托盘",
-                "保持防窥守护在后台运行，可从右下角托盘随时恢复或彻底退出",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Pin, "最小化到托盘",
+                "关闭窗口时转入系统托盘",
                 PreferenceToggle("最小化到托盘", minimizeToTray, value => minimizeToTray = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Refresh, "启动时自动填入上次设备",
-                "自动回填最近连接过的主机地址与协助设备码，省去重复输入",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Refresh, "自动填入上次设备",
+                "启动时回填最近连接目标",
                 PreferenceToggle("启动时填入上次设备", fillLastTarget, value => fillLastTarget = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Refresh, "启动时自动检查新版本",
-                "后台静默检查 GitHub Releases 最新版，发现新版本可直接在应用内一键校验更新",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Refresh, "自动检查更新",
+                "静默检查 GitHub 最新版本",
                 PreferenceToggle("自动检查更新", autoCheckUpdates, value => autoCheckUpdates = value));
 
             var defaultProfile = Theme.Choice("默认串流画质", false);
@@ -592,34 +600,47 @@ namespace DualRemote
                 quality.SelectedIndex = defaultQuality;
                 SavePreferences();
             };
-            AddStandaloneSettingCard(page, Theme.Glyph.Image, "默认串流画质档位",
-                "发起低延迟桌面串流时默认采用的分辨率、帧率与码率档位",
-                Theme.WrapInput(defaultProfile), 336);
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Image, "默认串流画质",
+                "发起桌面串流时的默认画质档位",
+                Theme.WrapInput(defaultProfile), 372);
 
             settingsHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
-            AddStandaloneSettingCard(page, Theme.Glyph.Lock, "本机被远控退出后",
-                "远控会话结束时解除防窥，并按此设置保留登录或锁定 Windows",
-                Theme.WrapInput(settingsHostDisconnectActionCombo), 180);
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Lock, "被控断开后动作",
+                "远控结束时回到桌面或锁屏",
+                Theme.WrapInput(settingsHostDisconnectActionCombo), 160);
+
+            basicCard.Controls.Add(basicList);
+            Theme.Row(page, SumRows(basicList) + basicCard.Padding.Vertical, basicCard);
+            Theme.Row(page, 16);
+
+            Theme.Row(page, 22, Theme.Text("版本与引导", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
+
+            var miscCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var miscList = Theme.Grid(1);
+            Theme.FillColumn(miscList);
 
             updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
             updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
-            updateStatusCardText = AddStandaloneSettingCardWithDesc(page, Theme.Glyph.Refresh,
-                "软件版本与在线自动更新（当前 v" + AppUpdater.CurrentVersion + "）",
-                "无需手动去仓库下载安装包，支持 SHA-256 校验后自动增量或覆盖升级",
-                updateActionButton, 156);
+            updateStatusCardText = AddGroupedSettingRowWithDesc(miscList, false, Theme.Glyph.Refresh,
+                "软件版本 (v" + AppUpdater.CurrentVersion + ")",
+                "支持在线校验升级与增量覆盖",
+                updateActionButton, 146);
 
-            var replayGuide = Theme.Action("重新查看引导", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
+            var replayGuide = Theme.Action("重新查看", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
             replayGuide.Click += delegate { StartOnboardingTour(false); };
-            AddStandaloneSettingCard(page, Theme.Glyph.Help, "新手引导使用教程",
-                "以灰白框选高亮方式分步回顾设备连接、远程协助、防窥壁纸与低延迟调优",
-                replayGuide, 148);
+            AddGroupedSettingRow(miscList, true, Theme.Glyph.Help, "新手引导",
+                "分步熟悉设备连接与防窥保护",
+                replayGuide, 128);
 
             var clear = Theme.Action("清空记录", Theme.ButtonStyle.Secondary);
             clear.Click += delegate { ClearRecents(); };
-            AddStandaloneSettingCard(page, Theme.Glyph.Trash, "清除最近连接历史",
-                "清除本机保存的设备码与主机地址历史记录（不影响收藏与配对）",
-                clear, 120);
+            AddGroupedSettingRow(miscList, true, Theme.Glyph.Trash, "清除连接历史",
+                "清空最近地址与设备码记录",
+                clear, 114);
 
+            miscCard.Controls.Add(miscList);
+            Theme.Row(page, SumRows(miscList) + miscCard.Padding.Vertical, miscCard);
             return page;
         }
 
@@ -628,34 +649,58 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "优先使用 HEVC (H.265) 硬件编解码",
-                "同等高清画质节省约 35%–40% 带宽，外网与高刷场景文字更锐利（默认开启）",
+            Theme.Row(page, 22, Theme.Text("画面与音频", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
+
+            var mediaCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var mediaList = Theme.Grid(1);
+            Theme.FillColumn(mediaList);
+
+            AddGroupedSettingRow(mediaList, false, Theme.Glyph.Desktop, "优先使用 HEVC (H.265)",
+                "高清场景节省约 35% 带宽",
                 PreferenceToggle("优先使用 HEVC 编码", preferHevc, value => { preferHevc = value; UpdateStreamHint(); }));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Desktop, "自由出框桌面鼠标（绝对坐标 · 推荐）",
-                "鼠标精确映射到远控画面并可自由滑出窗口或触碰顶部悬浮条，不锁死本机键鼠；玩 3D FPS 时可在悬浮条切为「锁鼠模式」",
-                PreferenceToggle("绝对坐标鼠标", useAbsoluteMouse, value => useAbsoluteMouse = value));
+            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Volume, "高效 AAC-LC 音频编码",
+                "96 kbps 压缩传输 · 不支持时回落 ADPCM",
+                PreferenceToggle("高效 AAC 音频", preferCompressedAudio, value => preferCompressedAudio = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Info, "串流实时性能浮层（OSD）",
-                "连接后实时显示帧率、网络丢帧、RTT 延迟与解码耗时（会话中可按 Ctrl+Alt+Shift+S）",
-                PreferenceToggle("串流统计", showStreamStats, value => showStreamStats = value));
-
-            AddStandaloneSettingCard(page, Theme.Glyph.Bell, "在被控端同步播放声音",
-                "关闭时音频仅传输至主控端设备，避免被控端外放打扰他人",
+            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Bell, "在被控端播放声音",
+                "关闭时声音仅传至主控端",
                 PreferenceToggle("在被控端同时播放声音", playAudioOnHost, value => playAudioOnHost = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Maximize, "使用窗口模式打开串流",
-                "开启后以可自由拖拽拉伸的窗口显示远程桌面并配备 UU 风格顶栏控制中心；关闭时默认无边框全屏并显示可移动贴边悬浮球",
+            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Info, "实时性能浮层 (OSD)",
+                "Ctrl+Alt+Shift+S 切换显示",
+                PreferenceToggle("串流统计", showStreamStats, value => showStreamStats = value));
+
+            mediaCard.Controls.Add(mediaList);
+            Theme.Row(page, SumRows(mediaList) + mediaCard.Padding.Vertical, mediaCard);
+            Theme.Row(page, 16);
+
+            Theme.Row(page, 22, Theme.Text("操控与隐私", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
+
+            var controlCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var controlList = Theme.Grid(1);
+            Theme.FillColumn(controlList);
+
+            AddGroupedSettingRow(controlList, false, Theme.Glyph.Desktop, "自由出框鼠标（绝对坐标）",
+                "精准点击 · 3D 游戏可切锁鼠模式",
+                PreferenceToggle("绝对坐标鼠标", useAbsoluteMouse, value => useAbsoluteMouse = value));
+
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.Maximize, "窗口模式打开串流",
+                "关闭时默认无边框全屏",
                 PreferenceToggle("使用窗口模式", windowedStream, value => windowedStream = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Shield, "连接成功瞬间自动开启被控端防窥模式",
-                "开启后，本机作为主控端接通远控的瞬间会立即通知被控端进入防窥屏保护；也可以在远控控制中心「安全」菜单随时开关",
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.Shield, "连接后自动开启防窥",
+                "接通瞬间自动遮挡被控物理屏",
                 PreferenceToggle("自动开启被控端防窥", autoRemotePrivacyOnConnect, value => autoRemotePrivacyOnConnect = value));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Eye, "全屏状态隐藏悬浮球（Ctrl+Alt+G）",
-                "全屏远控时隐藏可移动四边贴边方形悬浮球，仍可随时按 Ctrl+Alt+G 恢复或按 Ctrl+Alt+Shift+B 唤出控制中心",
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.Eye, "全屏隐藏悬浮球",
+                "Ctrl+Alt+G 显示或隐藏",
                 PreferenceToggle("全屏隐藏悬浮球", hideFloatBallInFullscreen, value => hideFloatBallInFullscreen = value));
 
+            controlCard.Controls.Add(controlList);
+            Theme.Row(page, SumRows(controlList) + controlCard.Padding.Vertical, controlCard);
             return page;
         }
 
@@ -664,7 +709,7 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            var hostCard = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
+            var hostCard = new Theme.Card { Padding = new Padding(20, 16, 20, 16) };
             perfDiagCard = hostCard;
             var h = Theme.Grid(1);
             Theme.FillColumn(h);
@@ -674,18 +719,18 @@ namespace DualRemote
             Theme.FillColumn(head);
             Theme.FixedColumn(head, 12);
             Theme.FixedColumn(head, 188);
-            Theme.Row(head, 30, Theme.Text("本机被控诊断", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
-            Theme.Row(h, 30, head);
+            Theme.Row(head, 28, Theme.Text("本机被控诊断", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
+            Theme.Row(h, 28, head);
             Theme.Row(h, 4);
-            Theme.Row(h, 24, diagVersionLabel);
-            Theme.Row(h, 8);
+            Theme.Row(h, 22, diagVersionLabel);
+            Theme.Row(h, 6);
             diagDetailsLabel.TextAlign = ContentAlignment.TopLeft;
             diagDetailsLabel.AutoEllipsis = false;
-            Theme.Row(h, 74, diagDetailsLabel);
-            Theme.Row(h, 12);
+            Theme.Row(h, 54, diagDetailsLabel);
+            Theme.Row(h, 10);
 
             var btnBar = Theme.Grid(2);
-            Theme.FixedColumn(btnBar, 118);
+            Theme.FixedColumn(btnBar, 114);
             Theme.FillColumn(btnBar);
             var refreshDiag = Theme.Action("刷新诊断", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
             refreshDiag.Click += async delegate
@@ -694,26 +739,26 @@ namespace DualRemote
                 try { await RefreshHostDiagnosticsAsync(); }
                 finally { if (!IsDisposed) refreshDiag.Enabled = true; }
             };
-            Theme.Row(btnBar, 38, refreshDiag, null);
-            Theme.Row(h, 38, btnBar);
+            Theme.Row(btnBar, 36, refreshDiag, null);
+            Theme.Row(h, 36, btnBar);
             hostCard.Controls.Add(h);
 
-            Theme.Row(page, 232, hostCard);
-            Theme.Row(page, 12);
+            Theme.Row(page, 194, hostCard);
+            Theme.Row(page, 14);
 
-            var guideCard = new Theme.Card { Padding = new Padding(22, 18, 22, 18) };
+            var guideCard = new Theme.Card { Padding = new Padding(20, 16, 20, 16) };
             var g = Theme.Grid(1);
             Theme.FillColumn(g);
-            Theme.Row(g, 28, Theme.Text("串流与网络建议", Theme.TextSize.Section, Theme.Ink));
-            Theme.Row(g, 8);
-            Theme.Row(g, 26, Theme.Text("优先使用局域网直连。跨公网连接时，可使用公网 IPv6 或 Tailscale 组网。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 26, Theme.Text("发现延迟或卡顿时，可在串流控制中心查看链路状态并调低分辨率、帧率或码率。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 12);
+            Theme.Row(g, 26, Theme.Text("串流与网络建议", Theme.TextSize.Section, Theme.Ink));
+            Theme.Row(g, 6);
+            Theme.Row(g, 24, Theme.Text("优先局域网或内置 Tailscale 直连；跨网不可达可启用自建 VPS 兜底中转。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 24, Theme.Text("弱网时 GCC 拥塞控制与动态 FEC 会自动平滑码率，也可手动调低画质。", Theme.TextSize.Small, Theme.BodyInk));
+            Theme.Row(g, 10);
 
             var links = Theme.Grid(4);
-            Theme.FixedColumn(links, 150);
+            Theme.FixedColumn(links, 142);
             Theme.FixedColumn(links, 10);
-            Theme.FixedColumn(links, 166);
+            Theme.FixedColumn(links, 158);
             Theme.FillColumn(links);
 
             var openGuide = Theme.Action("打开使用指南", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
@@ -724,7 +769,7 @@ namespace DualRemote
             Theme.Row(g, 36, links);
             guideCard.Controls.Add(g);
 
-            Theme.Row(page, 172, guideCard);
+            Theme.Row(page, 160, guideCard);
             return page;
         }
 
@@ -733,12 +778,19 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Bolt, "BoBo V6 全内置原生内核（BoBoCore）",
-                "DXGI 采编、MF H.264 硬编/硬解、D3D11VA 渲染、WASAPI 音频与输入注入已全部写入单文件内嵌加载，无外置独立可执行内核",
+            Theme.Row(page, 22, Theme.Text("内核与传输", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
+
+            var card = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
+            var list = Theme.Grid(1);
+            Theme.FillColumn(list);
+
+            AddGroupedSettingRow(list, false, Theme.Glyph.Bolt, "BoBoCore 原生内核",
+                "DXGI / MF / D3D11 / WASAPI 单文件全内置",
                 BuildEngineActionRow(BoBoCoreInterop.IsLoaded, "运行自检", delegate { RunNativeCoreSelfTestDialog(); }), 186);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Shield, "允许本机被控（BoBo 专属端口 49810 · TLS 1.2）",
-                "仅在 BoBo远程 运行且此开关开启时接受已配对设备连控；关闭软件后立刻停服断口",
+            AddGroupedSettingRow(list, true, Theme.Glyph.Shield, "允许本机被控 (:49810)",
+                "TLS 1.2 + AES-128-GCM 实时加密传输",
                 PreferenceToggle("允许本机被控", allowIncomingControl, delegate(bool value)
                 {
                     allowIncomingControl = value;
@@ -746,15 +798,48 @@ namespace DualRemote
                     ApplyHostSnapshotToUi();
                 }));
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Keypad, "本机 BoBo 设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
-                "已授权设备保存在本机独立安全名单中，可随时查看并一键撤销授权",
+            AddGroupedSettingRow(list, true, Theme.Glyph.Keypad, "本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
+                "管理本机已授权的远控设备名单",
                 BuildEngineActionRow(true, "管理授权", delegate { ShowAuthorizedPeersDialog(); }), 186);
 
-            AddStandaloneSettingCard(page, Theme.Glyph.Network, "Tailscale 异地组网发现（可选）",
-                "局域网设备已内置 UDP 自动发现；若需跨公网高速直连可配合 Tailscale 自动发现同网设备",
+            AddGroupedSettingRow(list, true, Theme.Glyph.Network, "外部 Tailscale CLI",
+                "可选命令行组网补充（优先使用内置通道）",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
+            card.Controls.Add(list);
+            Theme.Row(page, SumRows(list) + card.Padding.Vertical, card);
             return page;
+        }
+
+        private static void AddGroupedSettingRow(TableLayoutPanel list, bool addTopRule, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 108)
+        {
+            AddGroupedSettingRowWithDesc(list, addTopRule, glyph, title, description, action, actionWidth);
+        }
+
+        private static Theme.TwoLineText AddGroupedSettingRowWithDesc(TableLayoutPanel list, bool addTopRule, Theme.Glyph glyph, string title, string description, Control action, int actionWidth = 108)
+        {
+            if (addTopRule) Theme.Row(list, 1, Theme.Rule());
+
+            var rowWrap = Theme.Grid(1);
+            rowWrap.Padding = new Padding(18, 9, 18, 9);
+            Theme.FillColumn(rowWrap);
+
+            var row = Theme.Grid(5);
+            Theme.FixedColumn(row, 30);
+            Theme.FixedColumn(row, 12);
+            Theme.FillColumn(row);
+            Theme.FixedColumn(row, 12);
+            Theme.FixedColumn(row, actionWidth);
+
+            var icon = new Theme.IconTile(glyph, true, Theme.SurfaceSubtle, Theme.BodyInk, 8f);
+            icon.Margin = new Padding(0, 5, 0, 5);
+            var textBlock = new Theme.TwoLineText(title, description, Theme.TextSize.Label, Theme.Ink, Theme.Muted);
+
+            action.Margin = new Padding(0, 3, 0, 3);
+            Theme.Row(row, 40, icon, null, textBlock, null, action);
+            Theme.Row(rowWrap, 40, row);
+            Theme.Row(list, 58, rowWrap);
+            return textBlock;
         }
 
         private void RunNativeCoreSelfTestDialog()
@@ -828,9 +913,9 @@ namespace DualRemote
             else
                 diagStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Alert);
 
-            diagVersionLabel.Text = "全内置 BoBo V6 · 本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
-            diagDetailsLabel.Text = "• 已授权可连本机设备：" + peerCount + " 台（双端必须同时打开 BoBo远程 且通过 4 位临时码双向加密授权）\r\n"
-                + "• 传输通道：专属 TLS 1.2 端口 " + BoBoProtocol.DefaultTcpPort + " + 局域网 UDP " + BoBoProtocol.DiscoveryUdpPort + " 自动发现";
+            diagVersionLabel.Text = "全内置 BoBoCore v7.3 · 本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
+            diagDetailsLabel.Text = "已授权设备 " + peerCount + " 台 · 控制口 TCP " + BoBoProtocol.DefaultTcpPort + " (TLS 1.2)\r\n"
+                + "媒体流 UDP+AES-128-GCM+FEC/NACK · 局域网发现 UDP " + BoBoProtocol.DiscoveryUdpPort;
         }
 
         // ==================== TOP BAR POPOVERS (UU IMAGE 9 & 10 STYLE) ====================
@@ -1531,6 +1616,7 @@ namespace DualRemote
         private void LoadPreferences()
         {
             preferHevc = true;
+            preferCompressedAudio = true;
             useAbsoluteMouse = true;
             minimizeToTray = false;
             autoCheckUpdates = true;
@@ -1568,6 +1654,7 @@ namespace DualRemote
                         && routePref >= (int)BoBoRoutePreference.Auto
                         && routePref <= (int)BoBoRoutePreference.CustomRelayFallback)
                         preferredConnectionRoute = (BoBoRoutePreference)routePref;
+                    preferCompressedAudio = ReadFlag(lines, 22, true);
                 }
                 else
                 {
@@ -1617,7 +1704,8 @@ namespace DualRemote
                     WriteFlag(sendSystemShortcuts),
                     miniWindowOpacity.ToString(),
                     WriteFlag(allowIncomingControl),
-                    ((int)preferredConnectionRoute).ToString()
+                    ((int)preferredConnectionRoute).ToString(),
+                    WriteFlag(preferCompressedAudio)
                 });
                 ShowSettingsBanner("设置已自动保存到本机。", Theme.PillTone.Success);
             }
@@ -1784,8 +1872,8 @@ namespace DualRemote
 
                 int textLeft = (int)Math.Round(iconX + iconBox + 10f * scale);
                 int textW = Math.Max(16, (int)Math.Floor(dotX - 6f * scale - textLeft));
-                int topPad = (int)Math.Round(12f * scale);
-                int lineH = Math.Max(16, (int)Math.Round(19f * scale));
+                int topPad = (int)Math.Round(10f * scale);
+                int lineH = Math.Max(15, (int)Math.Round(18f * scale));
                 int subTop = topPad + lineH + (int)Math.Round(2f * scale);
 
                 TextRenderer.DrawText(g, primaryText, Theme.GetFont(Theme.TextSize.LabelBold),

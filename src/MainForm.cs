@@ -737,7 +737,7 @@ namespace DualRemote
 
             var addrCol = Theme.Grid(1);
             Theme.FillColumn(addrCol);
-            Theme.Row(addrCol, 22, Theme.Text("本机连接地址（推荐直连）", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(addrCol, 22, Theme.Text("本机直连地址", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(addrCol, 6);
 
             var addrLine = Theme.Grid(3);
@@ -758,7 +758,7 @@ namespace DualRemote
             Theme.Row(addrLine, 38, localAssistAddressLabel, null, localAssistAddressEyeButton);
             Theme.Row(addrCol, 38, addrLine);
 
-            localPairStatusLabel = Theme.Text("点击右上角「生成配对码」允许新电脑首次连接本机", Theme.TextSize.Small, Theme.Muted);
+            localPairStatusLabel = Theme.Text("点击生成 4 位临时配对码", Theme.TextSize.Small, Theme.Muted);
             localPairStatusLabel.AutoEllipsis = true;
             Theme.Row(addrCol, 24, localPairStatusLabel);
             Theme.FillRow(addrCol);
@@ -888,12 +888,10 @@ namespace DualRemote
             clientPairCardLayout = layout;
 
             var header = Theme.Grid(1);
-            header.Padding = new Padding(22, 16, 22, 14);
+            header.Padding = new Padding(22, 14, 22, 12);
             Theme.FillColumn(header);
-            Theme.Row(header, 28, Theme.Text("远控伙伴设备", Theme.TextSize.Section, Theme.Ink));
-            Theme.Row(header, 4);
-            Theme.Row(header, 24, Theme.Text("双端同时打开 BoBo远程 后，输入对方 9 位 BoBo 设备码或局域网/Tailscale IP 即可安全连控与传文件", Theme.TextSize.Small, Theme.Muted));
-            Theme.Row(layout, 86, header);
+            Theme.Row(header, 26, Theme.Text("远控伙伴设备", Theme.TextSize.Section, Theme.Ink));
+            Theme.Row(layout, 54, header);
             Theme.Row(layout, 1, Theme.Rule());
 
             var modeStrip = Theme.Grid(5);
@@ -1053,7 +1051,7 @@ namespace DualRemote
             Theme.Row(row, 40, Theme.WrapInput(remoteId), null, rustDeskConnectBtn);
             Theme.Row(panel, 40, row);
             Theme.Row(panel, 12);
-            Theme.Row(panel, 26, Theme.Text("通过 BoBo V6 内置 TLS 1.2 通道点对点传输文件并校验 SHA-256，接收文件自动保存到对方「下载\\BoBoRemote」。", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 26, Theme.Text("TLS 1.2 点对点加密传输 · 自动校验 SHA-256（保存至对方「下载\\BoBoRemote」）", Theme.TextSize.Small, Theme.Muted));
 
             UpdateAssistConnectButtons();
             return panel;
@@ -1593,7 +1591,8 @@ namespace DualRemote
                 sendSystemShortcuts,
                 miniWindowOpacity,
                 true,
-                targetPort);
+                targetPort,
+                preferCompressedAudio);
 
             nativeForm.LocalPrivacyActiveProvider = delegate { return privacyCurtain.IsActive; };
 

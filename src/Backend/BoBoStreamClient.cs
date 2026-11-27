@@ -52,6 +52,7 @@ namespace DualRemote
         internal bool AutoBitrate = true;
         internal bool FreeMouse = true;
         internal bool MuteHostAudio = false;
+        internal bool PreferCompressedAudio = true;
         internal bool RequestPrivacy = false;
         internal bool SuperDisplay = true;
         internal int ClientWidth = 0;
@@ -758,8 +759,13 @@ namespace DualRemote
                     startReq["fullscreen"] = options.ClientFullscreen;
                 }
                 startReq["udpTransport"] = true;
+                startReq["udpCipher"] = "aes-128-gcm";
+                startReq["udpCiphers"] = new string[] { "aes-128-gcm", "aes-128-ctr-hmac" };
                 startReq["udpInterleavedFec"] = true;
                 startReq["udpNack"] = true;
+                startReq["audioCodecs"] = options.PreferCompressedAudio
+                    ? new string[] { "aac", "adpcm" }
+                    : new string[] { "adpcm" };
                 startReq["nativeLocalCursor"] = true;
                 startReq["cursorMetrics"] = true;
                 startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
@@ -824,15 +830,18 @@ namespace DualRemote
                         continue;
                     }
 
-                    if (frame.Type == BoBoPacketType.AudioAdpcm)
+                    if (frame.Type == BoBoPacketType.AudioAdpcm || frame.Type == BoBoPacketType.AudioAac)
                     {
                         if (udpActive) continue;
                         int sr, ch, samples;
-                        byte[] adpcm;
-                        if (BoBoProtocol.ParseAudioPayload(frame.Payload, out sr, out ch, out samples, out adpcm))
+                        byte[] audioBytes;
+                        if (BoBoProtocol.ParseAudioPayload(frame.Payload, out sr, out ch, out samples, out audioBytes))
                         {
+                            int codecId = (frame.Type == BoBoPacketType.AudioAac)
+                                ? BoBoCoreInterop.AudioCodecAac
+                                : BoBoCoreInterop.AudioCodecAdpcm;
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                            if (nc != null) nc.PushAudio(adpcm, adpcm.Length, sr, ch, samples);
+                            if (nc != null) nc.PushAudioEx(audioBytes, audioBytes.Length, sr, ch, samples, codecId);
                         }
                         continue;
                     }
@@ -869,10 +878,14 @@ namespace DualRemote
                             int udpPort = BoBoProtocol.GetInt(msg, "udpPort", 0);
                             long udpSidLong = BoBoProtocol.GetLong(msg, "udpSessionId", 0);
                             string udpKeyB64 = BoBoProtocol.GetStr(msg, "udpKey", "");
+                            string udpCipherStr = BoBoProtocol.GetStr(msg, "udpCipher", "aes-128-ctr-hmac");
+                            BoBoUdpCipherMode udpCipherMode = string.Equals(udpCipherStr, "aes-128-gcm", StringComparison.OrdinalIgnoreCase)
+                                ? BoBoUdpCipherMode.Aes128Gcm
+                                : BoBoUdpCipherMode.Aes128CtrHmac;
                             bool hostUdpNack = BoBoProtocol.GetBool(msg, "udpNack", false);
                             if (!routedViaEmbeddedTailnet && udpPort > 0 && udpSidLong != 0 && !string.IsNullOrEmpty(udpKeyB64))
                             {
-                                TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, hostUdpNack, ct);
+                                TryStartUdpChannel(udpPort, unchecked((uint)udpSidLong), udpKeyB64, hostUdpNack, udpCipherMode, ct);
                             }
 
                             Action<List<BoBoMonitorDescriptor>, int, int, int> ev = StreamStarted;
@@ -1012,7 +1025,7 @@ namespace DualRemote
             }
         }
 
-        private void TryStartUdpChannel(int udpPort, uint udpSessionId, string udpKeyB64, bool hostUdpNack, CancellationToken ct)
+        private void TryStartUdpChannel(int udpPort, uint udpSessionId, string udpKeyB64, bool hostUdpNack, BoBoUdpCipherMode cipherMode, CancellationToken ct)
         {
             try
             {
@@ -1029,7 +1042,8 @@ namespace DualRemote
                 var uc = new UdpClient(targetIp.AddressFamily);
                 BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 131072, 2 * 1024 * 1024);
                 var ep = new IPEndPoint(targetIp, udpPort);
-                var crypto = new BoBoUdpCrypto(udpSessionId, key, false);
+                var crypto = new BoBoUdpCrypto(udpSessionId, key, false, cipherMode);
+                Array.Clear(key, 0, key.Length);
                 var assembler = new BoBoUdpVideoAssembler { NackEnabled = hostUdpNack };
                 var inCodec = new BoBoUdpInputCodec();
 
@@ -1103,7 +1117,7 @@ namespace DualRemote
                     }
 
                     int n = sock.ReceiveFrom(buf, 0, buf.Length, SocketFlags.None, ref remoteEp);
-                    if (n < BoBoUdpCrypto.OverheadBytes) continue;
+                    if (n < crypto.ActiveOverheadBytes) continue;
 
                     BoBoUdpPacketType ptype;
                     uint seq;
@@ -1181,14 +1195,17 @@ namespace DualRemote
                         continue;
                     }
 
-                    if (ptype == BoBoUdpPacketType.Audio)
+                    if (ptype == BoBoUdpPacketType.Audio || ptype == BoBoUdpPacketType.AudioAac)
                     {
                         int sr, ch, samples;
-                        byte[] adpcm;
-                        if (BoBoProtocol.ParseAudioPayload(plain, out sr, out ch, out samples, out adpcm))
+                        byte[] audioBytes;
+                        if (BoBoProtocol.ParseAudioPayload(plain, out sr, out ch, out samples, out audioBytes))
                         {
+                            int codecId = (ptype == BoBoUdpPacketType.AudioAac)
+                                ? BoBoCoreInterop.AudioCodecAac
+                                : BoBoCoreInterop.AudioCodecAdpcm;
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
-                            if (nc != null) nc.PushAudio(adpcm, adpcm.Length, sr, ch, samples);
+                            if (nc != null) nc.PushAudioEx(audioBytes, audioBytes.Length, sr, ch, samples, codecId);
                         }
                         continue;
                     }
@@ -1313,9 +1330,10 @@ namespace DualRemote
             byte[] fb = new byte[11];
             ushort lossX100 = (ushort)Math.Max(0, Math.Min(10000, (int)Math.Round(loss * 100.0)));
             ushort rttX10 = (ushort)Math.Max(0, Math.Min(65000, (int)Math.Round(latestRttMs * 10.0)));
+            ushort jitterX10 = (ushort)Math.Max(0, Math.Min(65535, (int)Math.Round(latestJitterMs * 10.0)));
             BoBoUdpCrypto.WriteUInt16LE(fb, 0, lossX100);
             BoBoUdpCrypto.WriteUInt16LE(fb, 2, rttX10);
-            BoBoUdpCrypto.WriteUInt16LE(fb, 4, 0);
+            BoBoUdpCrypto.WriteUInt16LE(fb, 4, jitterX10);
             BoBoUdpCrypto.WriteUInt32LE(fb, 6, assembler != null ? assembler.LastDeliveredFrameId : 0u);
             fb[10] = (byte)(requestPli ? 1 : 0);
             SendUdpRaw(uc, crypto, BoBoUdpPacketType.Feedback, fb, ep);

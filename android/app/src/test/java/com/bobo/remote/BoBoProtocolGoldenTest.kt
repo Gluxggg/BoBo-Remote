@@ -1,7 +1,14 @@
 package com.bobo.remote
 
 import com.bobo.remote.network.BoBoHostServer
+import com.bobo.remote.network.BoBoReassembledVideoFrame
 import com.bobo.remote.network.BoBoStreamClient
+import com.bobo.remote.network.BoBoUdpAesGcmCrypto
+import com.bobo.remote.network.BoBoUdpFec
+import com.bobo.remote.network.BoBoUdpNackCodec
+import com.bobo.remote.network.BoBoUdpNackRequest
+import com.bobo.remote.network.BoBoUdpPacketType
+import com.bobo.remote.network.BoBoUdpVideoAssembler
 import com.bobo.remote.protocol.BoBoIdentityStore
 import com.bobo.remote.protocol.BoBoPacketType
 import com.bobo.remote.protocol.BoBoProtocol
@@ -138,6 +145,79 @@ class BoBoProtocolGoldenTest {
         assertEquals(fc.getString("transferId"), parsedChunk.transferId)
         assertEquals(fc.getLong("offset"), parsedChunk.offset)
         assertEquals(fc.getString("chunkHex"), BoBoProtocol.bytesToHex(parsedChunk.data))
+
+        // 7. v7.3 Standard AEAD AES-128-GCM UDP golden vector + tamper/replay/nonce-cap/FEC/NACK tests
+        val gcm = root.getJSONObject("udpAesGcm")
+        val masterKey = BoBoProtocol.hexToBytes(gcm.getString("masterKey32Hex"))
+        val sid = gcm.getLong("sessionId")
+        val seq = gcm.getLong("seq")
+        val pktType = gcm.getInt("packetType")
+        val isH2c = gcm.getBoolean("isHostToClient")
+        val derivedKey = BoBoUdpAesGcmCrypto.deriveDirectionKey(
+            masterKey,
+            sid,
+            if (isH2c) "BoBo7.3-UDP-GCM-H2C" else "BoBo7.3-UDP-GCM-C2H"
+        )
+        assertEquals(gcm.getString("expectedKeyHex"), BoBoProtocol.bytesToHex(derivedKey))
+
+        val hostGcm = BoBoUdpAesGcmCrypto(sid, masterKey, isHost = isH2c)
+        val clientGcm = BoBoUdpAesGcmCrypto(sid, masterKey, isHost = !isH2c)
+        try {
+            hostGcm.forceSendSeqForTest(seq - 1L)
+            val plain = BoBoProtocol.hexToBytes(gcm.getString("plaintextHex"))
+            val sealed = hostGcm.seal(pktType, plain)!!
+            assertEquals(gcm.getString("expectedDatagramHex"), BoBoProtocol.bytesToHex(sealed))
+
+            // Tampered tag/header MUST fail without mutating replay window
+            val tampered = sealed.copyOf()
+            tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0xFF).toByte()
+            assertTrue(clientGcm.open(tampered) == null)
+
+            // Original packet still accepted after forged packet attempt, then replay rejected
+            val opened = clientGcm.open(sealed)!!
+            assertEquals(pktType, opened.packetType)
+            assertEquals(seq, opened.seq)
+            assertArrayEquals(plain, opened.plaintext)
+            assertTrue(clientGcm.open(sealed) == null)
+
+            // Empty payload AEAD round-trip
+            val emptySealed = hostGcm.seal(BoBoUdpPacketType.PING, ByteArray(0))!!
+            val emptyOpened = clientGcm.open(emptySealed)!!
+            assertEquals(0, emptyOpened.plaintext.size)
+
+            // Nonce exhaustion guard (0xFFFFFF00 fail-closed)
+            hostGcm.forceSendSeqForTest(BoBoUdpAesGcmCrypto.MAX_SAFE_SEQUENCE)
+            var exhaustedThrown = false
+            try {
+                hostGcm.seal(BoBoUdpPacketType.PING, ByteArray(0))
+            } catch (_: IllegalStateException) {
+                exhaustedThrown = true
+            }
+            assertTrue("Nonce exhaustion must fail closed", exhaustedThrown)
+        } finally {
+            hostGcm.close()
+            clientGcm.close()
+        }
+
+        // Interleaved XOR FEC burst-loss recovery (drop 2 consecutive shards across interleaved groups!)
+        val fakeIdr = ByteArray(6800) { i -> ((i * 41 + 7) and 0xFF).toByte() }
+        val shards = BoBoUdpFec.buildVideoShards(1L, 500L, 1920, 1080, true, fakeIdr, groupSizeIn = 2, interleavedFec = true)
+        val assembler = BoBoUdpVideoAssembler(nackEnabled = true)
+        val ready = ArrayList<BoBoReassembledVideoFrame>()
+        for (s in shards) {
+            val isParity = (s[12].toInt() and BoBoUdpFec.FLAG_PARITY) != 0
+            val sIdx = BoBoUdpAesGcmCrypto.readUInt16LE(s, 13)
+            if (!isParity && (sIdx == 1 || sIdx == 2)) continue
+            assembler.processShard(s, 15.0, ready)
+        }
+        assertEquals(1, ready.size)
+        assertArrayEquals(fakeIdr, ready[0].h264Data)
+        assertTrue(assembler.fecRecoveredPackets >= 2L)
+
+        // Selective NACK encode/decode round-trip
+        val nackIn = listOf(BoBoUdpNackRequest(12L, 3), BoBoUdpNackRequest(12L, 5))
+        val nackDecoded = BoBoUdpNackCodec.decode(BoBoUdpNackCodec.encode(nackIn)!!)
+        assertEquals(nackIn, nackDecoded)
     }
 
     @Test

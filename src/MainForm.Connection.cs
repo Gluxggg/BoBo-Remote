@@ -83,11 +83,11 @@ namespace DualRemote
             {
                 case BoBoRoutePreference.LanOnly:
                     connectionRouteHint.ForeColor = Theme.Muted;
-                    connectionRouteHint.Text = "仅连接同网段局域网 IP，或从「发现设备」列表选择。";
+                    connectionRouteHint.Text = "仅连接局域网同网段 IP。";
                     break;
                 case BoBoRoutePreference.Tailnet:
                     connectionRouteHint.ForeColor = Theme.Muted;
-                    connectionRouteHint.Text = "使用 Tailscale 地址。P2P 可用时直连，必要时走 Tailscale 节点/DERP 中继。";
+                    connectionRouteHint.Text = "优先 Tailscale P2P 直连，必要时经节点中继。";
                     break;
                 case BoBoRoutePreference.CustomRelayFallback:
                     BoBoCustomRelay activeRelay = customRelayStore != null ? customRelayStore.ActiveRelay : null;
@@ -100,24 +100,24 @@ namespace DualRemote
                         if (customRelayStore != null && customRelayStore.Relays.Count > 1 && selMode != BoBoRelaySelectionMode.Manual)
                         {
                             string schedDesc = selMode == BoBoRelaySelectionMode.LowestLatency
-                                ? "按最低延迟自动择优"
-                                : "按延迟+服务器负载动态调度";
-                            connectionRouteHint.Text = "直连优先；未通时在 " + customRelayStore.Relays.Count + " 个节点中" + schedDesc + "（当前：" + activeRelay.DisplayLabel + "）。";
+                                ? "按最低延迟择优"
+                                : "按延迟+负载动态调度";
+                            connectionRouteHint.Text = "直连未通时在 " + customRelayStore.Relays.Count + " 个节点中" + schedDesc + "（当前：" + activeRelay.DisplayLabel + "）";
                         }
                         else
                         {
-                            connectionRouteHint.Text = "直连优先；未通时自动切换至兜底中转「" + activeRelay.DisplayLabel + "」（端到端 TLS 1.2）。";
+                            connectionRouteHint.Text = "直连未通时切换兜底中转「" + activeRelay.DisplayLabel + "」（TLS 1.2）";
                         }
                     }
                     else
                     {
                         connectionRouteHint.ForeColor = Theme.Warning;
-                        connectionRouteHint.Text = "请先在下方添加您的自建 VPS 兜底中转地址与端口。";
+                        connectionRouteHint.Text = "请在下方添加自建 VPS 兜底中转地址与端口。";
                     }
                     break;
                 default:
                     connectionRouteHint.ForeColor = Theme.Muted;
-                    connectionRouteHint.Text = "自动优先同网段与 P2P 直连；需要自建 VPS 兜底可在线路选择「直连优先 + 自建中转兜底」。";
+                    connectionRouteHint.Text = "自动优先局域网与 P2P 直连；需要自建中转可在上方切换。";
                     break;
             }
         }
@@ -177,11 +177,11 @@ namespace DualRemote
                 UpdateCustomRelayButtonsState();
                 ShowConnectionRouteHint(activeConnectionRoute);
                 if (customRelayStore.SelectionMode == BoBoRelaySelectionMode.Manual)
-                    SetCustomRelayStatus("已设为手动固定节点（故障时仍可顺序兜底）。", Theme.Muted);
+                    SetCustomRelayStatus("已设为手动固定节点（故障时仍可顺序兜底）", Theme.Muted);
                 else if (customRelayStore.SelectionMode == BoBoRelaySelectionMode.LowestLatency)
-                    SetCustomRelayStatus("已设为延迟优先：连控时并发测速并自动选择最低延迟节点。", Theme.Accent);
+                    SetCustomRelayStatus("已设为延迟优先：连控时并发测速并选择最低 RTT 节点", Theme.Accent);
                 else
-                    SetCustomRelayStatus("已设为智能动态调度：综合 RTT 延迟与服务器负载优选，过载自动切换。", Theme.Accent);
+                    SetCustomRelayStatus("已设为智能动态调度：综合延迟与负载优选，过载自动切换", Theme.Accent);
             };
 
             customRelayAutoSelectBtn = Theme.Action("智能优选", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Bolt);
@@ -285,7 +285,7 @@ namespace DualRemote
 
             customRelayHealthInput = Theme.InputBox("负载监控接口", "");
             customRelayHealthInput.MaxLength = 300;
-            Theme.Cue(customRelayHealthInput, "负载接口（可选）：如 :49811 或 http://IP:49811/bobo-relay/health，留空自动探测端口+1");
+            Theme.Cue(customRelayHealthInput, "负载接口（可选）：如 :49811，留空自动探测端口+1");
             customRelayHealthInput.KeyDown += delegate(object sender, KeyEventArgs args)
             {
                 if (args.KeyCode == Keys.Enter)
@@ -301,7 +301,7 @@ namespace DualRemote
             Theme.Row(grid, 6);
 
             customRelayStatusLabel = Theme.Text(
-                "支持多节点并发测速、bobo-relay 服务器实时负载动态优选与过载自动切换。",
+                "支持多节点并发测速、实时负载优选与过载切换",
                 Theme.TextSize.Small, Theme.Muted);
             customRelayStatusLabel.AutoEllipsis = true;
             Theme.Row(grid, 22, customRelayStatusLabel);

@@ -7,6 +7,7 @@ public enum BoBoPacketType: UInt8, Sendable {
     case inputEvent = 0x04
     case fileChunk = 0x05
     case cursorShape = 0x06
+    case audioAac = 0x07
 }
 
 public struct BoBoMonitorDescriptor: Codable, Equatable, Identifiable, Sendable {
@@ -139,7 +140,7 @@ public struct BoBoFileChunk: Equatable, Sendable {
 public enum BoBoProtocol {
     public static let protocolMagic = "BOBO6"
     public static let protocolVersion = "6.2"
-    public static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "7.2.1"
+    public static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "7.3.0"
     public static let tlsSniHost = "BoBoRemote-V6-Node"
 
     public static let platformWindows = "windows"

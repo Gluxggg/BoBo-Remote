@@ -31,6 +31,7 @@ namespace DualRemote
         private int targetPort = BoBoProtocol.DefaultTcpPort;
         private bool hostAudio;
         private bool preferHevc;
+        private bool preferCompressedAudio = true;
         private int currentWidth;
         private int currentHeight;
         private int currentFps;
@@ -172,7 +173,8 @@ namespace DualRemote
             bool sendSystemShortcuts = false,
             int miniOpacity = 100,
             bool superDisplay = true,
-            int port = BoBoProtocol.DefaultTcpPort)
+            int port = BoBoProtocol.DefaultTcpPort,
+            bool preferCompressedAudio = true)
         {
             this.host = host ?? "";
             this.targetPort = port > 0 && port <= 65535 ? port : BoBoProtocol.DefaultTcpPort;
@@ -190,6 +192,7 @@ namespace DualRemote
             this.hudVisible = showHud;
             this.hostAudio = hostAudio;
             this.preferHevc = preferHevc;
+            this.preferCompressedAudio = preferCompressedAudio;
             this.autoRemotePrivacyOnConnect = autoRemotePrivacy;
             this.lockHostOnDisconnect = lockHostOnDisconnect;
             this.hideFloatBallInFullscreen = hideFloatBallInFullscreen;
@@ -1318,6 +1321,7 @@ namespace DualRemote
                 AutoBitrate = autoBitrate,
                 FreeMouse = freeMouseMode,
                 MuteHostAudio = !hostAudio,
+                PreferCompressedAudio = preferCompressedAudio,
                 RequestPrivacy = autoRemotePrivacyOnConnect,
                 SuperDisplay = lastSuperDisplayRequestEnabled,
                 ClientWidth = lastRequestedViewport.Width,

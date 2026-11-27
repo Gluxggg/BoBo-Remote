@@ -11,22 +11,22 @@ namespace DualRemote
 {
     internal static class RemoteTheme
     {
-        internal static readonly Color ChromeBg = Color.FromArgb(238, 240, 244);
+        internal static readonly Color ChromeBg = Color.FromArgb(241, 243, 247);
         internal static readonly Color Rail = ChromeBg;
-        internal static readonly Color Workspace = Color.FromArgb(245, 246, 248);
-        internal static readonly Color Paper = Color.FromArgb(252, 252, 253);
-        internal static readonly Color SurfaceSubtle = Color.FromArgb(238, 241, 245);
-        internal static readonly Color NavHover = Color.FromArgb(226, 232, 241);
-        internal static readonly Color NavActive = Color.FromArgb(220, 230, 246);
+        internal static readonly Color Workspace = Color.FromArgb(246, 247, 250);
+        internal static readonly Color Paper = Color.FromArgb(255, 255, 255);
+        internal static readonly Color SurfaceSubtle = Color.FromArgb(243, 245, 249);
+        internal static readonly Color NavHover = Color.FromArgb(233, 238, 246);
+        internal static readonly Color NavActive = Color.FromArgb(226, 236, 250);
 
-        internal static readonly Color Ink = Color.FromArgb(29, 36, 49);
-        internal static readonly Color BodyInk = Color.FromArgb(60, 74, 94);
-        internal static readonly Color Muted = Color.FromArgb(76, 90, 111);
-        internal static readonly Color Placeholder = Color.FromArgb(102, 115, 135);
+        internal static readonly Color Ink = Color.FromArgb(24, 31, 44);
+        internal static readonly Color BodyInk = Color.FromArgb(56, 70, 90);
+        internal static readonly Color Muted = Color.FromArgb(100, 113, 133);
+        internal static readonly Color Placeholder = Color.FromArgb(132, 143, 160);
 
-        internal static readonly Color Stroke = Color.FromArgb(222, 227, 235);
-        internal static readonly Color StrokeStrong = Color.FromArgb(194, 204, 218);
-        internal static readonly Color Divider = Color.FromArgb(227, 231, 237);
+        internal static readonly Color Stroke = Color.FromArgb(230, 234, 241);
+        internal static readonly Color StrokeStrong = Color.FromArgb(206, 214, 226);
+        internal static readonly Color Divider = Color.FromArgb(236, 239, 244);
         internal static readonly Color WindowBorder = StrokeStrong;
 
         internal static readonly Color Accent = Color.FromArgb(53, 90, 151);
@@ -50,14 +50,14 @@ namespace DualRemote
         internal static readonly Color OverlayInk = Color.FromArgb(242, 245, 250);
         internal static readonly Color OverlayMuted = Color.FromArgb(189, 201, 222);
 
-        private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.5f);
-        private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 9f);
-        private static readonly Font LabelFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Regular);
-        private static readonly Font LabelBoldFont = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Bold);
-        private static readonly Font SectionFont = new Font("Microsoft YaHei UI", 11.25f, FontStyle.Bold);
-        private static readonly Font TitleFont = new Font("Microsoft YaHei UI", 19f, FontStyle.Bold);
-        private static readonly Font CodeFont = new Font("Consolas", 9.5f);
-        private static readonly Font BigCodeFont = new Font("Consolas", 17.5f, FontStyle.Bold);
+        private static readonly Font BodyFont = new Font("Microsoft YaHei UI", 9.25f);
+        private static readonly Font SmallFont = new Font("Microsoft YaHei UI", 8.25f);
+        private static readonly Font LabelFont = new Font("Microsoft YaHei UI", 9.25f, FontStyle.Regular);
+        private static readonly Font LabelBoldFont = new Font("Microsoft YaHei UI", 9.25f, FontStyle.Bold);
+        private static readonly Font SectionFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+        private static readonly Font TitleFont = new Font("Microsoft YaHei UI", 15.5f, FontStyle.Bold);
+        private static readonly Font CodeFont = new Font("Consolas", 9.0f);
+        private static readonly Font BigCodeFont = new Font("Consolas", 16.0f, FontStyle.Bold);
 
         internal enum TextSize { Small, Body, Label, LabelBold, Section, Title, Code, BigCode }
 
@@ -811,8 +811,19 @@ namespace DualRemote
             {
                 const int WmPaint = 0x000F;
                 const int WmEraseBkgnd = 0x0014;
+                const int WmPrint = 0x0317;
+                const int WmPrintClient = 0x0318;
                 if (m.Msg == WmEraseBkgnd)
                 {
+                    m.Result = (IntPtr)1;
+                    return;
+                }
+                if ((m.Msg == WmPrint || m.Msg == WmPrintClient) && m.WParam != IntPtr.Zero && Width > 0 && Height > 0)
+                {
+                    using (Graphics g = Graphics.FromHdc(m.WParam))
+                    {
+                        PaintClosedFace(g, ClientRectangle);
+                    }
                     m.Result = (IntPtr)1;
                     return;
                 }

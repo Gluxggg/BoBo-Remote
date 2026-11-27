@@ -1700,6 +1700,53 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
                   " pop=" + std::to_string(popOk && stalePopDropped));
     }
 
+    // 7. OS-native Media Foundation AAC-LC (ADTS 96kbps) encode/decode round-trip + compression check
+    {
+        bool aacAvailable = IsMfAacAudioSupported();
+        if (!aacAvailable) {
+            check("MF AAC-LC 48kHz audio codec (graceful ADPCM fallback on host OS)", true, "fallback_adpcm");
+        } else {
+            MfAacEncoder aacEnc;
+            MfAacDecoder aacDec;
+            bool opened = aacEnc.Open(48000, 2, 96000) && aacDec.Open(48000, 2);
+            std::vector<int16_t> sine(4096 * 2);
+            for (size_t i = 0; i < 4096; ++i) {
+                double phase = 6.28318530718 * 440.0 * static_cast<double>(i) / 48000.0;
+                int16_t sample = static_cast<int16_t>(std::sin(phase) * 16000.0);
+                sine[i * 2] = sample;
+                sine[i * 2 + 1] = sample;
+            }
+            std::vector<std::vector<uint8_t>> packets;
+            bool encOk = opened && aacEnc.PushPcm(sine.data(), 4096, packets);
+            std::vector<std::vector<uint8_t>> drained;
+            if (encOk && aacEnc.Drain(drained)) {
+                packets.insert(packets.end(), drained.begin(), drained.end());
+            }
+            size_t totalAacBytes = 0;
+            size_t totalDecodedShorts = 0;
+            bool adtsSyncOk = !packets.empty();
+            for (const auto& pkt : packets) {
+                totalAacBytes += pkt.size();
+                if (pkt.size() < 7 || pkt[0] != 0xFF || (pkt[1] & 0xF0) != 0xF0) {
+                    adtsSyncOk = false;
+                }
+                std::vector<int16_t> decoded;
+                if (aacDec.DecodeAdts(pkt.data(), static_cast<int>(pkt.size()), decoded)) {
+                    totalDecodedShorts += decoded.size();
+                }
+            }
+            std::vector<int16_t> drainedPcm;
+            if (aacDec.Drain(drainedPcm)) totalDecodedShorts += drainedPcm.size();
+            aacEnc.Close();
+            aacDec.Close();
+            bool compressed = (totalAacBytes > 0) && (totalAacBytes * 3 < 4096 * 4); // >3x smaller than raw PCM
+            check("MF AAC-LC 48kHz stereo ADTS round-trip",
+                  opened && encOk && adtsSyncOk && compressed && totalDecodedShorts >= 4096,
+                  "pkts=" + std::to_string(packets.size()) + " bytes=" + std::to_string(totalAacBytes) +
+                      " decShorts=" + std::to_string(totalDecodedShorts));
+        }
+    }
+
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
 
     std::string finalReport = log.str();
@@ -1724,7 +1771,11 @@ BOBO_API int32_t __stdcall BoBoCore_GetMonitorInfo(int32_t index, BoBoMonitorInf
     return 1;
 }
 
-BOBO_API void* __stdcall BoBoHost_CreateEx(
+BOBO_API int32_t __stdcall BoBoCore_IsAacAudioSupported(void) {
+    return IsMfAacAudioSupported() ? 1 : 0;
+}
+
+BOBO_API void* __stdcall BoBoHost_CreateV2(
     int32_t monitorIndex,
     int32_t targetWidth,
     int32_t targetHeight,
@@ -1732,6 +1783,7 @@ BOBO_API void* __stdcall BoBoHost_CreateEx(
     int32_t bitrateKbps,
     int32_t muteHostSpeakers,
     int32_t compositeCursor,
+    int32_t preferAacAudio,
     BoBoVideoFrameCallback onVideo,
     BoBoAudioFrameCallback onAudio,
     void* userCtx) {
@@ -1748,9 +1800,31 @@ BOBO_API void* __stdcall BoBoHost_CreateEx(
     session->running.store(true);
     session->videoThread = std::thread([session]() { session->RunVideoLoop(); });
     if (onAudio) {
-        session->audioCap.Start(muteHostSpeakers != 0, onAudio, userCtx);
+        session->audioCap.Start(muteHostSpeakers != 0, preferAacAudio != 0, onAudio, userCtx);
     }
     return session;
+}
+
+BOBO_API void* __stdcall BoBoHost_CreateEx(
+    int32_t monitorIndex,
+    int32_t targetWidth,
+    int32_t targetHeight,
+    int32_t fps,
+    int32_t bitrateKbps,
+    int32_t muteHostSpeakers,
+    int32_t compositeCursor,
+    BoBoVideoFrameCallback onVideo,
+    BoBoAudioFrameCallback onAudio,
+    void* userCtx) {
+    return BoBoHost_CreateV2(
+        monitorIndex, targetWidth, targetHeight, fps, bitrateKbps,
+        muteHostSpeakers, compositeCursor, 0, onVideo, onAudio, userCtx);
+}
+
+BOBO_API int32_t __stdcall BoBoHost_GetAudioCodec(void* handle) {
+    auto* session = static_cast<BoBoHostSession*>(handle);
+    if (!session) return kAudioCodecAdpcm;
+    return session->audioCap.ActiveCodec();
 }
 
 BOBO_API void* __stdcall BoBoHost_Create(
@@ -2474,10 +2548,25 @@ BOBO_API void __stdcall BoBoClient_PushAudio(
     int32_t sampleRate,
     int32_t channels,
     int32_t sampleCount) {
+    BoBoClient_PushAudioEx(handle, adpcmData, length, sampleRate, channels, sampleCount, kAudioCodecAdpcm);
+}
+
+BOBO_API void __stdcall BoBoClient_PushAudioEx(
+    void* handle,
+    const uint8_t* audioData,
+    int32_t length,
+    int32_t sampleRate,
+    int32_t channels,
+    int32_t sampleCount,
+    int32_t codecId) {
     (void)sampleCount;
     auto* st = static_cast<BoBoClientSession*>(handle);
-    if (!st || !st->alive.load() || !adpcmData || length <= 0) return;
-    st->audio.PlayAdpcm(adpcmData, length, sampleRate, channels);
+    if (!st || !st->alive.load() || !audioData || length <= 0) return;
+    if (codecId == kAudioCodecAac) {
+        st->audio.PlayAac(audioData, length, sampleRate, channels);
+    } else {
+        st->audio.PlayAdpcm(audioData, length, sampleRate, channels);
+    }
 }
 
 BOBO_API void __stdcall BoBoClient_Resize(void* handle, int32_t width, int32_t height) {

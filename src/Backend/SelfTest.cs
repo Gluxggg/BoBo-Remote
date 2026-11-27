@@ -1075,6 +1075,93 @@ namespace DualRemote
                     " ok2=" + ok2 + " ok1=" + ok1 + " replayRej=" + rejectReplay + " tamperRej=" + rejectTamper);
             }
 
+            // 1b. P1-A Standard AEAD AES-128-GCM golden vector, verify-before-replay, 512-window, nonce guard & key zeroization
+            {
+                byte[] masterKey = HexToBytes("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+                const uint vecSessionId = 0x12345678u;
+                byte[] derivedH2c = BoBoUdpCrypto.DeriveDirectionKey(masterKey, vecSessionId, "BoBo7.3-UDP-GCM-H2C");
+                bool gcmKeyDeriveOk = BytesToHex(derivedH2c).Substring(0, 32) == "6f7550a61d7f82ba4b74bbb537bd89ef";
+                byte[] vecPlaintext = Encoding.UTF8.GetBytes("BoBo7.3-AEAD-GCM");
+
+                BoBoUdpPacketType tGcm;
+                uint sGcm;
+                byte[] oGcm;
+                bool vecSealOk = false;
+                bool vecOpenOk = false;
+                bool emptyGcmOk = false;
+                bool verifyBeforeReplayOk = false;
+                bool gcmReflectRej = false;
+                bool gcmWindowOk = false;
+                bool nonceExhaustGuardOk = false;
+                bool keyZeroizedOk = false;
+
+                BoBoUdpCrypto hostGcm = new BoBoUdpCrypto(vecSessionId, masterKey, true, BoBoUdpCipherMode.Aes128Gcm);
+                using (var clientGcm = new BoBoUdpCrypto(vecSessionId, masterKey, false, BoBoUdpCipherMode.Aes128Gcm))
+                {
+                    hostGcm.ForceSendSeqForTest(41u);
+                    byte[] sealedVec = hostGcm.Seal(BoBoUdpPacketType.Audio, vecPlaintext, 0, vecPlaintext.Length);
+                    vecSealOk = BytesToHex(sealedVec) == "785634122a00000004baa91203313de78fce3509cb81e3768ec4a45aac6a7eca60428e4170da43b323";
+                    vecOpenOk = clientGcm.TryOpen(sealedVec, sealedVec.Length, out tGcm, out sGcm, out oGcm)
+                        && tGcm == BoBoUdpPacketType.Audio && sGcm == 42u
+                        && Encoding.UTF8.GetString(oGcm) == "BoBo7.3-AEAD-GCM";
+                    gcmReflectRej = !hostGcm.TryOpen(sealedVec, sealedVec.Length, out tGcm, out sGcm, out oGcm);
+
+                    byte[] emptySealed = hostGcm.Seal(BoBoUdpPacketType.Ping, new byte[0], 0, 0);
+                    emptyGcmOk = emptySealed.Length == BoBoUdpCrypto.GcmOverheadBytes
+                        && clientGcm.TryOpen(emptySealed, emptySealed.Length, out tGcm, out sGcm, out oGcm)
+                        && tGcm == BoBoUdpPacketType.Ping && oGcm != null && oGcm.Length == 0;
+
+                    hostGcm.ForceSendSeqForTest(49u);
+                    byte[] validSeq50 = hostGcm.Seal(BoBoUdpPacketType.Ping, vecPlaintext, 0, vecPlaintext.Length);
+                    byte[] tamperedSeq50 = (byte[])validSeq50.Clone();
+                    tamperedSeq50[BoBoUdpCrypto.HeaderBytes] ^= 0x80;
+                    bool rejTampered = !clientGcm.TryOpen(tamperedSeq50, tamperedSeq50.Length, out tGcm, out sGcm, out oGcm);
+                    bool accFreshAfterTamper = clientGcm.TryOpen(validSeq50, validSeq50.Length, out tGcm, out sGcm, out oGcm);
+                    bool rejReplay50 = !clientGcm.TryOpen(validSeq50, validSeq50.Length, out tGcm, out sGcm, out oGcm);
+                    verifyBeforeReplayOk = rejTampered && accFreshAfterTamper && rejReplay50;
+
+                    hostGcm.ForceSendSeqForTest(599u);
+                    byte[] seq600 = hostGcm.Seal(BoBoUdpPacketType.Ping, vecPlaintext, 0, vecPlaintext.Length);
+                    hostGcm.ForceSendSeqForTest(89u);
+                    byte[] seq90 = hostGcm.Seal(BoBoUdpPacketType.Ping, vecPlaintext, 0, vecPlaintext.Length);
+                    hostGcm.ForceSendSeqForTest(79u);
+                    byte[] seq80 = hostGcm.Seal(BoBoUdpPacketType.Ping, vecPlaintext, 0, vecPlaintext.Length);
+                    gcmWindowOk = clientGcm.TryOpen(seq600, seq600.Length, out tGcm, out sGcm, out oGcm)
+                        && clientGcm.TryOpen(seq90, seq90.Length, out tGcm, out sGcm, out oGcm)
+                        && !clientGcm.TryOpen(seq80, seq80.Length, out tGcm, out sGcm, out oGcm);
+
+                    hostGcm.ForceSendSeqForTest(BoBoUdpCrypto.MaxSafeSequence);
+                    try
+                    {
+                        hostGcm.Seal(BoBoUdpPacketType.Ping, vecPlaintext, 0, vecPlaintext.Length);
+                    }
+                    catch (System.Security.Cryptography.CryptographicException)
+                    {
+                        nonceExhaustGuardOk = true;
+                    }
+                }
+
+                hostGcm.Dispose();
+                const System.Reflection.BindingFlags PrivInst = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                Type cryptoType = typeof(BoBoUdpCrypto);
+                byte[] zEncAes = (byte[])cryptoType.GetField("encAesKey", PrivInst).GetValue(hostGcm);
+                byte[] zDecAes = (byte[])cryptoType.GetField("decAesKey", PrivInst).GetValue(hostGcm);
+                IntPtr zEncH = (IntPtr)cryptoType.GetField("encGcmKeyHandle", PrivInst).GetValue(hostGcm);
+                IntPtr zDecH = (IntPtr)cryptoType.GetField("decGcmKeyHandle", PrivInst).GetValue(hostGcm);
+                IntPtr zEncObj = (IntPtr)cryptoType.GetField("encGcmKeyObj", PrivInst).GetValue(hostGcm);
+                IntPtr zDecObj = (IntPtr)cryptoType.GetField("decGcmKeyObj", PrivInst).GetValue(hostGcm);
+                keyZeroizedOk = zEncAes.All(b => b == 0) && zDecAes.All(b => b == 0)
+                    && zEncH == IntPtr.Zero && zDecH == IntPtr.Zero
+                    && zEncObj == IntPtr.Zero && zDecObj == IntPtr.Zero;
+
+                Check("P1-A AES-128-GCM AEAD：黄金向量匹配、空包通过、先验签后窗口、512 窗防重放、Nonce 封顶与 Dispose 清零",
+                    gcmKeyDeriveOk && vecSealOk && vecOpenOk && emptyGcmOk && verifyBeforeReplayOk &&
+                    gcmReflectRej && gcmWindowOk && nonceExhaustGuardOk && keyZeroizedOk,
+                    "derive=" + gcmKeyDeriveOk + " seal=" + vecSealOk + " open=" + vecOpenOk +
+                    " empty=" + emptyGcmOk + " vbr=" + verifyBeforeReplayOk + " refl=" + gcmReflectRej +
+                    " win=" + gcmWindowOk + " nonce=" + nonceExhaustGuardOk + " zero=" + keyZeroizedOk);
+            }
+
             // 2. XOR FEC 0-RTT loss recovery + out-of-order frame jitter grace (F+1 completes before F's last shard)
             byte[] fakeIdr = new byte[5200]; // 5 shards (1140*4 + 640) -> 2 FEC groups on keyframe
             for (int i = 0; i < fakeIdr.Length; i++) fakeIdr[i] = (byte)((i * 37 + 13) & 0xFF);
@@ -1347,6 +1434,52 @@ namespace DualRemote
                 abrJitter.LatestJitterMs >= 35.0 && abrJitter.CurrentBitrateKbps <= 4500,
                 "shiftBase=" + abrShift.CurrentBaselineRttMs + " shiftBps=" + abrShift.CurrentBitrateKbps +
                 " jitter=" + Math.Round(abrJitter.LatestJitterMs, 1) + " jBps=" + abrJitter.CurrentBitrateKbps);
+
+            // 4b. P1-B GCC delay-gradient congestion control, single-spike immunity & dynamic FEC scaling
+            var gcc = new BoBoAdaptiveBitrateController(true, 20000, 60, 10.0, true);
+            long gT0 = Stopwatch.GetTimestamp();
+            int gBps = 20000, gFps = 60;
+            gcc.OnTelemetry(26.0, 0.0, 2.0, gT0 + Stopwatch.Frequency * 250 / 1000, out gBps, out gFps);
+            gcc.OnTelemetry(48.0, 0.0, 3.0, gT0 + Stopwatch.Frequency * 500 / 1000, out gBps, out gFps);
+            gcc.OnTelemetry(76.0, 0.0, 4.0, gT0 + Stopwatch.Frequency * 750 / 1000, out gBps, out gFps);
+            gcc.OnTelemetry(108.0, 0.0, 5.0, gT0 + Stopwatch.Frequency * 1000 / 1000, out gBps, out gFps);
+            bool gccOveruseOk = gcc.CurrentSignal == BoBoCongestionSignal.Overuse
+                && gcc.CurrentBitrateKbps < 20000 && gcc.PacingHeadroomFactor < 1.15;
+
+            var spikeGcc = new BoBoAdaptiveBitrateController(true, 20000, 60, 10.0, true);
+            long spT0 = Stopwatch.GetTimestamp();
+            int spBps, spFps;
+            spikeGcc.OnTelemetry(38.0, 0.0, 4.0, spT0 + Stopwatch.Frequency * 250 / 1000, out spBps, out spFps);
+            bool singleSpikeImmune = spikeGcc.CurrentSignal != BoBoCongestionSignal.Overuse && spBps == 20000;
+
+            int lanGrp, singleGrp, wanGrp;
+            bool lanEmit, singleCleanEmit, wanEmit;
+            BoBoUdpFec.SelectFecParams(12, false, 0.0, true, 4.0, 1.0, 0, out lanGrp, out lanEmit);
+            BoBoUdpFec.SelectFecParams(1, false, 0.0, true, 4.0, 1.0, 0, out singleGrp, out singleCleanEmit);
+            BoBoUdpFec.SelectFecParams(12, false, 3.5, true, 85.0, 28.0, 3, out wanGrp, out wanEmit);
+            List<byte[]> dynShards = BoBoUdpFec.BuildVideoShards(77u, 770u, 1920, 1080, false, new byte[4800], 3.5, true, true, 85.0, 28.0, 3);
+            bool hasInterleaved = dynShards.Any(sh => (sh[12] & BoBoUdpFec.FlagInterleaved) != 0);
+            bool hasParity = dynShards.Any(sh => (sh[12] & BoBoUdpFec.FlagParity) != 0);
+            Check("P1-B GCC 延迟梯度拥塞控制与动态 FEC：趋势过载降码率降突发、单峰免疫、弱网自适应收缩分组",
+                gccOveruseOk && singleSpikeImmune && lanEmit && lanGrp == 8 && !singleCleanEmit && wanEmit && wanGrp == 2 && hasInterleaved && hasParity,
+                "sig=" + gcc.CurrentSignal + " bps=" + gcc.CurrentBitrateKbps + " pacing=" + gcc.PacingHeadroomFactor +
+                " spikeImm=" + singleSpikeImmune + " lanGrp=" + lanGrp + " singleEmit=" + singleCleanEmit + " wanGrp=" + wanGrp);
+
+            // 4c. P1-D AAC-LC audio wire payload round-trip & OS capability query
+            byte[] aacStub = new byte[] { 0xFF, 0xF1, 0x4C, 0x80, 0x02, 0x00, 0xFC, 0xAA, 0xBB };
+            byte[] audioWire = BoBoProtocol.BuildAudioPayload(48000, 2, 1024, aacStub);
+            int aRate, aCh, aSamples;
+            byte[] parsedAac;
+            bool aacWireOk = BoBoProtocol.ParseAudioPayload(audioWire, out aRate, out aCh, out aSamples, out parsedAac)
+                && (byte)BoBoPacketType.AudioAac == 0x07
+                && aRate == 48000 && aCh == 2 && aSamples == 1024 && parsedAac.SequenceEqual(aacStub);
+            bool aacCapProbed = true;
+            bool aacSupported = false;
+            try { aacSupported = BoBoCoreInterop.IsAacAudioSupported(); }
+            catch { aacCapProbed = false; }
+            Check("P1-D AudioAac 协议帧打包解析与系统 Media Foundation AAC-LC 能力探测",
+                aacWireOk && aacCapProbed,
+                "wireOk=" + aacWireOk + " capProbed=" + aacCapProbed + " aacSupported=" + aacSupported);
 
             Check("本地网段识别：私网与回环地址可用局域网档位，Tailscale 使用跨网档位",
                 BoBoProtocol.IsPrivateLanIp("192.168.1.20") && BoBoProtocol.IsPrivateLanIp("10.0.0.1") &&
