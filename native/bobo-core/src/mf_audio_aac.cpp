@@ -11,7 +11,9 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace bobo {
 
@@ -443,7 +445,10 @@ bool MfAacDecoder::DecodeAdts(const uint8_t* adtsData, int len, std::vector<int1
         if (!PullOutputs(outPcm)) return false;
         hrIn = mft->ProcessInput(0, samp.Get(), 0);
     }
-    if (FAILED(hrIn)) return false;
+    if (FAILED(hrIn)) {
+        lastHr_ = static_cast<uint32_t>(hrIn);
+        return false;
+    }
     return PullOutputs(outPcm);
 }
 
@@ -530,15 +535,55 @@ void MfAacDecoder::Close() {
 }
 
 bool IsMfAacAudioSupported() {
+    static std::mutex probeGate;
+    static bool probed = false;
+    static bool cachedOk = false;
+
+    std::lock_guard<std::mutex> lock(probeGate);
+    if (probed) return cachedOk;
+
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     bool ok = false;
     {
         MfAacEncoder enc;
         MfAacDecoder dec;
-        ok = enc.Open(48000, 2, 96000) && dec.Open(48000, 2);
+        if (enc.Open(48000, 2, 96000) && dec.Open(48000, 2)) {
+            std::vector<int16_t> sine(4096 * 2);
+            for (size_t i = 0; i < 4096; ++i) {
+                double phase = 6.28318530718 * 440.0 * static_cast<double>(i) / 48000.0;
+                int16_t sample = static_cast<int16_t>(std::sin(phase) * 16000.0);
+                sine[i * 2] = sample;
+                sine[i * 2 + 1] = sample;
+            }
+            std::vector<std::vector<uint8_t>> pkts;
+            std::vector<std::vector<uint8_t>> drained;
+            bool encOk = enc.PushPcm(sine.data(), 4096, pkts);
+            if (encOk && enc.Drain(drained)) {
+                pkts.insert(pkts.end(), drained.begin(), drained.end());
+            }
+            size_t totalDecodedShorts = 0;
+            bool syncOk = encOk && !pkts.empty();
+            for (const auto& pkt : pkts) {
+                if (pkt.size() < 7 || pkt[0] != 0xFF || (pkt[1] & 0xF0) != 0xF0) {
+                    syncOk = false;
+                    break;
+                }
+                std::vector<int16_t> pcm;
+                if (dec.DecodeAdts(pkt.data(), static_cast<int>(pkt.size()), pcm)) {
+                    totalDecodedShorts += pcm.size();
+                }
+            }
+            std::vector<int16_t> drainedPcm;
+            if (dec.Drain(drainedPcm)) {
+                totalDecodedShorts += drainedPcm.size();
+            }
+            ok = syncOk && totalDecodedShorts >= 4096;
+        }
     }
     if (SUCCEEDED(hrCo)) CoUninitialize();
-    return ok;
+    cachedOk = ok;
+    probed = true;
+    return cachedOk;
 }
 
 } // namespace bobo

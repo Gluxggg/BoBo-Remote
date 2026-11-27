@@ -51,6 +51,7 @@ public:
     bool IsOpen() const { return open_; }
     int SampleRate() const { return sampleRate_; }
     int Channels() const { return channels_; }
+    uint32_t LastHresult() const { return lastHr_; }
 
 private:
     bool ConfigureOutputType();
@@ -65,6 +66,7 @@ private:
     uint32_t outStreamMinBytes_ = 16384;
     bool providerAllocatesOut_ = false;
     int64_t nextPtsHns_ = 0;
+    uint32_t lastHr_ = 0;
     void* mftRaw_ = nullptr;
 };
 
