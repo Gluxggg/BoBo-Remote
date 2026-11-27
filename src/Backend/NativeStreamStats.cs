@@ -6,6 +6,14 @@ namespace DualRemote
         internal double Fps;
         internal double DecodeMs;
         internal double RenderMs;
+        internal double QueueWaitMs;
+        internal double MaxQueueWaitMs;
+        internal double FrameTotalMs;
+        internal int QueueDepth;
+        internal int QueueBytes;
+        internal bool WaitingForKeyframe;
+        internal long DecodeDroppedFrames;
+        internal long DecodeQueueResets;
         internal double RttMs;
         internal double JitterMs;
         internal double PacketLossPct;

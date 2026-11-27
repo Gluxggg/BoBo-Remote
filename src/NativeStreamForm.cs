@@ -1639,6 +1639,11 @@ namespace DualRemote
             statusOverlay.Location = new Point(x, y);
         }
 
+        internal static string FormatHudPipelineLine(NativeStreamStats s)
+        {
+            return NativeHudOverlay.FormatHudPipelineLine(s);
+        }
+
         private void UpdateHudPosition()
         {
             if (hudOverlay == null || hudOverlay.IsDisposed || IsDisposed) return;
@@ -2079,7 +2084,9 @@ namespace DualRemote
             private const int WsExTopMost = 0x00000008;
 
             private string line1 = "BoBo V6 · 全内置 D3D11VA 硬解";
-            private string line2 = "等待帧率统计…";
+            private string line2 = "等待网络指标…";
+            private string line3 = "帧管线等待首帧…";
+            private bool line3Warn;
 
             internal NativeHudOverlay()
             {
@@ -2113,7 +2120,28 @@ namespace DualRemote
             private void ApplyHudSize()
             {
                 float scale = Theme.GetDpiScale(this);
-                Size = new Size((int)Math.Round(460 * scale), (int)Math.Round(56 * scale));
+                Size = new Size((int)Math.Round(492 * scale), (int)Math.Round(76 * scale));
+            }
+
+            internal static string FormatHudPipelineLine(NativeStreamStats s)
+            {
+                if (s == null) return "帧管线等待首帧…";
+                double totalMs = s.FrameTotalMs > 0.0 ? s.FrameTotalMs : (s.QueueWaitMs + s.DecodeMs + s.RenderMs);
+                var sb = new StringBuilder(96);
+                sb.AppendFormat(CultureInfo.InvariantCulture,
+                    "帧管线 {0:F1}ms（排队 {1:F1} · 解码 {2:F1} · 渲染 {3:F1}）· 队列 {4}帧",
+                    totalMs, s.QueueWaitMs, s.DecodeMs, s.RenderMs, s.QueueDepth);
+                if (s.DecodeDroppedFrames > 0 || s.DecodeQueueResets > 0)
+                {
+                    sb.AppendFormat(CultureInfo.InvariantCulture,
+                        " · 丢帧 {0}/重置 {1}",
+                        s.DecodeDroppedFrames, s.DecodeQueueResets);
+                }
+                if (s.WaitingForKeyframe)
+                {
+                    sb.Append(" · 等待关键帧");
+                }
+                return sb.ToString();
             }
 
             internal void UpdateStats(NativeStreamStats s, string modeTag)
@@ -2129,11 +2157,13 @@ namespace DualRemote
                     string.IsNullOrEmpty(s.Decoder) ? "D3D11VA" : s.Decoder);
                 line2 = isUdp
                     ? string.Format(CultureInfo.InvariantCulture,
-                        "解码 {0:F1}ms · RTT {1:F0}ms(±{2:F0}) · 丢包 {3:F1}% · 纠错 F{4}/N{5} · {6:F1} Mbps",
-                        s.DecodeMs, s.RttMs, s.JitterMs, s.PacketLossPct, s.FecRecoveredPackets, s.NackRecoveredPackets, mbps)
+                        "网络 RTT {0:F0}ms(±{1:F0}) · 丢包 {2:F1}% · 纠错 F{3}/N{4} · {5:F1} Mbps",
+                        s.RttMs, s.JitterMs, s.PacketLossPct, s.FecRecoveredPackets, s.NackRecoveredPackets, mbps)
                     : string.Format(CultureInfo.InvariantCulture,
-                        "解码 {0:F1}ms · RTT {1:F0}ms · 丢包 {2:F1}% · {3:F1} Mbps",
-                        s.DecodeMs, s.RttMs, s.PacketLossPct, mbps);
+                        "网络 RTT {0:F0}ms · 丢包 {1:F1}% · {2:F1} Mbps",
+                        s.RttMs, s.PacketLossPct, mbps);
+                line3 = FormatHudPipelineLine(s);
+                line3Warn = s.WaitingForKeyframe || s.QueueDepth >= 6 || s.MaxQueueWaitMs >= 120.0;
                 Invalidate();
             }
 
@@ -2149,15 +2179,19 @@ namespace DualRemote
                     g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
                 int padX = (int)Math.Round(10 * scale);
                 int line1Y = (int)Math.Round(6 * scale);
-                int line2Y = (int)Math.Round(29 * scale);
+                int line2Y = (int)Math.Round(28 * scale);
+                int line3Y = (int)Math.Round(50 * scale);
                 int textW = Math.Max(40, Width - padX * 2);
+                int lineH = (int)Math.Round(20 * scale);
                 const TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+                Color line3Color = line3Warn ? Color.FromArgb(255, 245, 194, 107) : Theme.OverlayMuted;
                 using (var f1 = new Font("Consolas", 9f, FontStyle.Bold))
                 using (var f2 = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular))
                 {
-                    TextRenderer.DrawText(g, line1, f1, new Rectangle(padX, line1Y, textW, (int)Math.Round(20 * scale)), Theme.OverlayInk, flags);
-                    TextRenderer.DrawText(g, line2, f2, new Rectangle(padX, line2Y, textW, (int)Math.Round(20 * scale)), Theme.OverlayMuted, flags);
+                    TextRenderer.DrawText(g, line1, f1, new Rectangle(padX, line1Y, textW, lineH), Theme.OverlayInk, flags);
+                    TextRenderer.DrawText(g, line2, f2, new Rectangle(padX, line2Y, textW, lineH), Theme.OverlayMuted, flags);
+                    TextRenderer.DrawText(g, line3, f2, new Rectangle(padX, line3Y, textW, lineH), line3Color, flags);
                 }
             }
         }

@@ -1475,6 +1475,51 @@ namespace DualRemote
 
             RunEmbeddedSocks5SelfTest();
             RunRelaySchedulerSelfTest();
+            RunDecodePipelineTelemetrySelfTest();
+        }
+
+        private static void RunDecodePipelineTelemetrySelfTest()
+        {
+            string coreErr;
+            bool coreReady = BoBoCoreInterop.EnsureLoaded(out coreErr);
+            int sizeBase = System.Runtime.InteropServices.Marshal.SizeOf(typeof(BoBoNativeClientStats));
+            int sizeEx = System.Runtime.InteropServices.Marshal.SizeOf(typeof(BoBoNativeClientStatsEx));
+            Check("解码统计 ABI：BoBoClientStats(96B) 与 BoBoClientStatsEx(148B) 字节布局对齐",
+                coreReady && BoBoCoreInterop.HasClientGetStatsEx && sizeBase == 96 && sizeEx == 148 && BoBoCoreInterop.PushVideoNeedKeyframe == 2,
+                "ready=" + coreReady + ", statsEx=" + BoBoCoreInterop.HasClientGetStatsEx + ", base=" + sizeBase + ", ex=" + sizeEx + (string.IsNullOrEmpty(coreErr) ? "" : ", err=" + coreErr));
+
+            string normalLine = NativeStreamForm.FormatHudPipelineLine(new NativeStreamStats
+            {
+                QueueWaitMs = 1.4,
+                DecodeMs = 2.8,
+                RenderMs = 0.7,
+                FrameTotalMs = 4.9,
+                QueueDepth = 2
+            });
+            Check("帧管线 HUD 文案：正常帧展示排队/解码/渲染总耗时与队列深度",
+                normalLine.IndexOf("帧管线 4.9ms", StringComparison.Ordinal) >= 0
+                && normalLine.IndexOf("排队 1.4", StringComparison.Ordinal) >= 0
+                && normalLine.IndexOf("解码 2.8", StringComparison.Ordinal) >= 0
+                && normalLine.IndexOf("渲染 0.7", StringComparison.Ordinal) >= 0
+                && normalLine.IndexOf("队列 2帧", StringComparison.Ordinal) >= 0
+                && normalLine.IndexOf("等待关键帧", StringComparison.Ordinal) < 0,
+                normalLine);
+
+            string resetLine = NativeStreamForm.FormatHudPipelineLine(new NativeStreamStats
+            {
+                QueueWaitMs = 4.2,
+                DecodeMs = 3.1,
+                RenderMs = 0.9,
+                QueueDepth = 0,
+                DecodeDroppedFrames = 7,
+                DecodeQueueResets = 2,
+                WaitingForKeyframe = true
+            });
+            Check("帧管线 HUD 文案：队列溢出重置时显式提示丢帧/重置与等待关键帧",
+                resetLine.IndexOf("帧管线 8.2ms", StringComparison.Ordinal) >= 0
+                && resetLine.IndexOf("丢帧 7/重置 2", StringComparison.Ordinal) >= 0
+                && resetLine.IndexOf("等待关键帧", StringComparison.Ordinal) >= 0,
+                resetLine);
         }
 
         private static void RunRelaySchedulerSelfTest()

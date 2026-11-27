@@ -139,7 +139,7 @@ public struct BoBoFileChunk: Equatable, Sendable {
 public enum BoBoProtocol {
     public static let protocolMagic = "BOBO6"
     public static let protocolVersion = "6.2"
-    public static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "7.2.0"
+    public static let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "7.2.1"
     public static let tlsSniHost = "BoBoRemote-V6-Node"
 
     public static let platformWindows = "windows"

@@ -157,6 +157,8 @@ namespace DualRemote
         private double latestJitterMs;
         private double prevUdpRttMs;
         private int lastCursorSeq;
+        private long lastDecodeQueueIdrReqTicks;
+        private long decodeQueueIdrRequests;
 
         internal event Action<List<BoBoMonitorDescriptor>, int, int, int> StreamStarted;
         internal event Action<bool, bool, int, int> SuperDisplayStateChanged;
@@ -199,6 +201,7 @@ namespace DualRemote
         internal int UdpDroppedFrames { get { BoBoUdpVideoAssembler a = udpAssembler; return a != null ? a.DroppedIncompleteFrames : 0; } }
         internal int ActiveBitrateKbps { get { return activeBitrateKbps; } }
         internal long VideoFramesReceived { get { return Interlocked.Read(ref videoFramesReceived); } }
+        internal long DecodeQueueIdrRequests { get { return Interlocked.Read(ref decodeQueueIdrRequests); } }
         internal List<BoBoMonitorDescriptor> RemoteMonitors { get { return remoteMonitors; } }
 
         private const string PinMismatchMessage = "目标设备的 TLS 证书指纹与本地配对记录不一致。请核对设备后移除旧授权并重新配对。";
@@ -809,7 +812,11 @@ namespace DualRemote
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
                             if (nc != null)
                             {
-                                nc.PushVideo(h264, h264.Length, isKey, w, h);
+                                int pushRc = nc.PushVideo(h264, h264.Length, isKey, w, h);
+                                if (pushRc == BoBoCoreInterop.PushVideoNeedKeyframe && ShouldEmitDecodeQueueIdrRequest())
+                                {
+                                    SendRequestKeyframe();
+                                }
                             }
                             Action<byte[], bool, int, int> rawEv = RawVideoFrameReceived;
                             if (rawEv != null) { try { rawEv(h264, isKey, w, h); } catch { } }
@@ -1131,6 +1138,7 @@ namespace DualRemote
                         readyFrames.Clear();
                         bool needPli;
                         assembler.ProcessShardBatch(plain, latestRttMs, readyFrames, out needPli);
+                        bool decodeQueueNeedPli = false;
                         for (int i = 0; i < readyFrames.Count; i++)
                         {
                             BoBoReassembledVideoFrame doneFrame = readyFrames[i];
@@ -1138,10 +1146,19 @@ namespace DualRemote
                             BoBoCoreInterop.BoBoClientNativeHandle nc = nativeClient;
                             if (nc != null)
                             {
-                                nc.PushVideo(doneFrame.H264Data, doneFrame.H264Data.Length, doneFrame.IsKeyframe, doneFrame.Width, doneFrame.Height);
+                                int pushRc = nc.PushVideo(doneFrame.H264Data, doneFrame.H264Data.Length, doneFrame.IsKeyframe, doneFrame.Width, doneFrame.Height);
+                                if (pushRc == BoBoCoreInterop.PushVideoNeedKeyframe)
+                                {
+                                    decodeQueueNeedPli = true;
+                                }
                             }
                             Action<byte[], bool, int, int> rawEv = RawVideoFrameReceived;
                             if (rawEv != null) { try { rawEv(doneFrame.H264Data, doneFrame.IsKeyframe, doneFrame.Width, doneFrame.Height); } catch { } }
+                        }
+                        if (decodeQueueNeedPli && ShouldEmitDecodeQueueIdrRequest())
+                        {
+                            needPli = true;
+                            SendRequestKeyframe();
                         }
                         bool pollPli = false;
                         if (assembler.HasPendingBuckets)
@@ -1329,6 +1346,7 @@ namespace DualRemote
             latestJitterMs = 0.0;
             prevUdpRttMs = 0.0;
             latestPacketLossPct = 0.0;
+            Interlocked.Exchange(ref lastDecodeQueueIdrReqTicks, 0);
             if (udpClient != null) { try { udpClient.Close(); } catch { } udpClient = null; }
             if (udpCrypto != null) { try { udpCrypto.Dispose(); } catch { } udpCrypto = null; }
             udpRemoteEp = null;
@@ -1693,6 +1711,17 @@ namespace DualRemote
             SendJsonFireAndForget(cmd);
         }
 
+        private bool ShouldEmitDecodeQueueIdrRequest()
+        {
+            long now = Stopwatch.GetTimestamp();
+            long prev = Interlocked.Read(ref lastDecodeQueueIdrReqTicks);
+            long minInterval = Stopwatch.Frequency / 4; // 250ms guard to avoid IDR floods
+            if (prev != 0 && (now - prev) < minInterval) return false;
+            if (Interlocked.CompareExchange(ref lastDecodeQueueIdrReqTicks, now, prev) != prev) return false;
+            Interlocked.Increment(ref decodeQueueIdrRequests);
+            return true;
+        }
+
         internal void SendRequestKeyframe()
         {
             var cmd = new Dictionary<string, object>();
@@ -1988,6 +2017,7 @@ namespace DualRemote
             connected = false;
             routedViaEmbeddedTailnet = false;
             HostCursorComposited = false;
+            Interlocked.Exchange(ref lastDecodeQueueIdrReqTicks, 0);
             try
             {
                 if (wasConnected && ssl != null)

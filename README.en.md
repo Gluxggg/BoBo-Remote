@@ -81,14 +81,14 @@
   - Cross-platform sessions run over `TCP+TLS 49810`; Windows peers auto-negotiate an **`AES-128-CTR + HMAC-SHA256`** encrypted UDP channel with **grouped/interleaved `XOR FEC`**, **selective shard `NACK`** (18-frame / 2 MiB retransmit ring buffer & rate budget, 3-shard reorder margin), static-frame tail-loss detection, 10 ms-spaced discrete input redundancy, **12-second rolling-baseline ABR**, and automatic seamless fallback to `TCP+TLS` after `> 3.5s` UDP silence.
 
 ### 3. Ultra-Light In-Process Native Core & Hardware Acceleration Everywhere
-- **Windows (C# WinForms + embedded C++17 `BoBoCore.dll`)**: Full HW pipeline loaded in-process — **DXGI Desktop Duplication** (automatic GDI fallback) → **Media Foundation HW H.264 encode** → **D3D11 + DXGI 1.2 Flip-Model zero-copy render** → **WASAPI Loopback 48 kHz stereo IMA-ADPCM audio**.
+- **Windows (C# WinForms + embedded C++17 `BoBoCore.dll`)**: Full HW pipeline loaded in-process — **DXGI Desktop Duplication** (automatic GDI fallback) → **Media Foundation HW H.264 encode** → **Bounded low-latency decode queue (`12 frames / 4 MiB / 250 ms` hard caps with IDR auto-recovery & anti-artifact P-frame gating) + D3D11 Flip-Model zero-copy render** → **WASAPI Loopback 48 kHz stereo IMA-ADPCM audio**.
 - **Android (Kotlin + Jetpack Compose)**: Zero-copy `MediaCodec` decoding as controller; **rootless host** via `MediaProjection` + `AccessibilityService` touch injection, complete with a PC shortcut bar, Bluetooth keyboard Windows `VK_*` mapping, and mobile navigation controls.
 - **macOS (SwiftUI + `BoBoAppleCore`)**: Driverless `ScreenCaptureKit` video + system audio capture, VideoToolbox HW encode/decode, `CGEventTap` physical input locking, and smart `⌘ → Ctrl` key mapping, shipped as a **Universal 2** Intel + Apple Silicon DMG.
 - **iOS / iPadOS (SwiftUI + ReplayKit)**: Foreground controller with VideoToolbox decode and trackpad/direct-touch modes; view-only screen broadcasting via embedded `BoBoBroadcastExtension` ReplayKit extension + local loopback bridge.
 
 ### 4. Refined Desktop Controls & Custom Glacier-Blue UI
 - **Super Display v2 & Host-Sized Cursor**: Adapts cleanly to client viewport aspect ratios, dynamically switching host display modes in fullscreen (including enabled Windows virtual displays) and restoring the original mode on exit. Free mouse mirrors host pointer size and shape; tapping `Ctrl + Alt` in locked mode immediately frees the cursor and restores zero-latency local cursor mode.
-- **Unified Control Center & 4-Edge Dockable Floating Ball**: Shared real-time cascading menu across windowed header and fullscreen edge-snapping square ball — multi-monitor switching, quality/FPS hot-swap, always-on-top mini window with opacity slider, jump-free volume slider, live HUD telemetry (`RTT ± Jitter`, loss %, `F/N` FEC/NACK counts), clipboard text send, and screenshots.
+- **Unified Control Center & 4-Edge Dockable Floating Ball**: Shared real-time cascading menu across windowed header and fullscreen edge-snapping square ball — multi-monitor switching, quality/FPS hot-swap, always-on-top mini window with opacity slider, jump-free volume slider, **3-line frame-pipeline HUD telemetry** (`RTT ± Jitter`, loss %, `F/N` FEC/NACK counts, plus `Queue / Decode / Render` stage latency, queue depth, and drops/resets), clipboard text send, and screenshots.
 - **Custom Owner-Drawn Theme (`RemoteTheme` & `UiTransition`)**: Custom glacier-blue `StyledChoiceBox` replaces Win32 `#0078D7` blue dropdown highlights across selectors, paired with smooth hover/slider transitions, pixel-aligned window glyphs, multi-size tray ICOs, and a 7-step dual-layer ClearType onboarding tour.
 
 ### 5. Physical-Grade Host Privacy Shield (Windows & macOS)
@@ -105,9 +105,9 @@
 
 ## Four-Platform Matrix & Release Sizes
 
-| Platform | OS Requirement | `v7.2.0` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| Platform | OS Requirement | `v7.2.1` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264 + WASAPI | Embedded `BoBoCore.dll` + **zero-install `BoBoTsNet` (`tsnet`)**, **multi-relay latency & server-load dynamic scheduler**, `UDP+FEC/NACK`, Super Display, privacy shield, in-app updater |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF H.264 + WASAPI | Embedded `BoBoCore.dll` (bounded `12f / 4 MiB / 250 ms` decode queue + IDR auto-recovery) + **zero-install `BoBoTsNet`**, **multi-relay latency & load scheduler**, `UDP+FEC/NACK`, 3-line pipeline HUD, privacy shield, in-app updater |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>MediaCodec zero-copy decode + 48kHz stereo | ✅ **Rootless Full**<br>MediaProjection + Accessibility touch | Trackpad/direct touch, floating ball, Control Center, PC shortcut bar, Bluetooth VK map |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` zero-copy | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | Super Display, `⌘ → Ctrl` mapping, capture-excluded curtain + `CGEventTap` input lock |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~835 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | Embedded ReplayKit Broadcast Extension + local loopback bridge; sign via Sideloadly / AltStore / SideStore / Xcode |
@@ -118,7 +118,7 @@
 
 ## Architecture & Network Roadmap
 
-### A. Shipped Architecture (`BoBo6.2` · `v7.2.0`)
+### A. Shipped Architecture (`BoBo6.2` · `v7.2.1`)
 
 ```mermaid
 flowchart LR
@@ -250,8 +250,8 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.2.0`)**
-- **Local Windows suite**: **10/10** native `BoBoCore.dll` self-tests (encoder, D3D11, WASAPI, physical input blocker; capture falls back to synthetic NV12 in non-interactive sessions), **7/7** pure-Go `native/bobo-tsnet` unit tests (+ `--self-test` & live HTTP auth/`/logout`/`/shutdown` lifecycle smoke), **3/3** pure-Go `tools/bobo-relay` unit tests (TCP echo counting, max-session saturation `accepting=false`, health math), **142/142** managed `--self-test` checks (protocol Golden Vectors, UDP FEC/NACK, ABR, privacy guard state machine, `BoBoRelayStore` v1/v2, `BoBoRelayScheduler` concurrent load ranking, and `BoBoEmbeddedTailnet` JSON/SOCKS5 loopback checks), **7/7** installer self-tests, **73/73** UI/dropdown/relay-scheduler/embedded-Tailnet/sidebar/animation/icon smoke checks, and **12/12** threaded privacy curtain checks passed.
+**Verified Test Coverage (`v7.2.1`)**
+- **Local Windows suite**: **11/11** native `BoBoCore.dll` self-tests (encoder, D3D11, WASAPI, physical input blocker, plus **bounded `12f / 4 MiB / 250 ms` decode queue & IDR recovery unit tests**; capture falls back to synthetic NV12 in non-interactive sessions), **7/7** pure-Go `native/bobo-tsnet` unit tests (+ `--self-test` & live HTTP auth/`/logout`/`/shutdown` lifecycle smoke), **3/3** pure-Go `tools/bobo-relay` unit tests (TCP echo counting, max-session saturation `accepting=false`, health math), **145/145** managed `--self-test` checks (protocol Golden Vectors, UDP FEC/NACK, ABR, privacy guard state machine, `BoBoRelayStore` v1/v2, `BoBoRelayScheduler`, `BoBoEmbeddedTailnet`, `BoBoClientStatsEx` ABI alignment & 3-line pipeline HUD formatting), **7/7** installer self-tests, **78/78** UI/relay-scheduler/embedded-Tailnet/3-line HUD smoke checks, and **12/12** threaded privacy curtain checks passed.
 - **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows test `tools/bobo-relay` & `native/bobo-tsnet`, build Windows x64, Android (unit tests + APK), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA), and verify all 6 release artifacts against `SHA256SUMS.txt`. (Interactive browser OAuth sign-in and multi-VPS public WAN throughput remain dependent on real user devices and network peering.)
 
 ---
@@ -342,6 +342,7 @@ BoBo-Remote/
 | **V7.0 (through v7.0.5)** | Super Display v2, host-sized cursor, Windows encrypted `UDP+FEC/NACK` (interleaved XOR FEC + selective NACK) & 12s ABR, dedicated curtain thread (anti-IME flash), custom dropdowns & **inline BYO-VPS relay manager + TCP prober** | ✅ Done |
 | **V7.1 (`v7.1.0`)** | **Zero-install pure-Go `tsnet` embedded Tailscale engine** (1-click in-app browser auth, no TUN driver / zero VPN interference, Tailnet-only auth SOCKS5 + `:49810` TLS passthrough & sidebar status card) | ✅ Done |
 | **V7.2 (`v7.2.0`)** | **Automatic Lowest-Latency & Load-Aware Relay Scheduling**: concurrent probe ranking (`BoBoRelayScheduler`), ordered failover, mid-session overload migration, and open-source pure-Go [`tools/bobo-relay`](tools/bobo-relay/README.md) daemon | ✅ Done |
+| **V7.2.1 (`v7.2.1`)** | **P0 Bounded Decode Queue & Frame-Level Latency Telemetry**: `12f / 4 MiB / 250 ms` hard decode-queue caps & anti-artifact IDR gating in [`BoBoCore`](native/bobo-core/src/bobo_core.cpp), automatic IDR recovery in [`BoBoStreamClient`](src/Backend/BoBoStreamClient.cs), `BoBoClientStatsEx` (`148B`), and 3-line pipeline HUD | ✅ Done |
 | **V8** | Self-hostable open-source Connection Coordinator, native STUN/ICE P2P + BYO-VPS `UDP Relay (TURN)` + `TCP/TLS 443` fallback, cross-platform UDP+FEC/NACK & HEVC negotiation, Linux exploration | 🚧 Planned / Evolving |
 
 ---

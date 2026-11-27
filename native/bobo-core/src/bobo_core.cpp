@@ -267,11 +267,173 @@ struct BoBoHostSession {
     }
 };
 
+static_assert(sizeof(BoBoClientStats) == 96, "BoBoClientStats ABI size mismatch");
+static_assert(sizeof(BoBoClientStatsEx) == 148, "BoBoClientStatsEx ABI size mismatch");
+
 struct QueuedH264Frame {
     std::vector<uint8_t> data;
     bool isKeyframe = false;
     uint32_t width = 0;
     uint32_t height = 0;
+    std::chrono::steady_clock::time_point enqueueTime{};
+};
+
+struct BoundedVideoDecodeQueue {
+    using TimePoint = std::chrono::steady_clock::time_point;
+
+    static constexpr size_t kSoftTrimFrames = 8;
+    static constexpr size_t kMaxFrames = 12;
+    static constexpr size_t kMaxBytes = 4u * 1024u * 1024u; // 4 MiB hard cap
+    static constexpr double kMaxWaitMs = 250.0;
+    static constexpr double kIdrRequestCooldownMs = 300.0;
+
+    struct SnapshotData {
+        int32_t depth = 0;
+        int32_t bytes = 0;
+        bool waitingForKeyframe = false;
+        uint64_t droppedFrames = 0;
+        uint64_t queueResets = 0;
+    };
+
+    std::deque<QueuedH264Frame> frames;
+    size_t queuedBytes = 0;
+    bool waitingForKeyframe = false;
+    bool hasIdrRequestTime = false;
+    TimePoint lastIdrRequestTime{};
+    uint64_t droppedFrames = 0;
+    uint64_t queueResets = 0;
+    uint64_t keyframeRequests = 0;
+
+    static double AgeMs(TimePoint now, TimePoint then) {
+        return (now > then) ? std::chrono::duration<double, std::milli>(now - then).count() : 0.0;
+    }
+
+    bool Empty() const {
+        return frames.empty();
+    }
+
+    void ErasePrefix(std::deque<QueuedH264Frame>::iterator endIt) {
+        for (auto it = frames.begin(); it != endIt; ++it) {
+            size_t sz = it->data.size();
+            queuedBytes = (queuedBytes >= sz) ? (queuedBytes - sz) : 0;
+            droppedFrames += 1;
+        }
+        frames.erase(frames.begin(), endIt);
+    }
+
+    void ResetForKeyframe(TimePoint now, bool countIncomingDrop, bool recordIdrNow) {
+        droppedFrames += static_cast<uint64_t>(frames.size()) + (countIncomingDrop ? 1ULL : 0ULL);
+        frames.clear();
+        queuedBytes = 0;
+        waitingForKeyframe = true;
+        queueResets += 1;
+        if (recordIdrNow) {
+            hasIdrRequestTime = true;
+            lastIdrRequestTime = now;
+            keyframeRequests += 1;
+        } else {
+            hasIdrRequestTime = false;
+        }
+    }
+
+    int32_t Push(QueuedH264Frame&& pkt, TimePoint now) {
+        pkt.enqueueTime = now;
+        if (pkt.isKeyframe) {
+            waitingForKeyframe = false;
+            hasIdrRequestTime = false;
+            if (!frames.empty() &&
+                (frames.size() >= 2 ||
+                 (queuedBytes + pkt.data.size()) > kMaxBytes ||
+                 AgeMs(now, frames.front().enqueueTime) > kMaxWaitMs)) {
+                droppedFrames += static_cast<uint64_t>(frames.size());
+                frames.clear();
+                queuedBytes = 0;
+            }
+            queuedBytes += pkt.data.size();
+            frames.push_back(std::move(pkt));
+            return BOBO_PUSH_VIDEO_ACCEPTED;
+        }
+
+        if (waitingForKeyframe) {
+            droppedFrames += 1;
+            if (!hasIdrRequestTime || AgeMs(now, lastIdrRequestTime) >= kIdrRequestCooldownMs) {
+                hasIdrRequestTime = true;
+                lastIdrRequestTime = now;
+                keyframeRequests += 1;
+                return BOBO_PUSH_VIDEO_NEED_KEYFRAME;
+            }
+            return BOBO_PUSH_VIDEO_ACCEPTED;
+        }
+
+        bool overSoft = (frames.size() >= kSoftTrimFrames);
+        bool overHard = (frames.size() >= kMaxFrames) ||
+                        ((queuedBytes + pkt.data.size()) > kMaxBytes) ||
+                        (!frames.empty() && AgeMs(now, frames.front().enqueueTime) > kMaxWaitMs);
+        if (overSoft || overHard) {
+            auto lastKey = frames.end();
+            for (auto it = frames.begin(); it != frames.end(); ++it) {
+                if (it->isKeyframe && AgeMs(now, it->enqueueTime) <= kMaxWaitMs) {
+                    lastKey = it;
+                }
+            }
+            if (lastKey != frames.end() && lastKey != frames.begin()) {
+                ErasePrefix(lastKey);
+            }
+            overHard = (frames.size() >= kMaxFrames) ||
+                       ((queuedBytes + pkt.data.size()) > kMaxBytes) ||
+                       (!frames.empty() && AgeMs(now, frames.front().enqueueTime) > kMaxWaitMs);
+            if (overHard) {
+                ResetForKeyframe(now, true, true);
+                return BOBO_PUSH_VIDEO_NEED_KEYFRAME;
+            }
+        }
+
+        queuedBytes += pkt.data.size();
+        frames.push_back(std::move(pkt));
+        return BOBO_PUSH_VIDEO_ACCEPTED;
+    }
+
+    bool Pop(QueuedH264Frame& outItem, double& outQueueWaitMs, bool& outMoreQueued, TimePoint now) {
+        outQueueWaitMs = 0.0;
+        outMoreQueued = false;
+        while (!frames.empty()) {
+            if (AgeMs(now, frames.front().enqueueTime) > kMaxWaitMs) {
+                auto freshKey = frames.end();
+                for (auto it = frames.begin(); it != frames.end(); ++it) {
+                    if (it->isKeyframe && AgeMs(now, it->enqueueTime) <= kMaxWaitMs) {
+                        freshKey = it;
+                    }
+                }
+                if (freshKey != frames.end()) {
+                    if (freshKey != frames.begin()) {
+                        ErasePrefix(freshKey);
+                    }
+                } else if (!frames.front().isKeyframe || frames.size() > 1) {
+                    ResetForKeyframe(now, false, false);
+                    return false;
+                }
+            }
+
+            outItem = std::move(frames.front());
+            frames.pop_front();
+            size_t sz = outItem.data.size();
+            queuedBytes = (queuedBytes >= sz) ? (queuedBytes - sz) : 0;
+            outQueueWaitMs = AgeMs(now, outItem.enqueueTime);
+            outMoreQueued = !frames.empty();
+            return true;
+        }
+        return false;
+    }
+
+    SnapshotData Snapshot() const {
+        SnapshotData s;
+        s.depth = static_cast<int32_t>(frames.size());
+        s.bytes = static_cast<int32_t>(std::min<size_t>(queuedBytes, static_cast<size_t>(INT32_MAX)));
+        s.waitingForKeyframe = waitingForKeyframe;
+        s.droppedFrames = droppedFrames;
+        s.queueResets = queueResets;
+        return s;
+    }
 };
 
 // ==================== Client In-Process Viewport (Decoupled D3D11VA Decode + Render + Audio + 0ms Local Cursor) ====================
@@ -283,7 +445,7 @@ struct BoBoClientSession {
     std::mutex statsMutex;
     std::mutex queueMutex;
     std::condition_variable queueCv;
-    std::deque<QueuedH264Frame> frameQueue;
+    BoundedVideoDecodeQueue decodeQueue;
     std::thread decodeThread;
 
     HWND parentHwnd = nullptr;
@@ -325,11 +487,15 @@ struct BoBoClientSession {
     uint64_t framesWindow = 0;
     double decodeMsAccum = 0.0;
     double renderMsAccum = 0.0;
+    double queueWaitMsAccum = 0.0;
+    double maxQueueWaitWindowMs = 0.0;
     uint64_t timingSamples = 0;
     std::chrono::steady_clock::time_point lastStatsWindow = std::chrono::steady_clock::now();
     double measuredFps = 0.0;
     double avgDecodeMs = 0.0;
     double avgRenderMs = 0.0;
+    double avgQueueWaitMs = 0.0;
+    double recentMaxQueueWaitMs = 0.0;
     uint32_t statsVideoW = 1920;
     uint32_t statsVideoH = 1080;
     std::string statsDecoderName;
@@ -1186,14 +1352,15 @@ void BoBoClientSession::RunDecodeLoop() {
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     while (alive.load(std::memory_order_acquire)) {
         QueuedH264Frame item;
+        double qWaitMs = 0.0;
         bool moreQueued = false;
         {
             std::unique_lock<std::mutex> lk(queueMutex);
-            queueCv.wait(lk, [&]() { return !alive.load(std::memory_order_acquire) || !frameQueue.empty(); });
+            queueCv.wait(lk, [&]() { return !alive.load(std::memory_order_acquire) || !decodeQueue.Empty(); });
             if (!alive.load(std::memory_order_acquire)) break;
-            item = std::move(frameQueue.front());
-            frameQueue.pop_front();
-            moreQueued = !frameQueue.empty();
+            if (!decodeQueue.Pop(item, qWaitMs, moreQueued, std::chrono::steady_clock::now())) {
+                continue;
+            }
         }
         if (item.data.empty()) continue;
 
@@ -1242,7 +1409,7 @@ void BoBoClientSession::RunDecodeLoop() {
         bool skipPresent = moreQueued;
         if (skipPresent) {
             std::lock_guard<std::mutex> lk(queueMutex);
-            skipPresent = !frameQueue.empty();
+            skipPresent = !decodeQueue.Empty();
         }
 
         int presented = 0;
@@ -1277,6 +1444,10 @@ void BoBoClientSession::RunDecodeLoop() {
             framesWindow += static_cast<uint64_t>(presented > 0 ? presented : pulledCount);
             decodeMsAccum += decMs;
             renderMsAccum += renMs;
+            queueWaitMsAccum += qWaitMs;
+            if (qWaitMs > maxQueueWaitWindowMs) {
+                maxQueueWaitWindowMs = qWaitMs;
+            }
             timingSamples += 1;
         }
     }
@@ -1450,6 +1621,83 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
               en == 1 && active == 1 && after == 0 && filterOk,
               "en=" + std::to_string(en) + " active=" + std::to_string(active) +
                   " after=" + std::to_string(after) + " filter=" + (filterOk ? "ok" : "fail"));
+    }
+
+    // 6. Bounded video decode queue caps, IDR recovery & queue-wait latency tracking
+    {
+        auto makeFrame = [](bool isKey, size_t bytes) {
+            QueuedH264Frame q;
+            q.data.assign(bytes, isKey ? 0x65 : 0x41);
+            q.isKeyframe = isKey;
+            q.width = 1920;
+            q.height = 1080;
+            return q;
+        };
+        const auto tBase = std::chrono::steady_clock::time_point{} + std::chrono::seconds(10);
+        const auto atMs = [&](int64_t ms) {
+            return tBase + std::chrono::milliseconds(ms);
+        };
+
+        // 6a. Frame cap without keyframe -> reset, waitingForKeyframe, cooldown & IDR recovery
+        BoundedVideoDecodeQueue q;
+        q.Push(makeFrame(true, 1024), atMs(0));
+        int32_t lastPushRc = BOBO_PUSH_VIDEO_ACCEPTED;
+        size_t maxObservedDepth = 0;
+        for (int i = 1; i <= 15; ++i) {
+            lastPushRc = q.Push(makeFrame(false, 1024), atMs(i * 10));
+            maxObservedDepth = std::max(maxObservedDepth, q.frames.size());
+            if (lastPushRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) break;
+        }
+        bool capResetOk = (lastPushRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) &&
+                          (maxObservedDepth <= BoundedVideoDecodeQueue::kMaxFrames) &&
+                          q.Empty() && q.waitingForKeyframe && (q.queueResets == 1);
+        // Orphan delta during cooldown (1) and after 300ms cooldown (2), then fresh IDR recovery
+        int32_t orphanSoonRc = q.Push(makeFrame(false, 512), atMs(170));
+        int32_t orphanLateRc = q.Push(makeFrame(false, 512), atMs(450));
+        int32_t recoveryKeyRc = q.Push(makeFrame(true, 2048), atMs(460));
+        bool recoveryOk = (orphanSoonRc == BOBO_PUSH_VIDEO_ACCEPTED) &&
+                          (orphanLateRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) &&
+                          (recoveryKeyRc == BOBO_PUSH_VIDEO_ACCEPTED) &&
+                          !q.waitingForKeyframe && (q.frames.size() == 1);
+
+        // 6b. Byte cap (4 MiB) reset on deltas & single oversized keyframe acceptance (no deadlock)
+        BoundedVideoDecodeQueue qBytes;
+        qBytes.Push(makeFrame(true, 102400), atMs(0));
+        qBytes.Push(makeFrame(false, 2u * 1024u * 1024u), atMs(10));
+        int32_t byteOverflowRc = qBytes.Push(makeFrame(false, 2u * 1024u * 1024u), atMs(20));
+        BoundedVideoDecodeQueue qBigKey;
+        int32_t bigKeyRc = qBigKey.Push(makeFrame(true, (4u * 1024u * 1024u) + 512u), atMs(0));
+        bool byteCapOk = (byteOverflowRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) && qBytes.Empty() &&
+                         (bigKeyRc == BOBO_PUSH_VIDEO_ACCEPTED) && (qBigKey.frames.size() == 1);
+
+        // 6c. Age cap (250 ms) jumps to newer keyframe when present, else resets on aged frames
+        BoundedVideoDecodeQueue qAge;
+        qAge.Push(makeFrame(true, 1024), atMs(0));
+        qAge.Push(makeFrame(true, 1024), atMs(200));
+        int32_t jumpPushRc = qAge.Push(makeFrame(false, 512), atMs(260));
+        bool ageJumpOk = (jumpPushRc == BOBO_PUSH_VIDEO_ACCEPTED) && (qAge.frames.size() == 2) &&
+                         qAge.frames.front().isKeyframe;
+        int32_t ageExpireRc = qAge.Push(makeFrame(false, 512), atMs(600));
+        bool ageExpireOk = (ageExpireRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) && qAge.Empty() && qAge.waitingForKeyframe;
+
+        // 6d. Pop latency measurement & stale backlog drop on Pop()
+        BoundedVideoDecodeQueue qPop;
+        qPop.Push(makeFrame(true, 1024), atMs(1000));
+        QueuedH264Frame popped;
+        double waitMs = 0.0;
+        bool moreQueuedPop = true;
+        bool popOk = qPop.Pop(popped, waitMs, moreQueuedPop, atMs(1018)) &&
+                     (waitMs >= 17.9 && waitMs <= 18.1) && !moreQueuedPop;
+        qPop.Push(makeFrame(true, 1024), atMs(2000));
+        qPop.Push(makeFrame(false, 512), atMs(2016));
+        bool stalePopDropped = !qPop.Pop(popped, waitMs, moreQueuedPop, atMs(2300)) &&
+                               qPop.Empty() && qPop.waitingForKeyframe;
+
+        check("Bounded video decode queue (12 frames / 4MiB / 250ms / IDR recovery)",
+              capResetOk && recoveryOk && byteCapOk && ageJumpOk && ageExpireOk && popOk && stalePopDropped,
+              "cap=" + std::to_string(capResetOk) + " rec=" + std::to_string(recoveryOk) +
+                  " bytes=" + std::to_string(byteCapOk) + " age=" + std::to_string(ageJumpOk && ageExpireOk) +
+                  " pop=" + std::to_string(popOk && stalePopDropped));
     }
 
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
@@ -2195,7 +2443,9 @@ BOBO_API int32_t __stdcall BoBoClient_PushVideo(
     int32_t srcWidth,
     int32_t srcHeight) {
     auto* st = static_cast<BoBoClientSession*>(handle);
-    if (!st || !st->alive.load(std::memory_order_acquire) || !h264Data || length <= 0) return 0;
+    if (!st || !st->alive.load(std::memory_order_acquire) || !h264Data || length <= 0) {
+        return BOBO_PUSH_VIDEO_IGNORED;
+    }
 
     QueuedH264Frame pkt;
     pkt.data.assign(h264Data, h264Data + length);
@@ -2203,26 +2453,18 @@ BOBO_API int32_t __stdcall BoBoClient_PushVideo(
     pkt.width = srcWidth > 0 ? static_cast<uint32_t>(srcWidth) : 0;
     pkt.height = srcHeight > 0 ? static_cast<uint32_t>(srcHeight) : 0;
 
+    int32_t rc = BOBO_PUSH_VIDEO_IGNORED;
+    bool shouldNotify = false;
     {
         std::lock_guard<std::mutex> lk(st->queueMutex);
-        if (!st->alive.load(std::memory_order_acquire)) return 0;
-        if (pkt.isKeyframe && st->frameQueue.size() >= 2) {
-            // New keyframe arrived while older frames were still waiting -> jump straight to fresh keyframe!
-            st->frameQueue.clear();
-        } else if (st->frameQueue.size() >= 8) {
-            // Trim up to the newest queued keyframe if overloaded, never grow unboundedly
-            auto lastKey = st->frameQueue.end();
-            for (auto it = st->frameQueue.begin(); it != st->frameQueue.end(); ++it) {
-                if (it->isKeyframe) lastKey = it;
-            }
-            if (lastKey != st->frameQueue.end() && lastKey != st->frameQueue.begin()) {
-                st->frameQueue.erase(st->frameQueue.begin(), lastKey);
-            }
-        }
-        st->frameQueue.push_back(std::move(pkt));
+        if (!st->alive.load(std::memory_order_acquire)) return BOBO_PUSH_VIDEO_IGNORED;
+        rc = st->decodeQueue.Push(std::move(pkt), std::chrono::steady_clock::now());
+        shouldNotify = !st->decodeQueue.Empty();
     }
-    st->queueCv.notify_one();
-    return 1;
+    if (shouldNotify) {
+        st->queueCv.notify_one();
+    }
+    return rc;
 }
 
 BOBO_API void __stdcall BoBoClient_PushAudio(
@@ -2318,34 +2560,75 @@ BOBO_API void __stdcall BoBoClient_SetRemoteCursorInfo(void* handle, int32_t sha
     }
 }
 
-BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats) {
-    if (!outStats) return;
-    std::memset(outStats, 0, sizeof(*outStats));
-    auto* st = static_cast<BoBoClientSession*>(handle);
+static void PopulateClientStats(BoBoClientSession* st, BoBoClientStats* outBase, BoBoClientStatsEx* outEx) {
+    if (!outBase && !outEx) return;
+    if (outBase) std::memset(outBase, 0, sizeof(*outBase));
+    if (outEx) std::memset(outEx, 0, sizeof(*outEx));
     if (!st) return;
 
-    auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> slk(st->statsMutex);
-    double elapsed = std::chrono::duration<double>(now - st->lastStatsWindow).count();
-    if (elapsed >= 0.35) {
-        st->measuredFps = static_cast<double>(st->framesWindow) / elapsed;
-        if (st->timingSamples > 0) {
-            st->avgDecodeMs = st->decodeMsAccum / static_cast<double>(st->timingSamples);
-            st->avgRenderMs = st->renderMsAccum / static_cast<double>(st->timingSamples);
-        }
-        st->framesWindow = 0;
-        st->decodeMsAccum = 0.0;
-        st->renderMsAccum = 0.0;
-        st->timingSamples = 0;
-        st->lastStatsWindow = now;
+    // Never nest locks: read queue snapshot first, then acquire statsMutex.
+    BoundedVideoDecodeQueue::SnapshotData qSnap{};
+    if (outEx) {
+        std::lock_guard<std::mutex> qlk(st->queueMutex);
+        qSnap = st->decodeQueue.Snapshot();
     }
-    outStats->fps = st->measuredFps;
-    outStats->decodeMs = st->avgDecodeMs;
-    outStats->renderMs = st->avgRenderMs;
-    outStats->width = static_cast<int32_t>(st->statsVideoW);
-    outStats->height = static_cast<int32_t>(st->statsVideoH);
-    const std::string& dec = st->statsDecoderName.empty() ? std::string("D3D11VA") : st->statsDecoderName;
-    std::strncpy(outStats->decoderName, dec.c_str(), sizeof(outStats->decoderName) - 1);
+
+    BoBoClientStats base{};
+    double avgQueueMs = 0.0;
+    double maxQueueMs = 0.0;
+    {
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> slk(st->statsMutex);
+        double elapsed = std::chrono::duration<double>(now - st->lastStatsWindow).count();
+        if (elapsed >= 0.35) {
+            st->measuredFps = static_cast<double>(st->framesWindow) / elapsed;
+            if (st->timingSamples > 0) {
+                st->avgDecodeMs = st->decodeMsAccum / static_cast<double>(st->timingSamples);
+                st->avgRenderMs = st->renderMsAccum / static_cast<double>(st->timingSamples);
+                st->avgQueueWaitMs = st->queueWaitMsAccum / static_cast<double>(st->timingSamples);
+                st->recentMaxQueueWaitMs = st->maxQueueWaitWindowMs;
+            }
+            st->framesWindow = 0;
+            st->decodeMsAccum = 0.0;
+            st->renderMsAccum = 0.0;
+            st->queueWaitMsAccum = 0.0;
+            st->maxQueueWaitWindowMs = 0.0;
+            st->timingSamples = 0;
+            st->lastStatsWindow = now;
+        }
+        base.fps = st->measuredFps;
+        base.decodeMs = st->avgDecodeMs;
+        base.renderMs = st->avgRenderMs;
+        base.width = static_cast<int32_t>(st->statsVideoW);
+        base.height = static_cast<int32_t>(st->statsVideoH);
+        const std::string& dec = st->statsDecoderName.empty() ? std::string("D3D11VA") : st->statsDecoderName;
+        std::strncpy(base.decoderName, dec.c_str(), sizeof(base.decoderName) - 1);
+        avgQueueMs = st->avgQueueWaitMs;
+        maxQueueMs = st->recentMaxQueueWaitMs;
+    }
+
+    if (outBase) {
+        *outBase = base;
+    }
+    if (outEx) {
+        outEx->base = base;
+        outEx->queueWaitMs = avgQueueMs;
+        outEx->maxQueueWaitMs = maxQueueMs;
+        outEx->frameTotalMs = avgQueueMs + base.decodeMs + base.renderMs;
+        outEx->queueDepth = qSnap.depth;
+        outEx->queueBytes = qSnap.bytes;
+        outEx->waitingKeyframe = qSnap.waitingForKeyframe ? 1 : 0;
+        outEx->droppedFrames = qSnap.droppedFrames;
+        outEx->queueResets = qSnap.queueResets;
+    }
+}
+
+BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats) {
+    PopulateClientStats(static_cast<BoBoClientSession*>(handle), outStats, nullptr);
+}
+
+BOBO_API void __stdcall BoBoClient_GetStatsEx(void* handle, BoBoClientStatsEx* outStats) {
+    PopulateClientStats(static_cast<BoBoClientSession*>(handle), nullptr, outStats);
 }
 
 BOBO_API void __stdcall BoBoClient_Destroy(void* handle) {

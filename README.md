@@ -82,14 +82,14 @@
   - 内建 **分组 / 交错 `XOR FEC`**（可容忍连续多片丢包零重传还原）、**选择性分片重传 `NACK`**（主机 `18` 帧 / `2 MiB` 环形缓存与限速配额、3 分片乱序容忍）、静帧尾包超时检测、`10 ms` 间隔离散输入冗余、**12 秒滚动基线自适应码率（ABR）**，且在 UDP 静默 >3.5 秒时无缝回退至 `TCP+TLS` 不断链。
 
 ### 3. 极致轻量化单文件内核 & 四端全原生硬编硬解
-- **Windows（C# WinForms + 内嵌 C++17 `BoBoCore.dll`）**：运行时从嵌入资源解压并进程内加载，全链路硬件加速：**DXGI Desktop Duplication**（无头/异常自动 GDI 回退）→ **Media Foundation 硬件 H.264 编码** → **D3D11 + DXGI 1.2 Flip-Model 零拷贝渲染** → **WASAPI Loopback 48 kHz 立体声 IMA-ADPCM 音频**。
+- **Windows（C# WinForms + 内嵌 C++17 `BoBoCore.dll`）**：运行时从嵌入资源解压并进程内加载，全链路硬件加速：**DXGI Desktop Duplication**（无头/异常自动 GDI 回退）→ **Media Foundation 硬件 H.264 编码** → **有界低延迟解码队列（硬上限 12 帧 / 4 MiB / 250 ms 等待，超时或无关键帧堆积自动安全重置并触发 IDR 关键帧恢复、防花屏丢弃孤立 P 帧）+ D3D11 DXGI 1.2 Flip-Model 零拷贝渲染** → **WASAPI Loopback 48 kHz 立体声 IMA-ADPCM 音频**。
 - **Android（Kotlin + Jetpack Compose）**：主控端 `MediaCodec` 零拷贝硬解；被控端基于 **`MediaProjection` + 无障碍服务（`AccessibilityService`）** 实现**免 Root** 录屏与全局触控输入，并内置快捷 PC 键盘栏、蓝牙键盘 Windows `VK_*` 映射与系统导航栏。
 - **macOS（SwiftUI + `BoBoAppleCore`）**：`ScreenCaptureKit` 原生采集画面与免驱动系统音频，VideoToolbox 硬编硬解，`CGEventTap` 物理级键鼠拦截与智能 `⌘ → Ctrl` 键位映射，打包为 Intel + Apple Silicon **Universal 2** 应用。
 - **iOS / iPadOS（SwiftUI + ReplayKit 扩展）**：前台主控支持 VideoToolbox 硬解及触控板 / 直点双模式；被控端通过内嵌 `BoBoBroadcastExtension` ReplayKit 广播扩展与本机回环桥接共享屏幕（`view_only`）。
 
 ### 4. 桌面级交互细节与冰川浅蓝极简体验
 - **超级屏 v2 与主机尺寸光标**：**超级屏**按控制端视口像素等比适配，全屏可临时协商匹配的显示器分辨率并在退出时恢复原模式（支持识别 Windows 已启用的虚拟显示器）；**自由鼠标**按主机传来的光标像素尺寸与形状绘制，锁鼠模式下轻按 `Ctrl + Alt` 秒级释放鼠标并切换零延迟本地指针模式。
-- **统一控制中心 & 四边贴边隐藏悬浮球**：顶栏「控制中心」与全屏任意贴边吸附/隐藏的方形悬浮球共用同一套实时级联菜单，覆盖多屏切换、超级屏、画质/帧率热切、置顶透明小窗、实时无跳变音量滑块、`RTT ± Jitter` / `F/N` 纠错数 HUD 遥测、剪贴板发字与截图。
+- **统一控制中心 & 四边贴边隐藏悬浮球**：顶栏「控制中心」与全屏任意贴边吸附/隐藏的方形悬浮球共用同一套实时级联菜单，覆盖多屏切换、超级屏、画质/帧率热切、置顶透明小窗、实时无跳变音量滑块、**三行全链路帧管线 HUD 遥测**（`RTT ± Jitter` / `F/N` 纠错数 + `排队 / 解码 / 渲染` 分段耗时 + 队列深度与丢帧/重置计数）、剪贴板发字与截图。
 - **冰川浅蓝自绘控件库 & 平滑微动画（`RemoteTheme` + `UiTransition`）**：全量自绘控件、自定义冰川浅蓝下拉框（`StyledChoiceBox` 消除 Win32 原生 `#0078D7` 蓝块与生硬灰箭头）、窗口级高对比矢量图标、多分辨率锐利托盘 ICO，以及首次启动 7 步双层 ClearType 聚光灯新手引导。
 
 ### 5. 物理级被控端防窥保护（Windows & macOS）
@@ -106,9 +106,9 @@
 
 ## 四端能力矩阵与发布体量
 
-| 平台 | 系统要求 | Release 产物（`v7.2.0`） | 控制端（主控） | 被控端（宿主） | 核心能力与特性 |
+| 平台 | 系统要求 | Release 产物（`v7.2.1`） | 控制端（主控） | 被控端（宿主） | 核心能力与特性 |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **全功能**<br>含 Android 导航栏与 iOS 观看 | ✅ **全功能**<br>DXGI/GDI + MF H.264 + WASAPI | 内嵌 `BoBoCore.dll` + **免安装 `BoBoTsNet` (`tsnet`)**、**多中转延迟优选与服务器负载动态调度**、`UDP+FEC/NACK`、超级屏、物理防窥、应用内更新 |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.4 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.1 MB) | ✅ **全功能**<br>含 Android 导航栏与 iOS 观看 | ✅ **全功能**<br>DXGI/GDI + MF H.264 + WASAPI | 内嵌 `BoBoCore.dll`（12 帧 / 4 MiB / 250 ms 有界解码队列 + IDR 自动恢复）+ **免安装 `BoBoTsNet`**、**多中转延迟/负载动态调度**、`UDP+FEC/NACK`、3 行帧管线 HUD、防窥、自动更新 |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **全功能**<br>MediaCodec 零拷贝硬解 + 48kHz 立体声 | ✅ **免 Root 全功能**<br>MediaProjection + 无障碍触控 | 触控板 / 直点双模式、贴边悬浮球、控制中心、PC 快捷键盘栏、蓝牙键盘 VK 映射 |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2（Apple 芯片 & Intel） | ✅ **全功能**<br>`AVSampleBufferDisplayLayer` 零拷贝渲染 | ✅ **全功能**<br>`ScreenCaptureKit` 免驱动内录 + VideoToolbox | 超级屏自适应、`⌘ → Ctrl` 智能映射、录制排除防窥窗口 + `CGEventTap` 物理锁 |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~835 KB) | ✅ **前台主控**<br>VideoToolbox 硬解 + 触控板/直点 | 👁️ **ReplayKit 仅观看投屏** | 内嵌 ReplayKit 广播扩展与本机回环桥接，支持 Sideloadly / AltStore / SideStore / Xcode 签装 |
@@ -119,7 +119,7 @@
 
 ## 系统架构与网络演进蓝图
 
-### A. 当前已实现架构（`BoBo6.2` · `v7.2.0`）
+### A. 当前已实现架构（`BoBo6.2` · `v7.2.1`）
 
 ```mermaid
 flowchart LR
@@ -251,8 +251,8 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**已验证测试覆盖（`v7.2.0`）**
-- **Windows 本地测试全绿**：`BoBoCore.dll` 原生内核自检 **10/10**（含编码器、D3D11、WASAPI 与物理输入锁；无交互会话采集自动回退合成帧）、纯 Go `native/bobo-tsnet` 单元测试 **7/7**（含 `--self-test` 及实机鉴权生命周期）、纯 Go 自建中转服务端 `tools/bobo-relay` 单元测试 **3/3**（含盲转发计数、并发饱和 `accepting=false` 与优雅排水）、托管 `BoBo远程.exe --self-test` **142/142**（含 Golden Vectors、UDP FEC/NACK、ABR、防窥状态机、`BoBoRelayStore` v1/v2、`BoBoRelayScheduler` 并发负载排序与 `BoBoEmbeddedTailnet` 回环校验）、`BoBoSetup --self-test` **7/7**、UI/自绘下拉框/动态中转面板/内置跨网卡片与侧边栏冒烟 **73/73**、防窥帘幕独立线程冒烟 **12/12**。
+**已验证测试覆盖（`v7.2.1`）**
+- **Windows 本地测试全绿**：`BoBoCore.dll` 原生内核自检 **11/11**（含编码器、D3D11、WASAPI、物理输入锁及 **12 帧/4 MiB/250 ms 有界解码队列 + IDR 恢复单测**；无交互会话采集自动回退合成帧）、纯 Go `native/bobo-tsnet` 单元测试 **7/7**（含 `--self-test` 及实机鉴权生命周期）、纯 Go 自建中转服务端 `tools/bobo-relay` 单元测试 **3/3**（含盲转发计数、并发饱和 `accepting=false` 与优雅排水）、托管 `BoBo远程.exe --self-test` **145/145**（含 Golden Vectors、UDP FEC/NACK、ABR、防窥状态机、`BoBoRelayStore` v1/v2、`BoBoRelayScheduler`、`BoBoEmbeddedTailnet`、`BoBoClientStatsEx` ABI 对齐与 3 行帧管线 HUD 校验）、`BoBoSetup --self-test` **7/7**、UI/自绘下拉框/动态中转面板/内置跨网卡片/帧管线 HUD 冒烟 **78/78**、防窥帘幕独立线程冒烟 **12/12**。
 - **GitHub Actions 四端流水线**：Windows x64（含 `tools/bobo-relay` 与 `native/bobo-tsnet` Go 单测）、Android（单测 + APK）、macOS（`swift test` + Universal 2 DMG）、iOS（IPA）与 `SHA256SUMS.txt` 全自动校验打包发布（内置 Tailscale 浏览器 OAuth 首次授权及实际公网跨运营商长时串流需在真实交互桌面与多台 VPS 环境下实测）。
 
 ---
@@ -343,6 +343,7 @@ BoBo-Remote/
 | **V7.0 (至 v7.0.5)** | 超级屏 v2、主机尺寸光标、Windows 加密 `UDP+FEC/NACK`（分组交错 FEC + 选择性 NACK）与 12s 基线 ABR、独立线程防窥幕布（抗输入法闪弹）、自绘下拉控件与 **客户端内建自建 VPS 兜底中转配置与测速** | ✅ 已完成 |
 | **V7.1 (`v7.1.0`)** | **内置纯 Go `tsnet` 免安装 Tailscale 用户态跨网引擎**（客户端一键浏览器登录、无 TUN 驱动零 VPN 冲突、Tailnet-only 鉴权 SOCKS5 + `49810` TLS 透传与侧边栏状态卡片） | ✅ 已完成 |
 | **V7.2 (`v7.2.0`)** | **多中转延迟自动优选 & 服务器负载动态调度**：[`BoBoRelayScheduler`](src/Backend/BoBoRelayScheduler.cs) 并发测速评分、顺序故障转移、会话内过载热切换与开源纯 Go [`tools/bobo-relay`](tools/bobo-relay/README.md) 服务端 | ✅ 已完成 |
+| **V7.2.1 (`v7.2.1`)** | **P0 有界解码队列 & 帧级延迟监控闭环**：[`BoBoCore`](native/bobo-core/src/bobo_core.cpp) 实施 `12 帧 / 4 MiB / 250 ms` 硬上限与等待 IDR 防花屏丢帧策略、联动 [`BoBoStreamClient`](src/Backend/BoBoStreamClient.cs) 自动补发关键帧，并扩展 `BoBoClientStatsEx`（`148B`）与 3 行帧管线 HUD | ✅ 已完成 |
 | **V8** | 开源自部署连接协调服务（设备注册/认证/信令）、原生 STUN/ICE P2P 打洞 + 自建 VPS `UDP Relay (TURN)` 兜底 + `TCP/TLS 443` 备用穿透、跨端 UDP+FEC/NACK 与 HEVC/H.265 协商、Linux 客户端探索 | 🚧 规划 / 演进中 |
 
 ---

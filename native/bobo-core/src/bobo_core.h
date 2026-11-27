@@ -33,6 +33,22 @@ typedef struct BoBoClientStats {
     char decoderName[64];
 } BoBoClientStats;
 
+typedef struct BoBoClientStatsEx {
+    BoBoClientStats base;
+    double queueWaitMs;
+    double maxQueueWaitMs;
+    double frameTotalMs;
+    int32_t queueDepth;
+    int32_t queueBytes;
+    int32_t waitingKeyframe;
+    uint64_t droppedFrames;
+    uint64_t queueResets;
+} BoBoClientStatsEx;
+
+#define BOBO_PUSH_VIDEO_IGNORED 0
+#define BOBO_PUSH_VIDEO_ACCEPTED 1
+#define BOBO_PUSH_VIDEO_NEED_KEYFRAME 2
+
 typedef struct BoBoInputPacket {
     uint8_t kind;     // 1=MouseAbs, 2=MouseRel, 3=MouseBtn, 4=MouseWheel, 5=Key, 6=ReleaseAll
     uint8_t flags;    // down/extended/horizontal
@@ -176,6 +192,7 @@ BOBO_API void __stdcall BoBoClient_SetHostCursorComposited(void* handle, int32_t
 BOBO_API void __stdcall BoBoClient_SetRemoteCursorShape(void* handle, int32_t shapeId);
 BOBO_API void __stdcall BoBoClient_SetRemoteCursorInfo(void* handle, int32_t shapeId, int32_t width, int32_t height);
 BOBO_API void __stdcall BoBoClient_GetStats(void* handle, BoBoClientStats* outStats);
+BOBO_API void __stdcall BoBoClient_GetStatsEx(void* handle, BoBoClientStatsEx* outStats);
 BOBO_API void __stdcall BoBoClient_Destroy(void* handle);
 
 #ifdef __cplusplus

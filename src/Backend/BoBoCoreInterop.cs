@@ -54,6 +54,35 @@ namespace DualRemote
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    internal struct BoBoNativeClientStatsEx
+    {
+        internal double Fps;
+        internal double DecodeMs;
+        internal double RenderMs;
+        internal int Width;
+        internal int Height;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+        internal byte[] DecoderNameBytes;
+        internal double QueueWaitMs;
+        internal double MaxQueueWaitMs;
+        internal double FrameTotalMs;
+        internal int QueueDepth;
+        internal int QueueBytes;
+        internal int WaitingKeyframe;
+        internal ulong DroppedFrames;
+        internal ulong QueueResets;
+
+        internal string GetDecoderName()
+        {
+            if (DecoderNameBytes == null) return "D3D11VA";
+            int len = 0;
+            while (len < DecoderNameBytes.Length && DecoderNameBytes[len] != 0) len++;
+            if (len == 0) return "D3D11VA";
+            return Encoding.UTF8.GetString(DecoderNameBytes, 0, len);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
     internal struct BoBoInputPacket
     {
         internal byte Kind;   // 1=MouseAbs, 2=MouseRel, 3=MouseBtn, 4=MouseWheel, 5=Key, 6=ReleaseAll
@@ -104,6 +133,9 @@ namespace DualRemote
     internal static class BoBoCoreInterop
     {
         internal const string EmbeddedResourceName = "DualRemote.BoBoCore.dll.gz";
+        internal const int PushVideoIgnored = 0;
+        internal const int PushVideoAccepted = 1;
+        internal const int PushVideoNeedKeyframe = 2;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryW(string lpFileName);
@@ -269,6 +301,9 @@ namespace DualRemote
         private delegate void FnClientGetStats(IntPtr handle, ref BoBoNativeClientStats outStats);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void FnClientGetStatsEx(IntPtr handle, ref BoBoNativeClientStatsEx outStats);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void FnClientDestroy(IntPtr handle);
 
         private static readonly object LoadGate = new object();
@@ -314,7 +349,13 @@ namespace DualRemote
         private static FnClientSetRemoteCursorShape fnClientSetRemoteCursorShape;
         private static FnClientSetRemoteCursorInfo fnClientSetRemoteCursorInfo;
         private static FnClientGetStats fnClientGetStats;
+        private static FnClientGetStatsEx fnClientGetStatsEx;
         private static FnClientDestroy fnClientDestroy;
+
+        internal static bool HasClientGetStatsEx
+        {
+            get { return fnClientGetStatsEx != null; }
+        }
 
         internal static bool IsLoaded
         {
@@ -389,6 +430,7 @@ namespace DualRemote
                     fnClientSetRemoteCursorShape = TryBind<FnClientSetRemoteCursorShape>(mod, "BoBoClient_SetRemoteCursorShape");
                     fnClientSetRemoteCursorInfo = TryBind<FnClientSetRemoteCursorInfo>(mod, "BoBoClient_SetRemoteCursorInfo");
                     fnClientGetStats = Bind<FnClientGetStats>(mod, "BoBoClient_GetStats");
+                    fnClientGetStatsEx = TryBind<FnClientGetStatsEx>(mod, "BoBoClient_GetStatsEx");
                     fnClientDestroy = Bind<FnClientDestroy>(mod, "BoBoClient_Destroy");
 
                     loadedDllPath = dllPath;
@@ -1028,15 +1070,39 @@ namespace DualRemote
                 try
                 {
                     if (handle == IntPtr.Zero) return st;
-                    var raw = new BoBoNativeClientStats();
-                    raw.DecoderNameBytes = new byte[64];
-                    fnClientGetStats(handle, ref raw);
-                    st.Fps = raw.Fps;
-                    st.DecodeMs = raw.DecodeMs;
-                    st.RenderMs = raw.RenderMs;
-                    st.Width = raw.Width;
-                    st.Height = raw.Height;
-                    st.Decoder = raw.GetDecoderName();
+                    if (fnClientGetStatsEx != null)
+                    {
+                        var rawEx = new BoBoNativeClientStatsEx();
+                        rawEx.DecoderNameBytes = new byte[64];
+                        fnClientGetStatsEx(handle, ref rawEx);
+                        st.Fps = rawEx.Fps;
+                        st.DecodeMs = rawEx.DecodeMs;
+                        st.RenderMs = rawEx.RenderMs;
+                        st.QueueWaitMs = rawEx.QueueWaitMs;
+                        st.MaxQueueWaitMs = rawEx.MaxQueueWaitMs;
+                        st.FrameTotalMs = rawEx.FrameTotalMs;
+                        st.QueueDepth = rawEx.QueueDepth;
+                        st.QueueBytes = rawEx.QueueBytes;
+                        st.WaitingForKeyframe = rawEx.WaitingKeyframe != 0;
+                        st.DecodeDroppedFrames = unchecked((long)rawEx.DroppedFrames);
+                        st.DecodeQueueResets = unchecked((long)rawEx.QueueResets);
+                        st.Width = rawEx.Width;
+                        st.Height = rawEx.Height;
+                        st.Decoder = rawEx.GetDecoderName();
+                    }
+                    else
+                    {
+                        var raw = new BoBoNativeClientStats();
+                        raw.DecoderNameBytes = new byte[64];
+                        fnClientGetStats(handle, ref raw);
+                        st.Fps = raw.Fps;
+                        st.DecodeMs = raw.DecodeMs;
+                        st.RenderMs = raw.RenderMs;
+                        st.FrameTotalMs = raw.DecodeMs + raw.RenderMs;
+                        st.Width = raw.Width;
+                        st.Height = raw.Height;
+                        st.Decoder = raw.GetDecoderName();
+                    }
                 }
                 finally { rwLock.ExitReadLock(); }
                 return st;
