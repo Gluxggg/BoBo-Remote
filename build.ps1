@@ -32,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.5.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.6.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
 $BuildDir        = Join-Path $Root '.cache\build'
 $StageRoot       = Join-Path $BuildDir 'clean-stage'
@@ -99,7 +99,7 @@ function Invoke-CompileStage {
     $verFile = Join-Path $BuildDir 'app-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
 
-    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
+    $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.ServiceProcess.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
     $refs = @($refNames | ForEach-Object { Join-Path $csc.Framework $_ })
 
     $appIcon = Join-Path $Root 'assets\bobo-remote.ico'

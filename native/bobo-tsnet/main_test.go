@@ -354,3 +354,22 @@ func TestUdpBridgeRelayAndAuth(t *testing.T) {
 		t.Fatalf("expected 200 OK from DELETE /udp-bridge, got %d", delResp.StatusCode)
 	}
 }
+
+func TestPickPreferredWireGuardPortAndPeerAddrsJson(t *testing.T) {
+	port := pickPreferredWireGuardPort()
+	if port != 0 && port != 49813 {
+		t.Fatalf("unexpected preferred WireGuard port: %d", port)
+	}
+	dto := PeerDTO{
+		ID:       "n1",
+		HostName: "host",
+		Addrs:    []string{"[2409:8a00::1]:49813", "192.168.1.10:49813"},
+	}
+	raw, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"addrs":["[2409:8a00::1]:49813","192.168.1.10:49813"]`) {
+		t.Fatalf("PeerDTO addrs missing in JSON: %s", string(raw))
+	}
+}

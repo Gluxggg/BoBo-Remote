@@ -265,6 +265,18 @@ namespace DualRemote
         private delegate void FnHostInjectUnicodeText([MarshalAs(UnmanagedType.LPWStr)] string text, int length);
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnIsInputDesktopAccessible();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnSyncInputDesktop();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnIsForegroundUipiBlocked();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int FnHostSendSas();
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int FnHostApplySuperDisplay(
             int monitorIndex,
             int clientWidth,
@@ -403,6 +415,10 @@ namespace DualRemote
         private static FnHostDestroy fnHostDestroy;
         private static FnHostInjectInput fnHostInjectInput;
         private static FnHostInjectUnicodeText fnHostInjectUnicodeText;
+        private static FnIsInputDesktopAccessible fnIsInputDesktopAccessible;
+        private static FnSyncInputDesktop fnSyncInputDesktop;
+        private static FnIsForegroundUipiBlocked fnIsForegroundUipiBlocked;
+        private static FnHostSendSas fnHostSendSas;
         private static FnHostApplySuperDisplay fnHostApplySuperDisplay;
         private static FnHostRestoreSuperDisplay fnHostRestoreSuperDisplay;
         private static FnHostSetPrivacyInputBlock fnHostSetPrivacyInputBlock;
@@ -495,6 +511,10 @@ namespace DualRemote
                     fnHostDestroy = Bind<FnHostDestroy>(mod, "BoBoHost_Destroy");
                     fnHostInjectInput = Bind<FnHostInjectInput>(mod, "BoBoHost_InjectInput");
                     fnHostInjectUnicodeText = Bind<FnHostInjectUnicodeText>(mod, "BoBoHost_InjectUnicodeText");
+                    fnIsInputDesktopAccessible = TryBind<FnIsInputDesktopAccessible>(mod, "BoBoCore_IsInputDesktopAccessible");
+                    fnSyncInputDesktop = TryBind<FnSyncInputDesktop>(mod, "BoBoCore_SyncInputDesktop");
+                    fnIsForegroundUipiBlocked = TryBind<FnIsForegroundUipiBlocked>(mod, "BoBoCore_IsForegroundUipiBlocked");
+                    fnHostSendSas = TryBind<FnHostSendSas>(mod, "BoBoHost_SendSAS");
                     fnHostApplySuperDisplay = Bind<FnHostApplySuperDisplay>(mod, "BoBoHost_ApplySuperDisplay");
                     fnHostRestoreSuperDisplay = Bind<FnHostRestoreSuperDisplay>(mod, "BoBoHost_RestoreSuperDisplay");
                     fnHostSetPrivacyInputBlock = Bind<FnHostSetPrivacyInputBlock>(mod, "BoBoHost_SetPrivacyInputBlock");
@@ -765,6 +785,34 @@ namespace DualRemote
             fnHostInjectUnicodeText(text, text.Length);
             Action textHook = RemoteTextInputHook;
             if (textHook != null) textHook();
+        }
+
+        internal static bool IsInputDesktopAccessible()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnIsInputDesktopAccessible == null) return true;
+            return fnIsInputDesktopAccessible() != 0;
+        }
+
+        internal static bool SyncInputDesktop()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnSyncInputDesktop == null) return false;
+            return fnSyncInputDesktop() != 0;
+        }
+
+        internal static bool IsForegroundUipiBlocked()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnIsForegroundUipiBlocked == null) return false;
+            return fnIsForegroundUipiBlocked() != 0;
+        }
+
+        internal static bool SendSAS()
+        {
+            string err;
+            if (!EnsureLoaded(out err) || fnHostSendSas == null) return false;
+            return fnHostSendSas() != 0;
         }
 
         internal static bool ApplySuperDisplay(int monitorIndex, int clientWidth, int clientHeight, out int actualWidth, out int actualHeight)

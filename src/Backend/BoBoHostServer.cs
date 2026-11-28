@@ -594,7 +594,9 @@ namespace DualRemote
             }
             catch { }
 
-            BoBoCoreInterop.BoBoHostNativeHandle nativeHost = null;
+            var nativeHost = new BoBoSystemService.BoBoSecureDesktopBridge();
+            bool hostStarted = false;
+            int lastLockNoticeTick = 0;
             bool streamNotifiedStarted = false;
             int activeMonitorIndex = 0;
             var display = new SessionDisplay();
@@ -675,6 +677,7 @@ namespace DualRemote
                     ack["nonce"] = sessionNonce;
                     ack["monitors"] = BoBoProtocol.SerializeMonitors(monitors);
                     ack["lanIps"] = BoBoProtocol.GetLocalLanIpv4Addresses().ToArray();
+                    ack["publicIpv6s"] = BoBoNatTraversal.GetLocalGlobalIpv6Addresses().ToArray();
                     ack["udpSupported"] = (boundUdpPort > 0);
                     await conn.SendJsonSafeAsync(ack, ct).ConfigureAwait(false);
 
@@ -706,12 +709,18 @@ namespace DualRemote
 
                         if (frame.Type == BoBoPacketType.InputEvent)
                         {
-                            if (authorized && nativeHost != null && object.ReferenceEquals(activeStreamConn, conn))
+                            if (authorized && hostStarted && object.ReferenceEquals(activeStreamConn, conn))
                             {
                                 BoBoInputPacket inp;
                                 if (BoBoProtocol.ParseInputPayload(frame.Payload, out inp))
                                 {
-                                    BoBoCoreInterop.InjectInput(activeMonitorIndex, inp);
+                                    nativeHost.InjectInput(activeMonitorIndex, inp);
+                                    if (nativeHost.IsSecureDesktopBlockedWithoutService())
+                                    {
+                                        SendLockedServiceNoticeIfNeeded(conn, nativeHost, ref lastLockNoticeTick,
+                                            "LOCK_SERVICE_NEEDED",
+                                            "主机当前处于锁屏或 UAC 安全桌面，请先在主机「网络与内核 → 安装/修复锁屏服务」中启用后即可远控并解锁。");
+                                    }
                                 }
                             }
                             continue;
@@ -948,7 +957,7 @@ namespace DualRemote
                                 if (previous != null && !object.ReferenceEquals(previous, conn))
                                 {
                                     previous.ForceClose("superseded by new stream");
-                                    BoBoCoreInterop.InjectInput(0, new BoBoInputPacket { Kind = 6 });
+                                    nativeHost.InjectInput(0, new BoBoInputPacket { Kind = 6 });
                                 }
                                 activeStreamRunning = true;
                                 activePeerName = clientName;
@@ -965,13 +974,13 @@ namespace DualRemote
                             {
                                 if (ct.IsCancellationRequested || !object.ReferenceEquals(activeStreamConn, conn)) break;
                                 // The outgoing connection cannot restore another session's display.
-                                BoBoCoreInterop.RestoreSuperDisplay();
+                                nativeHost.RestoreSuperDisplay();
                                 List<BoBoMonitorDescriptor> currentMonitors = BoBoCoreInterop.EnumerateMonitors();
                                 activeMonitorIndex = FindMonitorIndex(currentMonitors, reqMon);
                                 display.ViewportProtocol = BoBoProtocol.GetInt(msg, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
                                 display.SetRequestedStream(reqW, reqH);
                                 display.ReadRequest(msg, "superDisplay");
-                                display.UpdateDesktop(activeMonitorIndex, currentMonitors);
+                                display.UpdateDesktop(activeMonitorIndex, currentMonitors, nativeHost);
                                 display.GetStreamSize(reqAutoBitrate ? wanPixelBudget : long.MaxValue, out reqW, out reqH);
                             }
                             reqMon = activeMonitorIndex;
@@ -984,11 +993,8 @@ namespace DualRemote
                                 activeUdpSession.Dispose();
                                 activeUdpSession = null;
                             }
-                            if (nativeHost != null)
-                            {
-                                nativeHost.Dispose();
-                                nativeHost = null;
-                            }
+                            hostStarted = false;
+                            nativeHost.StopHostSession();
 
                             abrController = new BoBoAdaptiveBitrateController(reqAutoBitrate, reqBps, reqFps, initRttMs, isLanClient);
                             int startBps = abrController.CurrentBitrateKbps;
@@ -1020,19 +1026,27 @@ namespace DualRemote
                                     delegate(BoBoInputPacket inp)
                                     {
                                         if (!ct.IsCancellationRequested && object.ReferenceEquals(activeStreamConn, conn))
-                                            BoBoCoreInterop.InjectInput(Volatile.Read(ref activeMonitorIndex), inp);
+                                        {
+                                            nativeHost.InjectInput(Volatile.Read(ref activeMonitorIndex), inp);
+                                            if (nativeHost.IsSecureDesktopBlockedWithoutService())
+                                            {
+                                                SendLockedServiceNoticeIfNeeded(conn, nativeHost, ref lastLockNoticeTick,
+                                                    "LOCK_SERVICE_NEEDED",
+                                                    "主机当前处于锁屏或 UAC 安全桌面，请先在主机「网络与内核 → 安装/修复锁屏服务」中启用后即可远控并解锁。");
+                                            }
+                                        }
                                     },
                                     delegate
                                     {
-                                        BoBoCoreInterop.BoBoHostNativeHandle h = nativeHost;
-                                        if (h != null) { try { h.RequestKeyframe(); } catch { } }
+                                        BoBoSystemService.BoBoSecureDesktopBridge h = nativeHost;
+                                        if (h != null && hostStarted) { try { h.RequestKeyframe(); } catch { } }
                                     },
                                     delegate(double rttMs, double lossPct, double jitterMs)
                                     {
                                         BoBoAdaptiveBitrateController abr = abrController;
-                                        BoBoCoreInterop.BoBoHostNativeHandle h = nativeHost;
+                                        BoBoSystemService.BoBoSecureDesktopBridge h = nativeHost;
                                         HostUdpSession curU = activeUdpSession;
-                                        if (abr == null || h == null) return;
+                                        if (abr == null || h == null || !hostStarted) return;
                                         int nextBps, nextFps;
                                         bool changed = abr.OnTelemetry(rttMs, lossPct, jitterMs, Stopwatch.GetTimestamp(), out nextBps, out nextFps);
                                         if (curU != null) curU.SetPacingProfile(nextBps, abr.PacingHeadroomFactor);
@@ -1056,9 +1070,9 @@ namespace DualRemote
                                         if (promotedRank < 40) return;
                                         wanPixelBudget = isLanClient ? long.MaxValue : (2560L * 1600L);
                                         BoBoAdaptiveBitrateController abr = abrController;
-                                        BoBoCoreInterop.BoBoHostNativeHandle h = nativeHost;
+                                        BoBoSystemService.BoBoSecureDesktopBridge h = nativeHost;
                                         HostUdpSession curU = activeUdpSession;
-                                        if (abr != null && h != null)
+                                        if (abr != null && h != null && hostStarted)
                                         {
                                             int pBps, pFps;
                                             bool pChanged = abr.OnDirectPathPromoted(out pBps, out pFps);
@@ -1085,13 +1099,14 @@ namespace DualRemote
                             }
 
                             string hostErr;
-                            nativeHost = BoBoCoreInterop.CreateHostSession(
+                            hostStarted = nativeHost.StartHostSession(
                                 reqMon, reqW, reqH, startFps, startBps, muteHost,
+                                hostCompositeCursor, clientAcceptsAac, useHevc,
                                 delegate(byte[] h264, bool isKey, int w, int h, uint tsMs)
                                 {
                                     if (ct.IsCancellationRequested) return;
 
-                                    BoBoCoreInterop.BoBoHostNativeHandle curNh = nativeHost;
+                                    BoBoSystemService.BoBoSecureDesktopBridge curNh = nativeHost;
                                     bool isHevcFrame = (curNh != null && curNh.VideoCodec == BoBoCoreInterop.VideoCodecHevc);
 
                                     // Fast-path: encrypted UDP + adaptive XOR FEC (zero TCP Head-of-Line blocking!)
@@ -1152,7 +1167,7 @@ namespace DualRemote
                                 delegate(byte[] audioBytes, int sr, int ch, int samples)
                                 {
                                     if (ct.IsCancellationRequested) return;
-                                    BoBoCoreInterop.BoBoHostNativeHandle nh = nativeHost;
+                                    BoBoSystemService.BoBoSecureDesktopBridge nh = nativeHost;
                                     bool isAac = (nh != null && nh.AudioCodec == BoBoCoreInterop.AudioCodecAac);
                                     HostUdpSession uSess = activeUdpSession;
                                     if (uSess != null && uSess.IsActivated)
@@ -1175,12 +1190,9 @@ namespace DualRemote
                                         Interlocked.Decrement(ref audioQueueDepth);
                                     });
                                 },
-                                out hostErr,
-                                hostCompositeCursor,
-                                clientAcceptsAac,
-                                useHevc);
+                                out hostErr);
 
-                            if (nativeHost == null)
+                            if (!hostStarted)
                             {
                                 if (activeUdpSession != null)
                                 {
@@ -1252,6 +1264,7 @@ namespace DualRemote
                             started["hostCursorComposited"] = hostCompositeCursor;
                             started["videoCodec"] = useHevc ? "hevc" : "h264";
                             started["audioCodec"] = nativeHost.AudioCodec == BoBoCoreInterop.AudioCodecAac ? "aac" : "adpcm";
+                            started["lockServiceActive"] = nativeHost.IsUsingSystemHelper;
                             started["monitors"] = BoBoProtocol.SerializeMonitors(curMons);
                             if (activeUdpSession != null && udpKeyBytes != null)
                             {
@@ -1271,6 +1284,12 @@ namespace DualRemote
                                 }
                             }
                             await conn.SendJsonSafeAsync(started, ct).ConfigureAwait(false);
+                            if (nativeHost.IsSecureDesktopBlockedWithoutService())
+                            {
+                                SendLockedServiceNoticeIfNeeded(conn, nativeHost, ref lastLockNoticeTick,
+                                    "LOCK_SERVICE_NEEDED",
+                                    "主机当前处于锁屏或 UAC 安全桌面，请先在主机「网络与内核 → 安装/修复锁屏服务」中启用后即可远控并解锁。");
+                            }
                             if (activeUdpSession != null && mediaUdp != null && boundUdpPort > 0)
                             {
                                 UdpClient curMediaUdp = mediaUdp;
@@ -1281,18 +1300,28 @@ namespace DualRemote
                                 {
                                     try
                                     {
-                                        BoBoNatTraversal.StunDualProbeResult stunRes = null;
+                                        Task<BoBoNatTraversal.StunDualProbeResult> stunTask = null;
                                         try
                                         {
                                             var stunServers = BoBoNatTraversal.BuildDefaultStunServers(sHost, sPort);
-                                            stunRes = await hostStunSession.ProbeDualStackAsync(
-                                                curMediaUdp.Client, stunServers, 900, ct).ConfigureAwait(false);
+                                            stunTask = hostStunSession.ProbeDualStackAsync(curMediaUdp.Client, stunServers, 900, ct);
                                         }
                                         catch { }
+                                        Task<IPEndPoint> mapTask = BoBoNatTraversal.TryMapRouterPortAsync(curUdpPort, 750, ct);
+                                        BoBoNatTraversal.StunDualProbeResult stunRes = null;
+                                        IPEndPoint routerEp = null;
+                                        if (stunTask != null)
+                                        {
+                                            try { stunRes = await stunTask.ConfigureAwait(false); } catch { }
+                                        }
+                                        try { routerEp = await mapTask.ConfigureAwait(false); } catch { }
                                         if (ct.IsCancellationRequested || !object.ReferenceEquals(activeStreamConn, conn)) return;
-                                        IList<IPEndPoint> mappedList = stunRes != null ? stunRes.AllEndpoints() : null;
+
+                                        var mappedList = stunRes != null ? stunRes.AllEndpoints() : new List<IPEndPoint>();
+                                        if (routerEp != null) mappedList.Add(routerEp);
                                         bool symHint = stunRes != null && stunRes.IsSymmetricIPv4;
-                                        List<BoBoUdpCandidate> cands = BoBoNatTraversal.GatherLocalCandidates(curUdpPort, mappedList, symHint);
+                                        int delta = stunRes != null ? stunRes.ObservedPortDelta : 0;
+                                        List<BoBoUdpCandidate> cands = BoBoNatTraversal.GatherLocalCandidates(curUdpPort, mappedList, symHint, delta);
                                         if (cands.Count > 0)
                                         {
                                             var candMsg = new Dictionary<string, object>();
@@ -1313,7 +1342,7 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "RECONFIGURE" && nativeHost != null)
+                        if (msgType == "RECONFIGURE" && hostStarted)
                         {
                             var ackCfg = new Dictionary<string, object>();
                             lock (streamOwnerGate)
@@ -1334,11 +1363,11 @@ namespace DualRemote
                                 reqMon = FindMonitorIndex(currentMonitors, reqMon);
                                 if (reqMon != activeMonitorIndex)
                                 {
-                                    BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
-                                    BoBoCoreInterop.RestoreSuperDisplay();
+                                    nativeHost.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
+                                    nativeHost.RestoreSuperDisplay();
                                     currentMonitors = BoBoCoreInterop.EnumerateMonitors();
                                     reqMon = FindMonitorIndex(currentMonitors, reqMon);
-                                    display.UpdateDesktop(reqMon, currentMonitors);
+                                    display.UpdateDesktop(reqMon, currentMonitors, nativeHost);
                                 }
                                 Volatile.Write(ref activeMonitorIndex, reqMon);
                                 display.GetStreamSize(reqAuto ? wanPixelBudget : long.MaxValue, out reqW, out reqH);
@@ -1358,7 +1387,7 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "SET_CURSOR_MODE" && nativeHost != null)
+                        if (msgType == "SET_CURSOR_MODE" && hostStarted)
                         {
                             bool composite = BoBoProtocol.GetBool(msg, "composite", true);
                             nativeHost.SetCompositeCursor(composite);
@@ -1369,7 +1398,7 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "TELEMETRY" && nativeHost != null)
+                        if (msgType == "TELEMETRY" && hostStarted)
                         {
                             double rttMs = 0.0;
                             double lossPct = 0.0;
@@ -1419,14 +1448,14 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "SET_SUPER_DISPLAY" && nativeHost != null)
+                        if (msgType == "SET_SUPER_DISPLAY" && hostStarted)
                         {
                             var ackSd = new Dictionary<string, object>();
                             lock (streamOwnerGate)
                             {
                                 if (!object.ReferenceEquals(activeStreamConn, conn) || ct.IsCancellationRequested) break;
                                 display.ReadRequest(msg, "enable");
-                                display.UpdateDesktop(activeMonitorIndex, BoBoCoreInterop.EnumerateMonitors());
+                                display.UpdateDesktop(activeMonitorIndex, BoBoCoreInterop.EnumerateMonitors(), nativeHost);
                                 int streamW, streamH;
                                 display.GetStreamSize(abrController.AutoEnabled ? wanPixelBudget : long.MaxValue, out streamW, out streamH);
                                 nativeHost.Reconfigure(activeMonitorIndex, streamW, streamH, abrController.CurrentFps, abrController.CurrentBitrateKbps);
@@ -1444,13 +1473,13 @@ namespace DualRemote
                             continue;
                         }
 
-                        if (msgType == "REQUEST_KEYFRAME" && nativeHost != null)
+                        if (msgType == "REQUEST_KEYFRAME" && hostStarted)
                         {
                             nativeHost.RequestKeyframe();
                             continue;
                         }
 
-                        if (msgType == "SET_MUTE_HOST" && nativeHost != null)
+                        if (msgType == "SET_MUTE_HOST" && hostStarted)
                         {
                             nativeHost.SetMuteHost(BoBoProtocol.GetBool(msg, "mute", false));
                             continue;
@@ -1474,6 +1503,18 @@ namespace DualRemote
                             continue;
                         }
 
+                        if (msgType == "SEND_SAS")
+                        {
+                            bool sasOk = nativeHost.SendSAS();
+                            if (!sasOk && !nativeHost.IsUsingSystemHelper)
+                            {
+                                SendLockedServiceNoticeIfNeeded(conn, nativeHost, ref lastLockNoticeTick,
+                                    "LOCK_SERVICE_NEEDED",
+                                    "主机尚未安装 BoBo 锁屏穿透服务，系统拦截了 Ctrl+Alt+Del；请在主机「网络与内核 → 安装/修复锁屏服务」启用。");
+                            }
+                            continue;
+                        }
+
                         if (msgType == "CLIPBOARD_TEXT")
                         {
                             string text = BoBoProtocol.GetStr(msg, "text", "");
@@ -1482,7 +1523,16 @@ namespace DualRemote
                             {
                                 Action<string> cbEv = ClipboardTextReceived;
                                 if (cbEv != null) { try { cbEv(text); } catch { } }
-                                if (typeText) BoBoCoreInterop.InjectUnicodeText(text);
+                                if (typeText)
+                                {
+                                    nativeHost.InjectUnicodeText(text);
+                                    if (nativeHost.IsSecureDesktopBlockedWithoutService())
+                                    {
+                                        SendLockedServiceNoticeIfNeeded(conn, nativeHost, ref lastLockNoticeTick,
+                                            "LOCK_SERVICE_NEEDED",
+                                            "主机当前处于锁屏或 UAC 安全桌面，请先在主机「网络与内核 → 安装/修复锁屏服务」中启用后即可远控并解锁。");
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -1605,10 +1655,6 @@ namespace DualRemote
                 {
                     try { File.Delete(activeFileTmpPath); } catch { }
                 }
-                if (nativeHost != null)
-                {
-                    nativeHost.Dispose();
-                }
                 bool notifyStopped = false;
                 lock (streamOwnerGate)
                 {
@@ -1616,8 +1662,8 @@ namespace DualRemote
                     {
                         if (streamNotifiedStarted)
                         {
-                            BoBoCoreInterop.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
-                            BoBoCoreInterop.RestoreSuperDisplay();
+                            nativeHost.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
+                            nativeHost.RestoreSuperDisplay();
                             activeStreamRunning = false;
                             activePeerName = "";
                             notifyStopped = true;
@@ -1625,6 +1671,7 @@ namespace DualRemote
                         activeStreamConn = null;
                     }
                 }
+                nativeHost.Dispose();
                 Action<bool, string, bool> stopped = SessionStateChanged;
                 if (notifyStopped && stopped != null)
                 {
@@ -1708,9 +1755,13 @@ namespace DualRemote
                     viewportWidth >= 320 && viewportWidth <= 16384 && viewportHeight >= 240 && viewportHeight <= 16384;
             }
 
-            internal void UpdateDesktop(int index, List<BoBoMonitorDescriptor> monitors)
+            internal void UpdateDesktop(int index, List<BoBoMonitorDescriptor> monitors, BoBoSystemService.BoBoSecureDesktopBridge bridge)
             {
-                if (!Active || !fullscreen) BoBoCoreInterop.RestoreSuperDisplay();
+                if (!Active || !fullscreen)
+                {
+                    if (bridge != null) bridge.RestoreSuperDisplay();
+                    else BoBoCoreInterop.RestoreSuperDisplay();
+                }
                 else if (originalMonitor != index)
                 {
                     originalMonitor = index;
@@ -1721,7 +1772,10 @@ namespace DualRemote
                 DesktopWidth = 0;
                 DesktopHeight = 0;
                 if (Active && fullscreen && viewportWidth >= 640 && viewportHeight >= 480)
-                    BoBoCoreInterop.ApplySuperDisplay(index, viewportWidth, viewportHeight, out DesktopWidth, out DesktopHeight);
+                {
+                    if (bridge != null) bridge.ApplySuperDisplay(index, viewportWidth, viewportHeight, out DesktopWidth, out DesktopHeight);
+                    else BoBoCoreInterop.ApplySuperDisplay(index, viewportWidth, viewportHeight, out DesktopWidth, out DesktopHeight);
+                }
                 if (DesktopWidth <= 0 || DesktopHeight <= 0)
                 {
                     monitors = BoBoCoreInterop.EnumerateMonitors();
@@ -1788,7 +1842,7 @@ namespace DualRemote
             height = Math.Max(2, (int)(height * scale) & ~1);
         }
 
-        private static void TryRequestDebouncedRecoveryKeyframe(ref int lastTick, BoBoCoreInterop.BoBoHostNativeHandle host, int cooldownMs)
+        private static void TryRequestDebouncedRecoveryKeyframe(ref int lastTick, BoBoSystemService.BoBoSecureDesktopBridge host, int cooldownMs)
         {
             if (host == null) return;
             int nowTick = Environment.TickCount;
@@ -1802,7 +1856,7 @@ namespace DualRemote
 
         private static void NotifyAbrBackpressure(
             BoBoAdaptiveBitrateController abr,
-            BoBoCoreInterop.BoBoHostNativeHandle host,
+            BoBoSystemService.BoBoSecureDesktopBridge host,
             HostUdpSession udpSess,
             ActiveClientConnection conn)
         {
@@ -1819,6 +1873,26 @@ namespace DualRemote
                 note["fps"] = nextFps;
                 conn.SendJsonHighPriorityFireAndForget(note);
             }
+        }
+
+        private static void SendLockedServiceNoticeIfNeeded(
+            ActiveClientConnection conn,
+            BoBoSystemService.BoBoSecureDesktopBridge bridge,
+            ref int lastNoticeTick,
+            string code,
+            string message)
+        {
+            if (conn == null || bridge == null) return;
+            if (bridge.IsUsingSystemHelper || BoBoSystemService.IsRunningAsSystem()) return;
+            int now = Environment.TickCount;
+            int prev = Volatile.Read(ref lastNoticeTick);
+            if (prev != 0 && unchecked(now - prev) < 8000) return;
+            if (Interlocked.CompareExchange(ref lastNoticeTick, now, prev) != prev) return;
+            var note = new Dictionary<string, object>();
+            note["type"] = "HOST_NOTICE";
+            note["code"] = code ?? "LOCK_SERVICE_NEEDED";
+            note["message"] = message;
+            conn.SendJsonHighPriorityFireAndForget(note);
         }
 
         private sealed class HostUdpSession : IDisposable
@@ -1986,7 +2060,7 @@ namespace DualRemote
             internal void UpdateRemoteCandidates(List<BoBoUdpCandidate> candidates, CancellationToken ct)
             {
                 if (disposed || candidates == null || candidates.Count == 0) return;
-                List<IPEndPoint> expanded = BoBoNatTraversal.ExpandPunchEndpoints(candidates, 20);
+                List<IPEndPoint> expanded = BoBoNatTraversal.ExpandPunchEndpoints(candidates, 24);
                 if (expanded.Count == 0) return;
 
                 bool startLoop = false;
@@ -2132,7 +2206,15 @@ namespace DualRemote
                 }
                 if (!sender.Equals(activeEp))
                 {
-                    return;
+                    if (!IPAddress.IsLoopback(sender.Address) && BoBoNatTraversal.IsAllowedRemoteCandidateIp(sender.Address))
+                    {
+                        remoteEp = sender;
+                        activeEp = sender;
+                    }
+                    else
+                    {
+                        return;
+                    }
                 }
                 Interlocked.Exchange(ref lastActiveEpRxTicks, nowTicks);
 
@@ -2289,15 +2371,21 @@ namespace DualRemote
                     double headroom = Volatile.Read(ref pacingHeadroom);
                     double bytesPerSec = Math.Max(600.0, pacingBitrateKbps * headroom) * 125.0;
                     double ticksPerByte = Stopwatch.Frequency / bytesPerSec;
-                    // 4ms quantum burst allowance eliminates per-shard Thread.Sleep(1) stalls on normal P-frames
-                    int burstAllowanceBytes = Math.Max(14000, Math.Min(65536, (int)(bytesPerSec * 0.004)));
+                    int maxBurstBytes = (activePathRank >= 40 && Volatile.Read(ref recentRttMs) < 60.0) ? 4600 : 2300;
+                    int burstAllowanceBytes = Math.Max(2300, Math.Min(maxBurstBytes, (int)(bytesPerSec * 0.0025)));
                     long burstTicks = (long)(burstAllowanceBytes * ticksPerByte);
+                    long spinThreshold = (ticksPerMs * 3L) / 2L;
                     for (int i = 0; i < shards.Count && IsActivated; i++)
                     {
                         long now = Stopwatch.GetTimestamp();
-                        while (nextSendTick - now >= ticksPerMs && IsActivated)
+                        while (nextSendTick - now >= spinThreshold && IsActivated)
                         {
                             Thread.Sleep(1);
+                            now = Stopwatch.GetTimestamp();
+                        }
+                        while (nextSendTick > now && IsActivated)
+                        {
+                            Thread.SpinWait(64);
                             now = Stopwatch.GetTimestamp();
                         }
                         if (!IsActivated) break;

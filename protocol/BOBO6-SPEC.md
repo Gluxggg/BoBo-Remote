@@ -9,11 +9,11 @@
 | 项目 | 约定 |
 |---|---|
 | 协议魔数 | `BOBO6` |
-| 控制与媒体端口 | `TCP 49810`，使用 TLS 1.2+ 和 SNI `BoBoRemote-V6-Node`。Windows 及四端可协商加密 UDP+FEC/NACK，端口为 `UDP 49811`（`BoBoTsNet` 与 `bobo-relay` 自 `v7.4.0` 起亦支持 `UDP 49811` 媒体转发，`v7.5.0` 将本机与中继套接字缓冲扩容至 `2–4 MiB`）。iOS ReplayKit 有独立的本机桥接，使用 `TCP 127.0.0.1:49811`。 |
+| 控制与媒体端口 | `TCP 49810`，使用 TLS 1.2+ 和 SNI `BoBoRemote-V6-Node`。Windows 及四端可协商加密 UDP+FEC/NACK，端口为 `UDP 49811`（`BoBoTsNet` 自 `v7.6.0` 起固定首选 WireGuard UDP 端口 `:49813` 并透出 `addrs`，`bobo-relay` 与 `BoBoTsNet` 支持 `UDP 49811` 媒体转发，`2–4 MiB` 套接字缓冲）。iOS ReplayKit 有独立的本机桥接，使用 `TCP 127.0.0.1:49811`。 |
 | 局域网发现 / STUN | `UDP 49812`（被控端局域网发现广播 UTF-8 JSON；独立部署的 `bobo-relay` 自 `v7.4.0` 起默认在 `:49812` 提供可选 RFC 5389 STUN 服务）。 |
 | 证书与双向身份证明模型 | 被控端持有本地生成的自签名 RSA-2048 X.509 证书；控制端必须直接从 TLS 握手叶证书计算 `SHA-256` 小写十六进制指纹（`certThumbprint`）并执行严格 TOFU 钉扎（绝不信任 JSON 自报指纹或静默覆盖变更指纹）。控制端在 `HELLO` 附带自身 `clientCertDer`（Base64 X.509 DER），并在已配对重连（`AUTH_PROOF`）或首次配对（`PAIR_REQUEST.authSig`）时使用自身 RSA 私钥对 `BOBO6-AUTH:<nonce>\|<clientThumb>\|<hostThumb>` 签名（RSASSA-PKCS1-v1_5 + SHA-256），由被控端核验 `SHA256(clientCertDer) == clientThumbprint` 及公钥验签，彻底杜绝伪造 JSON `certThumbprint` 绕过鉴权。 |
 | 预认证帧限制与防爆破 | 完成鉴权前单帧载荷上限严格限制为 `64 KiB`；4 位临时配对码连续失败 `5` 次立即作废，每次失败延迟 `500 ms` 并立即断开当前连接。 |
-| 跨网互联 | 局域网直连（UDP `49812` 自动发现）、公网 IPv6 直连竞速、RFC 5389 STUN + ICE-Lite 双向 UDP 打洞直连、嵌入式 `BoBoTsNet`（SOCKS5 + `:49811` UDP 桥接 `/udp-bridge`）及自建 `bobo-relay` TCP+UDP 盲中转兜底。 |
+| 跨网互联与安全桌面 | 局域网直连（UDP `49812` 自动发现）、公网 IPv6 直连竞速、NAT-PMP (`:5351`)/UPnP IGD 路由器端口映射、RFC 5389 STUN + 对称 NAT `PortDelta` 步长预测 + `"PUNC"` 反向打洞学习、嵌入式 `BoBoTsNet`（SOCKS5 + `/udp-bridge` + 节点真实公网候选提取）及自建 `bobo-relay` TCP+UDP 盲中转兜底。Windows 被控端可选注册 **`BoBoRemoteService`** (`NT AUTHORITY\SYSTEM`) + 同会话 Helper 与 `sas.dll!SendSAS(FALSE)` 穿透 `Winlogon` 锁屏与 UAC 桌面。 |
 
 ---
 
@@ -118,9 +118,10 @@ Host → Client:
   "deviceCode": "987654321",
   "deviceName": "Workstation",
   "certThumbprint": "<64-hex>",
-  "version": "6.2.0",
+  "version": "7.6.0",
   "allowIncoming": true,
   "authorized": true,
+  "publicIpv6s": ["2409:8900:..."],
   "nonce": "<32-hex>",
   "monitors": [
     { "index": 0, "name": "DISPLAY1 (2560x1440)", "width": 2560, "height": 1440, "primary": true }
@@ -147,9 +148,9 @@ Host → Client:
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.5 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.5 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `udpCandidates`） |
-| `UDP_CANDIDATES` | 双向 | `v7.4.0+`：`candidates` 数组（`kind`: `lan`/`ipv6`/`direct4`/`srflx`/`relay`/`tsnet`, `host`, `port`, `priority`；`v7.5.0+` 新增可选 `"sym": true` 指示对称 NAT 相邻端口打洞与零 RTT 建流直带），经已认证 TLS 通道交换并用 SSRF 白名单校验 |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.6 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.6 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `lockServiceActive`, `udpCandidates`） |
+| `UDP_CANDIDATES` | 双向 | `v7.4.0+`：`candidates` 数组（`kind`: `lan`/`ipv6`/`direct4`/`srflx`/`relay`/`tsnet`, `host`, `port`, `priority`；`v7.5.0+` 新增 `"sym": true`；`v7.6.0+` 新增有符号 `"delta"` 指示对称 NAT 端口映射步长预测与 NAT-PMP/UPnP 外部端口），经已认证 TLS 通道交换并用 SSRF 白名单校验 |
 | `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps` |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |
 | `SET_CURSOR_MODE` / `CURSOR_MODE_STATE` | C ↔ H | `composite` / `hostCursorComposited` |
@@ -157,6 +158,8 @@ Host → Client:
 | `SET_MUTE_HOST` | C → H | `mute` |
 | `SET_PRIVACY` / `PRIVACY_STATE` | C ↔ H | `enable`/`active` |
 | `LOCK_WORKSTATION` | C → H | 无 |
+| `SEND_SAS` | C → H | `v7.6.0+`：由被控端 `SYSTEM` 会话 Helper 执行 `OpenInputDesktop`/`SyncInputDesktop` 与 `sas.dll!SendSAS(FALSE)` 触发安全注意序列（解锁前 `Ctrl+Alt+Del`） |
+| `HOST_NOTICE` | H → C | `v7.6.0+`：`code`（如 `"LOCK_SERVICE_NEEDED"`）, `message`。当宿主未安装 `BoBoRemoteService` 且进入 `Winlogon`/UAC 安全桌面时节流提示控制端 |
 | `CLIPBOARD_TEXT` | C → H | `text`, `injectUnicode` |
 | `PING` / `PONG` | C ↔ H | `ts`（回传相同数值） |
 | `FILE_OFFER` → `FILE_ACCEPT` → `0x05 FileChunk*` → `FILE_DONE` → `FILE_ACK` | C ↔ H | `transferId` (16B ASCII), `fileName`, `totalBytes` (`<= 2 GiB`), `sha256` (必填 64-hex), `ok`, `savedPath`, `error` |
@@ -169,7 +172,7 @@ Windows 被控端可以在 `HELLO_ACK` 中声明 `superDisplayVersion: 2`。支�
 
 Windows 端在 `START_STREAM` 与 `STREAM_STARTED` 协商 `udpNack: true` 后，加密 UDP 通道支持分片级选择性重传：客户端通过报文类型 `10 (Nack)` 发送 `[uint16 LE count]` 与最多 48 条 `[uint32 LE frameId][uint16 LE shardIdx]` 请求补发；被控端在 36 帧 / 4 MiB 环形缓存与限速预算（单窗最多 48 片）内补发原数据分片，并在分片标志位附加 `0x08`（重传标记）；接收端支持最长 `380 ms` NACK 宽限及 `320–450 ms` 高 RTT 重传窗口。自 `v7.4.0` 起发送端默认每分片数据载荷收缩至 `1060 B`（兼容 `1140 B` 接收上限）以适配 `1280 B` IPv6+WireGuard MTU，并新增分片标志位 `0x10`（`FlagHevc`）指示 H.265 负载。
 
-### 4.4 加密 UDP 通道（`UDP 49811` · 四端互通 `AES-128-GCM` + `v7.4`–`v7.5` 路径竞速与持续升优）
+### 4.4 加密 UDP 通道（`UDP 49811` · 四端互通 `AES-128-GCM` + `v7.4`–`v7.6` 路径竞速、PUNC 反向学习与微突发流控）
 
 1. **密码套件协商**：控制端在 `START_STREAM` 声明 `"udpCipher": "aes-128-gcm"`（可选数组 `"udpCiphers": ["aes-128-gcm", "aes-128-ctr-hmac"]`），被控端在 `STREAM_STARTED` 确认 `"udpCipher"`；旧版仅支持 `v7.2` 的节点回落为 `"aes-128-ctr-hmac"`。
 2. **AES-128-GCM 密钥派生与线格式**（详见 [`golden-vectors.json`](golden-vectors.json) `udpAesGcm`）：
@@ -180,7 +183,7 @@ Windows 端在 `START_STREAM` 与 `STREAM_STARTED` 协商 `udpNack: true` 后，
 3. **UDP 包类型（`pktType`）与反馈遥测**：
    - `1=Hello`, `2=HelloAck`, `3=VideoShard`, `4=Audio`（ADPCM）, `5=Input`, `6=Ping`, `7=Pong`, `8=CursorShape`, `9=Feedback`, `10=Nack`, `11=AudioAac`。
    - `Feedback`（11 字节）：`[0..1] lossX100`, `[2..3] rttX10`, `[4..5] jitterX10`, `[6..9] lastDeliveredFrameId`, `[10] flags (bit0=PLI)`。
-   - **v7.4–v7.5 路径竞速与无感升优 `Hello` / `HelloAck`（14 字节扩展载荷）**：`"BO74" || LE32(probeId) || uint8(pathRank) || uint8(flags: bit0=forceSelect) || 4B(0)`；向后兼容 v6.3 `4B "BO63"`。被控端按路径优先级（`局域网 > 公网 IPv6 > 公网 IPv4 / STUN 打洞 > VPS UDP 中转 > 内置跨网 tsnet`）自动切换至最优直通路径，并通过 `1.4s` 周期持续探测与高秩直连无感升优（保留原序列重组队列、重置旧路由 RTT 基线）阻止迟到劣质探测包回退降级。
+   - **v7.4–v7.6 路径竞速、Symmetric NAT 双向穿洞与无丢包发包节奏**：`"BO74"` `14B` 扩展打洞载荷兼容 v6.3 `"BO63"`；`v7.6.0` 新增控制端接收未激活来源的已验签 `"PUNC"` 探测包反向注册并即刻回发 `Hello`（彻底解决 Symmetric NAT 对称端仅靠单一方向打洞被丢弃问题），配合 `2300 B / 4600 B` 两分片微突发 + `Thread.SpinWait(64)` 亚毫秒级发送步调、高 RTT Tight-FEC (`groupSize=2`) 与固定档位 `3200 kbps` 慢启动爬坡，并在收到 `HelloAck` 时无缝锁定真实回源端点。
 
 ---
 

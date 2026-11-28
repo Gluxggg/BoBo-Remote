@@ -173,6 +173,10 @@ BOBO_API void __stdcall BoBoHost_Destroy(void* handle);
 
 BOBO_API void __stdcall BoBoHost_InjectInput(int32_t monitorIndex, const BoBoInputPacket* pkt);
 BOBO_API void __stdcall BoBoHost_InjectUnicodeText(const wchar_t* text, int32_t length);
+BOBO_API int32_t __stdcall BoBoCore_IsInputDesktopAccessible(void);
+BOBO_API int32_t __stdcall BoBoCore_SyncInputDesktop(void);
+BOBO_API int32_t __stdcall BoBoCore_IsForegroundUipiBlocked(void);
+BOBO_API int32_t __stdcall BoBoHost_SendSAS(void);
 
 // ---- Host Super Display (Adaptive Aspect Resolution Switch & Safe Auto-Restore) ----
 BOBO_API int32_t __stdcall BoBoHost_ApplySuperDisplay(

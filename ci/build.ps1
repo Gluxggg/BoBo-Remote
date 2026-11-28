@@ -10,7 +10,7 @@
 param(
     [string] $OutputDirectory = 'ci-out',
     [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
-    [string] $ReleaseVersion = '7.5.0'
+    [string] $ReleaseVersion = '7.6.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +49,7 @@ if (-not (Test-Path -LiteralPath $manifest)) { throw "missing manifest: $manifes
 $appIcon = Join-Path $repoRoot 'assets\bobo-remote.ico'
 $brandLogo = Join-Path $repoRoot 'assets\bobo-logo.png'
 
-$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
+$referenceNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.ServiceProcess.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
 $references = @($referenceNames | ForEach-Object { Join-Path $framework $_ })
 
 $outputRoot = Join-Path $repoRoot $OutputDirectory

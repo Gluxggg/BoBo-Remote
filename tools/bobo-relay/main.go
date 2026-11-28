@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	relayVersion    = "7.5.0"
+	relayVersion    = "7.6.0"
 	stunMagicCookie = uint32(0x2112A442)
 )
 

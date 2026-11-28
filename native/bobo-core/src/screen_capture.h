@@ -18,6 +18,8 @@ namespace bobo {
 
 uint64_t GetLastRemoteMouseInjectMs();
 bool IsPrivacyCursorMasked();
+bool SyncThreadToInputDesktop(bool* outSwitched = nullptr);
+void ResetThreadDesktopHandle();
 
 constexpr int32_t kMaxCursorDimension = 128;
 constexpr int32_t kDefaultCursorDimension = 32;

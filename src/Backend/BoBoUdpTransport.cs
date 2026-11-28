@@ -734,7 +734,7 @@ namespace DualRemote
         {
             if (isKeyframe)
             {
-                groupSize = (recentLossPct >= 2.0 || burstLossStreak >= 2 || jitterMs >= 25.0) ? 2 : 3;
+                groupSize = (recentLossPct >= 2.0 || burstLossStreak >= 2 || jitterMs >= 25.0 || rttMs >= 110.0) ? 2 : 3;
                 emitFec = true;
             }
             else if (dataCount == 1)
@@ -742,7 +742,7 @@ namespace DualRemote
                 groupSize = 1;
                 emitFec = (recentLossPct >= 0.4 || burstLossStreak >= 1 || jitterMs >= 20.0);
             }
-            else if (recentLossPct >= 3.0 || burstLossStreak >= 2)
+            else if (recentLossPct >= 2.5 || burstLossStreak >= 2 || (rttMs >= 160.0 && recentLossPct >= 0.8))
             {
                 groupSize = 2;
                 emitFec = true;
@@ -1817,6 +1817,11 @@ namespace DualRemote
                 this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 6000);
                 this.currentFps = Math.Min(this.targetFps, 90);
             }
+            else if (!autoEnabled && !isLanLink && initialRttMs >= 95.0)
+            {
+                // Smoothly warm up fixed bitrate presets on high-RTT links so Frame 0 IDR bursts never spike packet loss.
+                this.currentBitrateKbps = Math.Min(this.targetBitrateKbps, 3200);
+            }
             else
             {
                 this.currentBitrateKbps = this.targetBitrateKbps;
@@ -2103,12 +2108,12 @@ namespace DualRemote
                          effectiveJitterMs < 35.0)
                 {
                     int maxBps = (enabled && !isLanLink) ? Math.Min(targetBitrateKbps, 30000) : targetBitrateKbps;
-                    double incInterval = enabled ? 2000.0 : 1000.0;
+                    double incInterval = enabled ? 2000.0 : 900.0;
                     if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= incInterval)
                     {
                         int step = enabled
                             ? Math.Max(400, (int)(currentBitrateKbps * 0.12))
-                            : Math.Max(800, (int)(currentBitrateKbps * 0.18));
+                            : Math.Max(900, (int)(currentBitrateKbps * 0.24));
                         int next = Math.Min(maxBps, currentBitrateKbps + step);
                         if (next != currentBitrateKbps)
                         {

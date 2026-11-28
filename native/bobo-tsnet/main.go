@@ -51,8 +51,9 @@ type PeerDTO struct {
 	Active    bool   `json:"active"`
 	CurAddr   string `json:"curAddr"`
 	Relay     string `json:"relay"`
-	PeerRelay string `json:"peerRelay"`
-	LastSeen  string `json:"lastSeen"`
+	PeerRelay string   `json:"peerRelay"`
+	LastSeen  string   `json:"lastSeen"`
+	Addrs     []string `json:"addrs,omitempty"`
 }
 
 type StatusDTO struct {
@@ -216,6 +217,15 @@ func (m *tsManager) signalWaiter() {
 	}
 }
 
+func pickPreferredWireGuardPort() uint16 {
+	ln, err := net.ListenPacket("udp", ":49813")
+	if err != nil {
+		return 0
+	}
+	_ = ln.Close()
+	return 49813
+}
+
 func (m *tsManager) ensureStarted() (*tsnet.Server, *local.Client, error) {
 	m.mu.Lock()
 	if m.srv != nil && m.lc != nil {
@@ -226,6 +236,7 @@ func (m *tsManager) ensureStarted() (*tsnet.Server, *local.Client, error) {
 	srv := &tsnet.Server{
 		Dir:      m.stateDir,
 		Hostname: m.hostname,
+		Port:     pickPreferredWireGuardPort(),
 		UserLogf: func(format string, args ...any) {
 			msg := fmt.Sprintf(format, args...)
 			if idx := strings.Index(msg, "https://"); idx >= 0 {
@@ -804,6 +815,16 @@ func (m *tsManager) buildStatus(ctx context.Context) StatusDTO {
 		}
 		if !p.LastSeen.IsZero() {
 			dto.LastSeen = p.LastSeen.UTC().Format(time.RFC3339)
+		}
+		for _, ap := range p.Addrs {
+			s := strings.TrimSpace(ap)
+			if s == "" {
+				continue
+			}
+			dto.Addrs = append(dto.Addrs, s)
+			if len(dto.Addrs) >= 12 {
+				break
+			}
 		}
 		for _, addr := range p.TailscaleIPs {
 			a := addr.Unmap()

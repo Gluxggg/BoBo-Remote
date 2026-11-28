@@ -158,6 +158,92 @@ ScreenCapturer::~ScreenCapturer() {
     Shutdown();
 }
 
+namespace {
+thread_local HDESK t_ownedDesktop = nullptr;
+thread_local HDESK t_initialDesktop = nullptr;
+thread_local wchar_t t_lastDeskName[64] = {};
+
+bool QueryDesktopNameLower(HDESK hDesk, wchar_t (&outName)[64]) {
+    outName[0] = L'\0';
+    if (!hDesk) return false;
+    DWORD needed = 0;
+    if (!GetUserObjectInformationW(hDesk, UOI_NAME, outName, sizeof(outName), &needed)) {
+        outName[0] = L'\0';
+        return false;
+    }
+    outName[63] = L'\0';
+    return outName[0] != L'\0';
+}
+} // namespace
+
+bool SyncThreadToInputDesktop(bool* outSwitched) {
+    if (outSwitched) *outSwitched = false;
+    HDESK curDesk = GetThreadDesktop(GetCurrentThreadId());
+    if (!t_initialDesktop && curDesk) {
+        t_initialDesktop = curDesk;
+    }
+
+    HDESK hInput = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (!hInput) {
+        hInput = OpenInputDesktop(
+            0, FALSE,
+            DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP |
+                DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALPLAYBACK);
+    }
+    if (!hInput) {
+        hInput = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+    }
+    if (!hInput) return false;
+
+    wchar_t curName[64] = {};
+    wchar_t inName[64] = {};
+    QueryDesktopNameLower(curDesk, curName);
+    QueryDesktopNameLower(hInput, inName);
+
+    if (inName[0] != L'\0' && curName[0] != L'\0' && _wcsicmp(curName, inName) == 0) {
+        if (t_lastDeskName[0] == L'\0') {
+            wcsncpy(t_lastDeskName, inName, 63);
+            t_lastDeskName[63] = L'\0';
+        }
+        CloseDesktop(hInput);
+        return true;
+    }
+
+    if (!SetThreadDesktop(hInput)) {
+        CloseDesktop(hInput);
+        return false;
+    }
+
+    if (t_ownedDesktop && t_ownedDesktop != hInput && t_ownedDesktop != t_initialDesktop) {
+        CloseDesktop(t_ownedDesktop);
+    }
+    t_ownedDesktop = hInput;
+
+    bool switched = false;
+    if (curName[0] != L'\0' && inName[0] != L'\0' && _wcsicmp(curName, inName) != 0) {
+        switched = true;
+    } else if (t_lastDeskName[0] != L'\0' && inName[0] != L'\0' && _wcsicmp(t_lastDeskName, inName) != 0) {
+        switched = true;
+    }
+    if (inName[0] != L'\0') {
+        wcsncpy(t_lastDeskName, inName, 63);
+        t_lastDeskName[63] = L'\0';
+    }
+    if (outSwitched) *outSwitched = switched;
+    return true;
+}
+
+void ResetThreadDesktopHandle() {
+    if (t_ownedDesktop) {
+        if (t_initialDesktop && t_initialDesktop != t_ownedDesktop) {
+            SetThreadDesktop(t_initialDesktop);
+        }
+        CloseDesktop(t_ownedDesktop);
+        t_ownedDesktop = nullptr;
+    }
+    t_lastDeskName[0] = L'\0';
+}
+
 bool ScreenCapturer::Initialize(int monitorIndex, uint32_t outWidth, uint32_t outHeight, std::string& outError) {
     Shutdown();
 

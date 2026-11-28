@@ -299,9 +299,12 @@ struct BoBoHostSession {
         auto nextDeadline = std::chrono::steady_clock::now();
 
         while (running.load(std::memory_order_acquire)) {
+            bool deskSwitched = false;
+            (void)SyncThreadToInputDesktop(&deskSwitched);
             bool wantComposite = compositeCursor.load(std::memory_order_acquire);
             bool allowZeroCopy = encoderAllowZeroCopy.load(std::memory_order_acquire);
-            bool capDeviceChanged = initialized && capturer.UsingDxgi() && (capturer.DeviceGeneration() != curCapDeviceGen);
+            bool capDeviceChanged = (initialized && capturer.UsingDxgi() && (capturer.DeviceGeneration() != curCapDeviceGen)) ||
+                                    (initialized && deskSwitched);
 
             if (!initialized || capDeviceChanged || reconfigPending.exchange(false, std::memory_order_acq_rel)) {
                 int32_t reqMon, reqW, reqH, reqFps, reqBps;
@@ -401,6 +404,7 @@ struct BoBoHostSession {
 
             if (devResetReq) {
                 pauseEncodeAndDrain();
+                (void)SyncThreadToInputDesktop(nullptr);
                 std::string resetErr;
                 if (capturer.Initialize(curMon, static_cast<uint32_t>(curW), static_cast<uint32_t>(curH), resetErr)) {
                     curCapDeviceGen = capturer.DeviceGeneration();
@@ -505,6 +509,7 @@ struct BoBoHostSession {
             encodeThread.join();
         }
         capturer.Shutdown();
+        ResetThreadDesktopHandle();
         if (SUCCEEDED(hrCo)) CoUninitialize();
     }
 };
@@ -2078,6 +2083,22 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
               "frames=" + std::to_string(cbFrames.load()));
     }
 
+    // 10. Winlogon/Input desktop sync probe & UIPI foreground query
+    {
+        std::atomic<int> syncRc{ 0 };
+        std::thread desktopProbe([&]() {
+            int32_t rc = BoBoCore_SyncInputDesktop();
+            ResetThreadDesktopHandle();
+            syncRc.store(rc, std::memory_order_release);
+        });
+        desktopProbe.join();
+        int32_t acc = BoBoCore_IsInputDesktopAccessible();
+        int32_t uipi = BoBoCore_IsForegroundUipiBlocked();
+        check("Input desktop sync & UIPI probe",
+              (acc == 0 || acc == 1) && (uipi == 0 || uipi == 1) && (syncRc.load() == 0 || syncRc.load() == 1),
+              "acc=" + std::to_string(acc) + " sync=" + std::to_string(syncRc.load()) + " uipi=" + std::to_string(uipi));
+    }
+
     log << "BoBoCore self-test: passed=" << passed << " failed=" << failed << "\n";
 
     std::string finalReport = log.str();
@@ -2610,6 +2631,54 @@ BOBO_API void __stdcall BoBoHost_InjectUnicodeText(const wchar_t* text, int32_t 
         g_lastRemoteKeyInjectMs.store(GetTickCount64(), std::memory_order_release);
         SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
     }
+}
+
+BOBO_API int32_t __stdcall BoBoCore_IsInputDesktopAccessible(void) {
+    HDESK h = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+    if (!h) return 0;
+    CloseDesktop(h);
+    return 1;
+}
+
+BOBO_API int32_t __stdcall BoBoCore_SyncInputDesktop(void) {
+    SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+    return SyncThreadToInputDesktop(nullptr) ? 1 : 0;
+}
+
+BOBO_API int32_t __stdcall BoBoCore_IsForegroundUipiBlocked(void) {
+    return IsForegroundBlockedByUipi() ? 1 : 0;
+}
+
+BOBO_API int32_t __stdcall BoBoHost_SendSAS(void) {
+    SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+
+    HKEY hPolicy = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                      0, KEY_QUERY_VALUE | KEY_SET_VALUE, &hPolicy) == ERROR_SUCCESS) {
+        DWORD val = 0;
+        DWORD sz = sizeof(val);
+        DWORD type = 0;
+        if (RegQueryValueExW(hPolicy, L"SoftwareSASGeneration", nullptr, &type, reinterpret_cast<BYTE*>(&val), &sz) != ERROR_SUCCESS ||
+            type != REG_DWORD || val == 0) {
+            DWORD desired = 1;
+            RegSetValueExW(hPolicy, L"SoftwareSASGeneration", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&desired), sizeof(desired));
+        }
+        RegCloseKey(hPolicy);
+    }
+
+    HMODULE hSas = LoadLibraryExW(L"sas.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hSas) hSas = LoadLibraryW(L"sas.dll");
+    if (!hSas) return 0;
+    using FnSendSAS = VOID (WINAPI*)(BOOL);
+    auto fn = reinterpret_cast<FnSendSAS>(GetProcAddress(hSas, "SendSAS"));
+    int32_t ok = 0;
+    if (fn) {
+        fn(FALSE);
+        ok = 1;
+    }
+    FreeLibrary(hSas);
+    return ok;
 }
 
 static bool ReadCurrentDesktopMode(const std::wstring& device, DEVMODEW& mode) {

@@ -639,6 +639,7 @@ namespace DualRemote
             RunV6AllInOneSelfTests();
             RunV74CrossNetAndHevcSelfTests();
             RunV75ZeroLagSelfTests();
+            RunV76WinlogonAndZeroLossSelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -2314,6 +2315,102 @@ namespace DualRemote
                 asm.DroppedIncompleteFrames == 0 && !asm.IsAwaitingKeyframe,
                 "nacks=" + nacks.Count + " delivered=" + deliveredIds.Count + " nackRec=" + asm.NackRecoveredPackets +
                 " fecRec=" + asm.FecRecoveredPackets + " dropped=" + asm.DroppedIncompleteFrames);
+        }
+
+        private static void RunV76WinlogonAndZeroLossSelfTests()
+        {
+            Log("");
+            Log("—— v7.6.0 Winlogon SYSTEM 服务管道 + PortDelta 步长打洞 + 直连候选剥离 + 225ms 慢启动自检 ——");
+
+            // 1. Named Pipe DesktopHelperServer <-> DesktopHelperClient + HWND-free InputWorkerLoop
+            string pipeName = "BoBoRemote.SelfTest." + Guid.NewGuid().ToString("N");
+            bool pipePingOk = false;
+            bool pipeInputOk = false;
+            using (var srv = new BoBoSystemService.DesktopHelperServer(pipeName, -1))
+            using (BoBoSystemService.DesktopHelperClient cli = BoBoSystemService.DesktopHelperClient.TryConnect(pipeName, 1800))
+            {
+                if (cli != null)
+                {
+                    pipePingOk = cli.Ping();
+                    cli.InjectInput(0, new BoBoInputPacket { Kind = 0, Flags = 0, A = 0, B = 0 });
+                    cli.InjectInput(0, new BoBoInputPacket { Kind = 0, Flags = 0, A = 0, B = 0 });
+                    cli.SendSAS();
+                    for (int w = 0; w < 40; w++)
+                    {
+                        if (srv.InjectedPacketCount >= 2 && srv.SasCallCount >= 1) break;
+                        System.Threading.Thread.Sleep(25);
+                    }
+                    pipeInputOk = cli.IsConnected && srv.InjectedPacketCount >= 2 && srv.SasCallCount >= 1;
+                }
+            }
+            bool apiProbeOk = true;
+            try
+            {
+                BoBoCoreInterop.IsInputDesktopAccessible();
+                BoBoCoreInterop.IsForegroundUipiBlocked();
+                apiProbeOk = BoBoSystemService.GetPipeNameForSession(1) == "BoBoRemote.DesktopHelper.1";
+            }
+            catch
+            {
+                apiProbeOk = false;
+            }
+            Check("V7.6 DesktopHelper 命名管道 RPC + 无 HWND 键鼠/SAS 线程派发 + Winlogon 探测导出",
+                pipePingOk && pipeInputOk && apiProbeOk,
+                "ping=" + pipePingOk + " inputSas=" + pipeInputOk + " api=" + apiProbeOk);
+
+            // 2. PortDelta stride punch expansion + BoBoTsNet direct IP extraction
+            List<BoBoUdpCandidate> deltaGathered = BoBoNatTraversal.GatherLocalCandidates(
+                49811,
+                new[] { new System.Net.IPEndPoint(System.Net.IPAddress.Parse("198.51.100.88"), 52000) },
+                true,
+                3);
+            var deltaMsg = new Dictionary<string, object>();
+            deltaMsg["cands"] = BoBoNatTraversal.ToProtocolObjects(deltaGathered);
+            List<BoBoUdpCandidate> deltaParsed = BoBoNatTraversal.ParseCandidatesFromKey(deltaMsg, "cands");
+            List<System.Net.IPEndPoint> deltaEps = BoBoNatTraversal.ExpandPunchEndpoints(deltaParsed, 28);
+            var deltaPorts = new HashSet<int>();
+            for (int i = 0; i < deltaEps.Count; i++)
+            {
+                if (deltaEps[i].Address.ToString() == "198.51.100.88") deltaPorts.Add(deltaEps[i].Port);
+            }
+            bool strideOk = deltaPorts.Contains(52000) && deltaPorts.Contains(52003) &&
+                deltaPorts.Contains(52006) && deltaPorts.Contains(51997) && deltaPorts.Contains(52001);
+
+            string mockTsJson =
+                "{\"ok\":true,\"backendState\":\"Running\",\"peers\":[{" +
+                "\"hostName\":\"glux-pc\",\"dnsName\":\"glux-pc.tail.ts.net.\",\"ip4\":\"100.64.0.77\",\"online\":true," +
+                "\"addrs\":[\"[2409:8900:1::2]:49813\",\"192.168.50.10:49813\",\"203.0.113.50:49813\",\"100.64.0.77:41641\",\"[fd7a:115c:a1e0::77]:41641\"]}]}";
+            EmbeddedTailnetSnapshot mockSnap = BoBoEmbeddedTailnet.ParseStatusJson(mockTsJson);
+            List<System.Net.IPAddress> directIps = BoBoEmbeddedTailnet.ExtractPeerDirectCandidateIps(mockSnap, "100.64.0.77");
+            bool tsDirectOk = directIps.Count == 3 &&
+                directIps[0].ToString() == "2409:8900:1::2" &&
+                directIps[1].ToString() == "192.168.50.10" &&
+                directIps[2].ToString() == "203.0.113.50";
+            Check("V7.6 对称 NAT ObservedPortDelta 步长预测打洞 + BoBoTsNet 公网 IPv6/IPv4 直连剥离",
+                strideOk && tsDirectOk,
+                "stride=" + strideOk + " directCount=" + directIps.Count);
+
+            // 3. High-RTT tight FEC groupSize=2 (keyframe or mild 0.9% loss delta) + fixed-preset 3200kbps slow-start ramp
+            int fecGroupKey76;
+            bool emitKeyFec76;
+            BoBoUdpFec.SelectFecParams(8, true, 0.0, true, 225.0, 2.0, 0, out fecGroupKey76, out emitKeyFec76);
+            int fecGroup76;
+            bool emitFec76;
+            BoBoUdpFec.SelectFecParams(8, false, 0.9, true, 225.0, 2.0, 0, out fecGroup76, out emitFec76);
+            var slowStartAbr = new BoBoAdaptiveBitrateController(false, 8000, 90, 225.0, false);
+            bool initSlowOk = slowStartAbr.CurrentBitrateKbps == 3200 && slowStartAbr.CurrentFps == 90;
+            long ts76 = Stopwatch.GetTimestamp();
+            long tick950 = (Stopwatch.Frequency * 950L) / 1000L;
+            int dummyBps, dummyFps;
+            for (int i = 0; i < 12; i++)
+            {
+                ts76 += tick950;
+                slowStartAbr.OnTelemetry(110.0, 0.0, 4.0, ts76, out dummyBps, out dummyFps);
+            }
+            bool rampOk = slowStartAbr.CurrentBitrateKbps == 8000 && slowStartAbr.CurrentFps == 90;
+            Check("V7.6 高RTT Tight-FEC(G=2) + 固定档位首帧 3200kbps 慢启动无丢包爬坡",
+                emitKeyFec76 && fecGroupKey76 == 2 && emitFec76 && fecGroup76 == 2 && initSlowOk && rampOk,
+                "fecKeyG=" + fecGroupKey76 + " fecG=" + fecGroup76 + " initOk=" + initSlowOk + " endBps=" + slowStartAbr.CurrentBitrateKbps);
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

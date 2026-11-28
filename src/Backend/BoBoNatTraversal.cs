@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -29,6 +30,7 @@ namespace DualRemote
         internal int Port;
         internal int Priority;
         internal bool SymmetricHint;
+        internal int PortDelta;
 
         internal bool TryGetIPEndPoint(out IPEndPoint ep)
         {
@@ -251,16 +253,68 @@ namespace DualRemote
             }
         }
 
+        internal static List<string> GetLocalGlobalIpv6Addresses()
+        {
+            var result = new List<string>(4);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            IPAddress routedV6 = TryGetKernelRoutedLocalAddress(AddressFamily.InterNetworkV6);
+            if (routedV6 != null)
+            {
+                string s = routedV6.ToString();
+                if (seen.Add(s)) result.Add(s);
+            }
+            try
+            {
+                NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
+                for (int i = 0; i < nics.Length && result.Count < 4; i++)
+                {
+                    NetworkInterface nic = nics[i];
+                    if (nic == null || nic.OperationalStatus != OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback || nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    IPInterfaceProperties props = null;
+                    try { props = nic.GetIPProperties(); } catch { continue; }
+                    if (props == null || props.UnicastAddresses == null) continue;
+                    foreach (UnicastIPAddressInformation uni in props.UnicastAddresses)
+                    {
+                        if (!IsPreferredUnicastAddress(uni)) continue;
+                        IPAddress addr = uni != null ? uni.Address : null;
+                        if (addr == null) continue;
+                        if (addr.IsIPv4MappedToIPv6) addr = addr.MapToIPv4();
+                        if (!IsUsableGlobalIPv6(addr)) continue;
+                        string str = addr.ToString();
+                        int pct = str.IndexOf('%');
+                        if (pct > 0) str = str.Substring(0, pct);
+                        if (seen.Add(str))
+                        {
+                            result.Add(str);
+                            if (result.Count >= 4) break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return result;
+        }
+
         internal static List<BoBoUdpCandidate> GatherLocalCandidates(int mediaPort, IPEndPoint stunMapped)
         {
             IList<IPEndPoint> list = stunMapped != null ? new IPEndPoint[] { stunMapped } : null;
-            return GatherLocalCandidates(mediaPort, list, false);
+            return GatherLocalCandidates(mediaPort, list, false, 0);
         }
 
         internal static List<BoBoUdpCandidate> GatherLocalCandidates(
             int mediaPort,
             IList<IPEndPoint> stunMappedEndpoints,
             bool symmetricIPv4Hint)
+        {
+            return GatherLocalCandidates(mediaPort, stunMappedEndpoints, symmetricIPv4Hint, 0);
+        }
+
+        internal static List<BoBoUdpCandidate> GatherLocalCandidates(
+            int mediaPort,
+            IList<IPEndPoint> stunMappedEndpoints,
+            bool symmetricIPv4Hint,
+            int portDelta)
         {
             var list = new List<BoBoUdpCandidate>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -344,7 +398,8 @@ namespace DualRemote
                         Host = ep4.Address.ToString(),
                         Port = ep4.Port,
                         Priority = Math.Max(90, 102 - i),
-                        SymmetricHint = symmetricIPv4Hint
+                        SymmetricHint = symmetricIPv4Hint,
+                        PortDelta = symmetricIPv4Hint ? portDelta : 0
                     });
                 }
             }
@@ -441,15 +496,26 @@ namespace DualRemote
                 }
             }
 
-            // Second pass: for Symmetric NAT IPv4 srflx endpoints, probe tight sequential CGNAT port offsets
-            int[] deltas = new int[] { 1, -1, 2, -2, 3, 4 };
+            // Second pass: for Symmetric NAT IPv4 srflx endpoints, probe observed stride deltas first then neighborhood ports
+            int[] deltas = new int[] { 1, -1, 2, -2, 3, -3, 4, -4, 5, 6, 7, 8, -5, -6, 10, 12 };
             for (int i = 0; i < candidates.Count && result.Count < maxTotal; i++)
             {
                 BoBoUdpCandidate c = candidates[i];
                 IPEndPoint ep;
-                if (c == null || !c.SymmetricHint || !c.TryGetIPEndPoint(out ep)) continue;
+                if (c == null || (!c.SymmetricHint && c.PortDelta == 0) || !c.TryGetIPEndPoint(out ep)) continue;
                 IPAddress addr = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
                 if (addr.AddressFamily != AddressFamily.InterNetwork) continue;
+
+                if (c.PortDelta != 0 && Math.Abs(c.PortDelta) <= 64)
+                {
+                    for (int k = 1; k <= 4 && result.Count < maxTotal; k++)
+                    {
+                        int sp = ep.Port + k * c.PortDelta;
+                        if (sp < 1024 || sp > 65535) continue;
+                        string key = addr.ToString() + ":" + sp.ToString(CultureInfo.InvariantCulture);
+                        if (seen.Add(key)) result.Add(new IPEndPoint(addr, sp));
+                    }
+                }
 
                 for (int d = 0; d < deltas.Length && result.Count < maxTotal; d++)
                 {
@@ -483,6 +549,7 @@ namespace DualRemote
                     { "priority", c.Priority }
                 };
                 if (c.SymmetricHint) obj["sym"] = true;
+                if (c.PortDelta != 0) obj["delta"] = c.PortDelta;
                 items.Add(obj);
             }
             return items;
@@ -516,6 +583,7 @@ namespace DualRemote
                 int port = BoBoProtocol.GetInt(d, "port", 0);
                 int prio = BoBoProtocol.GetInt(d, "priority", 50);
                 bool symHint = BoBoProtocol.GetBool(d, "sym", false);
+                int portDelta = BoBoProtocol.GetInt(d, "delta", 0);
                 if (port <= 0 || port > 65535 || string.IsNullOrEmpty(host)) continue;
 
                 IPAddress ip;
@@ -532,7 +600,8 @@ namespace DualRemote
                     Host = normHost,
                     Port = port,
                     Priority = prio,
-                    SymmetricHint = symHint
+                    SymmetricHint = symHint,
+                    PortDelta = Math.Max(-64, Math.Min(64, portDelta))
                 });
                 if (result.Count >= 12) break;
             }
@@ -565,6 +634,19 @@ namespace DualRemote
                 get
                 {
                     return PrimaryIPv4 != null && SecondaryIPv4 != null && PrimaryIPv4.Port != SecondaryIPv4.Port;
+                }
+            }
+
+            internal int ObservedPortDelta
+            {
+                get
+                {
+                    if (PrimaryIPv4 != null && SecondaryIPv4 != null && PrimaryIPv4.Address.Equals(SecondaryIPv4.Address))
+                    {
+                        int d = SecondaryIPv4.Port - PrimaryIPv4.Port;
+                        if (d != 0 && Math.Abs(d) <= 64) return d;
+                    }
+                    return 0;
                 }
             }
 
@@ -991,6 +1073,268 @@ namespace DualRemote
             }
         }
 
+        private static IPAddress GetDefaultIPv4Gateway()
+        {
+            try
+            {
+                NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
+                for (int i = 0; i < nics.Length; i++)
+                {
+                    NetworkInterface nic = nics[i];
+                    if (nic == null || nic.OperationalStatus != OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback || nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    IPInterfaceProperties props = null;
+                    try { props = nic.GetIPProperties(); } catch { continue; }
+                    if (props == null || props.GatewayAddresses == null) continue;
+                    foreach (GatewayIPAddressInformation gw in props.GatewayAddresses)
+                    {
+                        if (gw == null || gw.Address == null) continue;
+                        IPAddress addr = gw.Address.IsIPv4MappedToIPv6 ? gw.Address.MapToIPv4() : gw.Address;
+                        if (addr.AddressFamily == AddressFamily.InterNetwork && IsPrivateLanIPv4(addr)) return addr;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string ExtractXmlTag(string xml, string tagName)
+        {
+            if (string.IsNullOrEmpty(xml) || string.IsNullOrEmpty(tagName)) return "";
+            string open = "<" + tagName + ">";
+            string close = "</" + tagName + ">";
+            int idx = xml.IndexOf(open, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return "";
+            int start = idx + open.Length;
+            int end = xml.IndexOf(close, start, StringComparison.OrdinalIgnoreCase);
+            if (end <= start) return "";
+            return xml.Substring(start, end - start).Trim();
+        }
+
+        private static async Task<IPEndPoint> TryNatPmpMapAsync(IPAddress gatewayIp, int localUdpPort, int timeoutMs, CancellationToken ct)
+        {
+            if (gatewayIp == null || !IsPrivateLanIPv4(gatewayIp) || localUdpPort <= 0 || localUdpPort > 65535) return null;
+            using (var udp = new UdpClient(AddressFamily.InterNetwork))
+            {
+                try
+                {
+                    IPEndPoint gwEp = new IPEndPoint(gatewayIp, 5351);
+                    udp.Connect(gwEp);
+                    byte[] extReq = new byte[] { 0, 0 };
+                    await udp.SendAsync(extReq, extReq.Length).ConfigureAwait(false);
+
+                    Task<UdpReceiveResult> rx1Task = udp.ReceiveAsync();
+                    if (await Task.WhenAny(rx1Task, Task.Delay(Math.Min(350, timeoutMs), ct)).ConfigureAwait(false) != rx1Task) return null;
+                    byte[] r1 = (await rx1Task.ConfigureAwait(false)).Buffer;
+                    if (r1 == null || r1.Length < 12 || r1[0] != 0 || r1[1] != 128 || ((r1[2] << 8) | r1[3]) != 0) return null;
+                    IPAddress extIp = new IPAddress(new byte[] { r1[8], r1[9], r1[10], r1[11] });
+                    if (!IsAllowedRemoteCandidateIp(extIp) || IsPrivateLanIPv4(extIp)) return null;
+
+                    byte[] mapReq = new byte[12];
+                    mapReq[0] = 0; mapReq[1] = 1; // UDP
+                    mapReq[4] = (byte)(localUdpPort >> 8); mapReq[5] = (byte)(localUdpPort & 0xFF);
+                    mapReq[6] = (byte)(localUdpPort >> 8); mapReq[7] = (byte)(localUdpPort & 0xFF);
+                    mapReq[10] = 0x0E; mapReq[11] = 0x10; // 3600s
+                    await udp.SendAsync(mapReq, mapReq.Length).ConfigureAwait(false);
+
+                    Task<UdpReceiveResult> rx2Task = udp.ReceiveAsync();
+                    if (await Task.WhenAny(rx2Task, Task.Delay(Math.Min(350, timeoutMs), ct)).ConfigureAwait(false) != rx2Task) return null;
+                    byte[] r2 = (await rx2Task.ConfigureAwait(false)).Buffer;
+                    if (r2 == null || r2.Length < 16 || r2[0] != 0 || r2[1] != 129 || ((r2[2] << 8) | r2[3]) != 0) return null;
+                    int mappedPort = (r2[10] << 8) | r2[11];
+                    if (mappedPort <= 0 || mappedPort > 65535) return null;
+                    return new IPEndPoint(extIp, mappedPort);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static async Task<IPEndPoint> TryUpnpIgdMapAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
+        {
+            if (localUdpPort <= 0 || localUdpPort > 65535) return null;
+            IPAddress localLan = TryGetKernelRoutedLocalAddress(AddressFamily.InterNetwork);
+            if (localLan == null) return null;
+
+            string locationUrl = "";
+            using (var udp = new UdpClient(AddressFamily.InterNetwork))
+            {
+                try
+                {
+                    udp.Client.Bind(new IPEndPoint(localLan, 0));
+                    string ssdp =
+                        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\n" +
+                        "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n";
+                    byte[] sBytes = Encoding.ASCII.GetBytes(ssdp);
+                    IPEndPoint mcast = new IPEndPoint(IPAddress.Parse("239.255.255.250"), 1900);
+                    await udp.SendAsync(sBytes, sBytes.Length, mcast).ConfigureAwait(false);
+
+                    long deadline = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * Math.Min(450, timeoutMs)) / 1000L;
+                    while (Stopwatch.GetTimestamp() < deadline && !ct.IsCancellationRequested)
+                    {
+                        int remMs = (int)Math.Max(30, (deadline - Stopwatch.GetTimestamp()) * 1000L / Stopwatch.Frequency);
+                        Task<UdpReceiveResult> rx = udp.ReceiveAsync();
+                        if (await Task.WhenAny(rx, Task.Delay(remMs, ct)).ConfigureAwait(false) != rx) break;
+                        string resp = Encoding.UTF8.GetString((await rx.ConfigureAwait(false)).Buffer ?? new byte[0]);
+                        string[] lines = resp.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        for (int i = 0; i < lines.Length; i++)
+                        {
+                            if (lines[i].StartsWith("LOCATION:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string candUrl = lines[i].Substring(9).Trim();
+                                Uri u;
+                                IPAddress locIp;
+                                if (Uri.TryCreate(candUrl, UriKind.Absolute, out u) &&
+                                    (u.Scheme == "http" || u.Scheme == "https") &&
+                                    IPAddress.TryParse(u.Host, out locIp) && IsPrivateLanIPv4(locIp))
+                                {
+                                    locationUrl = candUrl;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!string.IsNullOrEmpty(locationUrl)) break;
+                    }
+                }
+                catch { }
+            }
+            if (string.IsNullOrEmpty(locationUrl)) return null;
+
+            try
+            {
+                Uri descUri = new Uri(locationUrl);
+                string descXml = await UpnpHttpRequestAsync("GET", descUri, null, null, timeoutMs, ct).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(descXml)) return null;
+                string[] stCandidates = new string[]
+                {
+                    "urn:schemas-upnp-org:service:WANIPConnection:1",
+                    "urn:schemas-upnp-org:service:WANIPConnection:2",
+                    "urn:schemas-upnp-org:service:WANPPPConnection:1"
+                };
+                string chosenType = "";
+                string controlRel = "";
+                for (int i = 0; i < stCandidates.Length; i++)
+                {
+                    int idx = descXml.IndexOf(stCandidates[i], StringComparison.OrdinalIgnoreCase);
+                    if (idx < 0) continue;
+                    int sliceLen = Math.Min(1200, descXml.Length - idx);
+                    string rel = ExtractXmlTag(descXml.Substring(idx, sliceLen), "controlURL");
+                    if (!string.IsNullOrEmpty(rel))
+                    {
+                        chosenType = stCandidates[i];
+                        controlRel = rel;
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(chosenType) || string.IsNullOrEmpty(controlRel)) return null;
+                Uri ctrlUri = new Uri(descUri, controlRel);
+                IPAddress ctrlIp;
+                if (!IPAddress.TryParse(ctrlUri.Host, out ctrlIp) || !IsPrivateLanIPv4(ctrlIp)) return null;
+
+                string addBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+                    "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                    "<u:AddPortMapping xmlns:u=\"" + chosenType + "\">" +
+                    "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + localUdpPort + "</NewExternalPort>" +
+                    "<NewProtocol>UDP</NewProtocol><NewInternalPort>" + localUdpPort + "</NewInternalPort>" +
+                    "<NewInternalClient>" + localLan + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
+                    "<NewPortMappingDescription>BoBoRemoteUDP</NewPortMappingDescription><NewLeaseDuration>3600</NewLeaseDuration>" +
+                    "</u:AddPortMapping></s:Body></s:Envelope>";
+                string addResp = await UpnpHttpRequestAsync("POST", ctrlUri, chosenType + "#AddPortMapping", addBody, timeoutMs, ct).ConfigureAwait(false);
+                if (addResp == null) return null;
+
+                string extBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+                    "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                    "<u:GetExternalIPAddress xmlns:u=\"" + chosenType + "\"></u:GetExternalIPAddress></s:Body></s:Envelope>";
+                string extXml = await UpnpHttpRequestAsync("POST", ctrlUri, chosenType + "#GetExternalIPAddress", extBody, timeoutMs, ct).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(extXml)) return null;
+                string extIpStr = ExtractXmlTag(extXml, "NewExternalIPAddress");
+                IPAddress extIp;
+                if (IPAddress.TryParse(extIpStr, out extIp) && IsAllowedRemoteCandidateIp(extIp) && !IsPrivateLanIPv4(extIp))
+                {
+                    return new IPEndPoint(extIp, localUdpPort);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static Task<string> UpnpHttpRequestAsync(string method, Uri uri, string soapAction, string body, int timeoutMs, CancellationToken ct)
+        {
+            return Task.Run(delegate
+            {
+                if (ct.IsCancellationRequested || uri == null) return null;
+                try
+                {
+                    var req = (HttpWebRequest)WebRequest.Create(uri);
+                    req.Method = method;
+                    req.Proxy = null;
+                    req.KeepAlive = false;
+                    int effectiveTimeout = Math.Max(200, Math.Min(650, timeoutMs));
+                    req.Timeout = effectiveTimeout;
+                    req.ReadWriteTimeout = effectiveTimeout;
+                    if (!string.IsNullOrEmpty(soapAction))
+                    {
+                        req.Headers["SOAPACTION"] = "\"" + soapAction + "\"";
+                    }
+                    using (CancellationTokenRegistration reg = ct.Register(delegate { try { req.Abort(); } catch { } }))
+                    {
+                        if (body != null)
+                        {
+                            req.ContentType = "text/xml; charset=\"utf-8\"";
+                            byte[] bytes = Encoding.UTF8.GetBytes(body);
+                            req.ContentLength = bytes.Length;
+                            using (System.IO.Stream reqStream = req.GetRequestStream())
+                            {
+                                reqStream.Write(bytes, 0, bytes.Length);
+                            }
+                        }
+                        using (var resp = (HttpWebResponse)req.GetResponse())
+                        {
+                            int code = (int)resp.StatusCode;
+                            if (code < 200 || code >= 300) return null;
+                            using (System.IO.Stream s = resp.GetResponseStream())
+                            {
+                                if (s == null) return "";
+                                using (var sr = new System.IO.StreamReader(s, Encoding.UTF8))
+                                {
+                                    return sr.ReadToEnd();
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    return null;
+                }
+            });
+        }
+
+        internal static async Task<IPEndPoint> TryMapRouterPortAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
+        {
+            if (localUdpPort <= 0 || localUdpPort > 65535) return null;
+            using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                linked.CancelAfter(Math.Max(250, timeoutMs));
+                try
+                {
+                    IPAddress gw = GetDefaultIPv4Gateway();
+                    if (gw != null)
+                    {
+                        IPEndPoint pmp = await TryNatPmpMapAsync(gw, localUdpPort, timeoutMs, linked.Token).ConfigureAwait(false);
+                        if (pmp != null) return pmp;
+                    }
+                    return await TryUpnpIgdMapAsync(localUdpPort, timeoutMs, linked.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
         private static int elevatedFirewallConfigured;
 
         internal static void TryEnsureElevatedFirewallRules()
@@ -1000,22 +1344,42 @@ namespace DualRemote
             {
                 try
                 {
-                    using (WindowsIdentity id = WindowsIdentity.GetCurrent())
-                    {
-                        if (id == null) return;
-                        var principal = new WindowsPrincipal(id);
-                        if (!principal.IsInRole(WindowsBuiltInRole.Administrator)) return;
-                    }
-                    string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                    if (string.IsNullOrWhiteSpace(exePath)) return;
-                    string quoted = "\"" + exePath + "\"";
-                    RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (UDP-In)\"");
-                    RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (TCP-In)\"");
-                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (UDP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=UDP localport=49811,49812");
-                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (TCP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=TCP localport=49810");
+                    string mainExe = Process.GetCurrentProcess().MainModule.FileName;
+                    string tsnetExe = BoBoEmbeddedTailnet.GetExpectedBinaryPath();
+                    ConfigureFirewallRulesForPaths(mainExe, tsnetExe, true);
                 }
                 catch { }
             });
+        }
+
+        internal static void ConfigureFirewallRulesForPaths(string mainExePath, string tsnetExePath, bool add)
+        {
+            try
+            {
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                {
+                    if (id == null) return;
+                    var principal = new WindowsPrincipal(id);
+                    if (!principal.IsInRole(WindowsBuiltInRole.Administrator)) return;
+                }
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (UDP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (TCP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote TsNet (UDP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote TsNet (TCP-In)\"");
+                if (add && !string.IsNullOrWhiteSpace(mainExePath))
+                {
+                    string quotedMain = "\"" + mainExePath + "\"";
+                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (UDP-In)\" dir=in action=allow program=" + quotedMain + " enable=yes profile=any protocol=UDP");
+                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (TCP-In)\" dir=in action=allow program=" + quotedMain + " enable=yes profile=any protocol=TCP localport=49810");
+                    if (!string.IsNullOrWhiteSpace(tsnetExePath) && File.Exists(tsnetExePath))
+                    {
+                        string quotedTs = "\"" + tsnetExePath + "\"";
+                        RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote TsNet (UDP-In)\" dir=in action=allow program=" + quotedTs + " enable=yes profile=any protocol=UDP");
+                        RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote TsNet (TCP-In)\" dir=in action=allow program=" + quotedTs + " enable=yes profile=any protocol=TCP");
+                    }
+                }
+            }
+            catch { }
         }
 
         private static void RunHiddenNetsh(string args)

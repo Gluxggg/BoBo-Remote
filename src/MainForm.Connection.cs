@@ -618,7 +618,13 @@ namespace DualRemote
                     refreshing = true;
                     try
                     {
-                        LinkProbeResult result = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2200));
+                        LinkProbeResult result = await Task.Run(delegate
+                        {
+                            string target = route.RemoteAddress.ToString();
+                            return BoBoEmbeddedTailnet.Default.ShouldRouteHost(target)
+                                ? BoBoEmbeddedTailnet.Default.PingPeerSync(target, 2200)
+                                : Tailscale.Probe(target, 2200);
+                        });
                         if (!IsDisposed && !session.IsDisposed && activeNativeStreamForm == session)
                         {
                             route.UpdateTailnetPath(result.LastPong);
@@ -1119,7 +1125,7 @@ namespace DualRemote
                     BoBoHostProbeResult direct = null;
                     try
                     {
-                        direct = await BoBoStreamClient.TryResolveDirectLanHostAsync(probe, BoBoIdentityStore.Default, 650, CancellationToken.None);
+                        direct = await BoBoStreamClient.TryResolveDirectLanHostAsync(probe, BoBoIdentityStore.Default, 850, CancellationToken.None);
                     }
                     catch { }
                     if (IsDisposed || request != connectRequestGeneration) return;
@@ -1141,7 +1147,13 @@ namespace DualRemote
                     SetStatus("正在检测 Tailscale 直连或中继路径…", Theme.PillTone.Info);
                     try
                     {
-                        LinkProbeResult link = await Task.Run(() => Tailscale.Probe(route.RemoteAddress.ToString(), 2400));
+                        string tsTarget = route.RemoteAddress.ToString();
+                        LinkProbeResult link = await Task.Run(delegate
+                        {
+                            return BoBoEmbeddedTailnet.Default.ShouldRouteHost(tsTarget)
+                                ? BoBoEmbeddedTailnet.Default.PingPeerSync(tsTarget, 2400)
+                                : Tailscale.Probe(tsTarget, 2400);
+                        });
                         route.UpdateTailnetPath(link.LastPong);
                     }
                     catch { }

@@ -35,6 +35,7 @@ namespace BoBoSetup
             bool launchAfter = true;
             bool autoStart = false;
             bool preserveAutoStart = false;
+            bool elevatedChild = false;
             int waitPid = 0;
             string customDir = null;
 
@@ -51,6 +52,7 @@ namespace BoBoSetup
                 else if (string.Equals(arg, "--no-launch", StringComparison.OrdinalIgnoreCase)) launchAfter = false;
                 else if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase)) autoStart = true;
                 else if (string.Equals(arg, "--preserve-autostart", StringComparison.OrdinalIgnoreCase)) preserveAutoStart = true;
+                else if (string.Equals(arg, "--elevated-child", StringComparison.OrdinalIgnoreCase)) elevatedChild = true;
                 else if (arg.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase))
                 {
                     int.TryParse(arg.Substring(11).Trim().Trim('"'), out waitPid);
@@ -119,6 +121,52 @@ namespace BoBoSetup
                     SafeWriteLine("ERROR: " + ex.Message);
                     return 1;
                 }
+            }
+
+            if (!elevatedChild && !InstallerEngine.IsAdministrator())
+            {
+                try
+                {
+                    var uacArgs = new List<string>();
+                    uacArgs.Add("--elevated-child");
+                    bool hasDirArg = false;
+                    foreach (string raw in args)
+                    {
+                        if (string.IsNullOrEmpty(raw)) continue;
+                        string trimmed = raw.Trim();
+                        if (string.Equals(trimmed, "--elevated-child", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (trimmed.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase)) hasDirArg = true;
+                        uacArgs.Add(trimmed.IndexOf(' ') >= 0 && !trimmed.StartsWith("\"")
+                            ? ("\"" + trimmed.TrimEnd('\\') + "\"")
+                            : trimmed);
+                    }
+                    if (!hasDirArg && !string.IsNullOrWhiteSpace(options.InstallDir))
+                    {
+                        uacArgs.Add("\"--dir=" + options.InstallDir.TrimEnd('\\') + "\"");
+                    }
+                    var uacPsi = new ProcessStartInfo(selfExe, string.Join(" ", uacArgs.ToArray()))
+                    {
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    };
+                    using (Process uacProc = Process.Start(uacPsi))
+                    {
+                        if (uacProc != null)
+                        {
+                            if (uninstall)
+                            {
+                                uacProc.WaitForExit();
+                                return uacProc.ExitCode;
+                            }
+                            return 0;
+                        }
+                    }
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    // 用户取消 UAC 提权时优雅降级为普通用户安装
+                }
+                catch { }
             }
 
             Application.EnableVisualStyles();
@@ -389,7 +437,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "7.5.0";
+            return "7.6.0";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -627,6 +675,11 @@ namespace BoBoSetup
             }
             Report(report, 98, "正在配置低延迟直连防火墙规则…");
             ConfigureWindowsFirewallRules(mainExe, true);
+            if (IsAdministrator())
+            {
+                Report(report, 99, "正在注册锁屏远控与穿透服务…");
+                TryRunMainExeSwitch(mainExe, "--install-service", 15000);
+            }
 
             Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
         }
@@ -638,6 +691,12 @@ namespace BoBoSetup
                 throw new InvalidOperationException(reason);
 
             string fullDir = Path.GetFullPath(installDir).TrimEnd('\\');
+            string mainExeUninstall = Path.Combine(fullDir, MainExeName);
+            if (IsAdministrator() && File.Exists(mainExeUninstall))
+            {
+                Report(report, 6, "正在停止并卸载锁屏穿透服务…");
+                TryRunMainExeSwitch(mainExeUninstall, "--uninstall-service", 12000);
+            }
             Report(report, 10, "正在关闭运行中的 BoBo Remote 进程…");
             StopRunningProcessesInDir(fullDir);
 
@@ -650,7 +709,7 @@ namespace BoBoSetup
             try { Registry.CurrentUser.DeleteSubKeyTree(UninstallRegSubKey, false); }
             catch { }
             SetAutoStart(null, false);
-            ConfigureWindowsFirewallRules(Path.Combine(fullDir, MainExeName), false);
+            ConfigureWindowsFirewallRules(mainExeUninstall, false);
 
             if (purgeUserData)
             {
@@ -680,12 +739,69 @@ namespace BoBoSetup
         {
             string mainExe = Path.Combine(installDir, MainExeName);
             if (!File.Exists(mainExe)) return;
+            if (IsAdministrator() && string.IsNullOrEmpty(arguments))
+            {
+                try
+                {
+                    // 通过 explorer.exe 降权拉起主程序 GUI，避免管理员进程引发的拖放/UIPI 隔离
+                    var expPsi = new ProcessStartInfo("explorer.exe", "\"" + mainExe + "\"")
+                    {
+                        WorkingDirectory = installDir,
+                        UseShellExecute = false
+                    };
+                    Process.Start(expPsi);
+                    return;
+                }
+                catch { }
+            }
             var psi = new ProcessStartInfo(mainExe, arguments ?? "")
             {
                 WorkingDirectory = installDir,
                 UseShellExecute = true
             };
             Process.Start(psi);
+        }
+
+        internal static bool IsAdministrator()
+        {
+            try
+            {
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                {
+                    if (id == null) return false;
+                    var principal = new WindowsPrincipal(id);
+                    return principal.IsInRole(WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryRunMainExeSwitch(string mainExe, string arguments, int timeoutMs)
+        {
+            if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe)) return false;
+            try
+            {
+                var psi = new ProcessStartInfo(mainExe, arguments ?? "")
+                {
+                    WorkingDirectory = Path.GetDirectoryName(mainExe),
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (p == null) return false;
+                    if (!p.WaitForExit(Math.Max(1000, timeoutMs))) return false;
+                    return p.ExitCode == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void WriteStubExe(string selfExe, long stubLength, string targetPath)
@@ -713,18 +829,16 @@ namespace BoBoSetup
         {
             try
             {
-                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
-                {
-                    if (id == null) return;
-                    var principal = new WindowsPrincipal(id);
-                    if (!principal.IsInRole(WindowsBuiltInRole.Administrator)) return;
-                }
+                if (!IsAdministrator()) return;
                 RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (UDP-In)\"");
                 RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote (TCP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote TsNet (UDP-In)\"");
+                RunHiddenNetsh("advfirewall firewall delete rule name=\"BoBo Remote TsNet (TCP-In)\"");
                 if (add && !string.IsNullOrWhiteSpace(exePath))
                 {
                     string quoted = "\"" + exePath + "\"";
-                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (UDP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=UDP localport=49811,49812");
+                    // 放行全部 UDP 端口以支持 STUN/ICE 临时端口直连打洞
+                    RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (UDP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=UDP");
                     RunHiddenNetsh("advfirewall firewall add rule name=\"BoBo Remote (TCP-In)\" dir=in action=allow program=" + quoted + " enable=yes profile=any protocol=TCP localport=49810");
                 }
             }

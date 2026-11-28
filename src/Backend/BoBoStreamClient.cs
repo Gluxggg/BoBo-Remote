@@ -33,6 +33,7 @@ namespace DualRemote
         internal string Nonce = "";
         internal List<BoBoMonitorDescriptor> Monitors = new List<BoBoMonitorDescriptor>();
         internal List<string> LanIps = new List<string>();
+        internal List<string> PublicIpv6s = new List<string>();
         internal bool UdpSupported;
         internal double HandshakeRttMs;
         internal IPAddress ConnectedAddress;
@@ -191,6 +192,7 @@ namespace DualRemote
         internal event Action<bool, bool, int, int> SuperDisplayStateChanged;
         internal event Action<BoBoDisplayState> DisplayStateChanged;
         internal event Action<string, string> StreamError;
+        internal event Action<string, string> HostNoticeReceived;
         internal event Action<string> Disconnected;
         internal event Action<bool> RemotePrivacyStateChanged;
         internal event Action<double> RttUpdated;
@@ -347,6 +349,7 @@ namespace DualRemote
                             res.Nonce = BoBoProtocol.GetStr(ack, "nonce", "");
                             res.Monitors = BoBoProtocol.ParseMonitors(ack, "monitors");
                             res.LanIps = BoBoProtocol.ParseStringList(ack, "lanIps");
+                            res.PublicIpv6s = BoBoProtocol.ParseStringList(ack, "publicIpv6s");
                             res.UdpSupported = BoBoProtocol.GetBool(ack, "udpSupported", false);
                             return res;
                         }
@@ -379,17 +382,46 @@ namespace DualRemote
                 !Tailscale.IsTailnetAddress(initialProbe.ConnectedAddress.ToString()) ||
                 string.IsNullOrEmpty(initialProbe.HostNodeId) || string.IsNullOrEmpty(initialProbe.HostThumbprint)) return null;
 
-            using (var lanCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using (var directCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                var candidates = new HashSet<IPAddress>();
-                var tasks = new List<Task<BoBoHostProbeResult>>(3);
+                var seen = new HashSet<IPAddress>();
+                var orderedTargets = new List<IPAddress>(8);
                 foreach (string value in initialProbe.LanIps)
                 {
                     IPAddress candidate;
-                    if (!IPAddress.TryParse(value, out candidate) || !BoBoConnectionRoute.IsOnLocalSubnet(candidate, null) ||
-                        !candidates.Add(candidate)) continue;
-                    tasks.Add(ProbeHostAsync(candidate.ToString(), initialProbe.Port, identityStore, timeoutMs, lanCts.Token));
-                    if (tasks.Count == 3) break;
+                    if (IPAddress.TryParse(value, out candidate) &&
+                        BoBoConnectionRoute.IsOnLocalSubnet(candidate, null) &&
+                        seen.Add(candidate))
+                    {
+                        orderedTargets.Add(candidate);
+                    }
+                }
+                foreach (string value6 in initialProbe.PublicIpv6s)
+                {
+                    IPAddress cand6;
+                    if (IPAddress.TryParse(value6, out cand6) &&
+                        BoBoNatTraversal.IsUsableGlobalIPv6(cand6) &&
+                        seen.Add(cand6))
+                    {
+                        orderedTargets.Add(cand6);
+                    }
+                }
+                List<IPAddress> tsDirect = BoBoEmbeddedTailnet.Default.GetPeerDirectCandidateIps(
+                    initialProbe.ConnectedAddress.ToString());
+                for (int i = 0; i < tsDirect.Count; i++)
+                {
+                    IPAddress tip = tsDirect[i];
+                    if (tip != null && !Tailscale.IsTailnetAddress(tip.ToString()) && seen.Add(tip))
+                    {
+                        orderedTargets.Add(tip);
+                    }
+                }
+                if (orderedTargets.Count == 0) return null;
+
+                var tasks = new List<Task<BoBoHostProbeResult>>(Math.Min(6, orderedTargets.Count));
+                for (int i = 0; i < orderedTargets.Count && tasks.Count < 6; i++)
+                {
+                    tasks.Add(ProbeHostAsync(orderedTargets[i].ToString(), initialProbe.Port, identityStore, timeoutMs, directCts.Token));
                 }
 
                 while (tasks.Count > 0)
@@ -397,11 +429,11 @@ namespace DualRemote
                     Task<BoBoHostProbeResult> finished = await Task.WhenAny(tasks).ConfigureAwait(false);
                     tasks.Remove(finished);
                     BoBoHostProbeResult probe = await finished.ConfigureAwait(false);
-                    if (!probe.IsBoBoHost || !probe.AllowIncoming ||
-                        !BoBoConnectionRoute.IsOnLocalSubnet(probe.ConnectedAddress, probe.LocalAddress) ||
+                    if (probe == null || !probe.IsBoBoHost || !probe.AllowIncoming || probe.ConnectedAddress == null ||
+                        Tailscale.IsTailnetAddress(probe.ConnectedAddress.ToString()) ||
                         !string.Equals(probe.HostNodeId, initialProbe.HostNodeId, StringComparison.OrdinalIgnoreCase) ||
                         !BoBoIdentityStore.FixedTimeEqualsHex(probe.HostThumbprint, initialProbe.HostThumbprint)) continue;
-                    lanCts.Cancel();
+                    directCts.Cancel();
                     return probe;
                 }
                 return null;
@@ -1031,6 +1063,16 @@ namespace DualRemote
                             Action<bool> privEv = RemotePrivacyStateChanged;
                             if (privEv != null) { try { privEv(act); } catch { } }
                         }
+                        else if (t == "HOST_NOTICE")
+                        {
+                            string ncode = BoBoProtocol.GetStr(msg, "code", "");
+                            string nmsg = BoBoProtocol.GetStr(msg, "message", "");
+                            Action<string, string> noticeEv = HostNoticeReceived;
+                            if (noticeEv != null && !string.IsNullOrEmpty(nmsg))
+                            {
+                                try { noticeEv(ncode, nmsg); } catch { }
+                            }
+                        }
                         else if (t == "ERROR")
                         {
                             string code = BoBoProtocol.GetStr(msg, "code", "ERROR");
@@ -1190,7 +1232,7 @@ namespace DualRemote
         {
             var newlyAdded = new List<UdpProbeCandidate>();
             if (candidates == null || candidates.Count == 0) return newlyAdded;
-            int[] symDeltas = new int[] { 1, -1, 2, -2 };
+            int[] symDeltas = new int[] { 1, -1, 2, -2, 3, -3, 4, -4 };
             for (int i = 0; i < candidates.Count; i++)
             {
                 BoBoUdpCandidate c = candidates[i];
@@ -1199,11 +1241,21 @@ namespace DualRemote
                 UdpProbeCandidate reg = RegisterUdpCandidate(c.Kind, ep);
                 if (reg != null) newlyAdded.Add(reg);
 
-                if (c.SymmetricHint)
+                if (c.SymmetricHint || c.PortDelta != 0)
                 {
                     IPAddress addr = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
                     if (addr.AddressFamily == AddressFamily.InterNetwork)
                     {
+                        if (c.PortDelta != 0 && Math.Abs(c.PortDelta) <= 64)
+                        {
+                            for (int k = 1; k <= 4; k++)
+                            {
+                                int sp = ep.Port + k * c.PortDelta;
+                                if (sp < 1024 || sp > 65535) continue;
+                                UdpProbeCandidate strideReg = RegisterUdpCandidate(c.Kind, new IPEndPoint(addr, sp));
+                                if (strideReg != null) newlyAdded.Add(strideReg);
+                            }
+                        }
                         for (int d = 0; d < symDeltas.Length; d++)
                         {
                             int np = ep.Port + symDeltas[d];
@@ -1330,15 +1382,16 @@ namespace DualRemote
                 {
                     BoBoStreamStartOptions optsSnap = lastStartOptions;
                     string peerHost = optsSnap != null ? optsSnap.Host : "";
-                    IPAddress tailnetDirectIp = BoBoEmbeddedTailnet.Default.TryGetPeerDirectPublicIp(peerHost);
-                    if (tailnetDirectIp != null)
+                    List<IPAddress> tailnetDirectIps = BoBoEmbeddedTailnet.Default.GetPeerDirectCandidateIps(peerHost);
+                    for (int ti = 0; ti < tailnetDirectIps.Count; ti++)
                     {
-                        string directKind = BoBoProtocol.IsPrivateLanIp(tailnetDirectIp.ToString())
+                        IPAddress tip = tailnetDirectIps[ti];
+                        string directKind = BoBoProtocol.IsPrivateLanIp(tip.ToString())
                             ? BoBoUdpCandidate.KindLan
-                            : (tailnetDirectIp.AddressFamily == AddressFamily.InterNetworkV6
+                            : (tip.AddressFamily == AddressFamily.InterNetworkV6
                                 ? BoBoUdpCandidate.KindDirectIPv6
                                 : BoBoUdpCandidate.KindDirectIPv4);
-                        RegisterUdpCandidate(directKind, new IPEndPoint(tailnetDirectIp, udpPort));
+                        RegisterUdpCandidate(directKind, new IPEndPoint(tip, udpPort));
                     }
 
                     Task _bridgeTask = Task.Run(async delegate
@@ -1376,7 +1429,7 @@ namespace DualRemote
                     });
                 }
 
-                // Concurrent Dual-Stack RFC 5389 STUN probe on the SAME bound socket + client UDP_CANDIDATES exchange
+                // Concurrent Dual-Stack RFC 5389 STUN + UPnP/NAT-PMP router mapping on the SAME bound socket
                 BoBoStreamStartOptions stunOpts = lastStartOptions;
                 string stunHost = stunOpts != null ? stunOpts.CustomStunHost : "";
                 int stunPort = stunOpts != null ? stunOpts.CustomStunPort : 0;
@@ -1384,17 +1437,28 @@ namespace DualRemote
                 {
                     try
                     {
-                        BoBoNatTraversal.StunDualProbeResult stunRes = null;
+                        Task<BoBoNatTraversal.StunDualProbeResult> stunTask = null;
                         try
                         {
                             var servers = BoBoNatTraversal.BuildDefaultStunServers(stunHost, stunPort);
-                            stunRes = await clientStunSession.ProbeDualStackAsync(uc.Client, servers, 900, ct).ConfigureAwait(false);
+                            stunTask = clientStunSession.ProbeDualStackAsync(uc.Client, servers, 900, ct);
                         }
                         catch { }
+                        Task<IPEndPoint> mapTask = BoBoNatTraversal.TryMapRouterPortAsync(localUdpPort, 750, ct);
+                        BoBoNatTraversal.StunDualProbeResult stunRes = null;
+                        IPEndPoint routerEp = null;
+                        if (stunTask != null)
+                        {
+                            try { stunRes = await stunTask.ConfigureAwait(false); } catch { }
+                        }
+                        try { routerEp = await mapTask.ConfigureAwait(false); } catch { }
                         if (ct.IsCancellationRequested || !connected || udpClient != uc) return;
-                        IList<IPEndPoint> mappedList = stunRes != null ? stunRes.AllEndpoints() : null;
+
+                        var mappedList = stunRes != null ? stunRes.AllEndpoints() : new List<IPEndPoint>();
+                        if (routerEp != null) mappedList.Add(routerEp);
                         bool symHint = stunRes != null && stunRes.IsSymmetricIPv4;
-                        List<BoBoUdpCandidate> localCands = BoBoNatTraversal.GatherLocalCandidates(localUdpPort, mappedList, symHint);
+                        int delta = stunRes != null ? stunRes.ObservedPortDelta : 0;
+                        List<BoBoUdpCandidate> localCands = BoBoNatTraversal.GatherLocalCandidates(localUdpPort, mappedList, symHint, delta);
                         if (localCands.Count > 0)
                         {
                             var candMsg = new Dictionary<string, object>();
@@ -1472,6 +1536,24 @@ namespace DualRemote
 
                     if (ptype == BoBoUdpPacketType.Ping)
                     {
+                        IPEndPoint liveSender = BoBoNatTraversal.NormalizeRemoteEndPoint(remoteEp);
+                        if (liveSender != null && !IPAddress.IsLoopback(liveSender.Address) &&
+                            BoBoNatTraversal.IsAllowedRemoteCandidateIp(liveSender.Address))
+                        {
+                            string dynKind = liveSender.AddressFamily == AddressFamily.InterNetworkV6
+                                ? BoBoUdpCandidate.KindDirectIPv6
+                                : BoBoUdpCandidate.KindDirectIPv4;
+                            UdpProbeCandidate dynCand = RegisterUdpCandidate(dynKind, liveSender);
+                            if (dynCand != null)
+                            {
+                                SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, dynCand.HelloPayload, liveSender);
+                            }
+                        }
+                        if (plain != null && plain.Length >= 8)
+                        {
+                            IPEndPoint pongEp = liveSender ?? (remoteEp as IPEndPoint);
+                            if (pongEp != null) SendUdpRaw(uc, crypto, BoBoUdpPacketType.Pong, plain, pongEp);
+                        }
                         continue;
                     }
 
@@ -1487,15 +1569,23 @@ namespace DualRemote
                                 udpProbeTable.TryGetValue(pid, out matchedCand);
                             }
 
+                            IPEndPoint liveAckSender = BoBoNatTraversal.NormalizeRemoteEndPoint(remoteEp);
                             if (matchedCand != null)
                             {
+                                IPEndPoint effectiveEp = matchedCand.EndPoint;
+                                if (!string.Equals(matchedCand.Kind, BoBoUdpCandidate.KindTsNet, StringComparison.OrdinalIgnoreCase) &&
+                                    liveAckSender != null && !IPAddress.IsLoopback(liveAckSender.Address) &&
+                                    BoBoNatTraversal.IsAllowedRemoteCandidateIp(liveAckSender.Address))
+                                {
+                                    effectiveEp = liveAckSender;
+                                }
                                 bool shouldPromote = !udpActive || matchedCand.Rank > activeUdpPathRank ||
-                                    (matchedCand.Rank == activeUdpPathRank && udpRemoteEp != null && matchedCand.EndPoint.Equals(udpRemoteEp));
+                                    (matchedCand.Rank == activeUdpPathRank && udpRemoteEp != null && effectiveEp.Equals(udpRemoteEp));
                                 if (shouldPromote)
                                 {
                                     bool wasUdpActive = udpActive;
-                                    bool switchedEp = !udpActive || udpRemoteEp == null || !matchedCand.EndPoint.Equals(udpRemoteEp);
-                                    udpRemoteEp = matchedCand.EndPoint;
+                                    bool switchedEp = !udpActive || udpRemoteEp == null || !effectiveEp.Equals(udpRemoteEp);
+                                    udpRemoteEp = effectiveEp;
                                     activeUdpPathKind = matchedCand.Kind;
                                     activeUdpPathRank = matchedCand.Rank;
                                     udpActive = true;
@@ -1509,10 +1599,10 @@ namespace DualRemote
                                             assembler.ResetForRecovery(rxNow);
                                             lastRecoveryPollTicks = rxNow;
                                         }
-                                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, matchedCand.ForceHelloPayload, matchedCand.EndPoint);
+                                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Hello, matchedCand.ForceHelloPayload, effectiveEp);
                                         byte[] immediatePing = new byte[8];
                                         BoBoUdpCrypto.WriteInt64LE(immediatePing, 0, Stopwatch.GetTimestamp());
-                                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, immediatePing, matchedCand.EndPoint);
+                                        SendUdpRaw(uc, crypto, BoBoUdpPacketType.Ping, immediatePing, effectiveEp);
                                     }
                                 }
                             }
@@ -2274,6 +2364,14 @@ namespace DualRemote
             {
                 SendInputPacket(new BoBoInputPacket { Kind = 5, Flags = 0, A = (short)vks[i], B = 0 });
             }
+        }
+
+        internal void SendSas()
+        {
+            if (!connected) return;
+            var cmd = new Dictionary<string, object>();
+            cmd["type"] = "SEND_SAS";
+            SendJsonFireAndForget(cmd);
         }
 
         private void SendJsonFireAndForget(Dictionary<string, object> obj)

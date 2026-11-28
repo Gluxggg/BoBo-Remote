@@ -31,6 +31,7 @@ namespace DualRemote
         internal string Relay = "";
         internal string PeerRelay = "";
         internal string LastSeen = "";
+        internal readonly List<string> Addrs = new List<string>();
 
         internal string PreferredIp
         {
@@ -682,6 +683,18 @@ namespace DualRemote
                             PeerRelay = GetStr(pd, "peerRelay", ""),
                             LastSeen = GetStr(pd, "lastSeen", "")
                         };
+                        if (pd.ContainsKey("addrs"))
+                        {
+                            var addrList = pd["addrs"] as IEnumerable;
+                            if (addrList != null)
+                            {
+                                foreach (object a in addrList)
+                                {
+                                    string addrStr = Convert.ToString(a, CultureInfo.InvariantCulture);
+                                    if (!string.IsNullOrWhiteSpace(addrStr)) peer.Addrs.Add(addrStr.Trim());
+                                }
+                            }
+                        }
                         if (!string.IsNullOrEmpty(peer.PreferredIp))
                             snap.Peers.Add(peer);
                     }
@@ -786,13 +799,51 @@ namespace DualRemote
             catch { }
         }
 
-        internal IPAddress TryGetPeerDirectPublicIp(string peerIpOrHost)
+        internal static string GetExpectedBinaryPath()
         {
-            if (string.IsNullOrWhiteSpace(peerIpOrHost)) return null;
-            string needle = peerIpOrHost.Trim().TrimEnd('.');
-            EmbeddedTailnetSnapshot snap = LatestSnapshot;
-            if (snap == null || snap.Peers == null) return null;
+            string exePath;
+            string err;
+            return TryExtractBinary(out exePath, out err) ? exePath : "";
+        }
 
+        private static bool TryExtractEndpointHostIp(string endpoint, out IPAddress ip)
+        {
+            ip = null;
+            if (string.IsNullOrWhiteSpace(endpoint)) return false;
+            string raw = endpoint.Trim();
+            string ipText = raw;
+            if (raw.StartsWith("[", StringComparison.Ordinal))
+            {
+                int close = raw.IndexOf(']');
+                if (close > 1) ipText = raw.Substring(1, close - 1);
+            }
+            else
+            {
+                int firstColon = raw.IndexOf(':');
+                int lastColon = raw.LastIndexOf(':');
+                if (firstColon > 0 && firstColon == lastColon)
+                {
+                    ipText = raw.Substring(0, lastColon);
+                }
+            }
+            if (!IPAddress.TryParse(ipText, out ip)) return false;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            return BoBoNatTraversal.IsAllowedRemoteCandidateIp(ip);
+        }
+
+        internal List<IPAddress> GetPeerDirectCandidateIps(string peerIpOrHost)
+        {
+            return ExtractPeerDirectCandidateIps(LatestSnapshot, peerIpOrHost);
+        }
+
+        internal static List<IPAddress> ExtractPeerDirectCandidateIps(EmbeddedTailnetSnapshot snap, string peerIpOrHost)
+        {
+            var result = new List<IPAddress>();
+            if (snap == null || snap.Peers == null || string.IsNullOrWhiteSpace(peerIpOrHost)) return result;
+            string needle = peerIpOrHost.Trim().TrimEnd('.');
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var rawIps = new List<IPAddress>();
             for (int i = 0; i < snap.Peers.Count; i++)
             {
                 EmbeddedTailnetPeer p = snap.Peers[i];
@@ -801,31 +852,40 @@ namespace DualRemote
                     string.Equals(p.Ip6, needle, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(p.HostName, needle, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(p.DnsName != null ? p.DnsName.TrimEnd('.') : "", needle, StringComparison.OrdinalIgnoreCase);
-                if (!matched || string.IsNullOrWhiteSpace(p.CurAddr)) continue;
+                if (!matched) continue;
 
-                string raw = p.CurAddr.Trim();
-                string ipText = raw;
-                if (raw.StartsWith("[", StringComparison.Ordinal))
+                IPAddress parsedCur;
+                if (TryExtractEndpointHostIp(p.CurAddr, out parsedCur) && seen.Add(parsedCur.ToString()))
                 {
-                    int close = raw.IndexOf(']');
-                    if (close > 1) ipText = raw.Substring(1, close - 1);
+                    rawIps.Add(parsedCur);
                 }
-                else
+                for (int j = 0; j < p.Addrs.Count; j++)
                 {
-                    int firstColon = raw.IndexOf(':');
-                    int lastColon = raw.LastIndexOf(':');
-                    if (firstColon > 0 && firstColon == lastColon)
+                    IPAddress parsedAddr;
+                    if (TryExtractEndpointHostIp(p.Addrs[j], out parsedAddr) && seen.Add(parsedAddr.ToString()))
                     {
-                        ipText = raw.Substring(0, lastColon);
+                        rawIps.Add(parsedAddr);
                     }
                 }
-                IPAddress ip;
-                if (IPAddress.TryParse(ipText, out ip) && BoBoNatTraversal.IsAllowedRemoteCandidateIp(ip))
-                {
-                    return ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
-                }
             }
-            return null;
+
+            // Order: Global IPv6 -> Private LAN IPv4 -> Public IPv4
+            for (int i = 0; i < rawIps.Count; i++)
+                if (rawIps[i].AddressFamily == AddressFamily.InterNetworkV6 && BoBoNatTraversal.IsUsableGlobalIPv6(rawIps[i]))
+                    result.Add(rawIps[i]);
+            for (int i = 0; i < rawIps.Count; i++)
+                if (rawIps[i].AddressFamily == AddressFamily.InterNetwork && BoBoNatTraversal.IsPrivateLanIPv4(rawIps[i]))
+                    result.Add(rawIps[i]);
+            for (int i = 0; i < rawIps.Count; i++)
+                if (rawIps[i].AddressFamily == AddressFamily.InterNetwork && !BoBoNatTraversal.IsPrivateLanIPv4(rawIps[i]))
+                    result.Add(rawIps[i]);
+            return result;
+        }
+
+        internal IPAddress TryGetPeerDirectPublicIp(string peerIpOrHost)
+        {
+            List<IPAddress> list = GetPeerDirectCandidateIps(peerIpOrHost);
+            return list.Count > 0 ? list[0] : null;
         }
 
         private static string SendHttpSync(string method, string pathAndQuery, int timeoutMs, int port, string tok)

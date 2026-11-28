@@ -806,6 +806,47 @@ namespace DualRemote
                 "可选命令行组网补充（优先使用内置通道）",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
+            bool lockSvcReady = BoBoSystemService.IsServiceRunning();
+            var lockSvcBadge = new Theme.Badge(lockSvcReady ? "已就绪" : "未配置",
+                lockSvcReady ? Theme.PillTone.Success : Theme.PillTone.Neutral);
+            var lockSvcBtn = Theme.Action(lockSvcReady ? "重新配置" : "安装/修复", Theme.ButtonStyle.Secondary);
+            var lockSvcBox = Theme.Grid(3);
+            Theme.FixedColumn(lockSvcBox, 78);
+            Theme.FixedColumn(lockSvcBox, 8);
+            Theme.FixedColumn(lockSvcBox, 98);
+            Theme.Row(lockSvcBox, 34, lockSvcBadge, null, lockSvcBtn);
+            Theme.TwoLineText lockSvcText = AddGroupedSettingRowWithDesc(
+                list, true, Theme.Glyph.Shield,
+                "锁屏远控与穿透服务（SYSTEM / UAC）",
+                BoBoSystemService.GetServiceStatusLabel(),
+                lockSvcBox, 184);
+            lockSvcBtn.Click += delegate
+            {
+                lockSvcBtn.Enabled = false;
+                lockSvcBtn.Text = "配置中…";
+                System.Threading.Tasks.Task.Run(delegate
+                {
+                    string svcMsg;
+                    bool ok = BoBoSystemService.TryInstallOrRepairElevated(out svcMsg);
+                    if (IsDisposed || !IsHandleCreated) return;
+                    try
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            if (IsDisposed) return;
+                            bool nowReady = BoBoSystemService.IsServiceRunning();
+                            lockSvcBadge.UpdateStatus(nowReady ? "已就绪" : "未配置",
+                                nowReady ? Theme.PillTone.Success : Theme.PillTone.Neutral);
+                            lockSvcBtn.Text = nowReady ? "重新配置" : "安装/修复";
+                            lockSvcBtn.Enabled = true;
+                            if (lockSvcText != null) lockSvcText.SubtitleText = BoBoSystemService.GetServiceStatusLabel();
+                            ShowSettingsBanner(svcMsg, ok ? Theme.PillTone.Success : Theme.PillTone.Alert);
+                        });
+                    }
+                    catch { }
+                });
+            };
+
             card.Controls.Add(list);
             Theme.Row(page, SumRows(list) + card.Padding.Vertical, card);
             return page;

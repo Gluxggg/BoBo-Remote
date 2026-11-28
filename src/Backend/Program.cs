@@ -29,6 +29,11 @@ namespace DualRemote
             bool selfTest = false;
             bool forceTour = false;
             bool applyUpdate = false;
+            bool runAsService = false;
+            bool runDesktopHelper = false;
+            bool installService = false;
+            bool uninstallService = false;
+            int helperSessionId = -1;
             string updatedVersion = null;
             foreach (string arg in args)
             {
@@ -39,6 +44,27 @@ namespace DualRemote
                 else if (string.Equals(arg, "--apply-update", StringComparison.OrdinalIgnoreCase))
                 {
                     applyUpdate = true;
+                }
+                else if (string.Equals(arg, "--service", StringComparison.OrdinalIgnoreCase))
+                {
+                    runAsService = true;
+                }
+                else if (string.Equals(arg, "--desktop-helper", StringComparison.OrdinalIgnoreCase))
+                {
+                    runDesktopHelper = true;
+                }
+                else if (string.Equals(arg, "--install-service", StringComparison.OrdinalIgnoreCase))
+                {
+                    installService = true;
+                }
+                else if (string.Equals(arg, "--uninstall-service", StringComparison.OrdinalIgnoreCase))
+                {
+                    uninstallService = true;
+                }
+                else if (arg != null && arg.StartsWith("--session=", StringComparison.OrdinalIgnoreCase))
+                {
+                    int parsedSid;
+                    if (int.TryParse(arg.Substring(10), out parsedSid)) helperSessionId = parsedSid;
                 }
                 else if (arg != null && arg.StartsWith("--updated-version=", StringComparison.OrdinalIgnoreCase))
                 {
@@ -51,6 +77,28 @@ namespace DualRemote
                     if (string.Equals(arg, "--reset-tour", StringComparison.OrdinalIgnoreCase))
                         OnboardingStore.Reset();
                 }
+            }
+            if (runAsService)
+            {
+                return BoBoSystemService.RunServiceHost();
+            }
+            if (runDesktopHelper)
+            {
+                return BoBoSystemService.RunDesktopHelper(helperSessionId);
+            }
+            if (installService)
+            {
+                string svcMsg;
+                bool ok = BoBoSystemService.InstallAndStartService(out svcMsg);
+                try { Console.WriteLine(svcMsg); } catch { }
+                return ok ? 0 : 1;
+            }
+            if (uninstallService)
+            {
+                string svcMsg;
+                bool ok = BoBoSystemService.UninstallService(out svcMsg);
+                try { Console.WriteLine(svcMsg); } catch { }
+                return ok ? 0 : 1;
             }
             if (applyUpdate)
             {

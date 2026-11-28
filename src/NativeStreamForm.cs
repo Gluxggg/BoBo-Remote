@@ -1044,7 +1044,12 @@ namespace DualRemote
         {
             if (vks == null || vks.Length == 0) return;
             BoBoStreamClient sc = streamClient;
-            if (sc != null && sc.IsConnected) sc.SendKeyCombo(vks);
+            if (sc == null || !sc.IsConnected) return;
+            if (vks.Length == 3 && vks[0] == 0x11 && vks[1] == 0x12 && vks[2] == 0x2E)
+            {
+                sc.SendSas();
+            }
+            sc.SendKeyCombo(vks);
         }
 
         internal void SendRemoteText(string text)
@@ -1287,6 +1292,16 @@ namespace DualRemote
             {
                 if (gen != sessionGeneration) return;
                 lastErrorMessage = emsg;
+            };
+
+            client.HostNoticeReceived += delegate(string code, string nmsg)
+            {
+                if (gen != sessionGeneration || IsDisposed) return;
+                SafeUiInvoke(delegate
+                {
+                    if (gen != sessionGeneration || IsDisposed || string.IsNullOrEmpty(nmsg)) return;
+                    ShowToastHint(nmsg);
+                });
             };
 
             client.Disconnected += delegate(string reason)
