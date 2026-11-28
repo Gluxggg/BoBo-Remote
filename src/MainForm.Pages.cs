@@ -57,7 +57,7 @@ namespace DualRemote
         private Panel settingsTabHost;
         private int settingsTabRow = -1;
         private Control[] settingsTabPanels;
-        private Button[] settingsTabButtons;
+        private Theme.SlidingTabStrip settingsTabs;
         private int activeSettingsTab = 0;
 
         private int defaultQuality = AutoQualityProfile;
@@ -163,12 +163,12 @@ namespace DualRemote
             topDisconnectBtn.Visible = false;
             topDisconnectBtn.Click += delegate { DisconnectAllRemoteSessionsFromUi(); };
 
-            topGuideBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Help);
+            topGuideBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Compass);
             topGuideBtn.AccessibleName = "新手使用引导";
             topGuideBtn.Margin = new Padding(0, 7, 0, 7);
             topGuideBtn.Click += delegate { StartOnboardingTour(false); };
 
-            topPrivacyBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Shield);
+            topPrivacyBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Privacy);
             topPrivacyBtn.AccessibleName = "防窥壁纸快捷开关";
             topPrivacyBtn.Margin = new Padding(0, 7, 0, 7);
             BindPrivacyToggleButton(topPrivacyBtn);
@@ -276,7 +276,7 @@ namespace DualRemote
             navQuickDeviceRow = rail.RowCount;
             Theme.Row(rail, 0, navQuickDevice);
 
-            var allDevicesBtn = MakePageButton(AllDevicesPage, Theme.Glyph.AllDevices, "全部设备");
+            var allDevicesBtn = MakePageButton(AllDevicesPage, Theme.Glyph.BentoGrid, "全部设备");
             Theme.SetNavIndent(allDevicesBtn, 14);
             Theme.SetGlyphTint(allDevicesBtn, Theme.Accent);
             navAllDevicesRow = rail.RowCount;
@@ -461,31 +461,21 @@ namespace DualRemote
             settingsDesk = desk;
 
             AddPageHeader(desk, "设置", null);
-            Theme.Row(desk, 14);
+            Theme.Row(desk, 12);
 
-            // Clean UU-style horizontal tabs with 防窥与显示 integrated cleanly inside 设置
-            var tabBar = Theme.Grid(9);
-            Theme.FixedColumn(tabBar, 88);
-            Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 108);
-            Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 108);
-            Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 108);
-            Theme.FillColumn(tabBar);
-            Theme.FixedColumn(tabBar, 1);
-
-            var tabGeneral = Theme.Action("常规设置", Theme.ButtonStyle.UnderlineTab);
-            var tabPrivacy = Theme.Action("防窥与显示", Theme.ButtonStyle.UnderlineTab);
-            var tabStream = Theme.Action("画面与操控", Theme.ButtonStyle.UnderlineTab);
-            var tabNetwork = Theme.Action("网络与服务", Theme.ButtonStyle.UnderlineTab);
-
-            Theme.Row(tabBar, 38, tabGeneral, null, tabPrivacy, null, tabStream, null, tabNetwork, null, null);
-            Theme.Row(desk, 38, tabBar);
-            Theme.Row(desk, 18);
+            settingsTabs = new Theme.SlidingTabStrip(
+                new Theme.TabEntry("常规设置", Theme.Glyph.Sliders),
+                new Theme.TabEntry("防窥与显示", Theme.Glyph.Privacy),
+                new Theme.TabEntry("画面与操控", Theme.Glyph.QualityHd),
+                new Theme.TabEntry("网络与服务", Theme.Glyph.Globe));
+            settingsTabs.SelectedIndexChanged += delegate
+            {
+                SelectSettingsTab(settingsTabs.SelectedIndex);
+            };
+            Theme.Row(desk, 40, settingsTabs);
+            Theme.Row(desk, 16);
 
             settingsTabHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Workspace };
-            settingsTabButtons = new[] { tabGeneral, tabPrivacy, tabStream, tabNetwork };
             settingsTabPanels = new Control[]
             {
                 BuildGeneralSettingsTab(),
@@ -496,11 +486,9 @@ namespace DualRemote
 
             for (int i = 0; i < settingsTabPanels.Length; i++)
             {
-                int tabIndex = i;
                 settingsTabPanels[i].Dock = DockStyle.Fill;
                 settingsTabPanels[i].Visible = false;
                 settingsTabHost.Controls.Add(settingsTabPanels[i]);
-                settingsTabButtons[i].Click += delegate { SelectSettingsTab(tabIndex); };
             }
 
             settingsTabRow = desk.RowCount;
@@ -521,8 +509,9 @@ namespace DualRemote
             {
                 bool active = i == selected;
                 settingsTabPanels[i].Visible = active;
-                Theme.Highlight(settingsTabButtons[i], active);
             }
+            if (settingsTabs != null && settingsTabs.SelectedIndex != selected)
+                settingsTabs.SelectTab(selected, true);
             settingsTabPanels[selected].BringToFront();
             RecalculateSettingsDeskHeight();
             if (tabChanged && settingsViewport != null && settingsViewport.Visible)
@@ -546,30 +535,30 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            Theme.Row(page, 22, Theme.Text("常用", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("常用", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var basicCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var basicList = Theme.Grid(1);
             Theme.FillColumn(basicList);
 
-            AddGroupedSettingRow(basicList, false, Theme.Glyph.Desktop, "开机自动启动",
+            AddGroupedSettingRow(basicList, false, Theme.Glyph.Power, "开机自动启动",
                 "登录后自动在后台待命",
                 SystemToggle("开机自动启动", WindowsSession.StartsAtSignIn(), WindowsSession.TrySetStartAtSignIn));
 
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Bolt, "防止电脑休眠",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Sun, "防止电脑休眠",
                 "保持被控端屏幕与网络在线",
                 SystemToggle("防止电脑休眠", false, ChangeKeepAwake));
 
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Pin, "最小化到托盘",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.Tray, "最小化到托盘",
                 "关闭窗口时转入系统托盘",
                 PreferenceToggle("最小化到托盘", minimizeToTray, value => minimizeToTray = value));
 
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Refresh, "自动填入上次设备",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.History, "自动填入上次设备",
                 "启动时回填最近连接目标",
                 PreferenceToggle("启动时填入上次设备", fillLastTarget, value => fillLastTarget = value));
 
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Refresh, "自动检查更新",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.CloudDownload, "自动检查更新",
                 "静默检查 GitHub 最新版本",
                 PreferenceToggle("自动检查更新", autoCheckUpdates, value => autoCheckUpdates = value));
 
@@ -584,12 +573,12 @@ namespace DualRemote
                 quality.SelectedIndex = defaultQuality;
                 SavePreferences();
             };
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Image, "默认串流画质",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.QualityHd, "默认串流画质",
                 "发起桌面串流时的默认画质档位",
                 Theme.WrapInput(defaultProfile), 372);
 
             settingsHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
-            AddGroupedSettingRow(basicList, true, Theme.Glyph.Lock, "被控断开后动作",
+            AddGroupedSettingRow(basicList, true, Theme.Glyph.ScreenLock, "被控断开后动作",
                 "远控结束时回到桌面或锁屏",
                 Theme.WrapInput(settingsHostDisconnectActionCombo), 160);
 
@@ -597,23 +586,23 @@ namespace DualRemote
             Theme.Row(page, SumRows(basicList) + basicCard.Padding.Vertical, basicCard);
             Theme.Row(page, 16);
 
-            Theme.Row(page, 22, Theme.Text("版本与引导", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("版本与引导", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var miscCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var miscList = Theme.Grid(1);
             Theme.FillColumn(miscList);
 
-            updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Refresh);
+            updateActionButton = Theme.Action("检查更新", Theme.ButtonStyle.AccentSoft, Theme.Glyph.CloudDownload);
             updateActionButton.Click += async delegate { await HandleUpdateButtonClickAsync(); };
-            updateStatusCardText = AddGroupedSettingRowWithDesc(miscList, false, Theme.Glyph.Refresh,
+            updateStatusCardText = AddGroupedSettingRowWithDesc(miscList, false, Theme.Glyph.Layers,
                 "软件版本 (v" + AppUpdater.CurrentVersion + ")",
                 "支持在线校验升级与增量覆盖",
                 updateActionButton, 146);
 
-            var replayGuide = Theme.Action("重新查看", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
+            var replayGuide = Theme.Action("重新查看", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
             replayGuide.Click += delegate { StartOnboardingTour(false); };
-            AddGroupedSettingRow(miscList, true, Theme.Glyph.Help, "新手引导",
+            AddGroupedSettingRow(miscList, true, Theme.Glyph.Compass, "新手引导",
                 "分步熟悉设备连接与防窥保护",
                 replayGuide, 128);
 
@@ -633,14 +622,14 @@ namespace DualRemote
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
 
-            Theme.Row(page, 22, Theme.Text("画面与音频", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("画面与音频", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var mediaCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var mediaList = Theme.Grid(1);
             Theme.FillColumn(mediaList);
 
-            AddGroupedSettingRow(mediaList, false, Theme.Glyph.Desktop, "优先使用 HEVC (H.265)",
+            AddGroupedSettingRow(mediaList, false, Theme.Glyph.Cpu, "优先使用 HEVC (H.265)",
                 "高清场景节省约 35% 带宽",
                 PreferenceToggle("优先使用 HEVC 编码", preferHevc, value => { preferHevc = value; UpdateStreamHint(); }));
 
@@ -648,11 +637,11 @@ namespace DualRemote
                 "96 kbps 压缩传输 · 不支持时回落 ADPCM",
                 PreferenceToggle("高效 AAC 音频", preferCompressedAudio, value => preferCompressedAudio = value));
 
-            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Bell, "在被控端播放声音",
+            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Speaker, "在被控端播放声音",
                 "关闭时声音仅传至主控端",
                 PreferenceToggle("在被控端同时播放声音", playAudioOnHost, value => playAudioOnHost = value));
 
-            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Info, "实时性能浮层 (OSD)",
+            AddGroupedSettingRow(mediaList, true, Theme.Glyph.Activity, "实时性能浮层 (OSD)",
                 "Ctrl+Alt+Shift+S 切换显示",
                 PreferenceToggle("串流统计", showStreamStats, value => showStreamStats = value));
 
@@ -660,26 +649,26 @@ namespace DualRemote
             Theme.Row(page, SumRows(mediaList) + mediaCard.Padding.Vertical, mediaCard);
             Theme.Row(page, 16);
 
-            Theme.Row(page, 22, Theme.Text("操控与隐私", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("操控与隐私", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var controlCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var controlList = Theme.Grid(1);
             Theme.FillColumn(controlList);
 
-            AddGroupedSettingRow(controlList, false, Theme.Glyph.Desktop, "自由出框鼠标（绝对坐标）",
+            AddGroupedSettingRow(controlList, false, Theme.Glyph.Mouse, "自由出框鼠标（绝对坐标）",
                 "精准点击 · 3D 游戏可切锁鼠模式",
                 PreferenceToggle("绝对坐标鼠标", useAbsoluteMouse, value => useAbsoluteMouse = value));
 
-            AddGroupedSettingRow(controlList, true, Theme.Glyph.Maximize, "窗口模式打开串流",
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.Window, "窗口模式打开串流",
                 "关闭时默认无边框全屏",
                 PreferenceToggle("使用窗口模式", windowedStream, value => windowedStream = value));
 
-            AddGroupedSettingRow(controlList, true, Theme.Glyph.Shield, "连接后自动开启防窥",
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.Privacy, "连接后自动开启防窥",
                 "接通瞬间自动遮挡被控物理屏",
                 PreferenceToggle("自动开启被控端防窥", autoRemotePrivacyOnConnect, value => autoRemotePrivacyOnConnect = value));
 
-            AddGroupedSettingRow(controlList, true, Theme.Glyph.Eye, "全屏隐藏悬浮球",
+            AddGroupedSettingRow(controlList, true, Theme.Glyph.FloatBall, "全屏隐藏悬浮球",
                 "Ctrl+Alt+G 显示或隐藏",
                 PreferenceToggle("全屏隐藏悬浮球", hideFloatBallInFullscreen, value => hideFloatBallInFullscreen = value));
 
@@ -734,22 +723,22 @@ namespace DualRemote
             Theme.Row(page, 192, hostCard);
             Theme.Row(page, 16);
 
-            Theme.Row(page, 22, Theme.Text("跨网与服务", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("跨网与服务", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var card = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var list = Theme.Grid(1);
             Theme.FillColumn(list);
 
-            settingsCrossNetBtn = Theme.Action("一键登录", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Network);
+            settingsCrossNetBtn = Theme.Action("一键登录", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Globe);
             settingsCrossNetBtn.Click += async delegate { await HandleCrossNetCardClickAsync(); };
-            settingsCrossNetText = AddGroupedSettingRowWithDesc(list, false, Theme.Glyph.Network,
+            settingsCrossNetText = AddGroupedSettingRowWithDesc(list, false, Theme.Glyph.Globe,
                 "内置跨网账号 (Tailscale)",
                 "免装虚拟网卡 · 双端同账号即可异地直连",
                 settingsCrossNetBtn, 120);
             SyncSettingsCrossNetRow(BoBoEmbeddedTailnet.Default.LatestSnapshot);
 
-            AddGroupedSettingRow(list, true, Theme.Glyph.Bolt, "BoBoCore 原生内核",
+            AddGroupedSettingRow(list, true, Theme.Glyph.Cpu, "BoBoCore 原生内核",
                 "DXGI / MF / D3D11 / WASAPI 单文件全内置",
                 BuildEngineActionRow(BoBoCoreInterop.IsLoaded, "运行自检", delegate { RunNativeCoreSelfTestDialog(); }), 186);
 
@@ -762,11 +751,11 @@ namespace DualRemote
                     ApplyHostSnapshotToUi();
                 }));
 
-            AddGroupedSettingRow(list, true, Theme.Glyph.Keypad, "本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
+            AddGroupedSettingRow(list, true, Theme.Glyph.Key, "本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode,
                 "管理本机已授权的远控设备名单",
                 BuildEngineActionRow(true, "管理授权", delegate { ShowAuthorizedPeersDialog(); }), 186);
 
-            AddGroupedSettingRow(list, true, Theme.Glyph.Network, "外部 Tailscale CLI",
+            AddGroupedSettingRow(list, true, Theme.Glyph.Terminal, "外部 Tailscale CLI",
                 "可选命令行组网补充（优先使用内置通道）",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
@@ -787,7 +776,7 @@ namespace DualRemote
             Theme.FixedColumn(lockSvcBox, 98);
             Theme.Row(lockSvcBox, 34, lockSvcBadge, null, lockSvcBtn);
             Theme.TwoLineText lockSvcText = AddGroupedSettingRowWithDesc(
-                list, true, Theme.Glyph.Shield,
+                list, true, Theme.Glyph.Server,
                 "锁屏远控与穿透服务（SYSTEM / UAC）",
                 BoBoSystemService.GetServiceStatusLabel(),
                 lockSvcBox, 184);
@@ -838,12 +827,8 @@ namespace DualRemote
         {
             if (addTopRule) Theme.Row(list, 1, Theme.Rule());
 
-            var rowWrap = Theme.Grid(1);
-            rowWrap.Padding = new Padding(18, 9, 18, 9);
-            Theme.FillColumn(rowWrap);
-
             var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 30);
+            Theme.FixedColumn(row, 32);
             Theme.FixedColumn(row, 12);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 12);
@@ -853,10 +838,13 @@ namespace DualRemote
             icon.Margin = new Padding(0, 5, 0, 5);
             var textBlock = new Theme.TwoLineText(title, description, Theme.TextSize.Label, Theme.Ink, Theme.Muted);
 
-            action.Margin = new Padding(0, 3, 0, 3);
-            Theme.Row(row, 40, icon, null, textBlock, null, action);
-            Theme.Row(rowWrap, 40, row);
-            Theme.Row(list, 58, rowWrap);
+            action.Margin = new Padding(0, 4, 0, 4);
+            Theme.Row(row, 42, icon, null, textBlock, null, action);
+
+            var rowWrap = new Theme.SettingRow(icon, textBlock) { Padding = new Padding(18, 10, 18, 10) };
+            rowWrap.Controls.Add(row);
+            rowWrap.HookHoverChildren(rowWrap);
+            Theme.Row(list, 62, rowWrap);
             return textBlock;
         }
 
@@ -985,28 +973,28 @@ namespace DualRemote
                     ShowPage(SettingsPage);
                     SelectSettingsTab(0);
                     var _ = HandleUpdateButtonClickAsync();
-                });
+                }, Theme.Glyph.CloudDownload);
                 menu.Items.Add(new ToolStripSeparator());
             }
-            AddPopupItem(menu, "刷新全部设备与本机状态", delegate { var _ = RefreshDashboardAsync(); });
-            AddPopupItem(menu, "切换防窥屏壁纸 (Ctrl+Alt+Shift+P)", delegate { TogglePrivacyCurtain(false); });
-            AddPopupItem(menu, "新手引导使用教程", delegate { StartOnboardingTour(false); });
+            AddPopupItem(menu, "刷新全部设备与本机状态", delegate { var _ = RefreshDashboardAsync(); }, Theme.Glyph.Refresh);
+            AddPopupItem(menu, "切换防窥屏壁纸 (Ctrl+Alt+Shift+P)", delegate { TogglePrivacyCurtain(false); }, Theme.Glyph.Privacy);
+            AddPopupItem(menu, "新手引导使用教程", delegate { StartOnboardingTour(false); }, Theme.Glyph.Compass);
             AddPopupItem(menu, "检查软件更新（当前 v" + AppUpdater.CurrentVersion + "）", delegate
             {
                 ShowPage(SettingsPage);
                 SelectSettingsTab(0);
                 var _ = CheckForUpdatesAsync(false);
-            });
+            }, Theme.Glyph.CloudDownload);
             menu.Items.Add(new ToolStripSeparator());
-            AddPopupItem(menu, "管理已授权设备（本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + "）", delegate { ShowAuthorizedPeersDialog(); });
-            AddPopupItem(menu, "运行 V6 全内置内核自检", delegate { RunNativeCoreSelfTestDialog(); });
-            AddPopupItem(menu, "BoBo远程使用指南", delegate { OpenGuide("README.md"); });
+            AddPopupItem(menu, "管理已授权设备（本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + "）", delegate { ShowAuthorizedPeersDialog(); }, Theme.Glyph.Shield);
+            AddPopupItem(menu, "运行 V6 全内置内核自检", delegate { RunNativeCoreSelfTestDialog(); }, Theme.Glyph.Activity);
+            AddPopupItem(menu, "BoBo远程使用指南", delegate { OpenGuide("README.md"); }, Theme.Glyph.Help);
             menu.Items.Add(new ToolStripSeparator());
-            AddPopupItem(menu, "断开当前远控会话", delegate { DisconnectAllRemoteSessionsFromUi(); });
-            AddPopupItem(menu, "关于 BoBo远程", delegate { ShowAboutDialog(); });
-            AddPopupItem(menu, "退出 BoBo远程（断开远控）", delegate { forceExit = true; Close(); });
+            AddPopupItem(menu, "断开当前远控会话", delegate { DisconnectAllRemoteSessionsFromUi(); }, Theme.Glyph.Power);
+            AddPopupItem(menu, "关于 BoBo远程", delegate { ShowAboutDialog(); }, Theme.Glyph.Info);
+            AddPopupItem(menu, "退出 BoBo远程（断开远控）", delegate { forceExit = true; Close(); }, Theme.Glyph.Exit, true);
 
-            int menuW = Math.Max(DevicePixels(228), menu.PreferredSize.Width);
+            int menuW = Math.Max(DevicePixels(236), menu.PreferredSize.Width);
             Point pt = topMenuBtn.PointToScreen(new Point(topMenuBtn.Width - menuW, topMenuBtn.Height + DevicePixels(6)));
             menu.Show(pt);
         }
@@ -1027,10 +1015,10 @@ namespace DualRemote
             string ts = string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4) ? "未登录" : hostSnapshot.TailscaleIpv4;
             string v6 = string.IsNullOrEmpty(hostSnapshot.PublicIpv6) ? "无公网 IPv6" : ShortenIpv6(hostSnapshot.PublicIpv6);
 
-            AddPopupItem(menu, "复制本机 BoBo 设备码：" + code, delegate { CopyHostAddress("本机 BoBo 设备码", code); });
-            AddPopupItem(menu, "复制局域网 IP：" + lan, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); });
-            AddPopupItem(menu, "复制 Tailscale IP：" + ts, delegate { CopyHostAddress("Tailscale IP", hostSnapshot.TailscaleIpv4); });
-            AddPopupItem(menu, "复制公网 IPv6：" + v6, delegate { CopyHostAddress("公网 IPv6", hostSnapshot.PublicIpv6); });
+            AddPopupItem(menu, "复制本机 BoBo 设备码：" + code, delegate { CopyHostAddress("本机 BoBo 设备码", code); }, Theme.Glyph.Copy);
+            AddPopupItem(menu, "复制局域网 IP：" + lan, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); }, Theme.Glyph.Copy);
+            AddPopupItem(menu, "复制 Tailscale IP：" + ts, delegate { CopyHostAddress("Tailscale IP", hostSnapshot.TailscaleIpv4); }, Theme.Glyph.Copy);
+            AddPopupItem(menu, "复制公网 IPv6：" + v6, delegate { CopyHostAddress("公网 IPv6", hostSnapshot.PublicIpv6); }, Theme.Glyph.Copy);
             menu.Items.Add(new ToolStripSeparator());
 
             EmbeddedTailnetSnapshot emb = BoBoEmbeddedTailnet.Default.LatestSnapshot;
@@ -1038,21 +1026,21 @@ namespace DualRemote
             if (embRunning)
             {
                 AddPopupItem(menu, "退出内置跨网账号（" + (string.IsNullOrEmpty(emb.DisplayName) ? emb.SelfIp4 : emb.DisplayName) + "）",
-                    delegate { var _ = CancelOrLogoutEmbeddedTailnetAsync(); });
+                    delegate { var _ = CancelOrLogoutEmbeddedTailnetAsync(); }, Theme.Glyph.Exit);
             }
             else
             {
                 AddPopupItem(menu, "登录内置跨网账号（Tailscale）",
-                    delegate { var _ = HandleCrossNetCardClickAsync(); });
+                    delegate { var _ = HandleCrossNetCardClickAsync(); }, Theme.Glyph.Globe);
             }
-            AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); });
+            AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); }, Theme.Glyph.Key);
 
-            int menuW = Math.Max(DevicePixels(260), menu.PreferredSize.Width);
+            int menuW = Math.Max(DevicePixels(270), menu.PreferredSize.Width);
             Point pt = topStatusBtn.PointToScreen(new Point(topStatusBtn.Width - menuW, topStatusBtn.Height + DevicePixels(6)));
             menu.Show(pt);
         }
 
-        private static readonly Font PopupMenuFont = new Font("Microsoft YaHei UI", 9.25f);
+        private static readonly Font PopupMenuFont = Theme.GetFont(Theme.TextSize.Label);
 
         private ContextMenuStrip CreateCleanPopupMenu()
         {
@@ -1084,12 +1072,17 @@ namespace DualRemote
             return menu;
         }
 
-        private static void AddPopupItem(ContextMenuStrip menu, string text, EventHandler click)
+        private static void AddPopupItem(ContextMenuStrip menu, string text, EventHandler click,
+            Theme.Glyph glyph = Theme.Glyph.None, bool danger = false)
         {
+            int leftPad = (int)Math.Round(30 * Theme.GetDpiScale());
+            int vertPad = (int)Math.Round(6 * Theme.GetDpiScale());
+            int rightPad = (int)Math.Round(14 * Theme.GetDpiScale());
             var item = new ToolStripMenuItem(text)
             {
-                Padding = new Padding(8, 6, 12, 6),
-                ForeColor = Theme.Ink
+                Padding = new Padding(leftPad, vertPad, rightPad, vertPad),
+                ForeColor = danger ? Theme.Alert : Theme.Ink,
+                Tag = glyph
             };
             item.Click += click;
             menu.Items.Add(item);
@@ -1112,6 +1105,31 @@ namespace DualRemote
                     Theme.Surface(e.Graphics, rect, 5f, Theme.SurfaceSubtle, Color.Transparent);
                 else
                     using (var b = new SolidBrush(Theme.Paper)) e.Graphics.FillRectangle(b, e.Item.ContentRectangle);
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                Color rowBg = (e.Item.Selected && e.Item.Enabled) ? Theme.SurfaceSubtle : Theme.Paper;
+                Color textColor = !e.Item.Enabled ? Theme.Muted : e.Item.ForeColor;
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                TextRenderer.DrawText(e.Graphics, e.Item.Text, e.TextFont, e.TextRectangle, textColor, rowBg,
+                    e.TextFormat | TextFormatFlags.NoPrefix);
+
+                if (e.Item.Tag is Theme.Glyph)
+                {
+                    var glyph = (Theme.Glyph)e.Item.Tag;
+                    if (glyph != Theme.Glyph.None)
+                    {
+                        float scale = Math.Max(1f, e.Graphics.DpiX / 96f);
+                        float icoSize = Math.Max(13f, 14.5f * scale);
+                        float ix = Math.Max(10f * scale, e.TextRectangle.Left - icoSize - 8f * scale);
+                        float iy = (e.Item.Height - icoSize) * 0.5f;
+                        Color iconColor = (e.Item.ForeColor == Theme.Alert)
+                            ? Theme.Alert
+                            : (e.Item.Selected && e.Item.Enabled ? Theme.Accent : Theme.BodyInk);
+                        Theme.DrawGlyph(e.Graphics, glyph, new RectangleF(ix, iy, icoSize, icoSize), iconColor);
+                    }
+                }
             }
         }
 
@@ -1180,13 +1198,13 @@ namespace DualRemote
                 Theme.FixedColumn(footer, 10);
                 Theme.FixedColumn(footer, 88);
 
-                var checkUpdBtn = Theme.Action("检查更新", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
+                var checkUpdBtn = Theme.Action("检查更新", Theme.ButtonStyle.Secondary, Theme.Glyph.CloudDownload);
                 checkUpdBtn.Click += delegate
                 {
                     dlg.DialogResult = DialogResult.Yes;
                     dlg.Close();
                 };
-                var tourBtn = Theme.Action("新手使用引导", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Help);
+                var tourBtn = Theme.Action("新手使用引导", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Compass);
                 tourBtn.Click += delegate
                 {
                     dlg.DialogResult = DialogResult.Retry;

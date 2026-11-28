@@ -38,8 +38,7 @@ namespace DualRemote
         private bool allowIncomingControl = true;
         private bool fileTransferBusy;
 
-        private Button assistModeStreamTab;
-        private Button assistModeRustDeskTab;
+        private Theme.SlidingTabStrip assistModeTabs;
         private Control assistStreamModePanel;
         private Control assistRustDeskModePanel;
         private Panel assistModeHost;
@@ -734,7 +733,7 @@ namespace DualRemote
             Theme.FixedColumn(header, 8);
             Theme.FixedColumn(header, 84);
 
-            localPairGenerateButton = Theme.Action("生成配对码", Theme.ButtonStyle.Primary);
+            localPairGenerateButton = Theme.Action("生成配对码", Theme.ButtonStyle.Primary, Theme.Glyph.Key);
             localPairGenerateButton.Click += async delegate { await LocalPairPrimaryActionAsync(); };
             localPairCancelButton = Theme.Action("取消", Theme.ButtonStyle.Secondary);
             localPairCancelButton.Enabled = false;
@@ -844,9 +843,9 @@ namespace DualRemote
 
             var actionCol = Theme.Grid(1);
             Theme.FillColumn(actionCol);
-            var copyShareBtn = Theme.Action("复制并分享", Theme.ButtonStyle.Secondary);
+            var copyShareBtn = Theme.Action("复制并分享", Theme.ButtonStyle.Secondary, Theme.Glyph.Copy);
             copyShareBtn.Click += delegate { CopyLocalShareInfo(); };
-            var manageAuthBtn = Theme.Action("管理授权", Theme.ButtonStyle.Secondary);
+            var manageAuthBtn = Theme.Action("管理授权", Theme.ButtonStyle.Secondary, Theme.Glyph.Shield);
             manageAuthBtn.Click += delegate { ShowAuthorizedPeersDialog(); };
             Theme.FillRow(actionCol);
             Theme.Row(actionCol, 36, copyShareBtn);
@@ -972,20 +971,22 @@ namespace DualRemote
             Theme.Row(layout, 54, header);
             Theme.Row(layout, 1, Theme.Rule());
 
-            var modeStrip = Theme.Grid(5);
-            modeStrip.Padding = new Padding(22, 12, 22, 0);
-            Theme.FixedColumn(modeStrip, 148);
-            Theme.FixedColumn(modeStrip, 18);
-            Theme.FixedColumn(modeStrip, 188);
+            var modeStrip = Theme.Grid(3);
+            modeStrip.Padding = new Padding(22, 10, 22, 0);
             Theme.FillColumn(modeStrip);
+            Theme.FixedColumn(modeStrip, 12);
             Theme.FixedColumn(modeStrip, 198);
 
-            assistModeStreamTab = Theme.Action("远程桌面控制", Theme.ButtonStyle.UnderlineTab);
-            assistModeRustDeskTab = Theme.Action("内置极速传文件", Theme.ButtonStyle.UnderlineTab);
-            assistModeStreamTab.Click += delegate { SelectAssistMode(0); };
-            assistModeRustDeskTab.Click += delegate { SelectAssistMode(1); };
+            assistModeTabs = new Theme.SlidingTabStrip(
+                new Theme.TabEntry("远程桌面控制", Theme.Glyph.Assist),
+                new Theme.TabEntry("内置极速传文件", Theme.Glyph.Send));
+            assistModeTabs.BackColor = Theme.Paper;
+            assistModeTabs.SelectedIndexChanged += delegate
+            {
+                SelectAssistMode(assistModeTabs.SelectedIndex);
+            };
 
-            Theme.Row(modeStrip, 36, assistModeStreamTab, null, assistModeRustDeskTab, null, streamModeBadge);
+            Theme.Row(modeStrip, 38, assistModeTabs, null, streamModeBadge);
             Theme.Row(layout, 48, modeStrip);
 
             assistModeHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Paper };
@@ -1169,7 +1170,7 @@ namespace DualRemote
             Theme.FixedColumn(row, 10);
             Theme.FixedColumn(row, 160);
 
-            rustDeskConnectBtn = Theme.Action("选择文件发送", Theme.ButtonStyle.Primary, Theme.Glyph.Folder);
+            rustDeskConnectBtn = Theme.Action("选择文件发送", Theme.ButtonStyle.Primary, Theme.Glyph.Send);
             rustDeskConnectBtn.Click += async delegate { await StartBuiltInFileTransferAsync(); };
             remoteId.KeyDown += delegate(object sender, KeyEventArgs args) { RunOnEnter(remoteId, rustDeskConnectBtn, args); };
             remoteId.TextChanged += delegate { UpdateAssistConnectButtons(); };
@@ -1189,8 +1190,8 @@ namespace DualRemote
             bool isStream = activeAssistMode == 0;
             if (assistStreamModePanel != null) assistStreamModePanel.Visible = isStream;
             if (assistRustDeskModePanel != null) assistRustDeskModePanel.Visible = !isStream;
-            if (assistModeStreamTab != null) Theme.Highlight(assistModeStreamTab, isStream);
-            if (assistModeRustDeskTab != null) Theme.Highlight(assistModeRustDeskTab, !isStream);
+            if (assistModeTabs != null && assistModeTabs.SelectedIndex != activeAssistMode)
+                assistModeTabs.SelectTab(activeAssistMode, true);
             if (streamModeBadge != null) streamModeBadge.Visible = isStream;
             if (!isStream) SetClientPairPanelVisible(false);
 

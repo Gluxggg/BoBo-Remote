@@ -127,11 +127,12 @@ namespace DualRemote
             var groupRow = Theme.Grid(2);
             Theme.FixedColumn(groupRow, 168);
             Theme.FillColumn(groupRow);
-            computersGroupBtn = Theme.Action("电脑 1", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronDown);
+            computersGroupBtn = Theme.Action("电脑 1", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronRight);
+            Theme.SetChevronExpanded(computersGroupBtn, computersExpanded);
             computersGroupBtn.Click += delegate
             {
                 computersExpanded = !computersExpanded;
-                Theme.ChangeGlyph(computersGroupBtn, computersExpanded ? Theme.Glyph.ChevronDown : Theme.Glyph.ChevronRight);
+                Theme.SetChevronExpanded(computersGroupBtn, computersExpanded);
                 SyncPeerListLayout();
             };
             Theme.Row(groupRow, 28, computersGroupBtn, null);
@@ -149,11 +150,12 @@ namespace DualRemote
             var mobileHeadRow = Theme.Grid(2);
             Theme.FixedColumn(mobileHeadRow, 180);
             Theme.FillColumn(mobileHeadRow);
-            mobilesGroupBtn = Theme.Action("手机/平板 0", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronDown);
+            mobilesGroupBtn = Theme.Action("手机/平板 0", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronRight);
+            Theme.SetChevronExpanded(mobilesGroupBtn, mobilesExpanded);
             mobilesGroupBtn.Click += delegate
             {
                 mobilesExpanded = !mobilesExpanded;
-                Theme.ChangeGlyph(mobilesGroupBtn, mobilesExpanded ? Theme.Glyph.ChevronDown : Theme.Glyph.ChevronRight);
+                Theme.SetChevronExpanded(mobilesGroupBtn, mobilesExpanded);
                 SyncPeerListLayout();
             };
             Theme.Row(mobileHeadRow, 28, mobilesGroupBtn, null);
@@ -427,11 +429,11 @@ namespace DualRemote
             {
                 bool hostFail = boboHostServer == null || !boboHostServer.IsRunning;
                 if (hostFail)
-                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Warning);
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.WarningDot);
                 else if (isRunning)
-                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Success);
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.SuccessDot);
                 else if (isWaiting)
-                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Warning);
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.WarningDot);
                 else
                     Theme.SetIndicatorDot(topStatusBtn, false, Theme.Accent);
             }
@@ -927,8 +929,8 @@ namespace DualRemote
             {
                 navQuickDevice.Text = string.IsNullOrEmpty(quickDeviceName) ? "暂无设备" : quickDeviceName;
                 navQuickDevice.AccessibleName = navQuickDevice.Text;
-                Theme.SetGlyphTint(navQuickDevice, quickDeviceOnline ? Theme.Accent : Theme.Muted);
-                Theme.SetIndicatorDot(navQuickDevice, !string.IsNullOrEmpty(quickDeviceAddress), quickDeviceOnline ? Theme.Success : Theme.StrokeStrong);
+                Theme.ChangeGlyph(navQuickDevice, best != null ? PeerOsGlyph(best) : Theme.Glyph.WindowsTile);
+                Theme.SetQuickDeviceIndicator(navQuickDevice, !string.IsNullOrEmpty(quickDeviceAddress), quickDeviceOnline);
             }
             SyncNavigationSectionVisibility();
         }
@@ -1040,11 +1042,15 @@ namespace DualRemote
             Theme.FixedColumn(row, 32);
             Theme.FixedColumn(row, 28);
 
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 8f);
+            bool hostReady = allowIncomingControl && boboHostServer != null && boboHostServer.IsRunning;
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 8f)
+            {
+                Status = hostReady ? Theme.TileStatus.Online : Theme.TileStatus.None
+            };
             string tag = "本机";
             if (!allowIncomingControl) tag = "本机 · 已暂停被控";
             else if (boboHostServer == null || !boboHostServer.IsRunning) tag = "本机 · 端口未就绪";
-            var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, tag);
+            var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, tag, Theme.PillTone.Info);
 
             var infoBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Info);
             infoBtn.AccessibleName = "查看本机网络与隐藏设备管理";
@@ -1070,7 +1076,6 @@ namespace DualRemote
             string displayName = deviceCatalog != null
                 ? deviceCatalog.ResolveDisplayName(peer.Ip, peer.HostName, PeerName(peer))
                 : PeerName(peer);
-            bool mobile = IsMobilePeer(peer);
             bool hasLanTag = !string.IsNullOrEmpty(peer.LinkText) && peer.LinkText.IndexOf("局域网", StringComparison.Ordinal) >= 0;
 
             var row = Theme.Grid(9);
@@ -1078,23 +1083,24 @@ namespace DualRemote
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 68);
+            Theme.FixedColumn(row, 78);
             Theme.FixedColumn(row, 6);
             Theme.FixedColumn(row, 32);
             Theme.FixedColumn(row, 2);
             Theme.FixedColumn(row, 28);
 
             var icon = new Theme.IconTile(
-                mobile ? Theme.Glyph.Devices : Theme.Glyph.WindowsTile,
+                PeerOsGlyph(peer),
                 !peer.Online,
                 peer.Online ? Theme.Accent : Theme.SurfaceSubtle,
                 peer.Online ? Theme.Paper : Theme.Muted,
                 8f);
+            icon.Status = peer.Online ? Theme.TileStatus.Online : Theme.TileStatus.Offline;
 
-            string pill = !peer.Online ? "离线" : (hasLanTag ? "局域网" : "");
-            var titleCtrl = string.IsNullOrEmpty(pill)
-                ? (Control)Theme.Text(displayName, Theme.TextSize.LabelBold, peer.Online ? Theme.Ink : Theme.Muted)
-                : new Theme.SelfDeviceTitle(displayName, pill);
+            Theme.PillTone stateTone = peer.Online ? Theme.PillTone.Success : Theme.PillTone.Neutral;
+            string primaryPill = peer.Online ? "在线" : "离线";
+            string secondaryPill = (peer.Online && hasLanTag) ? "局域网" : null;
+            var titleCtrl = new Theme.SelfDeviceTitle(displayName, primaryPill, stateTone, secondaryPill);
             titleCtrl.Cursor = Cursors.Hand;
             titleCtrl.Click += delegate { OpenDeviceDetail(displayName, peer.Ip, peer.Online, peer.LinkText, true); };
             titleCtrl.DoubleClick += async delegate
@@ -1104,7 +1110,8 @@ namespace DualRemote
             deviceCardToolTip.SetToolTip(titleCtrl, peer.Ip + " · " + peer.LinkText);
 
             var connectBtn = Theme.Action(peer.Online ? "连接" : "离线",
-                peer.Online ? Theme.ButtonStyle.AccentSoft : Theme.ButtonStyle.Secondary);
+                peer.Online ? Theme.ButtonStyle.AccentSoft : Theme.ButtonStyle.Secondary,
+                peer.Online ? Theme.Glyph.Arrow : Theme.Glyph.None);
             connectBtn.Enabled = peer.Online;
             connectBtn.Margin = new Padding(0, 3, 0, 3);
             connectBtn.Click += async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); };
@@ -1143,12 +1150,12 @@ namespace DualRemote
             menu.Items.Add(new ToolStripSeparator());
 
             string code = BoBoIdentityStore.Default.FormattedDeviceCode;
-            AddPopupItem(menu, "复制本机设备码：" + code, delegate { CopyHostAddress("本机设备码", code); });
+            AddPopupItem(menu, "复制本机设备码：" + code, delegate { CopyHostAddress("本机设备码", code); }, Theme.Glyph.Copy);
             if (!string.IsNullOrEmpty(hostSnapshot.LanIpv4))
-                AddPopupItem(menu, "复制局域网 IP：" + hostSnapshot.LanIpv4, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); });
+                AddPopupItem(menu, "复制局域网 IP：" + hostSnapshot.LanIpv4, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); }, Theme.Glyph.Copy);
             if (!string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4))
-                AddPopupItem(menu, "复制跨网 IP：" + hostSnapshot.TailscaleIpv4, delegate { CopyHostAddress("跨网 IP", hostSnapshot.TailscaleIpv4); });
-            AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); });
+                AddPopupItem(menu, "复制跨网 IP：" + hostSnapshot.TailscaleIpv4, delegate { CopyHostAddress("跨网 IP", hostSnapshot.TailscaleIpv4); }, Theme.Glyph.Copy);
+            AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); }, Theme.Glyph.Key);
 
             int hiddenCount = deviceCatalog != null ? deviceCatalog.HiddenKeys.Count : 0;
             if (hiddenCount > 0)
@@ -1160,7 +1167,7 @@ namespace DualRemote
                     deviceCatalog.Save();
                     SetDevicesHint("已恢复所有此前隐藏的设备，正在刷新列表…", Theme.Success);
                     await RefreshNetworkDevices();
-                });
+                }, Theme.Glyph.Refresh);
             }
 
             Point pt = anchor.PointToScreen(new Point(0, anchor.Height + DevicePixels(4)));
@@ -1177,16 +1184,16 @@ namespace DualRemote
 
             if (peer.Online)
             {
-                AddPopupItem(menu, "连接远程桌面", async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); });
+                AddPopupItem(menu, "连接远程桌面", async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); }, Theme.Glyph.Arrow);
             }
             AddPopupItem(menu, "发送文件到此设备", delegate
             {
                 remoteId.Text = peer.Ip;
                 ShowPage(AssistPage);
                 SelectAssistMode(1);
-            });
-            AddPopupItem(menu, "修改备注名称…", delegate { ShowRenameDeviceDialog(peer, displayName); });
-            AddPopupItem(menu, "复制设备地址：" + peer.Ip, delegate { CopyHostAddress("设备地址", peer.Ip); });
+            }, Theme.Glyph.Send);
+            AddPopupItem(menu, "修改备注名称…", delegate { ShowRenameDeviceDialog(peer, displayName); }, Theme.Glyph.Sliders);
+            AddPopupItem(menu, "复制设备地址：" + peer.Ip, delegate { CopyHostAddress("设备地址", peer.Ip); }, Theme.Glyph.Copy);
 
             bool isFav = favorites.Exists(f => f.Stream && string.Equals(f.Address, peer.Ip, StringComparison.OrdinalIgnoreCase));
             AddPopupItem(menu, isFav ? "移出收藏设备" : "加入收藏设备", delegate
@@ -1195,16 +1202,10 @@ namespace DualRemote
                 if (isFav) favorites.RemoveAll(f => f.SameAs(item));
                 else favorites.Insert(0, item);
                 SaveFavorites();
-            });
+            }, isFav ? Theme.Glyph.StarFilled : Theme.Glyph.Star);
 
             menu.Items.Add(new ToolStripSeparator());
-            var removeItem = new ToolStripMenuItem("移除 / 隐藏此设备")
-            {
-                Padding = new Padding(8, 6, 12, 6),
-                ForeColor = Theme.Alert
-            };
-            removeItem.Click += delegate { RemoveOrHidePeer(peer, displayName); };
-            menu.Items.Add(removeItem);
+            AddPopupItem(menu, "移除 / 隐藏此设备", delegate { RemoveOrHidePeer(peer, displayName); }, Theme.Glyph.Trash, true);
 
             Point pt = anchor.PointToScreen(new Point(0, anchor.Height + DevicePixels(4)));
             menu.Show(pt);
@@ -1452,7 +1453,7 @@ namespace DualRemote
                     await ConnectToDeviceAsync(detailDeviceAddress, detailDeviceName);
             };
 
-            var actDesktop = Theme.Action("发送文件", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Folder);
+            var actDesktop = Theme.Action("发送文件", Theme.ButtonStyle.ToolbarAction, Theme.Glyph.Send);
             actDesktop.Click += delegate
             {
                 if (!string.IsNullOrEmpty(detailDeviceAddress)) remoteId.Text = detailDeviceAddress;
@@ -1470,7 +1471,7 @@ namespace DualRemote
             actSettings.Click += delegate
             {
                 ShowPage(SettingsPage);
-                SelectSettingsTab(1);
+                SelectSettingsTab(2);
             };
 
             Theme.Row(strip, 52, actStream, MakeToolbarDivider(), actDesktop, MakeToolbarDivider(), actFile, MakeToolbarDivider(), actSettings);
@@ -1482,7 +1483,7 @@ namespace DualRemote
             Theme.Row(desk, 24);
 
             // Quick-launch quality presets section (matches UU Image 1 "快速启动" below card)
-            Theme.Row(desk, 26, Theme.Text("快速启动画质档位", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(desk, 26, Theme.Text("快速启动画质档位", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(desk, 10);
 
             var quickCard = new Theme.Card { Padding = new Padding(18, 18, 18, 18), DashedBorder = true };
@@ -1578,6 +1579,7 @@ namespace DualRemote
             bool exists = !string.IsNullOrEmpty(detailDeviceAddress) && favorites.Exists(f =>
                 f.Stream == detailDeviceIsStream && string.Equals(f.Address, detailDeviceAddress, StringComparison.OrdinalIgnoreCase));
             detailFavButton.Text = exists ? "已收藏" : "收藏";
+            Theme.ChangeGlyph(detailFavButton, exists ? Theme.Glyph.StarFilled : Theme.Glyph.Star);
             Theme.SetGlyphTint(detailFavButton, exists ? Theme.Accent : Theme.Muted);
         }
 
@@ -1887,7 +1889,7 @@ namespace DualRemote
             Theme.Row(desk, 190, favoritesListHost);
             Theme.Row(desk, 20);
 
-            Theme.Row(desk, 28, Theme.Text("最近连接", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(desk, 28, Theme.Text("最近连接", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(desk, 10);
 
             recentListHost = Theme.Grid(1);
@@ -2061,13 +2063,13 @@ namespace DualRemote
             Theme.FixedColumn(row, 8);
             Theme.FixedColumn(row, 88);
 
-            var icon = new Theme.IconTile(device.Stream ? Theme.Glyph.WindowsTile : Theme.Glyph.Assist,
+            var icon = new Theme.IconTile(device.Stream ? Theme.Glyph.WindowsTile : Theme.Glyph.Send,
                 true, Theme.AccentLight, Theme.Accent, 8f);
 
             var info = new Theme.TwoLineText(
                 device.Address,
                 device.Stream ? "低延迟高速串流主机" : "临时协助 / 文件传输设备码",
-                Theme.TextSize.LabelBold,
+                Theme.TextSize.Label,
                 Theme.Ink,
                 Theme.Muted);
 
@@ -2186,12 +2188,15 @@ namespace DualRemote
             {
                 string lt = peer.LinkText.ToLowerInvariant();
                 if (lt.IndexOf("[android]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[ios]", StringComparison.Ordinal) >= 0)
-                    return Theme.Glyph.Devices;
-                if (lt.IndexOf("[macos]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[darwin]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[linux]", StringComparison.Ordinal) >= 0)
-                    return Theme.Glyph.Desktop;
+                    return Theme.Glyph.Smartphone;
+                if (lt.IndexOf("[macos]", StringComparison.Ordinal) >= 0 || lt.IndexOf("[darwin]", StringComparison.Ordinal) >= 0)
+                    return Theme.Glyph.Apple;
+                if (lt.IndexOf("[linux]", StringComparison.Ordinal) >= 0)
+                    return Theme.Glyph.Linux;
             }
-            if (os == "android" || os == "ios") return Theme.Glyph.Devices;
-            if (os == "macos" || os == "darwin" || os == "linux" || os == "freebsd" || os == "openbsd") return Theme.Glyph.Desktop;
+            if (os == "android" || os == "ios") return Theme.Glyph.Smartphone;
+            if (os == "macos" || os == "darwin") return Theme.Glyph.Apple;
+            if (os == "linux" || os == "freebsd" || os == "openbsd") return Theme.Glyph.Linux;
             return Theme.Glyph.WindowsTile;
         }
 

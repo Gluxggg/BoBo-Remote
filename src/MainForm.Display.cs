@@ -61,7 +61,7 @@ namespace DualRemote
             Theme.FillColumn(statusRow);
             Theme.FixedColumn(statusRow, 10);
             Theme.FixedColumn(statusRow, 148);
-            Theme.Row(statusRow, 28, Theme.Text("防窥壁纸与物理锁护航", Theme.TextSize.Label, Theme.Muted), null, curtainStateBadge);
+            Theme.Row(statusRow, 28, Theme.Text("防窥壁纸与物理锁护航", Theme.TextSize.Caption, Theme.CaptionInk), null, curtainStateBadge);
             Theme.Row(page, 28, statusRow);
             Theme.Row(page, 10);
 
@@ -70,7 +70,7 @@ namespace DualRemote
             Theme.Row(page, 330, wallpaperCard);
             Theme.Row(page, 16);
 
-            Theme.Row(page, 24, Theme.Text("安全策略", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 24, Theme.Text("安全策略", Theme.TextSize.Caption, Theme.CaptionInk));
             Theme.Row(page, 8);
 
             var policyCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
@@ -88,7 +88,7 @@ namespace DualRemote
                     ? "已开启：远控接入时自动开启防窥保护"
                     : "已关闭远控自动防窥。", Theme.PillTone.Info);
             };
-            AddGroupedSettingRow(policyList, false, Theme.Glyph.Shield, "接入自动防窥",
+            AddGroupedSettingRow(policyList, false, Theme.Glyph.Privacy, "接入自动防窥",
                 "被控接入时自动遮挡物理屏", autoSwitch);
 
             var blockInputSwitch = BuildToggle("防窥锁定物理键鼠", privacyConfig.BlockLocalInput);
@@ -121,7 +121,7 @@ namespace DualRemote
                     ? "已开启物理屏背光降亮（DDC/CI 仅调亮度）"
                     : "已关闭物理屏背光降亮。", Theme.PillTone.Info);
             };
-            AddGroupedSettingRow(policyList, true, Theme.Glyph.EyeOff, "物理屏背光降亮",
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Dimmer, "物理屏背光降亮",
                 "DDC/CI 降亮并在退出后恢复", hwBlackoutSwitch);
 
             var lockSwitch = BuildToggle("退出防窥自动锁屏", privacyConfig.LockOnLocalExit);
@@ -131,11 +131,11 @@ namespace DualRemote
                 SavePrivacyConfig();
                 ShowDisplayBanner(lockSwitch.Checked ? "快捷键退出防窥后将自动锁定 Windows。" : "已关闭退出自动锁屏。", Theme.PillTone.Info);
             };
-            AddGroupedSettingRow(policyList, true, Theme.Glyph.Lock, "退出自动锁屏",
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.ScreenLock, "退出自动锁屏",
                 "快捷键解除防窥后立即锁屏", lockSwitch);
 
             privacyHostDisconnectActionCombo = CreateHostDisconnectActionCombo();
-            AddGroupedSettingRow(policyList, true, Theme.Glyph.Lock, "断开后主机动作",
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.Power, "断开后主机动作",
                 "远控结束并解除防窥后的系统状态",
                 Theme.WrapInput(privacyHostDisconnectActionCombo), 160);
 
@@ -146,7 +146,7 @@ namespace DualRemote
                 SavePrivacyConfig();
                 if (wallpaperPreview != null) wallpaperPreview.Invalidate();
             };
-            AddGroupedSettingRow(policyList, true, Theme.Glyph.Eye, "显示保护文案",
+            AddGroupedSettingRow(policyList, true, Theme.Glyph.MessageSquare, "显示保护文案",
                 "居中显示时间与隐私保护提示", badgeSwitch);
 
             policyCard.Controls.Add(policyList);
@@ -467,7 +467,7 @@ namespace DualRemote
             if (toggleCurtainBtn != null)
                 toggleCurtainBtn.Text = running ? "关闭防窥" : "开启防窥";
             if (topPrivacyBtn != null)
-                Theme.SetIndicatorDot(topPrivacyBtn, running || privacyConfig.AutoOnRemote, running ? Theme.Success : Theme.Accent);
+                Theme.SetIndicatorDot(topPrivacyBtn, running || privacyConfig.AutoOnRemote, running ? Theme.SuccessDot : Theme.Accent);
         }
 
         private void ShowDisplayBanner(string text, Theme.PillTone tone)

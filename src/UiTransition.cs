@@ -12,7 +12,8 @@ namespace DualRemote
         EaseOutQuint,
         EaseOutExpo,
         EaseOutBackSoft,
-        SpringSettle
+        SpringSettle,
+        SpringSmooth
     }
 
     internal sealed class UiTransition
@@ -117,6 +118,13 @@ namespace DualRemote
                 {
                     float norm = SpringSettleNorm > 0.0001f ? SpringSettleNorm : 1f;
                     return ComputeRawSpring(t) / norm;
+                }
+                case UiEase.SpringSmooth:
+                {
+                    double t4 = (double)t * t;
+                    double decay = Math.Exp(-5.0 * t) * (1.0 - t4 * t4);
+                    double osc = Math.Cos(4.6 * t) + 1.08 * Math.Sin(4.6 * t);
+                    return (float)(1.0 - decay * osc);
                 }
                 default:
                 {

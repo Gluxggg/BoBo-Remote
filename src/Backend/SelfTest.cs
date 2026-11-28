@@ -671,7 +671,8 @@ namespace DualRemote
                 UiEase.EaseOutQuint,
                 UiEase.EaseOutExpo,
                 UiEase.EaseOutBackSoft,
-                UiEase.SpringSettle
+                UiEase.SpringSettle,
+                UiEase.SpringSmooth
             };
             bool boundsOk = true;
             for (int i = 0; i < eases.Length; i++)
@@ -688,9 +689,13 @@ namespace DualRemote
             float quintQuarter = UiTransition.EvaluateCurve(0.25f, UiEase.EaseOutQuint);
             float cubicQuarter = UiTransition.EvaluateCurve(0.25f, UiEase.EaseOutCubic);
             float backPeak = UiTransition.EvaluateCurve(0.68f, UiEase.EaseOutBackSoft);
-            Check("V7.3.2 前端缓动曲线：6 种曲线边界收敛且 Quint 启动快于 Cubic、BackSoft 轻微过冲收尾",
-                boundsOk && quintQuarter > cubicQuarter && backPeak > 1.0f && backPeak < 1.06f,
-                "quint=" + quintQuarter.ToString("F3") + " cubic=" + cubicQuarter.ToString("F3") + " back=" + backPeak.ToString("F3"));
+            float springSmoothPeak = UiTransition.EvaluateCurve(0.72f, UiEase.SpringSmooth);
+            Check("V7.3.2 前端缓动曲线：7 种曲线边界收敛且 Quint 启动快于 Cubic、BackSoft/SpringSmooth 柔和回弹",
+                boundsOk && quintQuarter > cubicQuarter
+                && backPeak > 1.0f && backPeak < 1.06f
+                && springSmoothPeak > 1.01f && springSmoothPeak < 1.05f,
+                "quint=" + quintQuarter.ToString("F3") + " cubic=" + cubicQuarter.ToString("F3")
+                + " back=" + backPeak.ToString("F3") + " springSmooth=" + springSmoothPeak.ToString("F3"));
 
             using (var ctl = new System.Windows.Forms.Control())
             {
@@ -700,6 +705,82 @@ namespace DualRemote
                     tr.Value == 1f && !tr.IsRunning && UiTransition.ActiveHighResCount == 0,
                     "val=" + tr.Value + " active=" + UiTransition.ActiveHighResCount);
             }
+
+            // 字体层级规范自检：正文字重克制、最小说明文字 >= 9.0pt、大标题与眉题粗体分级明确
+            var fSmall = RemoteTheme.GetFont(RemoteTheme.TextSize.Small);
+            var fCaption = RemoteTheme.GetFont(RemoteTheme.TextSize.Caption);
+            var fBody = RemoteTheme.GetFont(RemoteTheme.TextSize.Body);
+            var fLabel = RemoteTheme.GetFont(RemoteTheme.TextSize.Label);
+            var fLabelBold = RemoteTheme.GetFont(RemoteTheme.TextSize.LabelBold);
+            var fSection = RemoteTheme.GetFont(RemoteTheme.TextSize.Section);
+            var fTitle = RemoteTheme.GetFont(RemoteTheme.TextSize.Title);
+            Check("UI 字体规范六级梯度：说明 >=9pt、列表正文不糊粗、标题与眉题严格分级",
+                fSmall.SizeInPoints >= 9.0f && !fSmall.Bold
+                && fCaption.Bold && !fBody.Bold && !fLabel.Bold
+                && fLabelBold.Bold && fSection.Bold && fTitle.Bold
+                && fTitle.SizeInPoints > fSection.SizeInPoints
+                && fSection.SizeInPoints > fLabel.SizeInPoints,
+                string.Format("small={0} label={1} section={2} title={3}",
+                    fSmall.SizeInPoints, fLabel.SizeInPoints, fSection.SizeInPoints, fTitle.SizeInPoints));
+
+            // Switch 初始状态同步与离屏渲染自检
+            bool switchOk;
+            using (var sw = new RemoteTheme.Switch { Checked = true, Size = new System.Drawing.Size(60, 30) })
+            using (var swBmp = new System.Drawing.Bitmap(60, 30))
+            {
+                sw.DrawToBitmap(swBmp, new System.Drawing.Rectangle(0, 0, 60, 30));
+                switchOk = Math.Abs(sw.PositionValue - 1f) < 0.001f && !sw.ShowStateText;
+            }
+            Check("UI 小滑块默认精简无赘字且 Checked=true 初态严格同步至 1.0", switchOk, "ok=" + switchOk);
+
+            // 全量矢量 Glyph 图标离屏绘制自检（确保无异常、零空图）
+            int glyphCount = 0;
+            bool glyphsOk = true;
+            string badGlyph = "";
+            foreach (RemoteTheme.Glyph gKind in Enum.GetValues(typeof(RemoteTheme.Glyph)))
+            {
+                if (gKind == RemoteTheme.Glyph.None) continue;
+                glyphCount++;
+                using (var bmp = new System.Drawing.Bitmap(24, 24))
+                using (var gr = System.Drawing.Graphics.FromImage(bmp))
+                {
+                    gr.Clear(System.Drawing.Color.Transparent);
+                    RemoteTheme.DrawGlyph(gr, gKind, new System.Drawing.RectangleF(0, 0, 24, 24), RemoteTheme.Ink);
+                    bool anyInk = false;
+                    for (int y = 0; y < 24 && !anyInk; y++)
+                    {
+                        for (int x = 0; x < 24; x++)
+                        {
+                            if (bmp.GetPixel(x, y).A > 0) { anyInk = true; break; }
+                        }
+                    }
+                    if (!anyInk)
+                    {
+                        glyphsOk = false;
+                        badGlyph = gKind.ToString();
+                        break;
+                    }
+                }
+            }
+            Check("UI 全量矢量 Glyph 图标渲染（共 " + glyphCount + " 枚）均非空且无 GDI+ 异常", glyphsOk, badGlyph);
+
+            // UU 风格在线微标签 / 滑动选项卡 / 在线角标设备块离屏渲染自检
+            using (var badge = new RemoteTheme.Badge("在线", RemoteTheme.PillTone.Success) { Size = new System.Drawing.Size(72, 26) })
+            using (var tabs = new RemoteTheme.SlidingTabStrip(
+                new RemoteTheme.TabEntry("常规设置", RemoteTheme.Glyph.Sliders),
+                new RemoteTheme.TabEntry("防窥与显示", RemoteTheme.Glyph.Privacy))
+            { Size = new System.Drawing.Size(320, 40) })
+            using (var tile = new RemoteTheme.IconTile(RemoteTheme.Glyph.Smartphone, false, RemoteTheme.Accent, RemoteTheme.Paper, 8f)
+            { Status = RemoteTheme.TileStatus.Online, Size = new System.Drawing.Size(38, 38) })
+            using (var rowBmp = new System.Drawing.Bitmap(320, 40))
+            {
+                badge.DrawToBitmap(rowBmp, new System.Drawing.Rectangle(0, 0, 72, 26));
+                tabs.SelectTab(1, true);
+                tabs.DrawToBitmap(rowBmp, new System.Drawing.Rectangle(0, 0, 320, 40));
+                tile.DrawToBitmap(rowBmp, new System.Drawing.Rectangle(0, 0, 38, 38));
+            }
+            Check("UU 风格在线徽标 / 滑动选项卡 / 设备在线角标离屏渲染通过", true, "ok");
+
             Check("V7.3.2 前端高刷动效：闲置状态下高精度计时器引用计数严格归零",
                 UiTransition.ActiveHighResCount == 0,
                 "active=" + UiTransition.ActiveHighResCount);
