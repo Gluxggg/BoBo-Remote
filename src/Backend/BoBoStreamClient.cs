@@ -38,6 +38,7 @@ namespace DualRemote
         internal double HandshakeRttMs;
         internal IPAddress ConnectedAddress;
         internal IPAddress LocalAddress;
+        internal bool TransientFailure;
         internal string Error = "";
     }
 
@@ -260,6 +261,98 @@ namespace DualRemote
 
         private const string PinMismatchMessage = "目标设备的 TLS 证书指纹与本地配对记录不一致。请核对设备后移除旧授权并重新配对。";
 
+        internal static void ClassifyHandshakeException(
+            Exception ex,
+            CancellationToken timeoutCt,
+            CancellationToken callerCt,
+            int port,
+            string targetLabel,
+            out bool isCallerCanceled,
+            out bool isTransient,
+            out string friendlyError)
+        {
+            var agg = ex as AggregateException;
+            if (agg != null)
+            {
+                AggregateException flat = agg.Flatten();
+                if (flat.InnerExceptions.Count > 0) ex = flat.InnerExceptions[0];
+            }
+
+            bool hasCanceled = false;
+            bool hasDisposed = false;
+            bool hasEof = false;
+            bool hasAuth = false;
+            bool hasIo = false;
+            SocketException sockEx = null;
+            for (Exception cur = ex; cur != null; cur = cur.InnerException)
+            {
+                if (cur is OperationCanceledException || cur is TimeoutException) hasCanceled = true;
+                if (cur is ObjectDisposedException) hasDisposed = true;
+                if (cur is EndOfStreamException) hasEof = true;
+                if (cur is AuthenticationException) hasAuth = true;
+                if (cur is IOException) hasIo = true;
+                if (sockEx == null) sockEx = cur as SocketException;
+            }
+
+            bool callerCancelled = false;
+            try { callerCancelled = callerCt.CanBeCanceled && callerCt.IsCancellationRequested; } catch { }
+            if (callerCancelled)
+            {
+                isCallerCanceled = true;
+                isTransient = false;
+                friendlyError = "已取消连接。";
+                return;
+            }
+
+            bool timedOut = false;
+            try { timedOut = timeoutCt.CanBeCanceled && timeoutCt.IsCancellationRequested; } catch { }
+            if (timedOut || hasCanceled)
+            {
+                isCallerCanceled = false;
+                isTransient = true;
+                friendlyError = "连接" + targetLabel + "超时。若为首次跨网唤醒，请稍候或重试。";
+                return;
+            }
+
+            if (sockEx != null)
+            {
+                SocketError se = sockEx.SocketErrorCode;
+                isCallerCanceled = false;
+                isTransient = (se == SocketError.TimedOut ||
+                               se == SocketError.ConnectionReset ||
+                               se == SocketError.ConnectionAborted ||
+                               se == SocketError.Interrupted ||
+                               se == SocketError.OperationAborted ||
+                               se == SocketError.TryAgain ||
+                               se == SocketError.HostUnreachable ||
+                               se == SocketError.NetworkUnreachable);
+                friendlyError = se == SocketError.ConnectionRefused
+                    ? ("未检测到对方打开 BoBo远程（端口 " + port + " 未开放）。请先在被控端启动 BoBo远程。")
+                    : ("无法连接" + targetLabel + "（网络或端口 " + port + " 暂未响应），请确认对方已打开 BoBo远程 且网络互通。");
+                return;
+            }
+
+            if (hasDisposed)
+            {
+                isCallerCanceled = false;
+                isTransient = true;
+                friendlyError = "连接通道在握手中已重置，请重试连接。";
+                return;
+            }
+
+            if (hasEof || (hasAuth && hasIo))
+            {
+                isCallerCanceled = false;
+                isTransient = true;
+                friendlyError = "对方网络在线，但被控服务尚未完成握手（端口 " + port + " 连接中断），请确认被控端已打开最新 BoBo远程。";
+                return;
+            }
+
+            isCallerCanceled = false;
+            isTransient = false;
+            friendlyError = "连接" + targetLabel + "失败：" + (ex != null ? ex.Message : "未知异常");
+        }
+
         private static bool HasPinMismatch(BoBoIdentityStore store, string nodeId, string serverThumb)
         {
             BoBoAuthorizedPeer peer = store.FindPeerByNodeId(nodeId);
@@ -285,6 +378,7 @@ namespace DualRemote
                 {
                     try
                     {
+                        BoBoHostServer.DisableSocketInheritance(client.Client);
                         client.NoDelay = true;
                         bool viaEmbedded = await ConnectWithCancelAsync(client, res.Host, res.Port, timeoutCts.Token).ConfigureAwait(false);
                         res.Reachable = true;
@@ -356,19 +450,14 @@ namespace DualRemote
                             return res;
                         }
                     }
-                    catch (OperationCanceledException)
-                    {
-                        res.Error = "连接对方 BoBo远程 超时。请确认对方已打开 BoBo远程 且网络互通。";
-                        return res;
-                    }
-                    catch (SocketException)
-                    {
-                        res.Error = "未检测到对方打开 BoBo远程（端口 " + res.Port + " 未开放）。请先在被控端启动 BoBo远程。";
-                        return res;
-                    }
                     catch (Exception ex)
                     {
-                        res.Error = "连接对方 BoBo远程 失败：" + ex.Message;
+                        bool callerCanceled;
+                        bool transient;
+                        string msg;
+                        ClassifyHandshakeException(ex, timeoutCts.Token, ct, res.Port, "对方 BoBo远程", out callerCanceled, out transient, out msg);
+                        res.TransientFailure = transient;
+                        res.Error = msg;
                         return res;
                     }
                 }
@@ -461,6 +550,7 @@ namespace DualRemote
                 {
                     try
                     {
+                        BoBoHostServer.DisableSocketInheritance(client.Client);
                         client.NoDelay = true;
                         await ConnectWithCancelAsync(client, host, targetPort, timeoutCts.Token).ConfigureAwait(false);
                         string serverThumb = "";
@@ -528,13 +618,14 @@ namespace DualRemote
                             return Tuple.Create(true, hostName, "");
                         }
                     }
-                    catch (SocketException)
-                    {
-                        return Tuple.Create(false, "", "未检测到对方打开 BoBo远程，请先启动被控端 BoBo远程 并生成 4 位配对码。");
-                    }
                     catch (Exception ex)
                     {
-                        return Tuple.Create(false, "", "配对通信失败：" + ex.Message);
+                        bool callerCanceled;
+                        bool transient;
+                        string msg;
+                        ClassifyHandshakeException(ex, timeoutCts.Token, ct, targetPort, "对方 BoBo远程", out callerCanceled, out transient, out msg);
+                        if (callerCanceled) throw new OperationCanceledException(ct);
+                        return Tuple.Create(false, "", msg);
                     }
                 }
             }
@@ -576,10 +667,13 @@ namespace DualRemote
 
                 using (var client = new TcpClient())
                 {
+                    BoBoHostServer.DisableSocketInheritance(client.Client);
                     client.NoDelay = true;
                     using (var hsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
                     using (hsCts.Token.Register(delegate { try { client.Close(); } catch { } }))
                     {
+                        try
+                        {
                         hsCts.CancelAfter(15000);
                         await ConnectWithCancelAsync(client, host, targetPort, hsCts.Token).ConfigureAwait(false);
                         string serverThumb = "";
@@ -683,6 +777,16 @@ namespace DualRemote
                                 prog.Error = BoBoProtocol.GetStr(finalObj, "error", "对方保存文件失败。");
                             }
                         }
+                        }
+                        catch (Exception ex)
+                        {
+                            bool callerCanceled;
+                            bool transient;
+                            string msg;
+                            ClassifyHandshakeException(ex, hsCts.Token, ct, targetPort, "对方 BoBo远程", out callerCanceled, out transient, out msg);
+                            prog.Error = callerCanceled ? "已取消文件传输。" : msg;
+                            return prog;
+                        }
                     }
                 }
             }
@@ -698,212 +802,236 @@ namespace DualRemote
             BoBoCoreInterop.BoBoClientNativeHandle nativeHandle,
             CancellationToken externalCt)
         {
-            Disconnect();
-            identity.EnsureLoaded();
-            nativeClient = nativeHandle;
-            forcedDisconnectReason = null;
-            cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
-            CancellationToken ct = cts.Token;
-
             int targetPort = options.Port > 0 ? options.Port : BoBoProtocol.DefaultTcpPort;
-            try
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                tcp = new TcpClient();
-                tcp.NoDelay = true;
-                // Balanced TCP buffers prevent micro-stalls on 2K 90Hz TCP fallback without multi-second bloat
-                tcp.ReceiveBufferSize = 524288;
-                tcp.SendBufferSize = 131072;
-                BoBoUdpSocketUtil.TrySetTcpDscp(tcp.Client);
-                ConfigureTcpKeepAlive(tcp);
+                Disconnect();
+                identity.EnsureLoaded();
+                nativeClient = nativeHandle;
+                forcedDisconnectReason = null;
+                cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+                CancellationToken ct = cts.Token;
+                CancellationToken activeTimeoutTok = CancellationToken.None;
 
-                string serverThumb = "";
-                BoBoFrame? ackFrame;
-                double handshakeRttMs;
-                using (var hsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-                using (hsCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
-                {
-                    hsCts.CancelAfter(12000);
-                    routedViaEmbeddedTailnet = await ConnectWithCancelAsync(tcp, options.Host, targetPort, hsCts.Token).ConfigureAwait(false);
-
-                    ssl = new SslStream(tcp.GetStream(), false,
-                        delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
-                        {
-                            if (cert != null) serverThumb = BoBoIdentityStore.ComputeCertSha256Hex(cert.GetRawCertData());
-                            return cert != null;
-                        });
-                    await ssl.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
-                    long helloStartTicks = Stopwatch.GetTimestamp();
-                    await SendHelloAsync(ssl, identity, hsCts.Token).ConfigureAwait(false);
-
-                    ackFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
-                    handshakeRttMs = (Stopwatch.GetTimestamp() - helloStartTicks) * 1000.0 / Stopwatch.Frequency;
-                }
-                if (handshakeRttMs > 0 && handshakeRttMs < 5000) latestRttMs = handshakeRttMs;
-                if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson)
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "HANDSHAKE_FAILED", "目标主机未返回有效 BoBo V6 握手。");
-                }
-
-                var ack = BoBoProtocol.ParseJsonPayload(ackFrame.Value.Payload);
-                if (ack == null || BoBoProtocol.GetStr(ack, "protocol", "") != BoBoProtocol.ProtocolMagic)
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "NOT_BOBO", "目标主机未运行 BoBo远程 V6。");
-                }
-
-                if (!BoBoProtocol.GetBool(ack, "allowIncoming", true))
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "HOST_DISABLED", "对方已关闭「允许本机被控」，请在被控端 BoBo远程 中开启。");
-                }
-
-                remoteMonitors = BoBoProtocol.ParseMonitors(ack, "monitors");
-                RemotePlatform = BoBoProtocol.GetStr(ack, "platform", BoBoProtocol.PlatformWindows);
-                SupportsSuperDisplayViewport = string.Equals(RemotePlatform, BoBoProtocol.PlatformWindows, StringComparison.OrdinalIgnoreCase) &&
-                    BoBoProtocol.GetInt(ack, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
-                RemoteHostControlMode = BoBoProtocol.GetStr(ack, "hostControlMode", BoBoProtocol.ControlModeFull);
-                string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
-                string hostCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
-                string hostName = BoBoProtocol.GetStr(ack, "deviceName", options.Host);
-                string nonce = BoBoProtocol.GetStr(ack, "nonce", "");
-
-                // Strict Client TOFU Certificate Pinning: NEVER trust JSON certThumbprint or silently overwrite a pinned mismatch!
-                if (string.IsNullOrEmpty(serverThumb))
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "CERT_MISSING", "未能从 TLS 握手获取目标主机证书指纹，已拒绝连接。");
-                }
-                if (HasPinMismatch(identity, hostNodeId, serverThumb))
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "CERT_MISMATCH", PinMismatchMessage);
-                }
-                if (!BoBoProtocol.GetBool(ack, "authorized", false) || !identity.IsPeerAuthorized(hostNodeId, serverThumb))
-                {
-                    Disconnect();
-                    return Tuple.Create(false, "PAIR_REQUIRED", "请先输入被控端 BoBo远程 生成的 4 位临时配对码。");
-                }
-
-                // Prove private-key possession over host's fresh sessionNonce before issuing START_STREAM
-                if (BoBoProtocol.GetBool(ack, "authChallenge", false))
-                {
-                    var proofMsg = new Dictionary<string, object>();
-                    proofMsg["type"] = "AUTH_PROOF";
-                    proofMsg["signature"] = identity.SignAuthChallenge(nonce, serverThumb);
-                    proofMsg["clientCertDer"] = identity.CertDerBase64;
-                    BoBoFrame? authResFrame;
-                    using (var authCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-                    using (authCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
-                    {
-                        authCts.CancelAfter(8000);
-                        await BoBoProtocol.WriteJsonAsync(ssl, proofMsg, authCts.Token).ConfigureAwait(false);
-                        authResFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, authCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
-                    }
-                    var authRes = authResFrame.HasValue && authResFrame.Value.Type == BoBoPacketType.ControlJson
-                        ? BoBoProtocol.ParseJsonPayload(authResFrame.Value.Payload) : null;
-                    if (BoBoProtocol.GetStr(authRes, "type", "") != "AUTH_RESULT" || !BoBoProtocol.GetBool(authRes, "ok", false))
-                    {
-                        Disconnect();
-                        return Tuple.Create(false, "AUTH_FAILED", BoBoProtocol.GetStr(authRes, "error", "双向密钥身份校验未通过。"));
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(hostNodeId))
-                {
-                    identity.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
-                    {
-                        NodeId = hostNodeId,
-                        DeviceCode = hostCode,
-                        DeviceName = hostName,
-                        CertThumbprint = serverThumb,
-                        LastHost = options.Host
-                    });
-                }
-
-                lastStartOptions = options;
-                activeVideoCodecId = BoBoCoreInterop.VideoCodecH264;
-                activeBitrateKbps = options.BitrateKbps;
-                var startReq = new Dictionary<string, object>();
-                startReq["type"] = "START_STREAM";
-                startReq["monitorIndex"] = options.MonitorIndex;
-                startReq["width"] = options.Width;
-                startReq["height"] = options.Height;
-                startReq["fps"] = options.Fps;
-                startReq["bitrateKbps"] = options.BitrateKbps;
-                startReq["autoBitrate"] = options.AutoBitrate;
-                startReq["freeMouse"] = options.FreeMouse;
-                startReq["muteHost"] = options.MuteHostAudio;
-                startReq["requestPrivacy"] = options.RequestPrivacy;
-                startReq["superDisplay"] = options.SuperDisplay && SupportsSuperDisplayViewport;
-                startReq["clientWidth"] = options.ClientWidth;
-                startReq["clientHeight"] = options.ClientHeight;
-                if (SupportsSuperDisplayViewport)
-                {
-                    startReq["superDisplayVersion"] = BoBoDisplayState.Version;
-                    startReq["fullscreen"] = options.ClientFullscreen;
-                }
-                bool canHevcDec = options.PreferHevc && BoBoCoreInterop.IsHevcDecodeSupported();
-                startReq["preferHevc"] = canHevcDec;
-                startReq["videoCodecs"] = canHevcDec ? new string[] { "hevc", "h264" } : new string[] { "h264" };
-                if (!string.IsNullOrWhiteSpace(options.CustomStunHost) && options.CustomStunPort > 0 && options.CustomStunPort <= 65535)
-                {
-                    startReq["stunHost"] = options.CustomStunHost.Trim();
-                    startReq["stunPort"] = options.CustomStunPort;
-                }
-                startReq["udpTransport"] = true;
-                startReq["udpCipher"] = "aes-128-gcm";
-                startReq["udpCiphers"] = new string[] { "aes-128-gcm", "aes-128-ctr-hmac" };
-                startReq["udpInterleavedFec"] = true;
-                startReq["udpNack"] = true;
-                startReq["audioCodecs"] = options.PreferCompressedAudio
-                    ? new string[] { "aac", "adpcm" }
-                    : new string[] { "adpcm" };
-                startReq["nativeLocalCursor"] = true;
-                startReq["cursorMetrics"] = true;
-                startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
                 try
                 {
-                    UdpClient preUc = CreateDualStackMediaUdp();
-                    if (preUc != null)
+                    tcp = new TcpClient();
+                    BoBoHostServer.DisableSocketInheritance(tcp.Client);
+                    tcp.NoDelay = true;
+                    // Balanced TCP buffers prevent micro-stalls on 2K 90Hz TCP fallback without multi-second bloat
+                    tcp.ReceiveBufferSize = 524288;
+                    tcp.SendBufferSize = 131072;
+                    BoBoUdpSocketUtil.TrySetTcpDscp(tcp.Client);
+                    ConfigureTcpKeepAlive(tcp);
+
+                    string serverThumb = "";
+                    BoBoFrame? ackFrame;
+                    double handshakeRttMs;
+                    using (var hsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    using (hsCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
                     {
-                        int prePort = ((IPEndPoint)preUc.Client.LocalEndPoint).Port;
-                        lock (udpGate)
+                        activeTimeoutTok = hsCts.Token;
+                        hsCts.CancelAfter(12000);
+                        routedViaEmbeddedTailnet = await ConnectWithCancelAsync(tcp, options.Host, targetPort, hsCts.Token).ConfigureAwait(false);
+
+                        ssl = new SslStream(tcp.GetStream(), false,
+                            delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errs)
+                            {
+                                if (cert != null) serverThumb = BoBoIdentityStore.ComputeCertSha256Hex(cert.GetRawCertData());
+                                return cert != null;
+                            });
+                        await ssl.AuthenticateAsClientAsync("BoBoRemote-V6-Node", null, SslProtocols.Tls12, false).ConfigureAwait(false);
+                        long helloStartTicks = Stopwatch.GetTimestamp();
+                        await SendHelloAsync(ssl, identity, hsCts.Token).ConfigureAwait(false);
+
+                        ackFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, hsCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
+                        handshakeRttMs = (Stopwatch.GetTimestamp() - helloStartTicks) * 1000.0 / Stopwatch.Frequency;
+                    }
+                    activeTimeoutTok = CancellationToken.None;
+                    if (handshakeRttMs > 0 && handshakeRttMs < 5000) latestRttMs = handshakeRttMs;
+                    if (!ackFrame.HasValue || ackFrame.Value.Type != BoBoPacketType.ControlJson)
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "HANDSHAKE_FAILED", "目标主机未返回有效 BoBo V6 握手。");
+                    }
+
+                    var ack = BoBoProtocol.ParseJsonPayload(ackFrame.Value.Payload);
+                    if (ack == null || BoBoProtocol.GetStr(ack, "protocol", "") != BoBoProtocol.ProtocolMagic)
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "NOT_BOBO", "目标主机未运行 BoBo远程 V6。");
+                    }
+
+                    if (!BoBoProtocol.GetBool(ack, "allowIncoming", true))
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "HOST_DISABLED", "对方已关闭「允许本机被控」，请在被控端 BoBo远程 中开启。");
+                    }
+
+                    remoteMonitors = BoBoProtocol.ParseMonitors(ack, "monitors");
+                    RemotePlatform = BoBoProtocol.GetStr(ack, "platform", BoBoProtocol.PlatformWindows);
+                    SupportsSuperDisplayViewport = string.Equals(RemotePlatform, BoBoProtocol.PlatformWindows, StringComparison.OrdinalIgnoreCase) &&
+                        BoBoProtocol.GetInt(ack, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
+                    RemoteHostControlMode = BoBoProtocol.GetStr(ack, "hostControlMode", BoBoProtocol.ControlModeFull);
+                    string hostNodeId = BoBoProtocol.GetStr(ack, "nodeId", "");
+                    string hostCode = BoBoProtocol.GetStr(ack, "deviceCode", "");
+                    string hostName = BoBoProtocol.GetStr(ack, "deviceName", options.Host);
+                    string nonce = BoBoProtocol.GetStr(ack, "nonce", "");
+
+                    // Strict Client TOFU Certificate Pinning: NEVER trust JSON certThumbprint or silently overwrite a pinned mismatch!
+                    if (string.IsNullOrEmpty(serverThumb))
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "CERT_MISSING", "未能从 TLS 握手获取目标主机证书指纹，已拒绝连接。");
+                    }
+                    if (HasPinMismatch(identity, hostNodeId, serverThumb))
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "CERT_MISMATCH", PinMismatchMessage);
+                    }
+                    if (!BoBoProtocol.GetBool(ack, "authorized", false) || !identity.IsPeerAuthorized(hostNodeId, serverThumb))
+                    {
+                        Disconnect();
+                        return Tuple.Create(false, "PAIR_REQUIRED", "请先输入被控端 BoBo远程 生成的 4 位临时配对码。");
+                    }
+
+                    // Prove private-key possession over host's fresh sessionNonce before issuing START_STREAM
+                    if (BoBoProtocol.GetBool(ack, "authChallenge", false))
+                    {
+                        var proofMsg = new Dictionary<string, object>();
+                        proofMsg["type"] = "AUTH_PROOF";
+                        proofMsg["signature"] = identity.SignAuthChallenge(nonce, serverThumb);
+                        proofMsg["clientCertDer"] = identity.CertDerBase64;
+                        BoBoFrame? authResFrame;
+                        using (var authCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                        using (authCts.Token.Register(delegate { try { if (tcp != null) tcp.Close(); } catch { } }))
                         {
-                            if (preBoundUdp != null) { try { preBoundUdp.Close(); } catch { } }
-                            preBoundUdp = preUc;
+                            activeTimeoutTok = authCts.Token;
+                            authCts.CancelAfter(8000);
+                            await BoBoProtocol.WriteJsonAsync(ssl, proofMsg, authCts.Token).ConfigureAwait(false);
+                            authResFrame = await BoBoProtocol.ReadOneFrameAsync(ssl, authCts.Token, BoBoProtocol.MaxPreAuthPayloadBytes).ConfigureAwait(false);
                         }
-                        List<BoBoUdpCandidate> initClientCands = BoBoNatTraversal.GatherLocalCandidates(prePort, null, false);
-                        if (initClientCands.Count > 0)
+                        activeTimeoutTok = CancellationToken.None;
+                        var authRes = authResFrame.HasValue && authResFrame.Value.Type == BoBoPacketType.ControlJson
+                            ? BoBoProtocol.ParseJsonPayload(authResFrame.Value.Payload) : null;
+                        if (BoBoProtocol.GetStr(authRes, "type", "") != "AUTH_RESULT" || !BoBoProtocol.GetBool(authRes, "ok", false))
                         {
-                            startReq["udpCandidates"] = BoBoNatTraversal.ToProtocolObjects(initClientCands);
+                            Disconnect();
+                            return Tuple.Create(false, "AUTH_FAILED", BoBoProtocol.GetStr(authRes, "error", "双向密钥身份校验未通过。"));
                         }
                     }
-                }
-                catch { }
-                await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
 
-                Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
-                connected = true;
-                Task _rx = Task.Run(delegate { return ReceiveLoopAsync(ct); });
-                Task _ping = Task.Run(delegate { return PingLoopAsync(ct); });
-                return Tuple.Create(true, "OK", hostName);
+                    if (!string.IsNullOrEmpty(hostNodeId))
+                    {
+                        identity.AuthorizeOrUpdatePeer(new BoBoAuthorizedPeer
+                        {
+                            NodeId = hostNodeId,
+                            DeviceCode = hostCode,
+                            DeviceName = hostName,
+                            CertThumbprint = serverThumb,
+                            LastHost = options.Host
+                        });
+                    }
+
+                    lastStartOptions = options;
+                    activeVideoCodecId = BoBoCoreInterop.VideoCodecH264;
+                    activeBitrateKbps = options.BitrateKbps;
+                    var startReq = new Dictionary<string, object>();
+                    startReq["type"] = "START_STREAM";
+                    startReq["monitorIndex"] = options.MonitorIndex;
+                    startReq["width"] = options.Width;
+                    startReq["height"] = options.Height;
+                    startReq["fps"] = options.Fps;
+                    startReq["bitrateKbps"] = options.BitrateKbps;
+                    startReq["autoBitrate"] = options.AutoBitrate;
+                    startReq["freeMouse"] = options.FreeMouse;
+                    startReq["muteHost"] = options.MuteHostAudio;
+                    startReq["requestPrivacy"] = options.RequestPrivacy;
+                    startReq["superDisplay"] = options.SuperDisplay && SupportsSuperDisplayViewport;
+                    startReq["clientWidth"] = options.ClientWidth;
+                    startReq["clientHeight"] = options.ClientHeight;
+                    if (SupportsSuperDisplayViewport)
+                    {
+                        startReq["superDisplayVersion"] = BoBoDisplayState.Version;
+                        startReq["fullscreen"] = options.ClientFullscreen;
+                    }
+                    bool canHevcDec = options.PreferHevc && BoBoCoreInterop.IsHevcDecodeSupported();
+                    startReq["preferHevc"] = canHevcDec;
+                    startReq["videoCodecs"] = canHevcDec ? new string[] { "hevc", "h264" } : new string[] { "h264" };
+                    if (!string.IsNullOrWhiteSpace(options.CustomStunHost) && options.CustomStunPort > 0 && options.CustomStunPort <= 65535)
+                    {
+                        startReq["stunHost"] = options.CustomStunHost.Trim();
+                        startReq["stunPort"] = options.CustomStunPort;
+                    }
+                    startReq["udpTransport"] = true;
+                    startReq["udpCipher"] = "aes-128-gcm";
+                    startReq["udpCiphers"] = new string[] { "aes-128-gcm", "aes-128-ctr-hmac" };
+                    startReq["udpInterleavedFec"] = true;
+                    startReq["udpNack"] = true;
+                    startReq["audioCodecs"] = options.PreferCompressedAudio
+                        ? new string[] { "aac", "adpcm" }
+                        : new string[] { "adpcm" };
+                    startReq["nativeLocalCursor"] = true;
+                    startReq["cursorMetrics"] = true;
+                    startReq["initialRttMs"] = Math.Round(handshakeRttMs, 1);
+                    try
+                    {
+                        UdpClient preUc = CreateDualStackMediaUdp();
+                        if (preUc != null)
+                        {
+                            int prePort = ((IPEndPoint)preUc.Client.LocalEndPoint).Port;
+                            lock (udpGate)
+                            {
+                                if (preBoundUdp != null) { try { preBoundUdp.Close(); } catch { } }
+                                preBoundUdp = preUc;
+                            }
+                            List<BoBoUdpCandidate> initClientCands = BoBoNatTraversal.GatherLocalCandidates(prePort, null, false);
+                            if (initClientCands.Count > 0)
+                            {
+                                startReq["udpCandidates"] = BoBoNatTraversal.ToProtocolObjects(initClientCands);
+                            }
+                        }
+                    }
+                    catch { }
+                    await SendJsonInternalAsync(startReq, ct).ConfigureAwait(false);
+
+                    Interlocked.Exchange(ref lastRxTicks, Stopwatch.GetTimestamp());
+                    connected = true;
+                    Task _rx = Task.Run(delegate { return ReceiveLoopAsync(ct); });
+                    Task _ping = Task.Run(delegate { return PingLoopAsync(ct); });
+                    return Tuple.Create(true, "OK", hostName);
+                }
+                catch (Exception ex)
+                {
+                    bool callerCanceled;
+                    bool transient;
+                    string msg;
+                    ClassifyHandshakeException(ex, activeTimeoutTok, externalCt, targetPort, "被控端", out callerCanceled, out transient, out msg);
+                    Disconnect();
+                    if (callerCanceled)
+                    {
+                        throw new OperationCanceledException(externalCt);
+                    }
+                    if (!(attempt == 0 && transient && !externalCt.IsCancellationRequested))
+                    {
+                        bool wasTimeout = false;
+                        try { wasTimeout = activeTimeoutTok.CanBeCanceled && activeTimeoutTok.IsCancellationRequested; } catch { }
+                        if (wasTimeout || ex is OperationCanceledException)
+                        {
+                            return Tuple.Create(false, "TIMEOUT", msg);
+                        }
+                        var sock = ex as SocketException;
+                        if (sock == null && ex.InnerException != null) sock = ex.InnerException as SocketException;
+                        if (sock != null)
+                        {
+                            return Tuple.Create(false, "OFFLINE", msg);
+                        }
+                        return Tuple.Create(false, "CONNECT_FAILED", msg);
+                    }
+                }
+                await Task.Delay(350, externalCt).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
-            {
-                Disconnect();
-                return Tuple.Create(false, "TIMEOUT", "连接被控端握手超时。请确认对方网络互通且已开启 BoBo远程。");
-            }
-            catch (SocketException)
-            {
-                Disconnect();
-                return Tuple.Create(false, "OFFLINE", "未检测到对方打开 BoBo远程（端口 " + targetPort + " 未响应）。请确认被控端已打开 BoBo远程。");
-            }
-            catch (Exception ex)
-            {
-                Disconnect();
-                return Tuple.Create(false, "CONNECT_FAILED", "连接被控端失败：" + ex.Message);
-            }
+            return Tuple.Create(false, "CONNECT_FAILED", "连接被控端失败。");
         }
 
         private async Task ReceiveLoopAsync(CancellationToken ct)
@@ -1222,6 +1350,7 @@ namespace DualRemote
                 BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
                 BoBoNatTraversal.ConfigureLowLatencyUdpSocket(uc.Client);
                 uc.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                BoBoHostServer.DisableSocketInheritance(uc.Client);
                 return uc;
             }
             catch
@@ -1231,6 +1360,7 @@ namespace DualRemote
                 BoBoUdpSocketUtil.ConfigureLowLatencySocket(uc.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
                 BoBoNatTraversal.ConfigureLowLatencyUdpSocket(uc.Client);
                 uc.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                BoBoHostServer.DisableSocketInheritance(uc.Client);
                 return uc;
             }
         }
@@ -2693,9 +2823,12 @@ namespace DualRemote
 
         private static async Task<bool> ConnectWithCancelAsync(TcpClient client, string host, int port, CancellationToken ct)
         {
+            BoBoHostServer.DisableSocketInheritance(client.Client);
+            await BoBoEmbeddedTailnet.Default.EnsureReadyForTailnetHostAsync(host, 3500, ct).ConfigureAwait(false);
             if (BoBoEmbeddedTailnet.Default.ShouldRouteHost(host))
             {
                 await BoBoEmbeddedTailnet.Default.ConnectTargetOverSocks5Async(client, host, port, ct).ConfigureAwait(false);
+                BoBoHostServer.DisableSocketInheritance(client.Client);
                 return true;
             }
             Task connectTask = client.ConnectAsync(host, port);
@@ -2704,6 +2837,7 @@ namespace DualRemote
                 await connectTask.ConfigureAwait(false);
             }
             ct.ThrowIfCancellationRequested();
+            BoBoHostServer.DisableSocketInheritance(client.Client);
             return false;
         }
 

@@ -11,29 +11,29 @@ namespace DualRemote
 {
     internal static class RemoteTheme
     {
-        internal static readonly Color ChromeBg = Color.FromArgb(241, 243, 247);
+        internal static readonly Color ChromeBg = Color.FromArgb(243, 245, 248);
         internal static readonly Color Rail = ChromeBg;
-        internal static readonly Color Workspace = Color.FromArgb(246, 247, 250);
+        internal static readonly Color Workspace = Color.FromArgb(248, 249, 252);
         internal static readonly Color Paper = Color.FromArgb(255, 255, 255);
-        internal static readonly Color SurfaceSubtle = Color.FromArgb(243, 245, 249);
-        internal static readonly Color NavHover = Color.FromArgb(233, 238, 246);
-        internal static readonly Color NavActive = Color.FromArgb(226, 236, 250);
+        internal static readonly Color SurfaceSubtle = Color.FromArgb(242, 244, 248);
+        internal static readonly Color NavHover = Color.FromArgb(232, 236, 243);
+        internal static readonly Color NavActive = Color.FromArgb(226, 236, 253);
 
         internal static readonly Color Ink = Color.FromArgb(24, 31, 44);
         internal static readonly Color BodyInk = Color.FromArgb(56, 70, 90);
         internal static readonly Color Muted = Color.FromArgb(100, 113, 133);
         internal static readonly Color Placeholder = Color.FromArgb(132, 143, 160);
 
-        internal static readonly Color Stroke = Color.FromArgb(230, 234, 241);
-        internal static readonly Color StrokeStrong = Color.FromArgb(206, 214, 226);
+        internal static readonly Color Stroke = Color.FromArgb(231, 235, 242);
+        internal static readonly Color StrokeStrong = Color.FromArgb(208, 215, 226);
         internal static readonly Color Divider = Color.FromArgb(236, 239, 244);
         internal static readonly Color WindowBorder = StrokeStrong;
 
-        internal static readonly Color Accent = Color.FromArgb(53, 90, 151);
-        internal static readonly Color AccentHover = Color.FromArgb(46, 82, 137);
-        internal static readonly Color AccentPressed = Color.FromArgb(39, 71, 121);
-        internal static readonly Color AccentLight = Color.FromArgb(234, 240, 249);
-        internal static readonly Color AccentBorder = Color.FromArgb(191, 207, 231);
+        internal static readonly Color Accent = Color.FromArgb(43, 108, 226);
+        internal static readonly Color AccentHover = Color.FromArgb(34, 93, 204);
+        internal static readonly Color AccentPressed = Color.FromArgb(27, 78, 176);
+        internal static readonly Color AccentLight = Color.FromArgb(236, 243, 255);
+        internal static readonly Color AccentBorder = Color.FromArgb(186, 209, 248);
         internal static readonly Color AccentSky = Color.FromArgb(134, 159, 198);
 
         internal static readonly Color DisabledBg = Color.FromArgb(230, 233, 239);
@@ -1742,11 +1742,22 @@ namespace DualRemote
                             DrawGlyph(g, Icon, new RectangleF(x, (float)Math.Round((Height - iconSize) / 2f), iconSize, iconSize), glyphColor);
                             x += iconSize + (float)Math.Round(10f * scale);
                         }
-                        int rightReserve = style == ButtonStyle.NavSection ? (int)Math.Round(26 * scale) : (int)Math.Round(10 * scale);
+                        int rightReserve = style == ButtonStyle.NavSection
+                            ? (int)Math.Round(26 * scale)
+                            : (ShowIndicatorDot ? (int)Math.Round(22 * scale) : (int)Math.Round(10 * scale));
                         var labelRect = new Rectangle((int)Math.Round(x), 0, Math.Max(8, Width - (int)Math.Round(x) - rightReserve), Height);
                         TextRenderer.DrawText(g, Text, drawFont, labelRect, text,
                             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine
                             | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+
+                        if (style == ButtonStyle.Navigation && ShowIndicatorDot)
+                        {
+                            float dot = Math.Max(6f, 6.5f * scale);
+                            float dotX = Width - (float)Math.Round(12f * scale) - dot;
+                            float dotY = (Height - dot) * 0.5f;
+                            using (var db = new SolidBrush(IndicatorDotColor))
+                                g.FillEllipse(db, dotX, dotY, dot, dot);
+                        }
 
                         if (style == ButtonStyle.NavSection)
                         {
@@ -1813,19 +1824,75 @@ namespace DualRemote
             }
         }
 
-        /// <summary>浅色内容卡片。</summary>
+        /// <summary>浅色内容卡片（支持 UU 风格悬停边线与轻量微升过渡动画）。</summary>
         internal sealed class Card : Panel
         {
+            private readonly UiTransition hoverTransition;
+            private bool hovered;
             internal bool DashedBorder;
+            internal bool Interactive;
 
             internal Card()
             {
+                hoverTransition = new UiTransition(this);
                 Padding = new Padding(22, 18, 22, 18);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 BackColor = Paper;
                 ResizeRedraw = true;
                 DoubleBuffered = true;
+            }
+
+            internal void AttachInteractiveHover(Control target)
+            {
+                if (target == null) return;
+                target.MouseEnter += delegate { SetHovered(true); };
+                target.MouseLeave += delegate
+                {
+                    if (!IsHandleCreated) return;
+                    Point clientPt = PointToClient(Cursor.Position);
+                    if (!ClientRectangle.Contains(clientPt)) SetHovered(false);
+                };
+                target.ControlAdded += delegate(object sender, ControlEventArgs e)
+                {
+                    AttachInteractiveHover(e.Control);
+                };
+                foreach (Control child in target.Controls)
+                {
+                    AttachInteractiveHover(child);
+                }
+            }
+
+            private void SetHovered(bool next)
+            {
+                if (!Interactive || hovered == next) return;
+                hovered = next;
+                hoverTransition.AnimateTo(next ? 1f : 0f, 140, UiEase.EaseOutQuart);
+                Invalidate();
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                base.OnMouseEnter(e);
+                SetHovered(true);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                base.OnMouseLeave(e);
+                if (!IsHandleCreated) return;
+                Point clientPt = PointToClient(Cursor.Position);
+                if (!ClientRectangle.Contains(clientPt)) SetHovered(false);
+            }
+
+            protected override void OnVisibleChanged(EventArgs e)
+            {
+                base.OnVisibleChanged(e);
+                if (!Visible && hovered)
+                {
+                    hovered = false;
+                    hoverTransition.SnapTo(0f);
+                }
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
@@ -1847,8 +1914,11 @@ namespace DualRemote
                     }
                     return;
                 }
+                float hover = Interactive ? hoverTransition.Value : 0f;
+                Color fillCol = Mix(Paper, Color.FromArgb(250, 252, 255), hover);
+                Color borderCol = Mix(Stroke, AccentBorder, hover);
                 var box = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-                Surface(e.Graphics, box, radius, Paper, Stroke, 1f);
+                Surface(e.Graphics, box, radius, fillCol, borderCol, 1f);
             }
         }
 
@@ -1858,6 +1928,7 @@ namespace DualRemote
             private static readonly Color ThumbIdle = Color.FromArgb(158, 167, 180);
             private static readonly Color ThumbHover = Color.FromArgb(104, 117, 136);
             private readonly UiTransition thumbEmphasis;
+            private readonly UiTransition entranceTransition;
             private Control content;
             private int offset;
             private bool dragging;
@@ -1871,12 +1942,35 @@ namespace DualRemote
             internal SlimScrollViewport()
             {
                 thumbEmphasis = new UiTransition(this, invalidate: InvalidateScrollbar);
+                entranceTransition = new UiTransition(this, 1f, ApplyEntranceOffset);
                 Dock = DockStyle.Fill;
                 Margin = Padding.Empty;
                 Padding = Padding.Empty;
                 BackColor = Workspace;
                 DoubleBuffered = true;
                 ResizeRedraw = true;
+            }
+
+            internal void AnimateEntrance()
+            {
+                if (!Visible || !IsHandleCreated || !UiTransition.AreAnimationsEnabled())
+                {
+                    entranceTransition.SnapTo(1f);
+                    ApplyEntranceOffset();
+                    return;
+                }
+                entranceTransition.RestartFrom(0f, 1f, 180, UiEase.EaseOutQuint);
+            }
+
+            private void ApplyEntranceOffset()
+            {
+                if (content == null || content.IsDisposed) return;
+                int shift = (int)Math.Round((1f - entranceTransition.Value) * 10f * GetDpiScale(this));
+                int targetTop = -offset + shift;
+                if (content.Top != targetTop)
+                {
+                    content.Top = targetTop;
+                }
             }
 
             internal void ScrollByWheel(int delta)
@@ -2034,7 +2128,8 @@ namespace DualRemote
                     if (handler != null) handler(targetWidth);
                 }
                 offset = Math.Min(MaxOffset(), offset);
-                content.Location = new Point(leftX, -offset);
+                int shift = (int)Math.Round((1f - entranceTransition.Value) * 10f * scale);
+                content.Location = new Point(leftX, -offset + shift);
                 if (!HasOverflow() && (dragging || thumbHot)) FinishDrag(false);
                 Invalidate();
             }

@@ -27,6 +27,7 @@ namespace DualRemote
         private bool localAssistAddressVisible = false;
         private Label localPairCodeLabel;
         private Label localPairStatusLabel;
+        private UiTransition localPairPulse;
         private Button localPairGenerateButton;
         private Button localPairCancelButton;
         private Button localPairEyeButton;
@@ -46,6 +47,12 @@ namespace DualRemote
         private int activeAssistMode = 0;
         private Button streamConnectBtn;
         private Button rustDeskConnectBtn;
+        private TableLayoutPanel assistAdvancedPanel;
+        private int assistAdvancedSpacerRowIndex = -1;
+        private int assistAdvancedRowIndex = -1;
+        private Button assistAdvancedToggleBtn;
+        private bool assistAdvancedExpanded;
+        private int assistBannerRowIndex = -1;
 
         private const int WanWideProfile = 0;
         private const int WanTallProfile = 1;
@@ -103,6 +110,7 @@ namespace DualRemote
         };
 
         private readonly RecentStore recent;
+        private readonly DeviceCatalogStore deviceCatalog;
         private readonly BoBoRelayStore customRelayStore;
         private readonly PrivacyWallpaperConfig privacyConfig;
         private readonly PrivacyCurtainManager privacyCurtain;
@@ -115,6 +123,7 @@ namespace DualRemote
         private bool forceExit;
         private bool remoteSessionsTornDown;
         private bool guardPollBusy;
+        private long lastHostSelfHealTicks;
         private bool hotkeyRegistered;
         private bool remoteHotkeysRegistered;
         private bool wtsRegistered;
@@ -171,6 +180,7 @@ namespace DualRemote
             catch { }
 
             recent = RecentStore.Load();
+            deviceCatalog = DeviceCatalogStore.Load();
             customRelayStore = BoBoRelayStore.Load();
             privacyConfig = PrivacyWallpaperConfig.Load();
             streamModeBadge.AlignRight = true;
@@ -488,6 +498,12 @@ namespace DualRemote
                 updatedFromVersion = null;
             }
 
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string ignore;
+                BoBoCoreInterop.EnsureLoaded(out ignore);
+            });
+
             if (autoCheckUpdates && updateCheckTimer == null)
             {
                 updateCheckTimer = new Timer { Interval = 2600 };
@@ -688,13 +704,15 @@ namespace DualRemote
             Theme.Row(desk, 208, localCard);
             Theme.Row(desk, 16);
 
-            // Card 2: 远控伙伴设备 (exact UU Image 3 structure with clean Stream / RustDesk toggle!)
+            // Card 2: 远控伙伴设备 (clean UU Image 3 structure; advanced route/quality collapsed by default)
             var partnerCard = BuildPartnerDeviceCard();
             assistPartnerCard = partnerCard;
             assistStreamCardRow = desk.RowCount;
             Theme.Row(desk, ClientStreamCardHeight(), partnerCard);
-            Theme.Row(desk, 16);
-            Theme.Row(desk, 42, assistBanner);
+            Theme.Row(desk, 12);
+            assistBanner.Visible = false;
+            assistBannerRowIndex = desk.RowCount;
+            Theme.Row(desk, 0, assistBanner);
 
             SelectAssistMode(0);
             LayoutAssistDesk();
@@ -772,9 +790,45 @@ namespace DualRemote
             Theme.FillColumn(pinLine);
             Theme.FixedColumn(pinLine, 6);
             Theme.FixedColumn(pinLine, 34);
-            localPairCodeLabel = Theme.Text("• • • •", Theme.TextSize.BigCode, Theme.Ink);
+            localPairCodeLabel = Theme.Text("• • • •", Theme.TextSize.BigCode, Theme.Muted);
             localPairCodeLabel.AutoEllipsis = false;
-            localPairCodeLabel.AccessibleName = "本机 4 位配对码";
+            localPairCodeLabel.Cursor = Cursors.Hand;
+            localPairCodeLabel.AccessibleName = "本机 4 位配对码，点击立即生成";
+            localPairCodeLabel.Click += async delegate
+            {
+                if (string.IsNullOrEmpty(localPairPin))
+                {
+                    await LocalPairPrimaryActionAsync();
+                }
+                else
+                {
+                    localPairPinVisible = !localPairPinVisible;
+                    if (localPairEyeButton != null)
+                        Theme.ChangeGlyph(localPairEyeButton, localPairPinVisible ? Theme.Glyph.Eye : Theme.Glyph.EyeOff);
+                    RefreshLocalPairPinDisplay();
+                }
+            };
+            localPairPulse = new UiTransition(localPairCodeLabel, 0f, delegate
+            {
+                if (localPairCodeLabel == null || localPairCodeLabel.IsDisposed) return;
+                float t = localPairPulse.Value;
+                if (string.IsNullOrEmpty(localPairPin))
+                {
+                    localPairCodeLabel.ForeColor = Theme.Muted;
+                    return;
+                }
+                if (t <= 0.01f)
+                {
+                    localPairCodeLabel.ForeColor = Theme.Accent;
+                    return;
+                }
+                Color flash = Theme.Success;
+                localPairCodeLabel.ForeColor = Color.FromArgb(
+                    (int)Math.Round(Theme.Accent.R + (flash.R - Theme.Accent.R) * t),
+                    (int)Math.Round(Theme.Accent.G + (flash.G - Theme.Accent.G) * t),
+                    (int)Math.Round(Theme.Accent.B + (flash.B - Theme.Accent.B) * t));
+            });
+
             localPairEyeButton = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Eye);
             localPairEyeButton.AccessibleName = "显示或隐藏配对码";
             localPairEyeButton.Click += delegate
@@ -785,7 +839,7 @@ namespace DualRemote
             };
             Theme.Row(pinLine, 38, localPairCodeLabel, null, localPairEyeButton);
             Theme.Row(pinCol, 38, pinLine);
-            Theme.Row(pinCol, 24, Theme.Text("每次生成自动刷新", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(pinCol, 24, Theme.Text("点击「生成配对码」立即刷新", Theme.TextSize.Small, Theme.Muted));
             Theme.FillRow(pinCol);
 
             var actionCol = Theme.Grid(1);
@@ -819,6 +873,7 @@ namespace DualRemote
                     : !string.IsNullOrEmpty(hostSnapshot.PublicIpv6)
                         ? ShortenIpv6(hostSnapshot.PublicIpv6)
                         : "未获取到网络地址";
+            bool fallbackPort = boboHostServer != null && boboHostServer.IsUsingFallbackPort && string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4);
             if (!localAssistAddressVisible && preferred != "未获取到网络地址")
             {
                 localAssistAddressLabel.Text = MaskAddressForDisplay(
@@ -828,7 +883,24 @@ namespace DualRemote
             }
             else
             {
-                localAssistAddressLabel.Text = preferred;
+                localAssistAddressLabel.Text = fallbackPort && preferred != "未获取到网络地址"
+                    ? (preferred + ":" + boboHostServer.ListeningPort)
+                    : preferred;
+            }
+            if (localPairStatusLabel != null && string.IsNullOrEmpty(localPairPin))
+            {
+                if (boboHostServer != null && boboHostServer.IsRunning)
+                {
+                    localPairStatusLabel.ForeColor = Theme.Muted;
+                    localPairStatusLabel.Text = boboHostServer.IsUsingFallbackPort
+                        ? ("端口 " + boboHostServer.ListeningPort + " 就绪 · 点击右侧生成 4 位配对码")
+                        : "点击「生成配对码」获取 4 位临时配对码";
+                }
+                else
+                {
+                    localPairStatusLabel.ForeColor = Theme.Warning;
+                    localPairStatusLabel.Text = "点击「生成配对码」将自动拉起本机被控服务";
+                }
             }
         }
 
@@ -848,9 +920,15 @@ namespace DualRemote
         {
             if (localPairCodeLabel == null) return;
             if (string.IsNullOrEmpty(localPairPin))
+            {
+                localPairCodeLabel.ForeColor = Theme.Muted;
                 localPairCodeLabel.Text = "• • • •";
+            }
             else
-                localPairCodeLabel.Text = localPairPinVisible ? localPairPin : "• • • •";
+            {
+                localPairCodeLabel.ForeColor = Theme.Accent;
+                localPairCodeLabel.Text = localPairPinVisible ? FormatSpacedPin(localPairPin) : "• • • •";
+            }
         }
 
         private void CopyLocalShareInfo()
@@ -932,18 +1010,19 @@ namespace DualRemote
         {
             var panel = Theme.Grid(1);
             panel.Dock = DockStyle.Fill;
-            panel.Padding = new Padding(22, 14, 22, 8);
+            panel.Padding = new Padding(22, 14, 22, 10);
             Theme.FillColumn(panel);
+            assistStreamPanelLayout = panel;
 
-            Theme.Row(panel, 22, Theme.Text("伙伴设备地址", Theme.TextSize.Small, Theme.Muted));
+            Theme.Row(panel, 22, Theme.Text("伙伴设备地址或 9 位设备码", Theme.TextSize.Small, Theme.Muted));
             Theme.Row(panel, 8);
 
             var row = Theme.Grid(5);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 124);
+            Theme.FixedColumn(row, 118);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 124);
+            Theme.FixedColumn(row, 118);
 
             streamConnectBtn = Theme.Action("连接", Theme.ButtonStyle.Primary, Theme.Glyph.Arrow);
             streamConnectBtn.Click += async delegate
@@ -961,9 +1040,25 @@ namespace DualRemote
 
             Theme.Row(row, 40, Theme.WrapInput(streamHost), null, streamConnectBtn, null, discover);
             Theme.Row(panel, 40, row);
-            Theme.Row(panel, 12);
+            Theme.Row(panel, 10);
 
-            assistStreamPanelLayout = panel;
+            var advToggleBar = Theme.Grid(2);
+            Theme.FixedColumn(advToggleBar, 210);
+            Theme.FillColumn(advToggleBar);
+            assistAdvancedToggleBtn = Theme.Action("高级线路与画质选项", Theme.ButtonStyle.Link, Theme.Glyph.ChevronDown);
+            assistAdvancedToggleBtn.Click += delegate { ToggleAssistAdvancedPanel(); };
+            Theme.Row(advToggleBar, 26, assistAdvancedToggleBtn, null);
+            Theme.Row(panel, 26, advToggleBar);
+
+            assistAdvancedSpacerRowIndex = panel.RowCount;
+            Theme.Row(panel, 0);
+
+            var adv = Theme.Grid(1);
+            adv.Margin = Padding.Empty;
+            adv.Visible = false;
+            Theme.FillColumn(adv);
+            assistAdvancedPanel = adv;
+
             var routeRow = Theme.Grid(5);
             Theme.FixedColumn(routeRow, 72);
             Theme.FixedColumn(routeRow, 8);
@@ -993,22 +1088,21 @@ namespace DualRemote
             connectionRouteChoice.SelectedIndexChanged += delegate { HandleConnectionRouteSelectionChanged(); };
             streamHost.TextChanged += delegate { ShowConnectionRouteHint(activeConnectionRoute); };
             Theme.Row(routeRow, 38, Theme.Text("连接线路", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(connectionRouteChoice), null, customRelayToggleBtn);
-            Theme.Row(panel, 38, routeRow);
-            Theme.Row(panel, 4);
-            Theme.Row(panel, 22, connectionRouteHint);
+            Theme.Row(adv, 38, routeRow);
+            Theme.Row(adv, 4);
+            Theme.Row(adv, 22, connectionRouteHint);
 
-            customRelaySpacerRowIndex = panel.RowCount;
-            customRelayPanelExpanded = preferredConnectionRoute == BoBoRoutePreference.CustomRelayFallback;
-            Theme.Row(panel, customRelayPanelExpanded ? 8 : 0);
+            customRelaySpacerRowIndex = adv.RowCount;
+            customRelayPanelExpanded = false;
+            Theme.Row(adv, 0);
             customRelayPanel = BuildCustomRelayPanel();
-            customRelayPanel.Visible = customRelayPanelExpanded;
-            customRelayRowIndex = panel.RowCount;
-            Theme.Row(panel, customRelayPanelExpanded ? MeasureCustomRelayPanelHeight() : 0, customRelayPanel);
-            Theme.Row(panel, 8);
+            customRelayPanel.Visible = false;
+            customRelayRowIndex = adv.RowCount;
+            Theme.Row(adv, 0, customRelayPanel);
+            Theme.Row(adv, 8);
             SyncCustomRelayUi();
             ShowConnectionRouteHint(null);
 
-            // Responsive quality selector + hint row
             var qRow = Theme.Grid(5);
             Theme.FixedColumn(qRow, 72);
             Theme.FixedColumn(qRow, 8);
@@ -1020,12 +1114,44 @@ namespace DualRemote
             probeBtn.Click += async delegate { await ProbeLink(); };
 
             Theme.Row(qRow, 38, Theme.Text("画质档位", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(quality), null, probeBtn);
-            Theme.Row(panel, 38, qRow);
-            Theme.Row(panel, 8);
-            Theme.Row(panel, 24, streamHint);
+            Theme.Row(adv, 38, qRow);
+            Theme.Row(adv, 6);
+            Theme.Row(adv, 24, streamHint);
+
+            assistAdvancedRowIndex = panel.RowCount;
+            Theme.Row(panel, 0, adv);
 
             UpdateAssistConnectButtons();
             return panel;
+        }
+
+        private void ToggleAssistAdvancedPanel(bool? forceOpen = null)
+        {
+            bool next = forceOpen.HasValue ? forceOpen.Value : !assistAdvancedExpanded;
+            assistAdvancedExpanded = next;
+            if (assistAdvancedPanel != null && assistStreamPanelLayout != null)
+            {
+                assistAdvancedPanel.Visible = next;
+                if (assistAdvancedSpacerRowIndex >= 0 && assistAdvancedSpacerRowIndex < assistStreamPanelLayout.RowStyles.Count)
+                    assistStreamPanelLayout.RowStyles[assistAdvancedSpacerRowIndex].Height = next ? DevicePixels(8) : 0;
+                if (assistAdvancedRowIndex >= 0 && assistAdvancedRowIndex < assistStreamPanelLayout.RowStyles.Count)
+                    assistStreamPanelLayout.RowStyles[assistAdvancedRowIndex].Height = next ? SumRows(assistAdvancedPanel) : 0;
+                assistStreamPanelLayout.PerformLayout();
+            }
+            if (assistAdvancedToggleBtn != null)
+            {
+                assistAdvancedToggleBtn.Text = next ? "收起高级选项" : "高级线路与画质选项";
+                Theme.ChangeGlyph(assistAdvancedToggleBtn, next ? Theme.Glyph.ChevronUp : Theme.Glyph.ChevronDown);
+            }
+            if (clientPairCardLayout != null && assistModeHostRow >= 0 && activeAssistMode == 0)
+            {
+                int panelH = SumRows(assistStreamModePanel);
+                if (panelH <= 0) panelH = DevicePixels(120);
+                clientPairCardLayout.RowStyles[assistModeHostRow].Height = panelH;
+                if (assistDesk != null && assistStreamCardRow >= 0)
+                    assistDesk.RowStyles[assistStreamCardRow].Height = ClientStreamCardHeight();
+                LayoutAssistDesk();
+            }
         }
 
         private Control BuildRustDeskModePanel()
@@ -1210,7 +1336,11 @@ namespace DualRemote
                 string err;
                 if (!boboHostServer.Start(out err))
                 {
-                    SetStatus(err ?? "本机 BoBo V6 被控端口监听失败，请检查端口 49810 是否被占用。", Theme.PillTone.Warning);
+                    SetStatus(err ?? "本机 BoBo V6 被控端口监听失败，请检查防火墙或旧进程残留。", Theme.PillTone.Warning);
+                }
+                else
+                {
+                    BoBoEmbeddedTailnet.Default.SetForwardTargetPort(boboHostServer.ListeningPort);
                 }
                 ApplyHostSnapshotToUi();
             }
@@ -1310,8 +1440,13 @@ namespace DualRemote
             EnsureBoBoHostServerStarted();
             if (boboHostServer == null || !boboHostServer.IsRunning)
             {
-                localPairStatusLabel.Text = "本机 49810 端口未能启动，请检查防火墙或重启 BoBo远程。";
+                localPairStatusLabel.ForeColor = Theme.Alert;
+                localPairStatusLabel.Text = "本机被控端口启动失败，请检查防火墙或重启 BoBo远程。";
                 SetStatus(localPairStatusLabel.Text, Theme.PillTone.Alert);
+                MessageBox.Show(this,
+                    "无法启动本机 BoBo 被控端口（49810 及备用端口 49820-49829 均被占用或拦截）。\r\n"
+                    + "请检查防火墙设置，或关闭托盘中残留的旧版 BoBo远程 后重试。",
+                    "生成配对码失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return Task.FromResult(0);
             }
 
@@ -1322,14 +1457,18 @@ namespace DualRemote
             if (localPairEyeButton != null)
                 Theme.ChangeGlyph(localPairEyeButton, Theme.Glyph.Eye);
             RefreshLocalPairPinDisplay();
+            if (localPairPulse != null)
+                localPairPulse.RestartFrom(1f, 0f, 380, UiEase.EaseOutQuart);
 
             localPairCancelButton.Enabled = true;
             localPairGenerateButton.Enabled = true;
             localPairGenerateButton.Text = "刷新配对码";
             localPairGenerateButton.AccessibleName = "刷新本机 4 位临时配对码";
-            localPairStatusLabel.Text = "已生成临时码 · 对方在 BoBo远程 输入此 4 位码即可完成双向授权（还剩 " + session.RemainingSeconds + " 秒）";
+            localPairStatusLabel.ForeColor = Theme.Success;
+            string portHint = boboHostServer.IsUsingFallbackPort ? ("（端口 " + boboHostServer.ListeningPort + "）") : "";
+            localPairStatusLabel.Text = "已生成临时码" + portHint + " · 还剩 " + session.RemainingSeconds + " 秒";
             localPairTimer.Start();
-            SetStatus("已即时生成 4 位临时配对码（有效期 120 秒），台式机与笔记本双端均需打开 BoBo远程 完成匹配。", Theme.PillTone.Success);
+            SetStatus("已即时生成 4 位临时配对码（有效期 120 秒）：" + session.Pin + "，对方输入即可完成双向授权。", Theme.PillTone.Success);
             ApplyHostSnapshotToUi();
             return Task.FromResult(0);
         }
@@ -1351,7 +1490,11 @@ namespace DualRemote
             localPairSession = null;
             localPairPin = null;
             RefreshLocalPairPinDisplay();
-            if (localPairStatusLabel != null) localPairStatusLabel.Text = status;
+            if (localPairStatusLabel != null)
+            {
+                localPairStatusLabel.ForeColor = Theme.Muted;
+                localPairStatusLabel.Text = status;
+            }
             if (localPairGenerateButton != null)
             {
                 localPairGenerateButton.Text = "生成配对码";
@@ -1378,7 +1521,8 @@ namespace DualRemote
             }
             if (localPairStatusLabel != null)
             {
-                localPairStatusLabel.Text = "等待对方 BoBo远程 输入此 4 位码… 还剩 " + rem + " 秒";
+                localPairStatusLabel.ForeColor = Theme.Success;
+                localPairStatusLabel.Text = "等待对方输入此 4 位码… 还剩 " + rem + " 秒";
             }
         }
 
@@ -2320,6 +2464,17 @@ namespace DualRemote
         private void SetStatus(string text, Theme.PillTone tone)
         {
             assistBanner.Set(text, tone);
+            bool show = !string.IsNullOrWhiteSpace(text);
+            if (assistBanner.Visible != show) assistBanner.Visible = show;
+            if (assistDesk != null && assistBannerRowIndex >= 0 && assistBannerRowIndex < assistDesk.RowStyles.Count)
+            {
+                float targetH = show ? DevicePixels(42) : 0f;
+                if (Math.Abs(assistDesk.RowStyles[assistBannerRowIndex].Height - targetH) > 0.5f)
+                {
+                    assistDesk.RowStyles[assistBannerRowIndex].Height = targetH;
+                    LayoutAssistDesk();
+                }
+            }
         }
 
         private void OpenGuide(string preferredFile = "低延迟调优与防窥指南.md")
@@ -2476,7 +2631,7 @@ namespace DualRemote
             try
             {
                 Control active = ActiveControl;
-                if (active != null && (active == toggleCurtainBtn || active == heroPrivacyToggle || active == topPrivacyBtn))
+                if (active != null && (active == toggleCurtainBtn || active == topPrivacyBtn))
                 {
                     ActiveControl = null;
                 }
@@ -2539,6 +2694,24 @@ namespace DualRemote
             long pollGeneration = privacyGuard.Generation;
             try
             {
+                long nowTicks = Stopwatch.GetTimestamp();
+                if (lastHostSelfHealTicks == 0 || ((nowTicks - lastHostSelfHealTicks) * 1000.0 / Stopwatch.Frequency) >= 3000.0)
+                {
+                    lastHostSelfHealTicks = nowTicks;
+                    if (boboHostServer == null || !boboHostServer.IsRunning)
+                    {
+                        EnsureBoBoHostServerStarted();
+                    }
+                    else if (boboHostServer.IsUsingFallbackPort && !boboHostServer.HasActiveRemoteSession)
+                    {
+                        if (boboHostServer.TryPromoteToRequestedPort())
+                        {
+                            BoBoEmbeddedTailnet.Default.SetForwardTargetPort(boboHostServer.ListeningPort);
+                            ApplyHostSnapshotToUi();
+                        }
+                    }
+                }
+
                 bool activeSession = boboHostServer != null && boboHostServer.HasActiveRemoteSession;
                 if (hostCurrentlyControlled != activeSession)
                 {

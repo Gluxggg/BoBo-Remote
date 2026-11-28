@@ -15,53 +15,48 @@ namespace DualRemote
         private readonly Theme.StatusBanner deviceBanner = new Theme.StatusBanner("正在检查本机与同网设备…");
         private readonly List<SavedDevice> favorites = new List<SavedDevice>();
         private readonly List<TsPeer> cachedPeers = new List<TsPeer>();
-        private readonly Theme.Badge heroHostStatusBadge = new Theme.Badge("检测中…", Theme.PillTone.Neutral);
-        private readonly Theme.Badge heroPrivacyBadge = new Theme.Badge("防窥未开", Theme.PillTone.Neutral);
-        private readonly Label heroLanLabel = Theme.Text("检测中…", Theme.TextSize.Code, Theme.Ink);
-        private readonly Label heroTsLabel = Theme.Text("检测中…", Theme.TextSize.Code, Theme.Ink);
-        private readonly Label heroV6Label = Theme.Text("检测中…", Theme.TextSize.Code, Theme.Ink);
-        private Button heroCopyLan;
-        private Button heroCopyTs;
-        private Button heroCopyV6;
-        private Button heroPrivacyToggle;
+        private readonly ToolTip deviceCardToolTip = new ToolTip();
+        private Button addDeviceBtn;
         private Button refreshDevices;
 
         private TableLayoutPanel devicesDesk;
         private Theme.SlimScrollViewport devicesViewport;
-        private TableLayoutPanel hostCardLayout;
-        private Control hostCardControl;
-        private Label heroSubtitleLabel;
-        private HostActionBarPanel hostActionsBar;
-        private int hostCardRow = -1;
-        private int hostSubtitleRow = -1;
-        private int hostActionsRow = -1;
-        private int hostDetailsRow = -1;
-        private Control hostCardDetails;
-        private TableLayoutPanel hostCardDetailsLayout;
-        private bool hostDetailsExpanded;
+        private int devicesGuideRow = -1;
+        private int devicesGuideSpacerRow = -1;
+        private Theme.Card devicesGuideCard;
+        private TableLayoutPanel devicesGuideLayout;
+        private Theme.IconTile devicesGuideIcon;
+        private Label devicesGuideTitleLabel;
+        private Label devicesGuideSubLabel;
+        private Panel devicesGuideActionsHost;
+        private Button devicesGuideLoginBtn;
+        private Button devicesGuideHelpBtn;
+        private Button devicesGuideOpenAuthBtn;
+        private Button devicesGuideCopyUrlBtn;
+        private Button devicesGuideCancelBtn;
+        private Button devicesGuideCopyIpBtn;
+        private Button devicesGuideLogoutBtn;
+        private Button devicesGuideCloseBtn;
+        private bool devicesGuideDismissed;
 
-        private int embeddedTailnetRow = -1;
-        private Theme.Card embeddedTsCard;
-        private Label embeddedTsTitleLabel;
-        private Label embeddedTsSubtitleLabel;
-        private Theme.Badge embeddedTsBadge;
-        private Theme.IconTile embeddedTsIcon;
-        private EmbeddedActionsStrip embeddedTsActionsBar;
-        private Button embeddedTsLoginBtn;
-        private Button embeddedTsOpenAuthBtn;
-        private Button embeddedTsCopyUrlBtn;
-        private Button embeddedTsCancelBtn;
-        private Button embeddedTsCopyIpBtn;
-        private Button embeddedTsLogoutBtn;
         private string lastEmbeddedAuthUrl = "";
         private string lastEmbeddedBackendState = "";
-        private Color embeddedTsAccentColor = Theme.Accent;
         private bool embeddedTsBusy;
 
         private Button computersGroupBtn;
         private bool computersExpanded = true;
         private TableLayoutPanel peerListHost;
         private int peerListRow = -1;
+
+        private Button mobilesGroupBtn;
+        private bool mobilesExpanded = true;
+        private TableLayoutPanel mobileListHost;
+        private int mobileSpacerRow = -1;
+        private int mobileGroupRow = -1;
+        private int mobileGroupGapRow = -1;
+        private int mobileListRow = -1;
+        private bool hasMobilePeers;
+        private Label devicesHintLabel;
 
         // Quick-access sidebar device & Detail Page state (UU Image 1)
         private string quickDeviceName = "";
@@ -81,6 +76,7 @@ namespace DualRemote
         private Theme.Badge detailStatusBadge;
         private Label detailTitleLabel;
         private Button detailFavButton;
+        private Button detailRemoveButton;
         private DevicePreviewCanvas detailPreviewCanvas;
         private TableLayoutPanel detailPreviewCardLayout;
         private int detailPreviewRow = -1;
@@ -103,31 +99,33 @@ namespace DualRemote
         private Control BuildDevicesPage()
         {
             TableLayoutPanel desk;
-            var viewport = CreatePage(740, out desk);
+            var viewport = CreatePage(640, out desk);
             devicesViewport = viewport;
             devicesDesk = desk;
             LoadFavorites();
 
-            refreshDevices = Theme.Action("刷新状态", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
+            var headActions = Theme.Grid(3);
+            Theme.FixedColumn(headActions, 108);
+            Theme.FixedColumn(headActions, 8);
+            Theme.FixedColumn(headActions, 84);
+            addDeviceBtn = Theme.Action("添加设备", Theme.ButtonStyle.Secondary, Theme.Glyph.Plus);
+            addDeviceBtn.Click += delegate { ShowAddDeviceDialog(); };
+            refreshDevices = Theme.Action("刷新", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
             refreshDevices.Click += async delegate { await RefreshDashboardAsync(); };
-            AddPageHeader(desk, "全部设备", null, refreshDevices, 118);
-            Theme.Row(desk, 18);
+            Theme.Row(headActions, 34, addDeviceBtn, null, refreshDevices);
+            AddPageHeader(desk, "全部设备", null, headActions, 200);
+            Theme.Row(desk, 16);
 
-            // Top Info & Quick Connect Card (matches UU Image 2 top banner card)
-            var hostCard = BuildHostInfoCard();
-            hostCardRow = desk.RowCount;
-            Theme.Row(desk, HostCardHeight(), hostCard);
-            Theme.Row(desk, 12);
-
-            // Built-in Zero-Install Tailscale (BoBoTsNet) Login & Mesh Card
-            var embeddedCard = BuildEmbeddedTailnetCard();
-            embeddedTailnetRow = desk.RowCount;
-            Theme.Row(desk, EmbeddedTailnetCardHeight(), embeddedCard);
+            // Clean UU-Remote-style single dismissible guide / cross-net banner card
+            var guideCard = BuildDevicesGuideCard();
+            devicesGuideRow = desk.RowCount;
+            Theme.Row(desk, DevicesGuideCardHeight(), guideCard);
+            devicesGuideSpacerRow = desk.RowCount;
             Theme.Row(desk, 14);
 
             // Collapsible "电脑 N" section header
             var groupRow = Theme.Grid(2);
-            Theme.FixedColumn(groupRow, 150);
+            Theme.FixedColumn(groupRow, 168);
             Theme.FillColumn(groupRow);
             computersGroupBtn = Theme.Action("电脑 1", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronDown);
             computersGroupBtn.Click += delegate
@@ -143,11 +141,39 @@ namespace DualRemote
             peerListHost = Theme.Grid(1);
             Theme.FillColumn(peerListHost);
             peerListRow = desk.RowCount;
-            Theme.Row(desk, 120, peerListHost);
-            Theme.Row(desk, 12);
-            Theme.Row(desk, 40, deviceBanner);
+            Theme.Row(desk, 64, peerListHost);
 
-            viewport.ContentWidthChanged += delegate(int contentW) { SyncHostCardResponsiveMetrics(contentW); };
+            // Collapsible "手机/平板 M" section (shown automatically whenever mobile peers exist)
+            mobileSpacerRow = desk.RowCount;
+            Theme.Row(desk, 0);
+            var mobileHeadRow = Theme.Grid(2);
+            Theme.FixedColumn(mobileHeadRow, 180);
+            Theme.FillColumn(mobileHeadRow);
+            mobilesGroupBtn = Theme.Action("手机/平板 0", Theme.ButtonStyle.Quiet, Theme.Glyph.ChevronDown);
+            mobilesGroupBtn.Click += delegate
+            {
+                mobilesExpanded = !mobilesExpanded;
+                Theme.ChangeGlyph(mobilesGroupBtn, mobilesExpanded ? Theme.Glyph.ChevronDown : Theme.Glyph.ChevronRight);
+                SyncPeerListLayout();
+            };
+            Theme.Row(mobileHeadRow, 28, mobilesGroupBtn, null);
+            mobileGroupRow = desk.RowCount;
+            Theme.Row(desk, 0, mobileHeadRow);
+            mobileGroupGapRow = desk.RowCount;
+            Theme.Row(desk, 0);
+
+            mobileListHost = Theme.Grid(1);
+            Theme.FillColumn(mobileListHost);
+            mobileListHost.Visible = false;
+            mobileListRow = desk.RowCount;
+            Theme.Row(desk, 0, mobileListHost);
+
+            Theme.Row(desk, 10);
+            devicesHintLabel = Theme.Text("", Theme.TextSize.Small, Theme.Muted);
+            devicesHintLabel.AutoEllipsis = true;
+            Theme.Row(desk, 22, devicesHintLabel);
+
+            viewport.ContentWidthChanged += delegate(int contentW) { SyncDevicesResponsiveMetrics(contentW); };
             DrawPeerRows(null);
             RecalculateDevicesDeskHeight();
 
@@ -155,189 +181,123 @@ namespace DualRemote
             return viewport;
         }
 
-        private Control BuildHostInfoCard()
+        private int DevicesGuideCardHeight()
         {
-            var card = new Theme.Card { Padding = new Padding(20, 14, 20, 14) };
-            hostCardControl = card;
-            var content = Theme.Grid(1);
-            Theme.FillColumn(content);
-            hostCardLayout = content;
+            if (devicesGuideDismissed) return 0;
+            if (devicesGuideLayout == null || devicesGuideCard == null) return DevicePixels(98);
+            int h = SumRows(devicesGuideLayout) + devicesGuideCard.Padding.Vertical;
+            return Math.Max(DevicePixels(92), h);
+        }
+
+        private Control BuildDevicesGuideCard()
+        {
+            var card = new Theme.Card { Padding = new Padding(18, 14, 14, 14) };
+            devicesGuideCard = card;
+            var root = Theme.Grid(1);
+            Theme.FillColumn(root);
+            devicesGuideLayout = root;
 
             var top = Theme.Grid(5);
-            Theme.FixedColumn(top, 26);
+            Theme.FixedColumn(top, 24);
             Theme.FixedColumn(top, 10);
             Theme.FillColumn(top);
-            Theme.FixedColumn(top, 10);
-            Theme.FixedColumn(top, 132);
+            Theme.FixedColumn(top, 8);
+            Theme.FixedColumn(top, 28);
 
-            var infoIcon = new Theme.IconTile(Theme.Glyph.Info, true, Theme.AccentLight, Theme.Accent, 8f);
-            heroHostStatusBadge.AlignRight = true;
-            heroPrivacyBadge.AlignRight = true;
-            Theme.Row(top, 28, infoIcon, null, Theme.Text("本机与快速连接", Theme.TextSize.LabelBold, Theme.Ink), null, heroHostStatusBadge);
-            Theme.Row(content, 28, top);
-            Theme.Row(content, 4);
+            devicesGuideIcon = new Theme.IconTile(Theme.Glyph.Info, true, Theme.AccentLight, Theme.Accent, 12f);
+            devicesGuideTitleLabel = Theme.Text("添加你的其他设备", Theme.TextSize.LabelBold, Theme.Ink);
+            devicesGuideCloseBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Close);
+            devicesGuideCloseBtn.AccessibleName = "收起提示卡片";
+            devicesGuideCloseBtn.Click += delegate { DismissDevicesGuideCard(); };
+            Theme.Row(top, 24, devicesGuideIcon, null, devicesGuideTitleLabel, null, devicesGuideCloseBtn);
+            Theme.Row(root, 24, top);
+            Theme.Row(root, 3);
 
             var subWrap = Theme.Grid(2);
-            Theme.FixedColumn(subWrap, 36);
+            Theme.FixedColumn(subWrap, 34);
             Theme.FillColumn(subWrap);
-            heroSubtitleLabel = Theme.Text("局域网即连 · 跨网免安装直连 · 自建兜底中转", Theme.TextSize.Small, Theme.Muted);
-            heroSubtitleLabel.AutoEllipsis = false;
+            devicesGuideSubLabel = Theme.Text("跨网登录同一 Tailscale 账号，或点右上角「添加设备」即可一键远控。", Theme.TextSize.Small, Theme.Muted);
+            devicesGuideSubLabel.AutoEllipsis = true;
             Theme.FillRow(subWrap);
-            subWrap.Controls.Add(heroSubtitleLabel, 1, 0);
-            hostSubtitleRow = content.RowCount;
-            Theme.Row(content, 22, subWrap);
-            Theme.Row(content, 10);
+            subWrap.Controls.Add(devicesGuideSubLabel, 1, 0);
+            Theme.Row(root, 20, subWrap);
+            Theme.Row(root, 10);
 
-            var actionsWrap = Theme.Grid(2);
-            Theme.FixedColumn(actionsWrap, 36);
-            Theme.FillColumn(actionsWrap);
+            var actWrap = Theme.Grid(2);
+            Theme.FixedColumn(actWrap, 34);
+            Theme.FillColumn(actWrap);
 
-            var manualBtn = Theme.Action("手动连接", Theme.ButtonStyle.AccentSoft);
-            manualBtn.Click += delegate { OpenStreamPage(null); };
+            devicesGuideLoginBtn = Theme.Action("跨网账号登录", Theme.ButtonStyle.Secondary);
+            devicesGuideLoginBtn.Click += async delegate { await BeginEmbeddedTailnetLoginAsync(); };
 
-            var pairBtn = Theme.Action("允许被控", Theme.ButtonStyle.Secondary);
-            pairBtn.Click += async delegate
+            devicesGuideHelpBtn = Theme.Action("如何添加设备", Theme.ButtonStyle.Secondary);
+            devicesGuideHelpBtn.Click += delegate { ShowAddDeviceDialog(); };
+
+            devicesGuideOpenAuthBtn = Theme.Action("打开登录页", Theme.ButtonStyle.AccentSoft);
+            devicesGuideOpenAuthBtn.Click += delegate { OpenEmbeddedAuthUrlInBrowser(); };
+
+            devicesGuideCopyUrlBtn = Theme.Action("复制链接", Theme.ButtonStyle.Secondary);
+            devicesGuideCopyUrlBtn.Click += delegate { CopyEmbeddedAuthUrlToClipboard(); };
+
+            devicesGuideCancelBtn = Theme.Action("取消", Theme.ButtonStyle.Secondary);
+            devicesGuideCancelBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
+
+            devicesGuideCopyIpBtn = Theme.Action("复制跨网 IP", Theme.ButtonStyle.Secondary);
+            devicesGuideCopyIpBtn.Click += delegate
             {
-                ShowPage(AssistPage);
-                await BeginLocalPairingAsync();
+                EmbeddedTailnetSnapshot s = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+                CopyHostAddress("内置 Tailscale IP", s != null ? s.SelfIp4 : "");
             };
 
-            heroPrivacyToggle = Theme.Action("开启防窥", Theme.ButtonStyle.Secondary);
-            BindPrivacyToggleButton(heroPrivacyToggle);
+            devicesGuideLogoutBtn = Theme.Action("退出账号", Theme.ButtonStyle.DangerSoft);
+            devicesGuideLogoutBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
 
-            var addrBtn = Theme.Action("本机地址", Theme.ButtonStyle.Link);
-            addrBtn.Click += delegate { ToggleHostDetails(addrBtn); };
+            devicesGuideActionsHost = new GuideActionsStrip(
+                this,
+                devicesGuideLoginBtn,
+                devicesGuideHelpBtn,
+                devicesGuideOpenAuthBtn,
+                devicesGuideCopyUrlBtn,
+                devicesGuideCancelBtn,
+                devicesGuideCopyIpBtn,
+                devicesGuideLogoutBtn);
+            Theme.FillRow(actWrap);
+            actWrap.Controls.Add(devicesGuideActionsHost, 1, 0);
+            Theme.Row(root, 32, actWrap);
 
-            hostActionsBar = new HostActionBarPanel(manualBtn, pairBtn, heroPrivacyToggle, addrBtn);
-            Theme.FillRow(actionsWrap);
-            actionsWrap.Controls.Add(hostActionsBar, 1, 0);
-            hostActionsRow = content.RowCount;
-            Theme.Row(content, 36, actionsWrap);
-
-            // Expandable local addresses drawer
-            var details = Theme.Grid(1);
-            Theme.FillColumn(details);
-            details.Padding = new Padding(36, 12, 0, 0);
-            hostCardDetails = details;
-            hostCardDetailsLayout = details;
-
-            heroLanLabel.AutoEllipsis = true;
-            heroTsLabel.AutoEllipsis = true;
-            heroV6Label.AutoEllipsis = true;
-            heroCopyLan = MakeAddressCopy("局域网 IP", delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); });
-            heroCopyTs = MakeAddressCopy("Tailscale IP", delegate { CopyHostAddress("Tailscale IP", hostSnapshot.TailscaleIpv4); });
-            heroCopyV6 = MakeAddressCopy("公网 IPv6", delegate { CopyHostAddress("公网 IPv6", hostSnapshot.PublicIpv6); });
-
-            Theme.Row(details, 1, Theme.Rule());
-            Theme.Row(details, 8);
-            Theme.Row(details, 30, BuildAddressRow("局域网 IPv4", heroLanLabel, heroCopyLan));
-            Theme.Row(details, 4);
-            Theme.Row(details, 30, BuildAddressRow("Tailscale 组网", heroTsLabel, heroCopyTs));
-            Theme.Row(details, 4);
-            Theme.Row(details, 30, BuildAddressRow("公网 IPv6", heroV6Label, heroCopyV6));
-
-            details.Visible = false;
-            hostDetailsRow = content.RowCount;
-            Theme.Row(content, 0, details);
-
-            card.Controls.Add(content);
-            return card;
-        }
-
-        private int EmbeddedTailnetCardHeight()
-        {
-            return DevicePixels(70);
-        }
-
-        private Control BuildEmbeddedTailnetCard()
-        {
-            var card = new Theme.Card { Padding = new Padding(20, 10, 20, 10) };
-            embeddedTsCard = card;
-            card.Paint += delegate(object sender, PaintEventArgs pe)
-            {
-                Graphics g = pe.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                float scale = CurrentDpiScale();
-                float w = Math.Max(3f, 3f * scale);
-                float marginY = 10f * scale;
-                float h = Math.Max(12f, card.Height - marginY * 2f);
-                Theme.Surface(g, new RectangleF(8f * scale, marginY, w, h), w * 0.5f, embeddedTsAccentColor, Color.Transparent);
-            };
-
-            var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 40);
-            Theme.FixedColumn(row, 14);
-            Theme.FillColumn(row);
-            Theme.FixedColumn(row, 14);
-            Theme.FixedColumn(row, 286);
-
-            embeddedTsIcon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.AccentLight, Theme.Accent, 8f);
-
-            var info = Theme.Grid(1);
-            Theme.FillColumn(info);
-            var titleLine = Theme.Grid(3);
-            Theme.FillColumn(titleLine);
-            Theme.FixedColumn(titleLine, 8);
-            Theme.FixedColumn(titleLine, 178);
-
-            embeddedTsTitleLabel = Theme.Text("跨网直连 (Tailscale)", Theme.TextSize.LabelBold, Theme.Ink);
-            embeddedTsTitleLabel.AutoEllipsis = true;
-            embeddedTsBadge = new Theme.Badge("未登录", Theme.PillTone.Neutral) { AlignRight = true };
-            Theme.Row(titleLine, 24, embeddedTsTitleLabel, null, embeddedTsBadge);
-
-            embeddedTsSubtitleLabel = Theme.Text("免装虚拟网卡 · 两端登录同一账号即可直连", Theme.TextSize.Small, Theme.Muted);
-            embeddedTsSubtitleLabel.AutoEllipsis = true;
-            Theme.Row(info, 24, titleLine);
-            Theme.Row(info, 2);
-            Theme.Row(info, 20, embeddedTsSubtitleLabel);
-
-            embeddedTsLoginBtn = Theme.Action("一键登录账号", Theme.ButtonStyle.Primary, Theme.Glyph.Network);
-            embeddedTsLoginBtn.Click += async delegate { await BeginEmbeddedTailnetLoginAsync(); };
-
-            embeddedTsOpenAuthBtn = Theme.Action("打开登录页", Theme.ButtonStyle.AccentSoft);
-            embeddedTsOpenAuthBtn.Click += delegate { OpenEmbeddedAuthUrlInBrowser(); };
-
-            embeddedTsCopyUrlBtn = Theme.Action("复制链接", Theme.ButtonStyle.Secondary, Theme.Glyph.Copy);
-            embeddedTsCopyUrlBtn.Click += delegate { CopyEmbeddedAuthUrlToClipboard(); };
-
-            embeddedTsCancelBtn = Theme.Action("取消", Theme.ButtonStyle.Quiet);
-            embeddedTsCancelBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
-
-            embeddedTsCopyIpBtn = Theme.Action("复制 IP", Theme.ButtonStyle.Secondary, Theme.Glyph.Copy);
-            embeddedTsCopyIpBtn.Click += delegate
-            {
-                EmbeddedTailnetSnapshot cur = BoBoEmbeddedTailnet.Default.LatestSnapshot;
-                CopyHostAddress("内置 Tailscale IP", cur != null ? cur.SelfIp4 : "");
-            };
-
-            embeddedTsLogoutBtn = Theme.Action("退出账号", Theme.ButtonStyle.DangerSoft, Theme.Glyph.Exit);
-            embeddedTsLogoutBtn.Click += async delegate { await CancelOrLogoutEmbeddedTailnetAsync(); };
-
-            embeddedTsActionsBar = new EmbeddedActionsStrip(this,
-                embeddedTsLoginBtn,
-                embeddedTsOpenAuthBtn, embeddedTsCopyUrlBtn, embeddedTsCancelBtn,
-                embeddedTsCopyIpBtn, embeddedTsLogoutBtn);
-
-            Theme.Row(row, 50, embeddedTsIcon, null, info, null, embeddedTsActionsBar);
-            card.Controls.Add(row);
-
+            card.Controls.Add(root);
             ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
             return card;
         }
 
-        private sealed class EmbeddedActionsStrip : Panel
+        private void DismissDevicesGuideCard()
+        {
+            devicesGuideDismissed = true;
+            if (devicesGuideCard != null) devicesGuideCard.Visible = false;
+            if (devicesDesk != null)
+            {
+                if (devicesGuideRow >= 0) devicesDesk.RowStyles[devicesGuideRow].Height = 0;
+                if (devicesGuideSpacerRow >= 0) devicesDesk.RowStyles[devicesGuideSpacerRow].Height = 0;
+                RecalculateDevicesDeskHeight();
+                if (devicesViewport != null) devicesViewport.RefreshLayout();
+            }
+        }
+
+        private sealed class GuideActionsStrip : Panel
         {
             private readonly MainForm owner;
             private readonly Button loginBtn;
+            private readonly Button helpBtn;
             private readonly Button openAuthBtn;
             private readonly Button copyUrlBtn;
             private readonly Button cancelBtn;
             private readonly Button copyIpBtn;
             private readonly Button logoutBtn;
 
-            internal EmbeddedActionsStrip(
+            internal GuideActionsStrip(
                 MainForm owner,
                 Button loginBtn,
+                Button helpBtn,
                 Button openAuthBtn,
                 Button copyUrlBtn,
                 Button cancelBtn,
@@ -346,6 +306,7 @@ namespace DualRemote
             {
                 this.owner = owner;
                 this.loginBtn = loginBtn;
+                this.helpBtn = helpBtn;
                 this.openAuthBtn = openAuthBtn;
                 this.copyUrlBtn = copyUrlBtn;
                 this.cancelBtn = cancelBtn;
@@ -356,7 +317,7 @@ namespace DualRemote
                 BackColor = Theme.Paper;
                 DoubleBuffered = true;
 
-                Button[] all = new[] { loginBtn, openAuthBtn, copyUrlBtn, cancelBtn, copyIpBtn, logoutBtn };
+                Button[] all = new[] { loginBtn, helpBtn, openAuthBtn, copyUrlBtn, cancelBtn, copyIpBtn, logoutBtn };
                 for (int i = 0; i < all.Length; i++)
                 {
                     all[i].Dock = DockStyle.None;
@@ -369,6 +330,8 @@ namespace DualRemote
                 // mode: 0=unlogged, 1=waiting auth, 2=running
                 loginBtn.Visible = mode == 0;
                 loginBtn.Enabled = mode == 0 && !busy;
+                helpBtn.Visible = mode == 0;
+                helpBtn.Enabled = mode == 0;
 
                 openAuthBtn.Visible = mode == 1;
                 openAuthBtn.Enabled = mode == 1 && hasAuthUrl;
@@ -388,21 +351,21 @@ namespace DualRemote
             protected override void OnLayout(LayoutEventArgs levent)
             {
                 base.OnLayout(levent);
-                int gap = owner.DevicePixels(6);
-                int h = owner.DevicePixels(36);
+                int gap = owner.DevicePixels(8);
+                int h = Math.Min(ClientSize.Height, owner.DevicePixels(32));
                 int y = Math.Max(0, (ClientSize.Height - h) / 2);
-                int right = ClientSize.Width;
+                int x = 0;
 
-                Button[] orderRightToLeft = new[] { logoutBtn, copyIpBtn, cancelBtn, copyUrlBtn, openAuthBtn, loginBtn };
-                int[] logicalWidths = new[] { 98, 86, 56, 86, 98, 144 };
+                Button[] items = new[] { loginBtn, helpBtn, openAuthBtn, copyUrlBtn, cancelBtn, copyIpBtn, logoutBtn };
+                int[] logicalWidths = new[] { 116, 112, 98, 86, 62, 108, 88 };
 
-                for (int i = 0; i < orderRightToLeft.Length; i++)
+                for (int i = 0; i < items.Length; i++)
                 {
-                    Button btn = orderRightToLeft[i];
+                    Button btn = items[i];
                     if (!btn.Visible) continue;
-                    int bw = Math.Min(owner.DevicePixels(logicalWidths[i]), Math.Max(40, right));
-                    btn.Bounds = new Rectangle(Math.Max(0, right - bw), y, bw, h);
-                    right -= bw + gap;
+                    int bw = Math.Min(owner.DevicePixels(logicalWidths[i]), Math.Max(48, ClientSize.Width - x));
+                    btn.Bounds = new Rectangle(x, y, bw, h);
+                    x += bw + gap;
                 }
             }
         }
@@ -448,14 +411,11 @@ namespace DualRemote
 
         private void ApplyEmbeddedTailnetUi(EmbeddedTailnetSnapshot snap)
         {
-            if (sidebarCrossNetCard != null)
-                sidebarCrossNetCard.ApplyEmbeddedSnapshot(snap);
-
             string state = snap != null ? (snap.BackendState ?? "Stopped") : "Stopped";
             lastEmbeddedBackendState = state;
             lastEmbeddedAuthUrl = snap != null ? (snap.AuthUrl ?? "") : "";
 
-            if (embeddedTsCard == null) return;
+            SyncSettingsCrossNetRow(snap);
 
             bool isRunning = string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase);
             bool hasUrl = !string.IsNullOrEmpty(lastEmbeddedAuthUrl);
@@ -463,55 +423,69 @@ namespace DualRemote
                 || string.Equals(state, "Starting", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(state, "NeedsMachineAuth", StringComparison.OrdinalIgnoreCase));
 
+            if (topStatusBtn != null)
+            {
+                bool hostFail = boboHostServer == null || !boboHostServer.IsRunning;
+                if (hostFail)
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Warning);
+                else if (isRunning)
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Success);
+                else if (isWaiting)
+                    Theme.SetIndicatorDot(topStatusBtn, true, Theme.Warning);
+                else
+                    Theme.SetIndicatorDot(topStatusBtn, false, Theme.Accent);
+            }
+
+            if (devicesGuideCard == null) return;
+
+            bool hostReady = boboHostServer != null && boboHostServer.IsRunning;
+            int hostPort = hostReady ? boboHostServer.ListeningPort : BoBoProtocol.DefaultTcpPort;
+            var actions = devicesGuideActionsHost as GuideActionsStrip;
+
             if (isRunning)
             {
-                embeddedTsAccentColor = Theme.Success;
-                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.SuccessLight, Theme.Success);
+                if (devicesGuideIcon != null) devicesGuideIcon.SetColors(Theme.SuccessLight, Theme.Success);
                 string account = (snap != null && !string.IsNullOrEmpty(snap.DisplayName)) ? snap.DisplayName
                     : (snap != null && !string.IsNullOrEmpty(snap.LoginName)) ? snap.LoginName
                     : (snap != null && !string.IsNullOrEmpty(snap.TailnetName)) ? snap.TailnetName
                     : "已登录";
-                embeddedTsTitleLabel.Text = "跨网直连 · " + account;
                 string ipText = snap != null && !string.IsNullOrEmpty(snap.SelfIp4) ? snap.SelfIp4 : "分配中";
-                embeddedTsBadge.UpdateStatus("在线 · " + ipText, Theme.PillTone.Success);
                 int count = snap != null && snap.Peers != null ? snap.Peers.Count : 0;
-                embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
-                embeddedTsSubtitleLabel.Text = "49810 端口就绪"
-                    + (count > 0 ? (" · 已发现 " + count + " 台同账号设备") : " · 等待同账号设备上线");
-                embeddedTsActionsBar.SetMode(2, embeddedTsBusy, false);
+                devicesGuideTitleLabel.Text = "跨网直连在线 · " + account + " (" + ipText + ")";
+                devicesGuideSubLabel.ForeColor = Theme.Muted;
+                devicesGuideSubLabel.Text = hostReady
+                    ? ("已对接本机被控端口 " + hostPort + " · 发现 " + count + " 台跨网设备")
+                    : ("跨网通道已在线（发现 " + count + " 台设备），本机被控端口初始化中");
+                if (actions != null) actions.SetMode(2, embeddedTsBusy, false);
             }
             else if (isWaiting || embeddedTsBusy)
             {
-                embeddedTsAccentColor = Theme.Warning;
-                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.WarningLight, Theme.Warning);
-                embeddedTsTitleLabel.Text = hasUrl ? "请在浏览器完成 Tailscale 授权" : "正在启动跨网通道…";
-                embeddedTsBadge.UpdateStatus(hasUrl ? "等待授权" : "正在连接", Theme.PillTone.Warning);
-                embeddedTsSubtitleLabel.ForeColor = Theme.Warning;
-                embeddedTsSubtitleLabel.Text = hasUrl
-                    ? "授权完成后本机将自动上线"
+                if (devicesGuideIcon != null) devicesGuideIcon.SetColors(Theme.WarningLight, Theme.Warning);
+                devicesGuideTitleLabel.Text = hasUrl ? "请在浏览器完成 Tailscale 授权" : "正在启动内置跨网通道…";
+                devicesGuideSubLabel.ForeColor = Theme.Warning;
+                devicesGuideSubLabel.Text = hasUrl
+                    ? "授权完成后同账号电脑与手机/平板将自动显示在下方列表。"
                     : (!string.IsNullOrEmpty(snap != null ? snap.Error : null) ? snap.Error : "正在初始化用户态跨网通道…");
-                embeddedTsActionsBar.SetMode(1, embeddedTsBusy, hasUrl);
+                if (actions != null) actions.SetMode(1, embeddedTsBusy, hasUrl);
             }
             else
             {
-                embeddedTsAccentColor = Theme.Accent;
-                if (embeddedTsIcon != null) embeddedTsIcon.SetColors(Theme.AccentLight, Theme.Accent);
-                embeddedTsTitleLabel.Text = "跨网直连 (Tailscale)";
+                if (devicesGuideIcon != null) devicesGuideIcon.SetColors(Theme.AccentLight, Theme.Accent);
+                devicesGuideTitleLabel.Text = "添加你的其他设备";
                 string err = snap != null ? snap.Error : "";
-                embeddedTsBadge.UpdateStatus("未登录", Theme.PillTone.Neutral);
                 if (!string.IsNullOrEmpty(err))
                 {
-                    embeddedTsSubtitleLabel.ForeColor = Theme.Alert;
-                    embeddedTsSubtitleLabel.Text = err;
+                    devicesGuideSubLabel.ForeColor = Theme.Alert;
+                    devicesGuideSubLabel.Text = err;
                 }
                 else
                 {
-                    embeddedTsSubtitleLabel.ForeColor = Theme.Muted;
-                    embeddedTsSubtitleLabel.Text = "免装虚拟网卡 · 两端登录同账号直连 · 不干扰本地 VPN";
+                    devicesGuideSubLabel.ForeColor = Theme.Muted;
+                    devicesGuideSubLabel.Text = "在另一台电脑或手机打开 BoBo远程（或登录同一 Tailscale 账号），即可在此一键连接。";
                 }
-                embeddedTsActionsBar.SetMode(0, embeddedTsBusy, false);
+                if (actions != null) actions.SetMode(0, embeddedTsBusy, false);
             }
-            embeddedTsCard.Invalidate();
+            devicesGuideCard.Invalidate();
         }
 
         private async Task HandleCrossNetCardClickAsync()
@@ -539,7 +513,7 @@ namespace DualRemote
             if (embeddedTsBusy) return;
             embeddedTsBusy = true;
             ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
-            deviceBanner.Set("正在启动内置免安装跨网引擎，请稍候…", Theme.PillTone.Info);
+            SetDevicesHint("正在启动内置免安装跨网引擎，请稍候…", Theme.Muted);
             try
             {
                 EmbeddedTailnetSnapshot snap = await BoBoEmbeddedTailnet.Default.BeginLoginAsync(System.Threading.CancellationToken.None);
@@ -548,16 +522,16 @@ namespace DualRemote
                 if (snap != null && !string.IsNullOrEmpty(snap.AuthUrl))
                 {
                     OpenEmbeddedAuthUrlInBrowser();
-                    deviceBanner.Set("已在默认浏览器打开 Tailscale 登录页，完成登录后设备将自动上线。", Theme.PillTone.Info);
+                    SetDevicesHint("已在默认浏览器打开 Tailscale 登录页，完成登录后设备将自动上线。", Theme.Accent);
                 }
                 else if (snap != null && string.Equals(snap.BackendState, "Running", StringComparison.OrdinalIgnoreCase))
                 {
-                    deviceBanner.Set("内置跨网通道已上线（" + snap.SelfIp4 + "）。", Theme.PillTone.Success);
+                    SetDevicesHint("内置跨网通道已上线（" + snap.SelfIp4 + "）。", Theme.Success);
                     await RefreshDashboardAsync();
                 }
                 else if (snap != null && !string.IsNullOrEmpty(snap.Error))
                 {
-                    deviceBanner.Set(snap.Error, Theme.PillTone.Warning);
+                    SetDevicesHint(snap.Error, Theme.Warning);
                 }
             }
             finally
@@ -579,9 +553,9 @@ namespace DualRemote
             if (string.IsNullOrEmpty(url)) return;
             string err;
             if (Engines.TryOpenUrl(url, out err))
-                deviceBanner.Set("已打开 Tailscale 登录页；完成后等待 2~3 秒自动同步，无需手动操作。", Theme.PillTone.Info);
+                SetDevicesHint("已打开 Tailscale 登录页；完成后等待 2~3 秒自动同步。", Theme.Accent);
             else
-                deviceBanner.Set("无法自动拉起浏览器：" + err + "，请点「复制链接」后粘贴到浏览器打开。", Theme.PillTone.Warning);
+                SetDevicesHint("无法自动拉起浏览器：" + err + "，请点「复制链接」后粘贴打开。", Theme.Warning);
         }
 
         private void CopyEmbeddedAuthUrlToClipboard()
@@ -590,11 +564,11 @@ namespace DualRemote
             try
             {
                 Clipboard.SetText(lastEmbeddedAuthUrl);
-                deviceBanner.Set("已复制 Tailscale 登录授权链接，请粘贴到浏览器完成登录。", Theme.PillTone.Success);
+                SetDevicesHint("已复制 Tailscale 登录授权链接。", Theme.Success);
             }
             catch
             {
-                deviceBanner.Set("无法访问剪贴板，请直接点击「打开登录页」。", Theme.PillTone.Warning);
+                SetDevicesHint("无法访问剪贴板，请直接点击「打开登录页」。", Theme.Warning);
             }
         }
 
@@ -608,7 +582,7 @@ namespace DualRemote
                 await BoBoEmbeddedTailnet.Default.LogoutAsync(System.Threading.CancellationToken.None);
                 if (!IsDisposed)
                 {
-                    deviceBanner.Set("已退出内置跨网账号。", Theme.PillTone.Info);
+                    SetDevicesHint("已退出内置跨网账号。", Theme.Muted);
                     await RefreshDashboardAsync();
                 }
             }
@@ -620,160 +594,19 @@ namespace DualRemote
             }
         }
 
-        /// <summary>
-        /// 顶部引导卡 4 按钮自适应排布容器：宽窗口单行舒展排布，窄窗口自动折行，绝不裁切「查看本机地址」。
-        /// </summary>
-        private sealed class HostActionBarPanel : Panel
+        private void SetDevicesHint(string text, Color color)
         {
-            private readonly Button b1;
-            private readonly Button b2;
-            private readonly Button b3;
-            private readonly Button linkBtn;
-
-            internal HostActionBarPanel(Button b1, Button b2, Button b3, Button linkBtn)
-            {
-                this.b1 = b1;
-                this.b2 = b2;
-                this.b3 = b3;
-                this.linkBtn = linkBtn;
-                Dock = DockStyle.Fill;
-                Margin = Padding.Empty;
-                BackColor = Theme.Paper;
-                DoubleBuffered = true;
-                foreach (Button b in new[] { b1, b2, b3, linkBtn })
-                {
-                    b.Dock = DockStyle.None;
-                    Controls.Add(b);
-                }
-            }
-
-            internal int ComputeRequiredHeight(int availableWidth, float scale)
-            {
-                int w1 = (int)Math.Round(128 * scale);
-                int gap = (int)Math.Round(8 * scale);
-                int linkGap = (int)Math.Round(14 * scale);
-                int wLink = (int)Math.Round(118 * scale);
-                int btnH = (int)Math.Round(36 * scale);
-                int rowGap = (int)Math.Round(8 * scale);
-
-                int singleRowW = w1 * 3 + gap * 2 + linkGap + wLink;
-                if (availableWidth >= singleRowW) return btnH;
-                int threeBtnsW = w1 * 3 + gap * 2;
-                if (availableWidth >= threeBtnsW) return btnH * 2 + rowGap;
-                return btnH * 2 + rowGap;
-            }
-
-            protected override void OnLayout(LayoutEventArgs levent)
-            {
-                base.OnLayout(levent);
-                float scale = Theme.GetDpiScale(this);
-                int availW = Math.Max(180, ClientSize.Width);
-                int wBtn = (int)Math.Round(128 * scale);
-                int gap = (int)Math.Round(8 * scale);
-                int linkGap = (int)Math.Round(14 * scale);
-                int wLink = (int)Math.Round(118 * scale);
-                int btnH = (int)Math.Round(36 * scale);
-                int rowGap = (int)Math.Round(8 * scale);
-
-                Button[] items = new[] { b1, b2, b3, linkBtn };
-                int[] widths = new[] { wBtn, wBtn, wBtn, wLink };
-                int[] gaps = new[] { gap, gap, linkGap, 0 };
-
-                int x = 0;
-                int y = 0;
-                for (int i = 0; i < items.Length; i++)
-                {
-                    int bw = Math.Min(widths[i], availW);
-                    if (x > 0 && x + bw > availW)
-                    {
-                        x = 0;
-                        y += btnH + rowGap;
-                    }
-                    items[i].Bounds = new Rectangle(x, y, bw, btnH);
-                    x += bw + gaps[i];
-                }
-            }
+            if (devicesHintLabel == null) return;
+            devicesHintLabel.ForeColor = color;
+            devicesHintLabel.Text = text ?? "";
         }
 
-        private void SyncHostCardResponsiveMetrics(int contentWidth)
+        private void SyncDevicesResponsiveMetrics(int contentWidth)
         {
-            if (!initialScaleApplied || hostCardLayout == null || hostCardControl == null || devicesDesk == null || hostCardRow < 0)
-                return;
-            float scale = CurrentDpiScale();
-            int innerCardW = Math.Max(260, contentWidth - devicesDesk.Padding.Horizontal - hostCardControl.Padding.Horizontal);
-            int rightColW = Math.Max(200, innerCardW - (int)Math.Round(36 * scale));
-
-            if (hostSubtitleRow >= 0 && heroSubtitleLabel != null)
-            {
-                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
-                {
-                    Size sz = TextRenderer.MeasureText(g, heroSubtitleLabel.Text, Theme.GetFont(Theme.TextSize.Small),
-                        new Size(rightColW, int.MaxValue),
-                        TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
-                    int subH = Math.Max((int)Math.Round(24 * scale), sz.Height + (int)Math.Ceiling(6 * scale));
-                    hostCardLayout.RowStyles[hostSubtitleRow].Height = subH;
-                }
-            }
-            if (hostActionsRow >= 0 && hostActionsBar != null)
-            {
-                hostCardLayout.RowStyles[hostActionsRow].Height = hostActionsBar.ComputeRequiredHeight(rightColW, scale);
-            }
-            if (hostDetailsRow >= 0 && hostCardDetailsLayout != null)
-            {
-                hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded ? SumRows(hostCardDetailsLayout) : 0;
-            }
-            devicesDesk.RowStyles[hostCardRow].Height = HostCardHeight();
-            if (embeddedTailnetRow >= 0)
-            {
-                devicesDesk.RowStyles[embeddedTailnetRow].Height = EmbeddedTailnetCardHeight();
-            }
+            if (!initialScaleApplied || devicesDesk == null) return;
+            if (devicesGuideRow >= 0 && !devicesGuideDismissed)
+                devicesDesk.RowStyles[devicesGuideRow].Height = DevicesGuideCardHeight();
             RecalculateDevicesDeskHeight();
-        }
-
-        private static Control BuildAddressRow(string label, Label value, Button copy)
-        {
-            var row = Theme.Grid(4);
-            Theme.FixedColumn(row, 102);
-            Theme.FixedColumn(row, 8);
-            Theme.FillColumn(row);
-            Theme.FixedColumn(row, 74);
-            Theme.Row(row, 30, Theme.Text(label, Theme.TextSize.Small, Theme.Muted), null, value, copy);
-            return row;
-        }
-
-        private Button MakeAddressCopy(string label, EventHandler click)
-        {
-            var copy = Theme.Action("复制", Theme.ButtonStyle.Secondary);
-            copy.AccessibleName = "复制" + label;
-            copy.Click += click;
-            copy.Enabled = false;
-            return copy;
-        }
-
-        private void ToggleHostDetails(Button button)
-        {
-            if (hostCardLayout == null || hostCardDetails == null) return;
-            hostDetailsExpanded = !hostDetailsExpanded;
-            hostCardLayout.RowStyles[hostDetailsRow].Height = hostDetailsExpanded
-                ? (hostCardDetailsLayout != null ? SumRows(hostCardDetailsLayout) : DevicePixels(120))
-                : 0;
-            hostCardDetails.Visible = hostDetailsExpanded;
-            if (devicesDesk != null && hostCardRow >= 0)
-            {
-                devicesDesk.RowStyles[hostCardRow].Height = HostCardHeight();
-                RecalculateDevicesDeskHeight();
-            }
-            if (button != null)
-            {
-                button.Text = hostDetailsExpanded ? "收起地址" : "本机地址";
-                button.AccessibleName = button.Text;
-            }
-        }
-
-        private int HostCardHeight()
-        {
-            if (hostCardLayout == null || hostCardControl == null) return DevicePixels(142);
-            return SumRows(hostCardLayout) + hostCardControl.Padding.Vertical;
         }
 
         private static int SumRows(Control grid)
@@ -805,20 +638,20 @@ namespace DualRemote
         {
             if (string.IsNullOrWhiteSpace(value))
             {
-                deviceBanner.Set("本机暂未获取到" + label + "。", Theme.PillTone.Warning);
+                SetDevicesHint("本机暂未获取到" + label + "。", Theme.Warning);
                 SetStatus("本机暂未获取到" + label + "。", Theme.PillTone.Warning);
                 return;
             }
             try
             {
                 Clipboard.SetText(value);
-                string ok = "已复制本机" + label + "到剪贴板（为保护隐私，状态栏不回显明文）。";
-                deviceBanner.Set(ok, Theme.PillTone.Success);
+                string ok = "已复制本机" + label + "到剪贴板。";
+                SetDevicesHint(ok, Theme.Success);
                 SetStatus(ok, Theme.PillTone.Success);
             }
             catch
             {
-                deviceBanner.Set("无法写入剪贴板，请展开本机地址后手动复制。", Theme.PillTone.Warning);
+                SetDevicesHint("无法写入剪贴板，请手动复制。", Theme.Warning);
             }
         }
 
@@ -842,20 +675,7 @@ namespace DualRemote
 
         private void ApplyHostSnapshotToUi()
         {
-            heroLanLabel.Text = string.IsNullOrEmpty(hostSnapshot.LanIpv4) ? "未连接" : hostSnapshot.LanIpv4;
-            heroTsLabel.Text = string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4) ? "未登录" : hostSnapshot.TailscaleIpv4;
-            heroV6Label.Text = string.IsNullOrEmpty(hostSnapshot.PublicIpv6) ? "无公网 IPv6" : ShortenIpv6(hostSnapshot.PublicIpv6);
-            if (heroCopyLan != null) heroCopyLan.Enabled = !string.IsNullOrEmpty(hostSnapshot.LanIpv4);
-            if (heroCopyTs != null) heroCopyTs.Enabled = !string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4);
-            if (heroCopyV6 != null) heroCopyV6.Enabled = !string.IsNullOrEmpty(hostSnapshot.PublicIpv6);
-
-            if (boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl)
-                heroHostStatusBadge.UpdateStatus("V6 本机可被控 · 49810", Theme.PillTone.Success);
-            else if (boboHostServer != null && boboHostServer.IsRunning)
-                heroHostStatusBadge.UpdateStatus("已关闭本机被控", Theme.PillTone.Neutral);
-            else
-                heroHostStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Warning);
-
+            ApplyEmbeddedTailnetUi(BoBoEmbeddedTailnet.Default.LatestSnapshot);
             UpdateLocalAssistAddressLabel();
             UpdateDiagnosticsUi();
             UpdatePrivacyIndicators();
@@ -865,6 +685,84 @@ namespace DualRemote
         {
             if (string.IsNullOrEmpty(ipv6) || ipv6.Length <= 24) return ipv6;
             return ipv6.Substring(0, 12) + "…" + ipv6.Substring(ipv6.Length - 8);
+        }
+
+        private HashSet<string> CollectLocalIpSet()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            set.Add("127.0.0.1");
+            set.Add("::1");
+            if (!string.IsNullOrWhiteSpace(hostSnapshot.LanIpv4)) set.Add(hostSnapshot.LanIpv4.Trim());
+            if (!string.IsNullOrWhiteSpace(hostSnapshot.TailscaleIpv4)) set.Add(hostSnapshot.TailscaleIpv4.Trim());
+            if (!string.IsNullOrWhiteSpace(hostSnapshot.PublicIpv6)) set.Add(hostSnapshot.PublicIpv6.Trim());
+            EmbeddedTailnetSnapshot emb = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+            if (emb != null && !string.IsNullOrWhiteSpace(emb.SelfIp4)) set.Add(emb.SelfIp4.Trim());
+            try
+            {
+                System.Net.NetworkInformation.NetworkInterface[] nics =
+                    System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
+                for (int i = 0; i < nics.Length; i++)
+                {
+                    var props = nics[i].GetIPProperties();
+                    if (props == null) continue;
+                    foreach (var ua in props.UnicastAddresses)
+                    {
+                        if (ua != null && ua.Address != null)
+                            set.Add(ua.Address.ToString());
+                    }
+                }
+            }
+            catch { }
+            return set;
+        }
+
+        private static bool IsMobilePeer(TsPeer peer)
+        {
+            if (peer == null) return false;
+            string os = (peer.Os ?? "").ToLowerInvariant();
+            if (os.Contains("android") || os.Contains("ios") || os.Contains("iphone") || os.Contains("ipad"))
+                return true;
+            string link = (peer.LinkText ?? "").ToLowerInvariant();
+            return link.Contains("android") || link.Contains("ios");
+        }
+
+        private static void MergeDedupPeer(
+            List<TsPeer> targetList,
+            Dictionary<string, int> keyIndexMap,
+            HashSet<string> seenIps,
+            HashSet<string> localIps,
+            string selfMachineKey,
+            DeviceCatalogStore catalog,
+            TsPeer candidate)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.Ip)) return;
+            string ip = candidate.Ip.Trim();
+            if (localIps != null && localIps.Contains(ip)) return;
+
+            string machineKey = DeviceCatalogStore.NormalizePeerKey(candidate.HostName);
+            if (!string.IsNullOrEmpty(selfMachineKey) && string.Equals(machineKey, selfMachineKey, StringComparison.Ordinal))
+                return;
+
+            if (catalog != null && catalog.IsHidden(ip, candidate.HostName))
+                return;
+
+            if (!seenIps.Add(ip)) return;
+
+            if (!string.IsNullOrEmpty(machineKey))
+            {
+                int existingIdx;
+                if (keyIndexMap.TryGetValue(machineKey, out existingIdx))
+                {
+                    TsPeer prev = targetList[existingIdx];
+                    if (!prev.Online && candidate.Online)
+                    {
+                        targetList[existingIdx] = candidate;
+                    }
+                    return;
+                }
+                keyIndexMap[machineKey] = targetList.Count;
+            }
+            targetList.Add(candidate);
         }
 
         private async Task RefreshNetworkDevices()
@@ -879,59 +777,76 @@ namespace DualRemote
 
                 var merged = new List<TsPeer>();
                 var seenIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var seenLanNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seenMachineKeys = new Dictionary<string, int>(StringComparer.Ordinal);
+                HashSet<string> localIps = CollectLocalIpSet();
+                string selfMachineKey = DeviceCatalogStore.NormalizePeerKey(Environment.MachineName);
 
-                // 1. Live LAN auto-discovered BoBo V6 peers (zero external VPN needed, always fastest!)
+                // 1. Live LAN auto-discovered BoBo V6 peers (fastest path)
                 if (boboHostServer != null)
                 {
                     foreach (BoBoDiscoveredPeer lp in boboHostServer.GetDiscoveredLanPeers())
                     {
                         if (string.IsNullOrWhiteSpace(lp.Host)) continue;
-                        seenIps.Add(lp.Host);
-                        if (lp.AllowIncoming && !string.IsNullOrWhiteSpace(lp.DeviceName))
-                            seenLanNames.Add(lp.DeviceName.Trim());
                         string platTag = "Windows";
                         if (string.Equals(lp.Platform, BoBoProtocol.PlatformMacOS, StringComparison.OrdinalIgnoreCase)) platTag = "macOS";
                         else if (string.Equals(lp.Platform, BoBoProtocol.PlatformAndroid, StringComparison.OrdinalIgnoreCase)) platTag = "Android";
                         else if (string.Equals(lp.Platform, BoBoProtocol.PlatformIOS, StringComparison.OrdinalIgnoreCase)) platTag = "iOS";
                         bool isViewOnly = string.Equals(lp.HostControlMode, BoBoProtocol.ControlModeViewOnly, StringComparison.OrdinalIgnoreCase);
-                        merged.Add(new TsPeer
+                        var lanPeer = new TsPeer
                         {
                             HostName = lp.DeviceName,
                             Ip = lp.Host,
+                            Os = platTag,
                             Online = lp.AllowIncoming,
                             LinkText = lp.AllowIncoming
-                                ? (platTag + (isViewOnly ? " · 仅投屏观看" : " · 局域网高速直连") + " · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
+                                ? (platTag + (isViewOnly ? " · 仅投屏观看" : " · 局域网直连") + " · 码 " + BoBoIdentityStore.FormatDeviceCode(lp.DeviceCode))
                                 : (platTag + " · 局域网 · 对方已关闭被控")
-                        });
+                        };
+                        MergeDedupPeer(merged, seenMachineKeys, seenIps, localIps, selfMachineKey, deviceCatalog, lanPeer);
                     }
                 }
 
-                // 2. Tailscale peers (optional cross-WAN mesh; deduplicate if same host is already online on LAN!)
+                // 2. Tailscale peers (deduplicated across LAN / BoBoTsNet / system Tailscale)
                 if (result.Ok && result.Peers != null)
                 {
                     foreach (TsPeer tp in result.Peers)
                     {
-                        if (string.IsNullOrWhiteSpace(tp.Ip)) continue;
-                        if (!string.IsNullOrWhiteSpace(tp.HostName) && seenLanNames.Contains(tp.HostName.Trim()))
-                            continue;
-                        if (seenIps.Add(tp.Ip))
-                            merged.Add(tp);
+                        MergeDedupPeer(merged, seenMachineKeys, seenIps, localIps, selfMachineKey, deviceCatalog, tp);
                     }
                 }
 
                 // 3. Previously authorized BoBo V6 peers with saved IP
                 foreach (BoBoAuthorizedPeer ap in BoBoIdentityStore.Default.ListAuthorizedPeers())
                 {
-                    if (!string.IsNullOrWhiteSpace(ap.LastHost) && seenIps.Add(ap.LastHost))
+                    if (string.IsNullOrWhiteSpace(ap.LastHost)) continue;
+                    var authPeer = new TsPeer
                     {
-                        merged.Add(new TsPeer
+                        HostName = string.IsNullOrWhiteSpace(ap.DeviceName) ? ap.LastHost : ap.DeviceName,
+                        Ip = ap.LastHost,
+                        Online = true,
+                        LinkText = "已授权设备 · 码 " + BoBoIdentityStore.FormatDeviceCode(ap.DeviceCode)
+                    };
+                    MergeDedupPeer(merged, seenMachineKeys, seenIps, localIps, selfMachineKey, deviceCatalog, authPeer);
+                }
+
+                // 4. Manually added devices from DeviceCatalogStore
+                if (deviceCatalog != null)
+                {
+                    for (int i = 0; i < deviceCatalog.ManualDevices.Count; i++)
+                    {
+                        ManagedDeviceItem m = deviceCatalog.ManualDevices[i];
+                        if (string.IsNullOrWhiteSpace(m.Address)) continue;
+                        string resolvedIp = ResolveBoBoHostTarget(m.Address);
+                        if (!string.IsNullOrEmpty(resolvedIp) && seenIps.Contains(resolvedIp)) continue;
+                        var manualPeer = new TsPeer
                         {
-                            HostName = string.IsNullOrWhiteSpace(ap.DeviceName) ? ap.LastHost : ap.DeviceName,
-                            Ip = ap.LastHost,
+                            HostName = string.IsNullOrWhiteSpace(m.Alias) ? m.Address : m.Alias,
+                            Ip = m.Address,
+                            Os = m.IsMobile ? "ios" : "windows",
                             Online = true,
-                            LinkText = "已授权 BoBo 设备 · 码 " + BoBoIdentityStore.FormatDeviceCode(ap.DeviceCode)
-                        });
+                            LinkText = "手动添加设备"
+                        };
+                        MergeDedupPeer(merged, seenMachineKeys, seenIps, localIps, selfMachineKey, deviceCatalog, manualPeer);
                     }
                 }
 
@@ -941,16 +856,26 @@ namespace DualRemote
                 UpdateQuickDeviceShortcut();
 
                 bool serverReady = boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl;
-                deviceBanner.Set(
-                    serverReady
-                        ? ("本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + " · 端口 49810 就绪 · 已发现 " + merged.Count + " 台")
-                        : "允许本机被控已关闭，可在设置中开启",
-                    serverReady ? Theme.PillTone.Success : Theme.PillTone.Warning);
+                if (boboHostServer != null && boboHostServer.IsRunning)
+                {
+                    string portText = boboHostServer.IsUsingFallbackPort
+                        ? ("备用端口 " + boboHostServer.ListeningPort)
+                        : ("端口 " + boboHostServer.ListeningPort);
+                    SetDevicesHint(
+                        serverReady
+                            ? ("本机码 " + BoBoIdentityStore.Default.FormattedDeviceCode + " · " + portText + " 就绪")
+                            : "已暂停本机被控（可在「设置 → 网络与服务」开启）",
+                        serverReady ? Theme.Muted : Theme.Warning);
+                }
+                else
+                {
+                    SetDevicesHint("本机被控端口暂未启动 · 点击「开始协助」可自动修复或切换备用端口", Theme.Warning);
+                }
             }
             catch
             {
                 if (!IsDisposed)
-                    deviceBanner.Set("暂未获取同网列表 · 可点「手动连接」输入 IP 或设备码", Theme.PillTone.Warning);
+                    SetDevicesHint("暂未获取同网列表 · 可点右上角「添加设备」或「开始协助」直连", Theme.Warning);
             }
             finally { if (!IsDisposed) refreshDevices.Enabled = true; }
         }
@@ -965,7 +890,9 @@ namespace DualRemote
             }
             if (best != null)
             {
-                quickDeviceName = PeerName(best);
+                quickDeviceName = deviceCatalog != null
+                    ? deviceCatalog.ResolveDisplayName(best.Ip, best.HostName, PeerName(best))
+                    : PeerName(best);
                 quickDeviceAddress = best.Ip;
                 quickDeviceOnline = best.Online;
                 quickDeviceLink = best.LinkText;
@@ -974,7 +901,9 @@ namespace DualRemote
             else if (favorites.Count > 0)
             {
                 var f = favorites[0];
-                quickDeviceName = f.Address;
+                quickDeviceName = deviceCatalog != null
+                    ? deviceCatalog.ResolveDisplayName(f.Address, f.Address, f.Address)
+                    : f.Address;
                 quickDeviceAddress = f.Address;
                 quickDeviceOnline = true;
                 quickDeviceLink = f.Stream ? "收藏串流主机" : "收藏协助设备";
@@ -999,6 +928,7 @@ namespace DualRemote
                 navQuickDevice.Text = string.IsNullOrEmpty(quickDeviceName) ? "暂无设备" : quickDeviceName;
                 navQuickDevice.AccessibleName = navQuickDevice.Text;
                 Theme.SetGlyphTint(navQuickDevice, quickDeviceOnline ? Theme.Accent : Theme.Muted);
+                Theme.SetIndicatorDot(navQuickDevice, !string.IsNullOrEmpty(quickDeviceAddress), quickDeviceOnline ? Theme.Success : Theme.StrokeStrong);
             }
             SyncNavigationSectionVisibility();
         }
@@ -1006,6 +936,20 @@ namespace DualRemote
         private void DrawPeerRows(List<TsPeer> peers, string issue = null)
         {
             if (peerListHost == null) return;
+            var pcPeers = new List<TsPeer>();
+            var mobPeers = new List<TsPeer>();
+            if (peers != null)
+            {
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    TsPeer p = peers[i];
+                    if (string.IsNullOrWhiteSpace(p.Ip)) continue;
+                    if (IsMobilePeer(p)) mobPeers.Add(p);
+                    else pcPeers.Add(p);
+                }
+            }
+
+            float scale = CurrentDpiScale();
             peerListHost.SuspendLayout();
             try
             {
@@ -1013,160 +957,418 @@ namespace DualRemote
                 peerListHost.RowStyles.Clear();
                 peerListHost.RowCount = 0;
 
-                float scale = CurrentDpiScale();
-                int totalDevices = 1; // Always includes This PC
+                Control selfCard = BuildThisPcCard();
+                if (scale != 1f) selfCard.Scale(new SizeF(scale, scale));
+                Theme.Row(peerListHost, 60f * scale, selfCard);
 
-                var groupCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
-                var list = Theme.Grid(1);
-                Theme.FillColumn(list);
-
-                var selfRow = BuildThisPcRow();
-                Theme.Row(list, 64, selfRow);
-
-                int peerCount = 0;
-                if (peers != null)
+                for (int i = 0; i < pcPeers.Count; i++)
                 {
-                    foreach (var peer in peers)
-                    {
-                        if (string.IsNullOrWhiteSpace(peer.Ip)) continue;
-                        peerCount++;
-                        Theme.Row(list, 1, Theme.Rule());
-                        Theme.Row(list, 64, BuildPeerCardRow(peer));
-                    }
+                    Theme.Row(peerListHost, 8f * scale);
+                    Control card = BuildPeerDeviceCard(pcPeers[i]);
+                    if (scale != 1f) card.Scale(new SizeF(scale, scale));
+                    Theme.Row(peerListHost, 60f * scale, card);
                 }
-                totalDevices += peerCount;
-
-                if (peerCount == 0)
-                {
-                    Theme.Row(list, 1, Theme.Rule());
-                    Theme.Row(list, 58, BuildEmptyPeersHintRow(issue));
-                }
-
-                groupCard.Controls.Add(list);
-                int logicalH = SumRows(list) + groupCard.Padding.Vertical;
-                if (scale != 1f) groupCard.Scale(new SizeF(scale, scale));
-                Theme.Row(peerListHost, logicalH * scale, groupCard);
 
                 if (computersGroupBtn != null)
-                    computersGroupBtn.Text = "电脑 " + totalDevices;
+                    computersGroupBtn.Text = "电脑 " + (1 + pcPeers.Count);
             }
             finally
             {
                 peerListHost.ResumeLayout(true);
             }
+
+            hasMobilePeers = mobPeers.Count > 0;
+            if (mobileListHost != null)
+            {
+                mobileListHost.SuspendLayout();
+                try
+                {
+                    for (int i = mobileListHost.Controls.Count - 1; i >= 0; i--) mobileListHost.Controls[i].Dispose();
+                    mobileListHost.RowStyles.Clear();
+                    mobileListHost.RowCount = 0;
+
+                    for (int i = 0; i < mobPeers.Count; i++)
+                    {
+                        if (i > 0) Theme.Row(mobileListHost, 8f * scale);
+                        Control card = BuildPeerDeviceCard(mobPeers[i]);
+                        if (scale != 1f) card.Scale(new SizeF(scale, scale));
+                        Theme.Row(mobileListHost, 60f * scale, card);
+                    }
+                }
+                finally
+                {
+                    mobileListHost.ResumeLayout(true);
+                }
+                if (mobilesGroupBtn != null)
+                    mobilesGroupBtn.Text = "手机/平板 " + mobPeers.Count;
+            }
+
             SyncPeerListLayout();
         }
 
         private void SyncPeerListLayout()
         {
             if (devicesDesk == null || peerListHost == null || peerListRow < 0) return;
+            float scale = CurrentDpiScale();
             peerListHost.Visible = computersExpanded;
             devicesDesk.RowStyles[peerListRow].Height = computersExpanded ? SumRows(peerListHost) : 0;
+
+            if (mobileSpacerRow >= 0 && mobileGroupRow >= 0 && mobileGroupGapRow >= 0 && mobileListRow >= 0 && mobileListHost != null)
+            {
+                if (mobilesGroupBtn != null && mobilesGroupBtn.Parent != null)
+                    mobilesGroupBtn.Parent.Visible = hasMobilePeers;
+                mobileListHost.Visible = hasMobilePeers && mobilesExpanded;
+                devicesDesk.RowStyles[mobileSpacerRow].Height = hasMobilePeers ? 14f * scale : 0f;
+                devicesDesk.RowStyles[mobileGroupRow].Height = hasMobilePeers ? 28f * scale : 0f;
+                devicesDesk.RowStyles[mobileGroupGapRow].Height = (hasMobilePeers && mobilesExpanded) ? 8f * scale : 0f;
+                devicesDesk.RowStyles[mobileListRow].Height = (hasMobilePeers && mobilesExpanded) ? SumRows(mobileListHost) : 0f;
+            }
+
             RecalculateDevicesDeskHeight();
+            if (devicesViewport != null) devicesViewport.RefreshLayout();
             NotifyOnboardingLayoutChanged();
         }
 
-        private Control BuildThisPcRow()
+        private Control BuildThisPcCard()
         {
-            var rowWrap = Theme.Grid(1);
-            rowWrap.Padding = new Padding(18, 8, 18, 8);
-            Theme.FillColumn(rowWrap);
-
+            var card = new Theme.Card { Padding = new Padding(16, 10, 14, 10), Interactive = true };
             var row = Theme.Grid(6);
-            Theme.FixedColumn(row, 40);
+            Theme.FixedColumn(row, 38);
+            Theme.FixedColumn(row, 14);
+            Theme.FillColumn(row);
+            Theme.FixedColumn(row, 8);
+            Theme.FixedColumn(row, 32);
+            Theme.FixedColumn(row, 28);
+
+            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, false, Theme.Accent, Theme.Paper, 8f);
+            string tag = "本机";
+            if (!allowIncomingControl) tag = "本机 · 已暂停被控";
+            else if (boboHostServer == null || !boboHostServer.IsRunning) tag = "本机 · 端口未就绪";
+            var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, tag);
+
+            var infoBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Info);
+            infoBtn.AccessibleName = "查看本机网络与隐藏设备管理";
+            infoBtn.Margin = new Padding(0, 4, 0, 4);
+            infoBtn.Click += delegate { ShowThisPcMenu(infoBtn); };
+
+            var openBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
+            openBtn.AccessibleName = "前往本机远程协助与配对";
+            openBtn.Margin = new Padding(0, 4, 0, 4);
+            openBtn.Click += delegate { ShowPage(AssistPage); };
+
+            Theme.Row(row, 38, icon, null, selfTitle, null, infoBtn, openBtn);
+            card.Controls.Add(row);
+            card.AttachInteractiveHover(row);
+            selfTitle.Cursor = Cursors.Hand;
+            selfTitle.Click += delegate { ShowPage(AssistPage); };
+            return card;
+        }
+
+        private Control BuildPeerDeviceCard(TsPeer peer)
+        {
+            var card = new Theme.Card { Padding = new Padding(16, 10, 14, 10), Interactive = true };
+            string displayName = deviceCatalog != null
+                ? deviceCatalog.ResolveDisplayName(peer.Ip, peer.HostName, PeerName(peer))
+                : PeerName(peer);
+            bool mobile = IsMobilePeer(peer);
+            bool hasLanTag = !string.IsNullOrEmpty(peer.LinkText) && peer.LinkText.IndexOf("局域网", StringComparison.Ordinal) >= 0;
+
+            var row = Theme.Grid(9);
+            Theme.FixedColumn(row, 38);
             Theme.FixedColumn(row, 14);
             Theme.FillColumn(row);
             Theme.FixedColumn(row, 10);
-            Theme.FixedColumn(row, 36);
+            Theme.FixedColumn(row, 68);
+            Theme.FixedColumn(row, 6);
             Theme.FixedColumn(row, 32);
+            Theme.FixedColumn(row, 2);
+            Theme.FixedColumn(row, 28);
 
-            var icon = new Theme.IconTile(Theme.Glyph.WindowsTile, true, Theme.AccentLight, Theme.Accent, 8f);
-            var selfTitle = new Theme.SelfDeviceTitle(Environment.MachineName, "本机");
+            var icon = new Theme.IconTile(
+                mobile ? Theme.Glyph.Devices : Theme.Glyph.WindowsTile,
+                !peer.Online,
+                peer.Online ? Theme.Accent : Theme.SurfaceSubtle,
+                peer.Online ? Theme.Paper : Theme.Muted,
+                8f);
+
+            string pill = !peer.Online ? "离线" : (hasLanTag ? "局域网" : "");
+            var titleCtrl = string.IsNullOrEmpty(pill)
+                ? (Control)Theme.Text(displayName, Theme.TextSize.LabelBold, peer.Online ? Theme.Ink : Theme.Muted)
+                : new Theme.SelfDeviceTitle(displayName, pill);
+            titleCtrl.Cursor = Cursors.Hand;
+            titleCtrl.Click += delegate { OpenDeviceDetail(displayName, peer.Ip, peer.Online, peer.LinkText, true); };
+            titleCtrl.DoubleClick += async delegate
+            {
+                if (peer.Online) await ConnectToDeviceAsync(peer.Ip, displayName);
+            };
+            deviceCardToolTip.SetToolTip(titleCtrl, peer.Ip + " · " + peer.LinkText);
+
+            var connectBtn = Theme.Action(peer.Online ? "连接" : "离线",
+                peer.Online ? Theme.ButtonStyle.AccentSoft : Theme.ButtonStyle.Secondary);
+            connectBtn.Enabled = peer.Online;
+            connectBtn.Margin = new Padding(0, 3, 0, 3);
+            connectBtn.Click += async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); };
 
             var infoBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.Info);
-            infoBtn.AccessibleName = "查看本机网络与宿主信息";
-            infoBtn.Margin = new Padding(0, 6, 0, 6);
-            infoBtn.Click += delegate { ToggleHostDetails(null); };
-
-            var openBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
-            openBtn.AccessibleName = "前往本机协助设置";
-            openBtn.Margin = new Padding(0, 6, 0, 6);
-            openBtn.Click += delegate { ShowPage(AssistPage); };
-
-            Theme.Row(row, 48, icon, null, selfTitle, null, infoBtn, openBtn);
-            Theme.Row(rowWrap, 48, row);
-            return rowWrap;
-        }
-
-        private Control BuildPeerCardRow(TsPeer peer)
-        {
-            var rowWrap = Theme.Grid(1);
-            rowWrap.Padding = new Padding(18, 8, 18, 8);
-            Theme.FillColumn(rowWrap);
-
-            var row = Theme.Grid(7);
-            Theme.FixedColumn(row, 40);
-            Theme.FixedColumn(row, 14);
-            Theme.FillColumn(row);
-            Theme.FixedColumn(row, 14);
-            Theme.FixedColumn(row, 84);
-            Theme.FixedColumn(row, 8);
-            Theme.FixedColumn(row, 32);
-
-            Color tileBg = peer.Online ? Theme.AccentLight : Theme.SurfaceSubtle;
-            var icon = new Theme.IconTile(PeerOsGlyph(peer), true, tileBg, peer.Online ? Theme.Accent : Theme.Muted, 8f);
-
-            string displayName = PeerName(peer);
-            var identity = new Theme.TwoLineText(
-                displayName,
-                peer.Ip + "  ·  " + peer.LinkText,
-                Theme.TextSize.LabelBold,
-                peer.Online ? Theme.Ink : Theme.Muted,
-                Theme.Muted);
-
-            var connectBtn = Theme.Action(peer.Online ? "连接" : "离线", peer.Online ? Theme.ButtonStyle.Primary : Theme.ButtonStyle.Secondary);
-            connectBtn.Enabled = peer.Online;
-            connectBtn.Margin = new Padding(0, 7, 0, 7);
-            connectBtn.Click += async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); };
+            infoBtn.AccessibleName = "管理此设备";
+            infoBtn.Margin = new Padding(0, 4, 0, 4);
+            infoBtn.Click += delegate { ShowPeerActionMenu(infoBtn, peer, displayName); };
 
             var detailBtn = Theme.Action("", Theme.ButtonStyle.IconGhost, Theme.Glyph.ChevronRight);
             detailBtn.AccessibleName = "查看设备详情";
-            detailBtn.Margin = new Padding(0, 7, 0, 7);
+            detailBtn.Margin = new Padding(0, 4, 0, 4);
             detailBtn.Click += delegate { OpenDeviceDetail(displayName, peer.Ip, peer.Online, peer.LinkText, true); };
 
-            Theme.Row(row, 48, icon, null, identity, null, connectBtn, null, detailBtn);
-            Theme.Row(rowWrap, 48, row);
-            return rowWrap;
+            Theme.Row(row, 38, icon, null, titleCtrl, null, connectBtn, null, infoBtn, null, detailBtn);
+            card.Controls.Add(row);
+            card.AttachInteractiveHover(row);
+            icon.MouseUp += delegate(object sender, MouseEventArgs me)
+            {
+                if (me.Button == MouseButtons.Right) ShowPeerActionMenu(card, peer, displayName);
+            };
+            titleCtrl.MouseUp += delegate(object sender, MouseEventArgs me)
+            {
+                if (me.Button == MouseButtons.Right) ShowPeerActionMenu(card, peer, displayName);
+            };
+            return card;
         }
 
-        private Control BuildEmptyPeersHintRow(string issue)
+        private void ShowThisPcMenu(Control anchor)
         {
-            var rowWrap = Theme.Grid(1);
-            rowWrap.Padding = new Padding(18, 8, 18, 8);
-            Theme.FillColumn(rowWrap);
+            var menu = CreateCleanPopupMenu();
+            bool serverUp = boboHostServer != null && boboHostServer.IsRunning;
+            string portText = serverUp ? ("端口 " + boboHostServer.ListeningPort + (boboHostServer.IsUsingFallbackPort ? " (备用)" : "")) : "未启动";
+            var header = new ToolStripMenuItem("本机：" + Environment.MachineName + " · " + portText) { Enabled = false };
+            menu.Items.Add(header);
+            menu.Items.Add(new ToolStripSeparator());
 
-            var row = Theme.Grid(5);
-            Theme.FixedColumn(row, 40);
-            Theme.FixedColumn(row, 14);
-            Theme.FillColumn(row);
-            Theme.FixedColumn(row, 14);
-            Theme.FixedColumn(row, 102);
+            string code = BoBoIdentityStore.Default.FormattedDeviceCode;
+            AddPopupItem(menu, "复制本机设备码：" + code, delegate { CopyHostAddress("本机设备码", code); });
+            if (!string.IsNullOrEmpty(hostSnapshot.LanIpv4))
+                AddPopupItem(menu, "复制局域网 IP：" + hostSnapshot.LanIpv4, delegate { CopyHostAddress("局域网 IP", hostSnapshot.LanIpv4); });
+            if (!string.IsNullOrEmpty(hostSnapshot.TailscaleIpv4))
+                AddPopupItem(menu, "复制跨网 IP：" + hostSnapshot.TailscaleIpv4, delegate { CopyHostAddress("跨网 IP", hostSnapshot.TailscaleIpv4); });
+            AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); });
 
-            var icon = new Theme.IconTile(Theme.Glyph.Network, true, Theme.SurfaceSubtle, Theme.Muted, 7.5f);
-            var text = new Theme.TwoLineText(
-                issue == null ? "暂未发现同网设备" : "暂未读取到设备列表",
-                "可登录上方跨网账号，或直接输入 IP / 9 位设备码连接",
-                Theme.TextSize.Label,
-                Theme.BodyInk,
-                Theme.Muted);
+            int hiddenCount = deviceCatalog != null ? deviceCatalog.HiddenKeys.Count : 0;
+            if (hiddenCount > 0)
+            {
+                menu.Items.Add(new ToolStripSeparator());
+                AddPopupItem(menu, "恢复已隐藏的设备（" + hiddenCount + " 条规则）", async delegate
+                {
+                    deviceCatalog.UnhideAll();
+                    deviceCatalog.Save();
+                    SetDevicesHint("已恢复所有此前隐藏的设备，正在刷新列表…", Theme.Success);
+                    await RefreshNetworkDevices();
+                });
+            }
 
-            var manual = Theme.Action("手动连接", Theme.ButtonStyle.Secondary);
-            manual.Margin = new Padding(0, 4, 0, 4);
-            manual.Click += delegate { OpenStreamPage(null); };
+            Point pt = anchor.PointToScreen(new Point(0, anchor.Height + DevicePixels(4)));
+            menu.Show(pt);
+        }
 
-            Theme.Row(row, 42, icon, null, text, null, manual);
-            Theme.Row(rowWrap, 42, row);
-            return rowWrap;
+        private void ShowPeerActionMenu(Control anchor, TsPeer peer, string displayName)
+        {
+            if (peer == null) return;
+            var menu = CreateCleanPopupMenu();
+            var infoHeader = new ToolStripMenuItem(peer.Ip + "  ·  " + peer.LinkText) { Enabled = false };
+            menu.Items.Add(infoHeader);
+            menu.Items.Add(new ToolStripSeparator());
+
+            if (peer.Online)
+            {
+                AddPopupItem(menu, "连接远程桌面", async delegate { await ConnectToDeviceAsync(peer.Ip, displayName); });
+            }
+            AddPopupItem(menu, "发送文件到此设备", delegate
+            {
+                remoteId.Text = peer.Ip;
+                ShowPage(AssistPage);
+                SelectAssistMode(1);
+            });
+            AddPopupItem(menu, "修改备注名称…", delegate { ShowRenameDeviceDialog(peer, displayName); });
+            AddPopupItem(menu, "复制设备地址：" + peer.Ip, delegate { CopyHostAddress("设备地址", peer.Ip); });
+
+            bool isFav = favorites.Exists(f => f.Stream && string.Equals(f.Address, peer.Ip, StringComparison.OrdinalIgnoreCase));
+            AddPopupItem(menu, isFav ? "移出收藏设备" : "加入收藏设备", delegate
+            {
+                var item = new SavedDevice(true, peer.Ip);
+                if (isFav) favorites.RemoveAll(f => f.SameAs(item));
+                else favorites.Insert(0, item);
+                SaveFavorites();
+            });
+
+            menu.Items.Add(new ToolStripSeparator());
+            var removeItem = new ToolStripMenuItem("移除 / 隐藏此设备")
+            {
+                Padding = new Padding(8, 6, 12, 6),
+                ForeColor = Theme.Alert
+            };
+            removeItem.Click += delegate { RemoveOrHidePeer(peer, displayName); };
+            menu.Items.Add(removeItem);
+
+            Point pt = anchor.PointToScreen(new Point(0, anchor.Height + DevicePixels(4)));
+            menu.Show(pt);
+        }
+
+        private void RemoveOrHidePeer(TsPeer peer, string displayName)
+        {
+            if (peer == null || deviceCatalog == null) return;
+            deviceCatalog.HideDevice(peer.Ip, peer.HostName);
+            deviceCatalog.Save();
+            cachedPeers.RemoveAll(p => string.Equals(p.Ip, peer.Ip, StringComparison.OrdinalIgnoreCase));
+            DrawPeerRows(cachedPeers);
+            UpdateQuickDeviceShortcut();
+            SetDevicesHint("已移除「" + displayName + "」（在本机 (i) 菜单中可随时恢复）。", Theme.Muted);
+        }
+
+        private void ShowAddDeviceDialog()
+        {
+            using (var dlg = new Form())
+            {
+                dlg.SuspendLayout();
+                dlg.Text = "添加设备";
+                dlg.AutoScaleMode = AutoScaleMode.Dpi;
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.ClientSize = new Size(440, 286);
+                dlg.BackColor = Theme.Workspace;
+                if (appIcon != null) dlg.Icon = appIcon;
+
+                var root = Theme.Grid(1);
+                Theme.FillColumn(root);
+                root.Padding = new Padding(22, 18, 22, 18);
+
+                Theme.Row(root, 22, Theme.Text("设备地址或 9 位设备码", Theme.TextSize.Small, Theme.Muted));
+                Theme.Row(root, 6);
+                TextBox addrInput = Theme.InputBox("设备地址", "");
+                Theme.Cue(addrInput, "例如 192.168.1.20、100.x.x.x 或 9 位 BoBo 设备码");
+                Theme.Row(root, 38, Theme.WrapInput(addrInput));
+                Theme.Row(root, 12);
+
+                Theme.Row(root, 22, Theme.Text("备注名称（选填）", Theme.TextSize.Small, Theme.Muted));
+                Theme.Row(root, 6);
+                TextBox aliasInput = Theme.InputBox("备注名称", "");
+                Theme.Cue(aliasInput, "例如：家里台式机 / 办公室笔记本");
+                Theme.Row(root, 38, Theme.WrapInput(aliasInput));
+                Theme.Row(root, 12);
+
+                var typeRow = Theme.Grid(3);
+                Theme.FixedColumn(typeRow, 76);
+                Theme.FixedColumn(typeRow, 10);
+                Theme.FillColumn(typeRow);
+                ComboBox typeChoice = Theme.Choice("设备类型", false);
+                typeChoice.Items.AddRange(new object[] { "电脑 (Windows / macOS)", "手机 / 平板 (Android / iOS)" });
+                typeChoice.SelectedIndex = 0;
+                Theme.Row(typeRow, 36, Theme.Text("设备类型", Theme.TextSize.Small, Theme.Muted), null, Theme.WrapInput(typeChoice));
+                Theme.Row(root, 36, typeRow);
+                Theme.Row(root, 16);
+
+                var btnRow = Theme.Grid(4);
+                Theme.FillColumn(btnRow);
+                Theme.FixedColumn(btnRow, 86);
+                Theme.FixedColumn(btnRow, 10);
+                Theme.FixedColumn(btnRow, 104);
+                var cancelBtn = Theme.Action("取消", Theme.ButtonStyle.Secondary);
+                cancelBtn.Click += delegate { dlg.DialogResult = DialogResult.Cancel; dlg.Close(); };
+                var okBtn = Theme.Action("添加设备", Theme.ButtonStyle.Primary);
+                okBtn.Click += delegate
+                {
+                    string err;
+                    string clean = NormalizeFavoriteTarget(addrInput.Text, out err);
+                    if (clean == null)
+                    {
+                        MessageBox.Show(dlg, err ?? "请输入有效的 IP 地址或 9 位 BoBo 设备码。", "格式无效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        addrInput.Focus();
+                        return;
+                    }
+                    if (deviceCatalog != null)
+                    {
+                        deviceCatalog.AddOrUpdateManual(clean, aliasInput.Text, typeChoice.SelectedIndex == 1);
+                        deviceCatalog.Save();
+                    }
+                    dlg.DialogResult = DialogResult.OK;
+                    dlg.Close();
+                };
+                Theme.Row(btnRow, 36, null, cancelBtn, null, okBtn);
+                Theme.Row(root, 36, btnRow);
+
+                dlg.Controls.Add(root);
+                dlg.AcceptButton = okBtn;
+                dlg.CancelButton = cancelBtn;
+                dlg.AutoScaleDimensions = new SizeF(96f, 96f);
+                dlg.ResumeLayout(false);
+                dlg.PerformAutoScale();
+                dlg.PerformLayout();
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    SetDevicesHint("已添加设备到列表，正在更新状态…", Theme.Success);
+                    var _ = RefreshNetworkDevices();
+                }
+            }
+        }
+
+        private void ShowRenameDeviceDialog(TsPeer peer, string currentName)
+        {
+            using (var dlg = new Form())
+            {
+                dlg.SuspendLayout();
+                dlg.Text = "修改设备备注";
+                dlg.AutoScaleMode = AutoScaleMode.Dpi;
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.ClientSize = new Size(380, 174);
+                dlg.BackColor = Theme.Workspace;
+                if (appIcon != null) dlg.Icon = appIcon;
+
+                var root = Theme.Grid(1);
+                Theme.FillColumn(root);
+                root.Padding = new Padding(22, 18, 22, 16);
+                Theme.Row(root, 22, Theme.Text("为 " + peer.Ip + " 设置备注（留空恢复默认）", Theme.TextSize.Small, Theme.Muted));
+                Theme.Row(root, 8);
+                TextBox box = Theme.InputBox("备注名称", currentName);
+                Theme.Row(root, 38, Theme.WrapInput(box));
+                Theme.Row(root, 16);
+
+                var btnRow = Theme.Grid(4);
+                Theme.FillColumn(btnRow);
+                Theme.FixedColumn(btnRow, 82);
+                Theme.FixedColumn(btnRow, 10);
+                Theme.FixedColumn(btnRow, 88);
+                var cancelBtn = Theme.Action("取消", Theme.ButtonStyle.Secondary);
+                cancelBtn.Click += delegate { dlg.DialogResult = DialogResult.Cancel; dlg.Close(); };
+                var saveBtn = Theme.Action("保存", Theme.ButtonStyle.Primary);
+                saveBtn.Click += delegate
+                {
+                    if (deviceCatalog != null)
+                    {
+                        deviceCatalog.SetAlias(peer.Ip, peer.HostName, box.Text);
+                        deviceCatalog.Save();
+                    }
+                    dlg.DialogResult = DialogResult.OK;
+                    dlg.Close();
+                };
+                Theme.Row(btnRow, 36, null, cancelBtn, null, saveBtn);
+                Theme.Row(root, 36, btnRow);
+
+                dlg.Controls.Add(root);
+                dlg.AcceptButton = saveBtn;
+                dlg.CancelButton = cancelBtn;
+                dlg.AutoScaleDimensions = new SizeF(96f, 96f);
+                dlg.ResumeLayout(false);
+                dlg.PerformAutoScale();
+                dlg.PerformLayout();
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    DrawPeerRows(cachedPeers);
+                    UpdateQuickDeviceShortcut();
+                }
+            }
         }
 
         // ==================== DEVICE DETAIL PAGE (UU IMAGE 1 STYLE) ====================
@@ -1177,13 +1379,15 @@ namespace DualRemote
             detailViewport = CreatePage(640, out desk);
             detailDesk = desk;
 
-            // Header: [在线/离线] DEVICE-NAME  ...  [收藏]
-            var head = Theme.Grid(5);
+            // Header: [在线/离线] DEVICE-NAME  ...  [收藏] [移除]
+            var head = Theme.Grid(7);
             Theme.FixedColumn(head, 62);
             Theme.FixedColumn(head, 12);
             Theme.FillColumn(head);
             Theme.FixedColumn(head, 12);
-            Theme.FixedColumn(head, 102);
+            Theme.FixedColumn(head, 92);
+            Theme.FixedColumn(head, 8);
+            Theme.FixedColumn(head, 76);
 
             detailStatusBadge = new Theme.Badge("在线", Theme.PillTone.Success);
             detailTitleLabel = Theme.Text("未选择设备", Theme.TextSize.Title, Theme.Ink);
@@ -1191,7 +1395,21 @@ namespace DualRemote
             detailFavButton.Margin = new Padding(0, 4, 0, 4);
             detailFavButton.Click += delegate { ToggleDetailDeviceFavorite(); };
 
-            Theme.Row(head, 44, detailStatusBadge, null, detailTitleLabel, null, detailFavButton);
+            detailRemoveButton = Theme.Action("移除", Theme.ButtonStyle.DangerSoft);
+            detailRemoveButton.Margin = new Padding(0, 4, 0, 4);
+            detailRemoveButton.Click += delegate
+            {
+                if (string.IsNullOrEmpty(detailDeviceAddress) || deviceCatalog == null) return;
+                deviceCatalog.HideDevice(detailDeviceAddress, detailDeviceName);
+                deviceCatalog.Save();
+                cachedPeers.RemoveAll(p => string.Equals(p.Ip, detailDeviceAddress, StringComparison.OrdinalIgnoreCase));
+                DrawPeerRows(cachedPeers);
+                UpdateQuickDeviceShortcut();
+                ShowPage(AllDevicesPage);
+                SetDevicesHint("已移除「" + detailDeviceName + "」。", Theme.Muted);
+            };
+
+            Theme.Row(head, 44, detailStatusBadge, null, detailTitleLabel, null, detailFavButton, null, detailRemoveButton);
             Theme.Row(desk, 44, head);
             Theme.Row(desk, 18);
 

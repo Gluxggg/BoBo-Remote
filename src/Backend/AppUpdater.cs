@@ -67,7 +67,7 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "7.6.5";
+        internal const string FallbackVersion = "7.6.6";
 
         /// <summary>当前内嵌架构指纹；与发布流水线写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
         internal const string CurrentEnginesStamp = "bobo-v6-allinone-inproc";
@@ -833,14 +833,27 @@ namespace DualRemote
                     {
                         TryRunElevatedServiceSwitch(launchedExe, "--upgrade-service", 25000);
                     }
-                    var psi = new ProcessStartInfo(launchedExe,
-                        string.IsNullOrEmpty(version) ? "" : "--updated-version=" + version)
+                    string launchArg = string.IsNullOrEmpty(version) ? "" : "--updated-version=" + version;
+                    try
                     {
-                        WorkingDirectory = fullTarget,
-                        UseShellExecute = false
-                    };
-                    Process proc = Process.Start(psi);
-                    if (proc != null) proc.Dispose();
+                        var psi = new ProcessStartInfo(launchedExe, launchArg)
+                        {
+                            WorkingDirectory = fullTarget,
+                            UseShellExecute = true
+                        };
+                        Process proc = Process.Start(psi);
+                        if (proc != null) proc.Dispose();
+                    }
+                    catch
+                    {
+                        var fallbackPsi = new ProcessStartInfo(launchedExe, launchArg)
+                        {
+                            WorkingDirectory = fullTarget,
+                            UseShellExecute = false
+                        };
+                        Process proc = Process.Start(fallbackPsi);
+                        if (proc != null) proc.Dispose();
+                    }
                 }
                 return 0;
             }

@@ -37,9 +37,9 @@ namespace DualRemote
         private Button topStatusBtn;
         private Button topMenuBtn;
         private Button maxRestoreBtn;
-        private Button navExitBtn;
-        private CrossNetSidebarCard sidebarCrossNetCard;
         private Control perfDiagCard;
+        private Theme.TwoLineText settingsCrossNetText;
+        private Button settingsCrossNetBtn;
         private Theme.TwoLineText updateStatusCardText;
         private Button updateActionButton;
         private OnboardingOverlayForm activeOnboardingTour;
@@ -48,12 +48,11 @@ namespace DualRemote
 
         private bool navDevicesExpanded = true;
         private bool navAssistExpanded = true;
-        private bool navPrivacyExpanded = true;
         private int navAllDevicesRow = -1;
         private int navStartAssistRow = -1;
         private int navFavoritesRow = -1;
-        private int navPrivacyRow = -1;
 
+        private Theme.SlimScrollViewport settingsViewport;
         private TableLayoutPanel settingsDesk;
         private Panel settingsTabHost;
         private int settingsTabRow = -1;
@@ -90,7 +89,7 @@ namespace DualRemote
             Theme.Row(frame, 48, BuildTopBar());
 
             var body = Theme.Grid(2);
-            Theme.FixedColumn(body, 232);
+            Theme.FixedColumn(body, 212);
             Theme.FillColumn(body);
             Theme.FillRow(body);
             body.BackColor = Theme.ChromeBg;
@@ -102,10 +101,11 @@ namespace DualRemote
             pages[DeviceDetailPage] = BuildDeviceDetailPage();
             pages[AssistPage] = BuildWorkspace();
             pages[FavoritesPage] = BuildFavoritesPage();
-            pages[PrivacyPage] = BuildPrivacyAndDisplayPage();
             pages[SettingsPage] = BuildSettingsPage();
+            pages[PrivacyPage] = null;
             for (int i = 0; i < pages.Length; i++)
             {
+                if (pages[i] == null) continue;
                 pages[i].Visible = false;
                 workspace.Controls.Add(pages[i]);
             }
@@ -132,7 +132,7 @@ namespace DualRemote
         {
             var bar = Theme.Grid(15);
             topBarGrid = bar;
-            Theme.FixedColumn(bar, 232);
+            Theme.FixedColumn(bar, 212);
             Theme.FillColumn(bar);
             topDisconnectCol = bar.ColumnStyles.Count;
             Theme.FixedColumn(bar, 0);
@@ -307,48 +307,15 @@ namespace DualRemote
             navFavoritesRow = rail.RowCount;
             Theme.Row(rail, 36, favoritesBtn);
 
-            Theme.Row(rail, 6);
-
-            // Group 3: 显示与隐私
-            var privacyGroup = Theme.Action("防窥与显示", Theme.ButtonStyle.NavSection, Theme.Glyph.Shield);
-            Theme.Highlight(privacyGroup, true);
-            privacyGroup.Click += delegate
-            {
-                navPrivacyExpanded = !navPrivacyExpanded;
-                Theme.Highlight(privacyGroup, navPrivacyExpanded);
-                SyncNavigationSectionVisibility();
-            };
-            Theme.Row(rail, 34, privacyGroup);
-
-            var privacyBtn = MakePageButton(PrivacyPage, Theme.Glyph.Eye, "防窥与显示");
-            Theme.SetNavIndent(privacyBtn, 14);
-            Theme.SetGlyphTint(privacyBtn, Theme.Accent);
-            navPrivacyRow = rail.RowCount;
-            Theme.Row(rail, 36, privacyBtn);
-
             Theme.FillRow(rail);
 
-            // Compact Glacier-Blue Embedded Tailscale Status Card
-            sidebarCrossNetCard = new CrossNetSidebarCard();
-            sidebarCrossNetCard.Click += async delegate { await HandleCrossNetCardClickAsync(); };
-            Theme.Row(rail, 60, sidebarCrossNetCard);
-            Theme.Row(rail, 8);
-
-            // Bottom pinned divider + Settings + Direct Exit button (clear frontend exit!)
+            // Bottom pinned divider + clean Settings entry (matches UU Remote Image 4)
             Theme.Row(rail, 1, Theme.Rule());
             Theme.Row(rail, 8);
             var settingsBtn = MakePageButton(SettingsPage, Theme.Glyph.Gear, "设置");
             Theme.SetNavIndent(settingsBtn, 0);
             Theme.SetGlyphTint(settingsBtn, Theme.BodyInk);
             Theme.Row(rail, 38, settingsBtn);
-
-            Theme.Row(rail, 4);
-            navExitBtn = Theme.Action("退出 BoBo远程", Theme.ButtonStyle.Navigation, Theme.Glyph.Close);
-            navExitBtn.AccessibleName = "退出 BoBo远程并断开远控";
-            Theme.SetNavIndent(navExitBtn, 0);
-            Theme.SetGlyphTint(navExitBtn, Theme.Alert);
-            navExitBtn.Click += delegate { forceExit = true; Close(); };
-            Theme.Row(rail, 38, navExitBtn);
             return rail;
         }
 
@@ -380,11 +347,6 @@ namespace DualRemote
                 navRail.RowStyles[navFavoritesRow].Height = navAssistExpanded ? itemH : 0;
                 navigation[FavoritesPage].Visible = navAssistExpanded;
             }
-            if (navPrivacyRow >= 0)
-            {
-                navRail.RowStyles[navPrivacyRow].Height = navPrivacyExpanded ? itemH : 0;
-                navigation[PrivacyPage].Visible = navPrivacyExpanded;
-            }
             navRail.ResumeLayout(true);
             NotifyOnboardingLayoutChanged();
         }
@@ -403,9 +365,22 @@ namespace DualRemote
             return button;
         }
 
+        internal void OpenPrivacySettings()
+        {
+            ShowPage(SettingsPage);
+            SelectSettingsTab(1);
+            ResetPageScroll(SettingsPage);
+        }
+
         private void ShowPage(int selected)
         {
+            if (selected == PrivacyPage)
+            {
+                OpenPrivacySettings();
+                return;
+            }
             if (selected < 0 || selected >= pages.Length) return;
+            bool switched = pages[selected] != null && !pages[selected].Visible;
             for (int i = 0; i < pages.Length; i++)
             {
                 bool active = i == selected;
@@ -416,7 +391,11 @@ namespace DualRemote
             {
                 pages[selected].BringToFront();
                 var vp = pages[selected] as Theme.SlimScrollViewport;
-                if (vp != null) vp.RefreshLayout();
+                if (vp != null)
+                {
+                    vp.RefreshLayout();
+                    if (switched) vp.AnimateEntrance();
+                }
             }
             if (selected == AllDevicesPage || selected == FavoritesPage) RefreshSavedDevices();
         }
@@ -477,41 +456,42 @@ namespace DualRemote
         private Control BuildSettingsPage()
         {
             TableLayoutPanel desk;
-            var viewport = CreatePage(700, out desk);
+            var viewport = CreatePage(760, out desk);
+            settingsViewport = viewport;
             settingsDesk = desk;
 
             AddPageHeader(desk, "设置", null);
             Theme.Row(desk, 14);
 
-            // UU-style clean horizontal text tabs with short blue underline indicator
+            // Clean UU-style horizontal tabs with 防窥与显示 integrated cleanly inside 设置
             var tabBar = Theme.Grid(9);
-            Theme.FixedColumn(tabBar, 64);
+            Theme.FixedColumn(tabBar, 88);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 112);
+            Theme.FixedColumn(tabBar, 108);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 140);
+            Theme.FixedColumn(tabBar, 108);
             Theme.FixedColumn(tabBar, 24);
-            Theme.FixedColumn(tabBar, 112);
+            Theme.FixedColumn(tabBar, 108);
             Theme.FillColumn(tabBar);
             Theme.FixedColumn(tabBar, 1);
 
-            var tabGeneral = Theme.Action("常规", Theme.ButtonStyle.UnderlineTab);
-            var tabStream = Theme.Action("串流与画质", Theme.ButtonStyle.UnderlineTab);
-            var tabPerf = Theme.Action("低延迟与抗丢包", Theme.ButtonStyle.UnderlineTab);
-            var tabNetwork = Theme.Action("引擎与网络", Theme.ButtonStyle.UnderlineTab);
+            var tabGeneral = Theme.Action("常规设置", Theme.ButtonStyle.UnderlineTab);
+            var tabPrivacy = Theme.Action("防窥与显示", Theme.ButtonStyle.UnderlineTab);
+            var tabStream = Theme.Action("画面与操控", Theme.ButtonStyle.UnderlineTab);
+            var tabNetwork = Theme.Action("网络与服务", Theme.ButtonStyle.UnderlineTab);
 
-            Theme.Row(tabBar, 38, tabGeneral, null, tabStream, null, tabPerf, null, tabNetwork, null, null);
+            Theme.Row(tabBar, 38, tabGeneral, null, tabPrivacy, null, tabStream, null, tabNetwork, null, null);
             Theme.Row(desk, 38, tabBar);
             Theme.Row(desk, 18);
 
             settingsTabHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Workspace };
-            settingsTabButtons = new[] { tabGeneral, tabStream, tabPerf, tabNetwork };
+            settingsTabButtons = new[] { tabGeneral, tabPrivacy, tabStream, tabNetwork };
             settingsTabPanels = new Control[]
             {
                 BuildGeneralSettingsTab(),
+                BuildPrivacySettingsTab(viewport),
                 BuildStreamSettingsTab(),
-                BuildPerformanceTab(),
-                BuildNetworkAndEnginesTab()
+                BuildNetworkAndServiceTab()
             };
 
             for (int i = 0; i < settingsTabPanels.Length; i++)
@@ -535,6 +515,7 @@ namespace DualRemote
         private void SelectSettingsTab(int selected)
         {
             if (settingsTabPanels == null || selected < 0 || selected >= settingsTabPanels.Length) return;
+            bool tabChanged = activeSettingsTab != selected;
             activeSettingsTab = selected;
             for (int i = 0; i < settingsTabPanels.Length; i++)
             {
@@ -544,6 +525,8 @@ namespace DualRemote
             }
             settingsTabPanels[selected].BringToFront();
             RecalculateSettingsDeskHeight();
+            if (tabChanged && settingsViewport != null && settingsViewport.Visible)
+                settingsViewport.AnimateEntrance();
         }
 
         private void RecalculateSettingsDeskHeight()
@@ -554,6 +537,7 @@ namespace DualRemote
             settingsDesk.RowStyles[settingsTabRow].Height = tabH;
             settingsDesk.Height = SumRows(settingsDesk);
             settingsDesk.PerformLayout();
+            if (settingsViewport != null) settingsViewport.RefreshLayout();
             NotifyOnboardingLayoutChanged();
         }
 
@@ -704,7 +688,7 @@ namespace DualRemote
             return page;
         }
 
-        private Control BuildPerformanceTab()
+        private Control BuildNetworkAndServiceTab()
         {
             var page = Theme.Grid(1);
             Theme.FillColumn(page);
@@ -718,7 +702,7 @@ namespace DualRemote
             var head = Theme.Grid(3);
             Theme.FillColumn(head);
             Theme.FixedColumn(head, 12);
-            Theme.FixedColumn(head, 188);
+            Theme.FixedColumn(head, 206);
             Theme.Row(head, 28, Theme.Text("本机被控诊断", Theme.TextSize.Section, Theme.Ink), null, diagStatusBadge);
             Theme.Row(h, 28, head);
             Theme.Row(h, 4);
@@ -726,11 +710,13 @@ namespace DualRemote
             Theme.Row(h, 6);
             diagDetailsLabel.TextAlign = ContentAlignment.TopLeft;
             diagDetailsLabel.AutoEllipsis = false;
-            Theme.Row(h, 54, diagDetailsLabel);
+            Theme.Row(h, 52, diagDetailsLabel);
             Theme.Row(h, 10);
 
-            var btnBar = Theme.Grid(2);
+            var btnBar = Theme.Grid(4);
             Theme.FixedColumn(btnBar, 114);
+            Theme.FixedColumn(btnBar, 10);
+            Theme.FixedColumn(btnBar, 128);
             Theme.FillColumn(btnBar);
             var refreshDiag = Theme.Action("刷新诊断", Theme.ButtonStyle.Secondary, Theme.Glyph.Refresh);
             refreshDiag.Click += async delegate
@@ -739,53 +725,31 @@ namespace DualRemote
                 try { await RefreshHostDiagnosticsAsync(); }
                 finally { if (!IsDisposed) refreshDiag.Enabled = true; }
             };
-            Theme.Row(btnBar, 36, refreshDiag, null);
+            var openGuide = Theme.Action("查看使用指南", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
+            openGuide.Click += delegate { OpenGuide("README.md"); };
+            Theme.Row(btnBar, 36, refreshDiag, null, openGuide, null);
             Theme.Row(h, 36, btnBar);
             hostCard.Controls.Add(h);
 
-            Theme.Row(page, 194, hostCard);
-            Theme.Row(page, 14);
+            Theme.Row(page, 192, hostCard);
+            Theme.Row(page, 16);
 
-            var guideCard = new Theme.Card { Padding = new Padding(20, 16, 20, 16) };
-            var g = Theme.Grid(1);
-            Theme.FillColumn(g);
-            Theme.Row(g, 26, Theme.Text("串流与网络建议", Theme.TextSize.Section, Theme.Ink));
-            Theme.Row(g, 6);
-            Theme.Row(g, 24, Theme.Text("优先局域网或内置 Tailscale 直连；跨网不可达可启用自建 VPS 兜底中转。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 24, Theme.Text("弱网时 GCC 拥塞控制与动态 FEC 会自动平滑码率，也可手动调低画质。", Theme.TextSize.Small, Theme.BodyInk));
-            Theme.Row(g, 10);
-
-            var links = Theme.Grid(4);
-            Theme.FixedColumn(links, 142);
-            Theme.FixedColumn(links, 10);
-            Theme.FixedColumn(links, 158);
-            Theme.FillColumn(links);
-
-            var openGuide = Theme.Action("打开使用指南", Theme.ButtonStyle.Secondary, Theme.Glyph.Help);
-            var openEt = Theme.Action("EasyTier 组网加速", Theme.ButtonStyle.Secondary);
-            openGuide.Click += delegate { OpenGuide("README.md"); };
-            openEt.Click += delegate { OpenExternalUrl(HostNetworkInfo.EasyTierReleasesUrl, "已打开 EasyTier 开源异地组网 Releases 页。"); };
-            Theme.Row(links, 36, openGuide, null, openEt, null);
-            Theme.Row(g, 36, links);
-            guideCard.Controls.Add(g);
-
-            Theme.Row(page, 160, guideCard);
-            return page;
-        }
-
-        private Control BuildNetworkAndEnginesTab()
-        {
-            var page = Theme.Grid(1);
-            Theme.FillColumn(page);
-
-            Theme.Row(page, 22, Theme.Text("内核与传输", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 22, Theme.Text("跨网与服务", Theme.TextSize.Label, Theme.Muted));
             Theme.Row(page, 8);
 
             var card = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var list = Theme.Grid(1);
             Theme.FillColumn(list);
 
-            AddGroupedSettingRow(list, false, Theme.Glyph.Bolt, "BoBoCore 原生内核",
+            settingsCrossNetBtn = Theme.Action("一键登录", Theme.ButtonStyle.AccentSoft, Theme.Glyph.Network);
+            settingsCrossNetBtn.Click += async delegate { await HandleCrossNetCardClickAsync(); };
+            settingsCrossNetText = AddGroupedSettingRowWithDesc(list, false, Theme.Glyph.Network,
+                "内置跨网账号 (Tailscale)",
+                "免装虚拟网卡 · 双端同账号即可异地直连",
+                settingsCrossNetBtn, 120);
+            SyncSettingsCrossNetRow(BoBoEmbeddedTailnet.Default.LatestSnapshot);
+
+            AddGroupedSettingRow(list, true, Theme.Glyph.Bolt, "BoBoCore 原生内核",
                 "DXGI / MF / D3D11 / WASAPI 单文件全内置",
                 BuildEngineActionRow(BoBoCoreInterop.IsLoaded, "运行自检", delegate { RunNativeCoreSelfTestDialog(); }), 186);
 
@@ -959,17 +923,54 @@ namespace DualRemote
         {
             bool serverUp = boboHostServer != null && boboHostServer.IsRunning;
             bool allowing = serverUp && boboHostServer.AllowIncomingControl;
+            int actualPort = serverUp ? boboHostServer.ListeningPort : BoBoProtocol.DefaultTcpPort;
             int peerCount = BoBoIdentityStore.Default.ListAuthorizedPeers().Count;
             if (allowing)
-                diagStatusBadge.UpdateStatus("V6 内置运行中 · 端口 " + boboHostServer.ListeningPort, Theme.PillTone.Success);
+            {
+                string portLabel = boboHostServer.IsUsingFallbackPort
+                    ? ("V6 运行中 · 备用端口 " + actualPort)
+                    : ("V6 内置运行中 · 端口 " + actualPort);
+                diagStatusBadge.UpdateStatus(portLabel, Theme.PillTone.Success);
+            }
             else if (serverUp)
                 diagStatusBadge.UpdateStatus("已暂停入站被控", Theme.PillTone.Warning);
             else
                 diagStatusBadge.UpdateStatus("被控服务未启动", Theme.PillTone.Alert);
 
-            diagVersionLabel.Text = "全内置 BoBoCore v7.3 · 本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
-            diagDetailsLabel.Text = "已授权设备 " + peerCount + " 台 · 控制口 TCP " + BoBoProtocol.DefaultTcpPort + " (TLS 1.2)\r\n"
+            diagVersionLabel.Text = "全内置 BoBoCore v" + AppUpdater.CurrentVersion + " · 本机设备码：" + BoBoIdentityStore.Default.FormattedDeviceCode;
+            diagDetailsLabel.Text = "已授权设备 " + peerCount + " 台 · 控制口 TCP " + actualPort + " (TLS 1.2)"
+                + (serverUp && boboHostServer.IsUsingFallbackPort ? "（49810 被旧进程占用，已自动切换）" : "") + "\r\n"
                 + "媒体流 UDP+AES-128-GCM+FEC/NACK · 局域网发现 UDP " + BoBoProtocol.DiscoveryUdpPort;
+        }
+
+        private void SyncSettingsCrossNetRow(EmbeddedTailnetSnapshot snap)
+        {
+            if (settingsCrossNetText == null || settingsCrossNetBtn == null) return;
+            string st = snap != null ? (snap.BackendState ?? "Stopped") : "Stopped";
+            bool running = string.Equals(st, "Running", StringComparison.OrdinalIgnoreCase);
+            bool waiting = !running && snap != null && !string.IsNullOrEmpty(snap.AuthUrl);
+            if (running)
+            {
+                string acct = !string.IsNullOrEmpty(snap.DisplayName) ? snap.DisplayName
+                    : (!string.IsNullOrEmpty(snap.LoginName) ? snap.LoginName : "已登录");
+                settingsCrossNetText.TitleText = "跨网账号 · " + acct;
+                settingsCrossNetText.SubtitleText = string.IsNullOrEmpty(snap.SelfIp4)
+                    ? "跨网通道在线 · 已自动对接本地被控端口"
+                    : ("跨网 IP：" + snap.SelfIp4 + " · 发现 " + (snap.Peers != null ? snap.Peers.Count : 0) + " 台设备");
+                settingsCrossNetBtn.Text = "退出账号";
+            }
+            else if (waiting)
+            {
+                settingsCrossNetText.TitleText = "跨网账号 · 等待浏览器授权";
+                settingsCrossNetText.SubtitleText = "点击右侧按钮继续在浏览器完成 Tailscale 登录";
+                settingsCrossNetBtn.Text = "打开登录页";
+            }
+            else
+            {
+                settingsCrossNetText.TitleText = "内置跨网账号 (Tailscale)";
+                settingsCrossNetText.SubtitleText = "免装虚拟网卡 · 双端同账号即可异地直连";
+                settingsCrossNetBtn.Text = "一键登录";
+            }
         }
 
         // ==================== TOP BAR POPOVERS (UU IMAGE 9 & 10 STYLE) ====================
@@ -1013,9 +1014,10 @@ namespace DualRemote
         private void ShowHostStatusPopover()
         {
             var menu = CreateCleanPopupMenu();
-            string hostState = (boboHostServer != null && boboHostServer.IsRunning && boboHostServer.AllowIncomingControl)
-                ? ("V6 内置运行中 · 端口 " + boboHostServer.ListeningPort)
-                : "本机被控已暂停";
+            bool serverUp = boboHostServer != null && boboHostServer.IsRunning;
+            string hostState = (serverUp && boboHostServer.AllowIncomingControl)
+                ? ("被控就绪 · 端口 " + boboHostServer.ListeningPort)
+                : (serverUp ? "已暂停被控" : "被控服务未启动");
             var header = new ToolStripMenuItem("本机：" + Environment.MachineName + "  (" + hostState + ")") { Enabled = false };
             menu.Items.Add(header);
             menu.Items.Add(new ToolStripSeparator());
@@ -1030,9 +1032,22 @@ namespace DualRemote
             AddPopupItem(menu, "复制 Tailscale IP：" + ts, delegate { CopyHostAddress("Tailscale IP", hostSnapshot.TailscaleIpv4); });
             AddPopupItem(menu, "复制公网 IPv6：" + v6, delegate { CopyHostAddress("公网 IPv6", hostSnapshot.PublicIpv6); });
             menu.Items.Add(new ToolStripSeparator());
+
+            EmbeddedTailnetSnapshot emb = BoBoEmbeddedTailnet.Default.LatestSnapshot;
+            bool embRunning = emb != null && string.Equals(emb.BackendState, "Running", StringComparison.OrdinalIgnoreCase);
+            if (embRunning)
+            {
+                AddPopupItem(menu, "退出内置跨网账号（" + (string.IsNullOrEmpty(emb.DisplayName) ? emb.SelfIp4 : emb.DisplayName) + "）",
+                    delegate { var _ = CancelOrLogoutEmbeddedTailnetAsync(); });
+            }
+            else
+            {
+                AddPopupItem(menu, "登录内置跨网账号（Tailscale）",
+                    delegate { var _ = HandleCrossNetCardClickAsync(); });
+            }
             AddPopupItem(menu, "前往「开始协助」生成 4 位配对码", delegate { ShowPage(AssistPage); });
 
-            int menuW = Math.Max(DevicePixels(250), menu.PreferredSize.Width);
+            int menuW = Math.Max(DevicePixels(260), menu.PreferredSize.Width);
             Point pt = topStatusBtn.PointToScreen(new Point(topStatusBtn.Width - menuW, topStatusBtn.Height + DevicePixels(6)));
             menu.Show(pt);
         }
@@ -1345,9 +1360,13 @@ namespace DualRemote
                 }, updateCts.Token);
 
                 if (IsDisposed) return;
+                // 更新前先彻底释放监听端口与内置子进程，防止句柄继承锁死 49810
+                TeardownRemoteSessionsOnExit();
                 string launchErr;
                 if (!AppUpdater.TryLaunchDownloadedUpdate(update, downloadedPath, out launchErr))
                 {
+                    remoteSessionsTornDown = false;
+                    EnsureBoBoHostServerStarted();
                     updateBusy = false;
                     if (updateActionButton != null)
                     {
@@ -1482,9 +1501,9 @@ namespace DualRemote
             {
                 new OnboardingStep
                 {
-                    Title = "欢迎使用 BoBo远程 · 功能导航栏",
-                    Description = "局域网高清串流、加密文件互传与防窥壁纸均已内置。左侧导航分为「我的设备」「远程协助」「防窥与显示」与底部「设置」四大区。",
-                    Tip = "仅跨外网 2K 高帧串流与硬件级彻底熄屏属于可选进阶能力，后续步骤会说明。支持 ←/→ 翻页，Esc 跳过。",
+                    Title = "欢迎使用 BoBo远程 · 极简导航栏",
+                    Description = "左侧导航已精简为「我的设备」「远程协助」与底部「设置」三大区（防窥与显示设置已收纳至设置页）。",
+                    Tip = "支持键盘 ←/→ 翻页，Esc 跳过引导。",
                     PaddingPx = 4,
                     Prepare = delegate
                     {
@@ -1495,22 +1514,9 @@ namespace DualRemote
                 },
                 new OnboardingStep
                 {
-                    Title = "本机状态与一键直连入口",
-                    Description = "右上角标签实时展示本机被控与防窥状态。同局域网下，被控端点「允许连接本机」生成 4 位配对码，控制端点「手动连接设备」输入对方 IP 即可零配置开启高清低延迟串流。",
-                    Tip = "可选进阶：若要跨外网跑 2K 高帧串流，需两台电脑安装同一组网工具（如 Tailscale）或具备公网 IPv6。",
-                    PaddingPx = 6,
-                    Prepare = delegate
-                    {
-                        ShowPage(AllDevicesPage);
-                        ResetPageScroll(AllDevicesPage);
-                    },
-                    ResolveTargetClientRect = delegate { return GetClientRectForControl(hostCardControl); }
-                },
-                new OnboardingStep
-                {
-                    Title = "自动发现同网电脑与收藏秒连",
-                    Description = "局域网或 Tailscale 同网设备会自动列在这里，显示在线状态与直连/中继链路。点击任意在线设备即可发起 60~144Hz 硬件编码串流；收藏常用设备后，会固定在左侧快捷栏一键直达。",
-                    Tip = "首次被控若弹出 Windows 防火墙提示，请点「允许访问」；暂未发现设备可点右上角「刷新状态」。",
+                    Title = "设备列表 · 添加与精简管理",
+                    Description = "自动发现同局域网或同账号电脑，按「电脑」「手机/平板」分组卡片展示。支持右上角「+ 添加设备」、重命名备注或点击设备右侧 (i) 隐藏不需要的冗余设备。",
+                    Tip = "同机多网卡/多通道节点已自动智能去重，不会反复占满列表。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1523,14 +1529,14 @@ namespace DualRemote
                         Rectangle groupRect = GetClientRectForControl(computersGroupBtn);
                         if (!groupRect.IsEmpty && !listRect.IsEmpty)
                             return Rectangle.Union(groupRect, listRect);
-                        return listRect;
+                        return !listRect.IsEmpty ? listRect : GetClientRectForControl(devicesGuideCard);
                     }
                 },
                 new OnboardingStep
                 {
-                    Title = "远程协助 · 4 位配对码与 9 位跨网设备码",
-                    Description = "上方「本设备」显示本机地址与设备码，可生成 120 秒有效的 4 位配对码；下方可切换高清串流与加密文件传输。两端同时打开 BoBo远程，首次连接完成配对后即可使用。",
-                    Tip = "跨公网连接可使用 Tailscale 或可达的公网 IPv6；设备码可用于查找同网及已授权设备。",
+                    Title = "远程协助 · 即点即出 4 位配对码",
+                    Description = "在「本设备」点击「生成配对码」（或直接点击 • • • • 区域）立即生成 120 秒有效的 4 位临时码，下方可连接伙伴设备或加密传文件。",
+                    Tip = "默认仅保留最常用输入与连接按钮，点击「高级线路与画质选项」可按需展开路由与中转配置。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1540,32 +1546,31 @@ namespace DualRemote
                     },
                     ResolveTargetClientRect = delegate
                     {
-                        return GetClientRectForControl(assistPartnerCard ?? assistLocalCard);
+                        return GetClientRectForControl(assistLocalCard ?? assistPartnerCard);
                     }
                 },
                 new OnboardingStep
                 {
-                    Title = "防窥壁纸与显示保护",
-                    Description = "软件防窥壁纸开箱即用：开启后物理屏立刻覆盖安全壁纸，而远程画面依然清晰可见，支持远控自动开启与退出自动锁屏。紧急解除按 Ctrl+Alt+Shift+P（系统锁屏解锁后不会误重拉）。",
-                    Tip = "可在串流控制中心切换超级屏和显示缩放。",
+                    Title = "防窥壁纸与显示保护（设置页）",
+                    Description = "防窥与显示已集成至「设置 → 防窥与显示」：开启后物理屏立刻覆盖安全壁纸，远程画面清晰可见，支持 Ctrl+Alt+Shift+P 紧急解除。",
+                    Tip = "也可以随时点击右上角小盾牌图标一键开关防窥壁纸。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
-                        ShowPage(PrivacyPage);
-                        ResetPageScroll(PrivacyPage);
+                        OpenPrivacySettings();
                     },
                     ResolveTargetClientRect = delegate { return GetClientRectForControl(wallpaperCardControl); }
                 },
                 new OnboardingStep
                 {
-                    Title = "检查本机被控状态",
-                    Description = "查看本机被控服务是否运行、已授权设备数量与监听端口。点击「刷新诊断」可重新检查当前网络状态。",
-                    Tip = "串流时可在控制中心查看网络状态并调整画质。",
+                    Title = "检查本机被控状态与跨网服务",
+                    Description = "在「设置 → 网络与服务」查看监听端口、跨网账号、已授权设备与锁屏穿透服务状态。",
+                    Tip = "如默认 49810 端口被占，系统会自动无缝启用备用端口并同步给跨网与局域网广播。",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
                         ShowPage(SettingsPage);
-                        SelectSettingsTab(2);
+                        SelectSettingsTab(3);
                         ResetPageScroll(SettingsPage);
                     },
                     ResolveTargetClientRect = delegate { return GetClientRectForControl(perfDiagCard); }
@@ -1573,8 +1578,8 @@ namespace DualRemote
                 new OnboardingStep
                 {
                     Title = "顶部快捷工具栏 · 随时重看引导",
-                    Description = "右上角快捷栏整合了四个高频入口：依次是「新手引导 (?)」、「一键开关防窥壁纸」、「本机 IP 速查面板」与「更多工具菜单」，无需切页即可随时操作。",
-                    Tip = "引导完成后将不再自动弹出；以后随时点右上角「?」图标都能重新查看本教程！",
+                    Description = "右上角快捷栏整合了「新手引导 (?)」、「一键防窥」、「本机状态与跨网账号」和「更多功能菜单」。",
+                    Tip = "引导完成后不再自动弹出；以后点右上角「?」随时可重新查看！",
                     PaddingPx = 6,
                     Prepare = delegate
                     {
@@ -1795,200 +1800,16 @@ namespace DualRemote
             catch (UnauthorizedAccessException) { PreferenceError(); }
         }
 
-        private sealed class CrossNetSidebarCard : Control
+        private static string FormatSpacedPin(string pin)
         {
-            private readonly UiTransition hoverTransition;
-            private readonly UiTransition pressTransition;
-            private readonly UiTransition rippleTransition;
-            private bool pressed;
-            private PointF rippleOrigin;
-            private bool rippleVisible;
-            private string primaryText = "内置跨网 · 未登录";
-            private string secondaryText = "点击一键登录 Tailscale";
-            private int visualTone = 0; // 0=Neutral/Accent, 1=Warning, 2=Success
-
-            internal CrossNetSidebarCard()
+            if (string.IsNullOrEmpty(pin)) return "• • • •";
+            var chars = new char[pin.Length * 2 - 1];
+            for (int i = 0; i < pin.Length; i++)
             {
-                hoverTransition = new UiTransition(this);
-                pressTransition = new UiTransition(this);
-                rippleTransition = new UiTransition(this);
-                Dock = DockStyle.Fill;
-                Margin = Padding.Empty;
-                Cursor = Cursors.Hand;
-                BackColor = Theme.ChromeBg;
-                AccessibleName = "内置跨网账号状态";
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                chars[i * 2] = pin[i];
+                if (i + 1 < pin.Length) chars[i * 2 + 1] = ' ';
             }
-
-            internal string PrimaryText { get { return primaryText; } }
-            internal string SecondaryText { get { return secondaryText; } }
-            internal int VisualTone { get { return visualTone; } }
-
-            internal void ApplyEmbeddedSnapshot(EmbeddedTailnetSnapshot snap)
-            {
-                string state = snap != null ? (snap.BackendState ?? "") : "";
-                if (string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
-                {
-                    string acct = !string.IsNullOrEmpty(snap.DisplayName) ? snap.DisplayName
-                        : !string.IsNullOrEmpty(snap.LoginName) ? snap.LoginName
-                        : !string.IsNullOrEmpty(snap.TailnetName) ? snap.TailnetName
-                        : "内置跨网已就绪";
-                    primaryText = acct;
-                    secondaryText = string.IsNullOrEmpty(snap.SelfIp4) ? "内置跨网 · 在线" : (snap.SelfIp4 + " · 在线");
-                    visualTone = 2;
-                }
-                else if (snap != null && !string.IsNullOrEmpty(snap.AuthUrl))
-                {
-                    primaryText = "等待浏览器授权…";
-                    secondaryText = "点击在浏览器完成登录";
-                    visualTone = 1;
-                }
-                else if (string.Equals(state, "Starting", StringComparison.OrdinalIgnoreCase))
-                {
-                    primaryText = "内置跨网启动中…";
-                    secondaryText = "正在连接协调节点";
-                    visualTone = 1;
-                }
-                else if (string.Equals(state, "NeedsMachineAuth", StringComparison.OrdinalIgnoreCase))
-                {
-                    primaryText = "等待设备审批";
-                    secondaryText = "需管理员确认设备加入";
-                    visualTone = 1;
-                }
-                else
-                {
-                    primaryText = "内置跨网 · 未登录";
-                    secondaryText = "点击一键登录 Tailscale";
-                    visualTone = 0;
-                }
-                AccessibleName = primaryText + "，" + secondaryText;
-                Invalidate();
-            }
-
-            protected override void OnMouseEnter(EventArgs e)
-            {
-                hoverTransition.AnimateTo(1f, 130, UiEase.EaseOutQuint);
-                Invalidate();
-                base.OnMouseEnter(e);
-            }
-
-            protected override void OnMouseLeave(EventArgs e)
-            {
-                if (pressed)
-                {
-                    pressed = false;
-                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
-                }
-                hoverTransition.AnimateTo(0f, 130, UiEase.EaseOutQuint);
-                Invalidate();
-                base.OnMouseLeave(e);
-            }
-
-            protected override void OnMouseDown(MouseEventArgs e)
-            {
-                if (e.Button == MouseButtons.Left)
-                {
-                    pressed = true;
-                    pressTransition.AnimateTo(1f, 60, UiEase.EaseOutQuint);
-                    rippleOrigin = e.Location;
-                    rippleVisible = true;
-                    rippleTransition.RestartFrom(0f, 1f, 280, UiEase.EaseOutExpo);
-                    Invalidate();
-                }
-                base.OnMouseDown(e);
-            }
-
-            protected override void OnMouseUp(MouseEventArgs e)
-            {
-                if (pressed)
-                {
-                    pressed = false;
-                    pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
-                    Invalidate();
-                }
-                base.OnMouseUp(e);
-            }
-
-            protected override void OnMouseCaptureChanged(EventArgs e)
-            {
-                base.OnMouseCaptureChanged(e);
-                if (!pressed || Capture) return;
-                pressed = false;
-                pressTransition.AnimateTo(0f, 180, UiEase.EaseOutQuint);
-                Invalidate();
-            }
-
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                if (Width < 16 || Height < 16) return;
-                Graphics g = e.Graphics;
-                Theme.FillBg(g, ClientRectangle, Theme.ChromeBg);
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-                float scale = Math.Max(1f, g.DpiX / 96f);
-                float hover = hoverTransition.Value;
-                float press = pressTransition.Value;
-                float rippleT = rippleTransition.Value;
-                if (rippleVisible && !rippleTransition.IsRunning && rippleT >= 1f)
-                    rippleVisible = false;
-
-                Color bg = Blend(Blend(Theme.Paper, Theme.AccentLight, hover * 0.85f), Theme.NavActive, press * 0.65f);
-                Color border = Blend(Theme.Stroke, Theme.AccentBorder, Math.Max(hover, press));
-                float inset = press * 0.85f * scale;
-                var cardRect = new RectangleF(0.5f + inset, 0.5f + inset,
-                    Math.Max(4f, Width - 1f - inset * 2f), Math.Max(4f, Height - 1f - inset * 2f));
-                Theme.Surface(g, cardRect, 8f * scale, bg, border, 1f);
-                if (rippleVisible && !SystemInformation.HighContrast)
-                    Theme.DrawClickRipple(g, cardRect, 8f * scale, rippleOrigin, rippleT, Theme.Accent, 24);
-
-                Color iconBg = visualTone == 2 ? Theme.SuccessLight : visualTone == 1 ? Theme.WarningLight : Theme.AccentLight;
-                Color iconFg = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.Accent;
-                float iconBox = (float)Math.Round(30f * scale);
-                float iconX = (float)Math.Round(10f * scale);
-                float iconY = (float)Math.Round((Height - iconBox) * 0.5f);
-                var iconRect = new RectangleF(iconX, iconY, iconBox, iconBox);
-                Theme.Surface(g, iconRect, 7f * scale, iconBg, Color.Transparent);
-                float pad = (float)Math.Round(6f * scale);
-                Theme.DrawGlyph(g, Theme.Glyph.Network, RectangleF.Inflate(iconRect, -pad, -pad), iconFg);
-
-                float dotSize = (float)Math.Round(6.5f * scale);
-                float dotX = Width - (float)Math.Round(10f * scale) - dotSize;
-                float dotY = (float)Math.Round(11f * scale);
-                Color dotColor = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.StrokeStrong;
-                using (var db = new SolidBrush(dotColor))
-                    g.FillEllipse(db, dotX, dotY, dotSize, dotSize);
-
-                int textLeft = (int)Math.Round(iconX + iconBox + 10f * scale);
-                int textW = Math.Max(16, (int)Math.Floor(dotX - 6f * scale - textLeft));
-                int topPad = (int)Math.Round(10f * scale);
-                int lineH = Math.Max(15, (int)Math.Round(18f * scale));
-                int subTop = topPad + lineH + (int)Math.Round(2f * scale);
-
-                TextRenderer.DrawText(g, primaryText, Theme.GetFont(Theme.TextSize.LabelBold),
-                    new Rectangle(textLeft, topPad, textW, lineH), Theme.Ink,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
-                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
-
-                Color subColor = visualTone == 2 ? Theme.Success : visualTone == 1 ? Theme.Warning : Theme.Muted;
-                TextRenderer.DrawText(g, secondaryText, Theme.GetFont(Theme.TextSize.Small),
-                    new Rectangle(textLeft, subTop, textW + (int)Math.Round(10f * scale), lineH), subColor,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
-                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
-            }
-
-            private static Color Blend(Color a, Color b, float t)
-            {
-                if (t <= 0f) return a;
-                if (t >= 1f) return b;
-                return Color.FromArgb(
-                    (int)Math.Round(a.A + (b.A - a.A) * t),
-                    (int)Math.Round(a.R + (b.R - a.R) * t),
-                    (int)Math.Round(a.G + (b.G - a.G) * t),
-                    (int)Math.Round(a.B + (b.B - a.B) * t));
-            }
+            return new string(chars);
         }
     }
 }

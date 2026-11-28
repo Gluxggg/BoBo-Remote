@@ -373,3 +373,71 @@ func TestPickPreferredWireGuardPortAndPeerAddrsJson(t *testing.T) {
 		t.Fatalf("PeerDTO addrs missing in JSON: %s", string(raw))
 	}
 }
+
+func TestControlMuxForwardTargetUpdate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := newTsManager(ctx, cancel, "", "fwd-pc", defaultForwardTarget, "tok-fwd")
+	mux := buildControlMux("tok-fwd", mgr, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	baseURL := "http://" + ln.Addr().String()
+
+	// 1. Unauthorized must fail with 401
+	unauthReq, _ := http.NewRequest(http.MethodPost, baseURL+"/forward-target?port=49823", nil)
+	unauthResp, err := http.DefaultClient.Do(unauthReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", unauthResp.StatusCode)
+	}
+
+	// 2. Invalid port must return 400
+	badReq, _ := http.NewRequest(http.MethodPost, baseURL+"/forward-target?port=0", nil)
+	badReq.Header.Set("X-BoBo-Token", "tok-fwd")
+	badResp, err := http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid port, got %d", badResp.StatusCode)
+	}
+
+	// 3. Valid port updates both TCP and UDP targets cleanly
+	okReq, _ := http.NewRequest(http.MethodPost, baseURL+"/forward-target?port=49823", nil)
+	okReq.Header.Set("X-BoBo-Token", "tok-fwd")
+	okResp, err := http.DefaultClient.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from /forward-target, got %d", okResp.StatusCode)
+	}
+	var out struct {
+		OK               bool   `json:"ok"`
+		ForwardTarget    string `json:"forwardTarget"`
+		UdpForwardTarget string `json:"udpForwardTarget"`
+	}
+	if err := json.NewDecoder(okResp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || out.ForwardTarget != "127.0.0.1:49823" || out.UdpForwardTarget != "127.0.0.1:49824" {
+		t.Fatalf("unexpected /forward-target output: %+v", out)
+	}
+	gotTcp, gotUdp := mgr.getForwardTargets()
+	if gotTcp != "127.0.0.1:49823" || gotUdp != "127.0.0.1:49824" {
+		t.Fatalf("manager forward targets not updated: tcp=%q udp=%q", gotTcp, gotUdp)
+	}
+}

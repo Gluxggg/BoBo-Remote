@@ -32,6 +32,22 @@ namespace DualRemote
         private readonly bool enableUdpDiscovery;
         private readonly object stateGate = new object();
         private readonly object pairGate = new object();
+        internal bool AllowPortFallback = true;
+
+        private const uint HandleFlagInherit = 0x00000001u;
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+
+        internal static void DisableSocketInheritance(Socket socket)
+        {
+            if (socket == null) return;
+            try
+            {
+                IntPtr h = socket.Handle;
+                if (h != IntPtr.Zero) SetHandleInformation(h, HandleFlagInherit, 0);
+            }
+            catch { }
+        }
 
         private TcpListener listener;
         private UdpClient discoveryUdp;
@@ -73,6 +89,7 @@ namespace DualRemote
         internal bool IsRunning { get { return running; } }
         internal int ListeningPort { get { return boundPort; } }
         internal int ListeningUdpPort { get { return boundUdpPort; } }
+        internal bool IsUsingFallbackPort { get { return running && boundPort > 0 && requestedPort > 0 && boundPort != requestedPort; } }
         internal bool HasActiveRemoteSession { get { return activeStreamRunning; } }
         internal string ActivePeerName { get { return activePeerName; } }
 
@@ -89,6 +106,41 @@ namespace DualRemote
             }
         }
 
+        private static bool TryBindTcpListener(int port, out TcpListener tcp, out Exception lastError)
+        {
+            tcp = null;
+            lastError = null;
+            try
+            {
+                var candidate = new TcpListener(IPAddress.IPv6Any, port);
+                candidate.ExclusiveAddressUse = true;
+                candidate.Server.DualMode = true;
+                DisableSocketInheritance(candidate.Server);
+                candidate.Start();
+                tcp = candidate;
+                return true;
+            }
+            catch (Exception ex6)
+            {
+                lastError = ex6;
+                try
+                {
+                    var candidate4 = new TcpListener(IPAddress.Any, port);
+                    candidate4.ExclusiveAddressUse = true;
+                    DisableSocketInheritance(candidate4.Server);
+                    candidate4.Start();
+                    tcp = candidate4;
+                    lastError = null;
+                    return true;
+                }
+                catch (Exception ex4)
+                {
+                    lastError = ex4;
+                    return false;
+                }
+            }
+        }
+
         internal bool Start(out string error)
         {
             error = null;
@@ -100,17 +152,24 @@ namespace DualRemote
                     identity.EnsureLoaded();
                     cts = new CancellationTokenSource();
 
-                    TcpListener tcp = null;
-                    try
+                    TcpListener tcp;
+                    Exception lastErr;
+                    if (!TryBindTcpListener(requestedPort, out tcp, out lastErr) && AllowPortFallback && requestedPort > 0)
                     {
-                        tcp = new TcpListener(IPAddress.IPv6Any, requestedPort);
-                        tcp.Server.DualMode = true;
-                        tcp.Start();
+                        for (int candidate = 49820; candidate <= 49829; candidate++)
+                        {
+                            if (candidate == requestedPort) continue;
+                            if (TryBindTcpListener(candidate, out tcp, out lastErr)) break;
+                        }
+                        if (tcp == null)
+                        {
+                            TryBindTcpListener(0, out tcp, out lastErr);
+                        }
                     }
-                    catch
+
+                    if (tcp == null)
                     {
-                        tcp = new TcpListener(IPAddress.Any, requestedPort);
-                        tcp.Start();
+                        throw lastErr ?? new SocketException((int)SocketError.AddressAlreadyInUse);
                     }
 
                     listener = tcp;
@@ -118,7 +177,7 @@ namespace DualRemote
                     running = true;
 
                     StartMediaUdpLocked(cts.Token);
-                    if (requestedPort == BoBoProtocol.DefaultTcpPort)
+                    if (boundPort == BoBoProtocol.DefaultTcpPort)
                     {
                         BoBoNatTraversal.TryEnsureElevatedFirewallRules();
                     }
@@ -144,6 +203,48 @@ namespace DualRemote
             lock (stateGate)
             {
                 StopInternalLocked();
+            }
+        }
+
+        internal bool TryPromoteToRequestedPort()
+        {
+            lock (stateGate)
+            {
+                if (!running || !IsUsingFallbackPort || requestedPort <= 0 || activeStreamRunning || cts == null)
+                    return false;
+                lock (activeConnections)
+                {
+                    if (activeConnections.Count > 0) return false;
+                }
+                if (!udpSessions.IsEmpty) return false;
+
+                TcpListener promoted;
+                Exception err;
+                if (!TryBindTcpListener(requestedPort, out promoted, out err) || promoted == null)
+                    return false;
+
+                TcpListener oldListener = listener;
+                listener = promoted;
+                boundPort = ((IPEndPoint)promoted.LocalEndpoint).Port;
+                if (oldListener != null)
+                {
+                    try { oldListener.Stop(); } catch { }
+                }
+
+                UdpClient oldUdp = mediaUdp;
+                mediaUdp = null;
+                boundUdpPort = 0;
+                if (oldUdp != null)
+                {
+                    try { oldUdp.Close(); } catch { }
+                }
+                StartMediaUdpLocked(cts.Token);
+                if (boundPort == BoBoProtocol.DefaultTcpPort)
+                {
+                    BoBoNatTraversal.TryEnsureElevatedFirewallRules();
+                }
+                Task _accept = Task.Run(delegate { return AcceptLoopAsync(promoted, cts.Token); });
+                return true;
             }
         }
 
@@ -300,6 +401,7 @@ namespace DualRemote
             try
             {
                 var udp = new UdpClient();
+                DisableSocketInheritance(udp.Client);
                 udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 udp.EnableBroadcast = true;
                 try
@@ -422,12 +524,16 @@ namespace DualRemote
         private void StartMediaUdpLocked(CancellationToken ct)
         {
             boundUdpPort = 0;
-            int desiredUdp = requestedPort == 0 ? 0 : BoBoProtocol.DefaultUdpPort;
+            int desiredUdp = boundPort <= 0
+                ? 0
+                : (boundPort == BoBoProtocol.DefaultTcpPort ? BoBoProtocol.DefaultUdpPort : Math.Min(65535, boundPort + 1));
             UdpClient udp = null;
             try
             {
                 udp = new UdpClient(AddressFamily.InterNetworkV6);
+                udp.ExclusiveAddressUse = true;
                 udp.Client.DualMode = true;
+                DisableSocketInheritance(udp.Client);
                 BoBoUdpSocketUtil.ConfigureLowLatencySocket(udp.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
                 BoBoNatTraversal.ConfigureLowLatencyUdpSocket(udp.Client);
                 udp.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, desiredUdp));
@@ -438,6 +544,8 @@ namespace DualRemote
                 try
                 {
                     udp = new UdpClient(AddressFamily.InterNetwork);
+                    udp.ExclusiveAddressUse = true;
+                    DisableSocketInheritance(udp.Client);
                     BoBoUdpSocketUtil.ConfigureLowLatencySocket(udp.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
                     BoBoNatTraversal.ConfigureLowLatencyUdpSocket(udp.Client);
                     udp.Client.Bind(new IPEndPoint(IPAddress.Any, desiredUdp));
@@ -450,6 +558,8 @@ namespace DualRemote
                         try
                         {
                             udp = new UdpClient(AddressFamily.InterNetwork);
+                            udp.ExclusiveAddressUse = true;
+                            DisableSocketInheritance(udp.Client);
                             BoBoUdpSocketUtil.ConfigureLowLatencySocket(udp.Client, 2 * 1024 * 1024, 4 * 1024 * 1024);
                             BoBoNatTraversal.ConfigureLowLatencyUdpSocket(udp.Client);
                             udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
@@ -497,9 +607,13 @@ namespace DualRemote
                         sess.HandleIncomingDatagram(buf, n, new IPEndPoint(sender.Address, sender.Port));
                     }
                 }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
                 catch
                 {
-                    if (ct.IsCancellationRequested || !running) break;
+                    if (ct.IsCancellationRequested || !running || !object.ReferenceEquals(mediaUdp, udp)) break;
                 }
             }
         }
@@ -560,6 +674,7 @@ namespace DualRemote
                 try
                 {
                     client = await tcp.AcceptTcpClientAsync().ConfigureAwait(false);
+                    DisableSocketInheritance(client.Client);
                     client.NoDelay = true;
                     // Right-sized TCP buffers (512KB) prevent micro-stalls on 2K 90Hz TCP fallback without multi-second bloat
                     client.SendBufferSize = 524288;
@@ -572,7 +687,7 @@ namespace DualRemote
                 catch
                 {
                     if (client != null) { try { client.Close(); } catch { } }
-                    if (ct.IsCancellationRequested || !running) break;
+                    if (ct.IsCancellationRequested || !running || !object.ReferenceEquals(listener, tcp)) break;
                 }
             }
         }

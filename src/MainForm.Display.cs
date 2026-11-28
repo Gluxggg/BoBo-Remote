@@ -42,13 +42,36 @@ namespace DualRemote
             AddPageHeader(desk, "防窥与显示", null, curtainStateBadge, 148);
             Theme.Row(desk, 16);
 
-            var wallpaperCard = BuildPrivacyWallpaperCard();
-            wallpaperCardRow = desk.RowCount;
-            Theme.Row(desk, 330, wallpaperCard);
-            Theme.Row(desk, 16);
+            Control innerTab = BuildPrivacySettingsTab(viewport);
+            Theme.Row(desk, SumRows(innerTab), innerTab);
+            desk.Height = SumRows(desk);
+            return viewport;
+        }
 
-            Theme.Row(desk, 24, Theme.Text("安全策略", Theme.TextSize.Label, Theme.Muted));
-            Theme.Row(desk, 8);
+        /// <summary>在「设置 → 防窥与显示」页签中嵌入防窥壁纸预览、主题选择与安全策略开关。</summary>
+        internal Control BuildPrivacySettingsTab(Theme.SlimScrollViewport hostViewport)
+        {
+            privacyViewport = hostViewport;
+            var page = Theme.Grid(1);
+            Theme.FillColumn(page);
+            privacyDesk = page;
+
+            curtainStateBadge.AlignRight = true;
+            var statusRow = Theme.Grid(3);
+            Theme.FillColumn(statusRow);
+            Theme.FixedColumn(statusRow, 10);
+            Theme.FixedColumn(statusRow, 148);
+            Theme.Row(statusRow, 28, Theme.Text("防窥壁纸与物理锁护航", Theme.TextSize.Label, Theme.Muted), null, curtainStateBadge);
+            Theme.Row(page, 28, statusRow);
+            Theme.Row(page, 10);
+
+            var wallpaperCard = BuildPrivacyWallpaperCard();
+            wallpaperCardRow = page.RowCount;
+            Theme.Row(page, 330, wallpaperCard);
+            Theme.Row(page, 16);
+
+            Theme.Row(page, 24, Theme.Text("安全策略", Theme.TextSize.Label, Theme.Muted));
+            Theme.Row(page, 8);
 
             var policyCard = new Theme.Card { Padding = new Padding(1, 2, 1, 2) };
             var policyList = Theme.Grid(1);
@@ -127,14 +150,17 @@ namespace DualRemote
                 "居中显示时间与隐私保护提示", badgeSwitch);
 
             policyCard.Controls.Add(policyList);
-            Theme.Row(desk, SumRows(policyList) + policyCard.Padding.Vertical, policyCard);
-            Theme.Row(desk, 12);
-            Theme.Row(desk, 40, displayBanner);
+            Theme.Row(page, SumRows(policyList) + policyCard.Padding.Vertical, policyCard);
+            Theme.Row(page, 12);
+            Theme.Row(page, 40, displayBanner);
 
             ReloadPreviewImage();
-            viewport.ContentWidthChanged += delegate(int contentW) { ApplyPrivacyWallpaperResponsiveLayout(contentW); };
-            desk.Height = SumRows(desk);
-            return viewport;
+            if (hostViewport != null)
+            {
+                hostViewport.ContentWidthChanged += delegate(int contentW) { ApplyPrivacyWallpaperResponsiveLayout(contentW); };
+            }
+            page.Height = SumRows(page);
+            return page;
         }
 
         private ComboBox CreateHostDisconnectActionCombo()
@@ -322,17 +348,19 @@ namespace DualRemote
             if (!initialScaleApplied || wallpaperRootLayout == null || privacyDesk == null || wallpaperCardRow < 0 || wallpaperSplitRow < 0) return;
             float scale = CurrentDpiScale();
             bool compact = contentWidth < (int)Math.Round(760f * scale);
-            if (compact == wallpaperCompactMode) return;
-            wallpaperCompactMode = compact;
-
-            BuildWallpaperSplitContainer(compact, scale);
-            wallpaperRootLayout.RowStyles[wallpaperSplitRow].Height = (compact ? 420f : 236f) * scale;
-            privacyDesk.RowStyles[wallpaperCardRow].Height = SumRows(wallpaperRootLayout)
-                + (wallpaperCardControl == null ? 0 : wallpaperCardControl.Padding.Vertical);
-            privacyDesk.Height = SumRows(privacyDesk);
-            privacyDesk.PerformLayout();
-            if (privacyViewport != null) privacyViewport.RefreshLayout();
-            NotifyOnboardingLayoutChanged();
+            if (compact != wallpaperCompactMode)
+            {
+                wallpaperCompactMode = compact;
+                BuildWallpaperSplitContainer(compact, scale);
+                wallpaperRootLayout.RowStyles[wallpaperSplitRow].Height = (compact ? 420f : 236f) * scale;
+                privacyDesk.RowStyles[wallpaperCardRow].Height = SumRows(wallpaperRootLayout)
+                    + (wallpaperCardControl == null ? 0 : wallpaperCardControl.Padding.Vertical);
+                privacyDesk.Height = SumRows(privacyDesk);
+                privacyDesk.PerformLayout();
+                if (activeSettingsTab == 1) RecalculateSettingsDeskHeight();
+                if (privacyViewport != null) privacyViewport.RefreshLayout();
+                NotifyOnboardingLayoutChanged();
+            }
         }
 
         private Button MakePresetChip(int presetIndex, string caption)
@@ -438,14 +466,6 @@ namespace DualRemote
             }
             if (toggleCurtainBtn != null)
                 toggleCurtainBtn.Text = running ? "关闭防窥" : "开启防窥";
-            if (heroPrivacyToggle != null)
-                heroPrivacyToggle.Text = running ? "关闭防窥壁纸" : "开启防窥壁纸";
-            if (heroPrivacyBadge != null)
-            {
-                if (running) heroPrivacyBadge.UpdateStatus("防窥生效中", Theme.PillTone.Success);
-                else if (privacyConfig.AutoOnRemote) heroPrivacyBadge.UpdateStatus("自动防窥待命", Theme.PillTone.Info);
-                else heroPrivacyBadge.UpdateStatus("防窥未开启", Theme.PillTone.Neutral);
-            }
             if (topPrivacyBtn != null)
                 Theme.SetIndicatorDot(topPrivacyBtn, running || privacyConfig.AutoOnRemote, running ? Theme.Success : Theme.Accent);
         }

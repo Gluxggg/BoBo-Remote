@@ -1710,6 +1710,144 @@ namespace DualRemote
             RunEmbeddedSocks5SelfTest();
             RunRelaySchedulerSelfTest();
             RunDecodePipelineTelemetrySelfTest();
+            RunPortFallbackAndCatalogSelfTest();
+        }
+
+        private static void RunPortFallbackAndCatalogSelfTest()
+        {
+            int occupiedPort = 0;
+            System.Net.Sockets.TcpListener blocker = null;
+            BoBoHostServer fallbackServer = null;
+            try
+            {
+                blocker = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, 49825);
+                blocker.Start();
+                occupiedPort = ((System.Net.IPEndPoint)blocker.LocalEndpoint).Port;
+            }
+            catch
+            {
+                blocker = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, 0);
+                blocker.Start();
+                occupiedPort = ((System.Net.IPEndPoint)blocker.LocalEndpoint).Port;
+            }
+            try
+            {
+                fallbackServer = new BoBoHostServer(BoBoIdentityStore.Default, occupiedPort, false);
+                string err;
+                bool started = fallbackServer.Start(out err);
+                BoBoLocalPairSession pair = started ? fallbackServer.BeginPairing(120) : null;
+                bool fallbackOk = started && fallbackServer.IsRunning && fallbackServer.ListeningPort > 0
+                    && fallbackServer.ListeningPort != occupiedPort && pair != null
+                    && !string.IsNullOrEmpty(pair.Pin) && pair.Pin.Length == 4;
+
+                if (blocker != null) { blocker.Stop(); blocker = null; }
+                bool promoted = fallbackServer.TryPromoteToRequestedPort();
+                bool promoteOk = promoted && fallbackServer.ListeningPort == occupiedPort && !fallbackServer.IsUsingFallbackPort;
+                Check("端口占用自动切备用口、释放后自愈升回主端口与 4 位配对码秒出",
+                    fallbackOk && promoteOk,
+                    started ? ("fallbackOk=" + fallbackOk + " promoteOk=" + promoteOk + " port=" + fallbackServer.ListeningPort + " pin=" + (pair != null ? pair.Pin : "")) : (err ?? ""));
+            }
+            finally
+            {
+                if (fallbackServer != null) try { fallbackServer.Dispose(); } catch { }
+                if (blocker != null) try { blocker.Stop(); } catch { }
+            }
+
+            // Blackhole TLS stall probe must never leak raw .NET ObjectDisposedException ("无法访问已释放的对象")
+            System.Net.Sockets.TcpListener stallListener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            stallListener.Start();
+            int stallPort = ((System.Net.IPEndPoint)stallListener.LocalEndpoint).Port;
+            var stallSockets = new System.Collections.Generic.List<System.Net.Sockets.TcpClient>();
+            var stallStop = new System.Threading.CancellationTokenSource();
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    while (!stallStop.IsCancellationRequested)
+                    {
+                        var sc = stallListener.AcceptTcpClient();
+                        lock (stallSockets) { stallSockets.Add(sc); }
+                    }
+                }
+                catch { }
+            });
+            try
+            {
+                string tmpIdDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bobo-selftest-probe-" + Guid.NewGuid().ToString("N"));
+                var tmpId = new BoBoIdentityStore(tmpIdDir);
+                tmpId.EnsureLoaded();
+                BoBoHostProbeResult stallRes = BoBoStreamClient.ProbeHostAsync(
+                    "127.0.0.1", stallPort, tmpId, 220, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+                bool stallOk = !stallRes.IsBoBoHost && stallRes.TransientFailure
+                    && !string.IsNullOrEmpty(stallRes.Error)
+                    && stallRes.Error.IndexOf("无法访问已释放的对象", StringComparison.Ordinal) < 0
+                    && stallRes.Error.IndexOf("ObjectDisposed", StringComparison.OrdinalIgnoreCase) < 0;
+                Check("首次探测超时握手黑洞拦截：返回可重试瞬态提示且绝不泄漏已释放对象异常",
+                    stallOk, stallRes.Error ?? "");
+                try { System.IO.Directory.Delete(tmpIdDir, true); } catch { }
+            }
+            finally
+            {
+                stallStop.Cancel();
+                try { stallListener.Stop(); } catch { }
+                lock (stallSockets)
+                {
+                    for (int si = 0; si < stallSockets.Count; si++) { try { stallSockets[si].Close(); } catch { } }
+                }
+                stallStop.Dispose();
+            }
+
+            // Disposed exception classifier test
+            bool clsCanceled, clsTransient;
+            string clsMsg;
+            BoBoStreamClient.ClassifyHandshakeException(
+                new ObjectDisposedException("System.Net.Sockets.Socket"),
+                System.Threading.CancellationToken.None,
+                System.Threading.CancellationToken.None,
+                49810,
+                "对方 BoBo远程",
+                out clsCanceled,
+                out clsTransient,
+                out clsMsg);
+            bool clsTimeoutCanceled, clsTimeoutTransient;
+            string clsTimeoutMsg;
+            using (var tCts = new System.Threading.CancellationTokenSource())
+            {
+                tCts.Cancel();
+                BoBoStreamClient.ClassifyHandshakeException(
+                    new ObjectDisposedException("System.Net.Sockets.Socket"),
+                    tCts.Token,
+                    System.Threading.CancellationToken.None,
+                    49810,
+                    "对方 BoBo远程",
+                    out clsTimeoutCanceled,
+                    out clsTimeoutTransient,
+                    out clsTimeoutMsg);
+            }
+            bool clsOk = !clsCanceled && clsTransient
+                && clsMsg.IndexOf("无法访问已释放的对象", StringComparison.Ordinal) < 0
+                && clsMsg.IndexOf("Socket", StringComparison.OrdinalIgnoreCase) < 0
+                && !clsTimeoutCanceled && clsTimeoutTransient
+                && clsTimeoutMsg.IndexOf("无法访问已释放的对象", StringComparison.Ordinal) < 0
+                && clsTimeoutMsg.IndexOf("Socket", StringComparison.OrdinalIgnoreCase) < 0;
+            Check("握手异常分类器：无论超时还是竞态释放均隔离 ObjectDisposedException 文案",
+                clsOk, clsMsg + " | " + clsTimeoutMsg);
+
+            string k1 = DeviceCatalogStore.NormalizePeerKey("bobo-laptop-sujsm9s5");
+            string k2 = DeviceCatalogStore.NormalizePeerKey("LAPTOP-SUJSM9S5.tailnet123.ts.net");
+            var catalog = new DeviceCatalogStore();
+            catalog.AddOrUpdateManual("100.88.26.70", "客厅电脑", false);
+            catalog.HideDevice("100.115.124.70", "muse");
+            bool hiddenBefore = catalog.IsHidden("100.115.124.70", "muse");
+            catalog.SetAlias("100.88.26.70", "bobo-laptop-sujsm9s5", "书房主控");
+            DeviceCatalogStore parsed = new DeviceCatalogStore();
+            DeviceCatalogStore.Parse(DeviceCatalogStore.Serialize(catalog), parsed);
+            bool catalogOk = k1 == "laptop-sujsm9s5" && k2 == "laptop-sujsm9s5"
+                && hiddenBefore && parsed.IsHidden("100.115.124.70", "MUSE")
+                && parsed.ResolveDisplayName("100.88.26.70", "bobo-laptop-sujsm9s5", "fallback") == "书房主控";
+            parsed.UnhideAll();
+            Check("设备目录管理：同名去重键归一化、隐藏、别名与序列化往返",
+                catalogOk && !parsed.IsHidden("100.115.124.70", "muse"), k1 + "==" + k2);
         }
 
         private static void RunDecodePipelineTelemetrySelfTest()

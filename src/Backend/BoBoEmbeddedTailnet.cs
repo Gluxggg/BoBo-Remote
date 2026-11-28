@@ -81,6 +81,7 @@ namespace DualRemote
         private bool disposed;
         private CancellationTokenSource pollCts;
         private Task startTask;
+        private int forwardTargetPort = BoBoProtocol.DefaultTcpPort;
         private EmbeddedTailnetSnapshot latestSnapshot = new EmbeddedTailnetSnapshot();
 
         private BoBoEmbeddedTailnet() { }
@@ -149,6 +150,75 @@ namespace DualRemote
         internal int ControlPort { get { lock (gate) { return controlPort; } } }
         internal int SocksPort { get { lock (gate) { return socksPort; } } }
         internal string SessionToken { get { lock (gate) { return sessionToken; } } }
+        internal int ForwardTargetPort { get { lock (gate) { return forwardTargetPort; } } }
+
+        internal void SetForwardTargetPort(int port)
+        {
+            int normalized = (port > 0 && port <= 65535) ? port : BoBoProtocol.DefaultTcpPort;
+            bool needUpdate = false;
+            int curCtrlPort = 0;
+            string curTok = "";
+            lock (gate)
+            {
+                if (forwardTargetPort == normalized) return;
+                forwardTargetPort = normalized;
+                curCtrlPort = controlPort;
+                curTok = sessionToken;
+                needUpdate = !disposed && childProcess != null && curCtrlPort > 0 && !string.IsNullOrEmpty(curTok);
+                if (needUpdate)
+                {
+                    try { needUpdate = !childProcess.HasExited; }
+                    catch { needUpdate = false; }
+                }
+            }
+            if (needUpdate)
+            {
+                Task.Run(async delegate
+                {
+                    try
+                    {
+                        string resp = SendHttpSync(
+                            "POST",
+                            "/forward-target?port=" + normalized.ToString(CultureInfo.InvariantCulture),
+                            1500,
+                            curCtrlPort,
+                            curTok);
+                        if (!string.IsNullOrEmpty(resp) &&
+                            resp.IndexOf("\"ok\":true", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return;
+                        }
+                        StopChildProcessOnly();
+                        await EnsureStartedAsync(CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch { }
+                });
+            }
+        }
+
+        private void StopChildProcessOnly()
+        {
+            int port;
+            string tok;
+            lock (gate)
+            {
+                port = controlPort;
+                tok = sessionToken;
+                if (pollCts != null) { try { pollCts.Cancel(); } catch { } }
+            }
+            if (port > 0 && !string.IsNullOrEmpty(tok))
+            {
+                try { SendHttpSync("POST", "/shutdown", 700, port, tok); } catch { }
+            }
+            lock (gate)
+            {
+                if (childProcess != null)
+                {
+                    try { childProcess.WaitForExit(600); } catch { }
+                }
+                CleanupProcessHandlesLocked();
+            }
+        }
 
         internal EmbeddedTailnetSnapshot LatestSnapshot
         {
@@ -202,7 +272,7 @@ namespace DualRemote
                 FileName = exePath,
                 Arguments = "--state-dir " + Engines.Quote(StateDir)
                     + " --hostname " + Engines.Quote(hostName)
-                    + " --forward-target 127.0.0.1:" + BoBoProtocol.DefaultTcpPort.ToString(CultureInfo.InvariantCulture)
+                    + " --forward-target 127.0.0.1:" + ForwardTargetPort.ToString(CultureInfo.InvariantCulture)
                     + " --parent-pid " + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture)
                     + (HasSavedState ? " --auto-start" : ""),
                 UseShellExecute = false,
@@ -491,6 +561,45 @@ namespace DualRemote
             }
             if (inEmbeddedPeers) return true;
             return !Tailscale.IsSystemDaemonRunningCached();
+        }
+
+        internal async Task EnsureReadyForTailnetHostAsync(string host, int maxWaitMs, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(host) || disposed || !Tailscale.IsTailnetAddress(host)) return;
+            if (Tailscale.IsSystemDaemonRunningCached() && !IsRunning) return;
+            if (!IsRunning && !HasSavedState) return;
+
+            bool started = await EnsureStartedAsync(ct).ConfigureAwait(false);
+            if (!started) return;
+
+            int budgetMs = Math.Max(500, maxWaitMs);
+            var sw = Stopwatch.StartNew();
+            bool refreshedOnce = false;
+            while (!ct.IsCancellationRequested && !disposed)
+            {
+                EmbeddedTailnetSnapshot snap = LatestSnapshot;
+                if (SocksPort > 0 && snap != null &&
+                    string.Equals(snap.BackendState, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                if (!refreshedOnce && snap != null &&
+                    (string.IsNullOrEmpty(snap.BackendState) ||
+                     string.Equals(snap.BackendState, "Stopped", StringComparison.OrdinalIgnoreCase)))
+                {
+                    refreshedOnce = true;
+                    try { await RefreshStatusAsync(ct).ConfigureAwait(false); } catch { }
+                    snap = LatestSnapshot;
+                    if (SocksPort > 0 && snap != null &&
+                        string.Equals(snap.BackendState, "Running", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+                if (sw.ElapsedMilliseconds >= budgetMs) break;
+                try { await Task.Delay(120, ct).ConfigureAwait(false); }
+                catch { break; }
+            }
         }
 
         internal Task ConnectTargetOverSocks5Async(TcpClient client, string targetHost, int targetPort, CancellationToken ct)

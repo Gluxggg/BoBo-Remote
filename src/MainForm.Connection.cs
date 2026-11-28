@@ -319,19 +319,25 @@ namespace DualRemote
         private void SetCustomRelayPanelExpanded(bool expanded)
         {
             customRelayPanelExpanded = expanded;
-            if (customRelayPanel == null || assistStreamPanelLayout == null) return;
+            if (customRelayPanel == null || assistAdvancedPanel == null) return;
             customRelayPanel.Visible = expanded;
-            if (customRelaySpacerRowIndex >= 0 && customRelaySpacerRowIndex < assistStreamPanelLayout.RowStyles.Count)
-                assistStreamPanelLayout.RowStyles[customRelaySpacerRowIndex].Height = expanded ? DevicePixels(8) : 0;
-            if (customRelayRowIndex >= 0 && customRelayRowIndex < assistStreamPanelLayout.RowStyles.Count)
-                assistStreamPanelLayout.RowStyles[customRelayRowIndex].Height = expanded ? MeasureCustomRelayPanelHeight() : 0;
-            assistStreamPanelLayout.PerformLayout();
+            if (customRelaySpacerRowIndex >= 0 && customRelaySpacerRowIndex < assistAdvancedPanel.RowStyles.Count)
+                assistAdvancedPanel.RowStyles[customRelaySpacerRowIndex].Height = expanded ? DevicePixels(8) : 0;
+            if (customRelayRowIndex >= 0 && customRelayRowIndex < assistAdvancedPanel.RowStyles.Count)
+                assistAdvancedPanel.RowStyles[customRelayRowIndex].Height = expanded ? MeasureCustomRelayPanelHeight() : 0;
+            assistAdvancedPanel.PerformLayout();
             UpdateCustomRelayToggleButtonText();
+
+            if (assistStreamPanelLayout != null && assistAdvancedRowIndex >= 0 && assistAdvancedRowIndex < assistStreamPanelLayout.RowStyles.Count)
+            {
+                assistStreamPanelLayout.RowStyles[assistAdvancedRowIndex].Height = assistAdvancedExpanded ? SumRows(assistAdvancedPanel) : 0;
+                assistStreamPanelLayout.PerformLayout();
+            }
 
             if (clientPairCardLayout != null && assistModeHostRow >= 0 && activeAssistMode == 0)
             {
                 int panelH = SumRows(assistStreamModePanel);
-                if (panelH <= 0) panelH = DevicePixels(178);
+                if (panelH <= 0) panelH = DevicePixels(120);
                 clientPairCardLayout.RowStyles[assistModeHostRow].Height = panelH;
                 if (assistDesk != null && assistStreamCardRow >= 0)
                     assistDesk.RowStyles[assistStreamCardRow].Height = ClientStreamCardHeight();
@@ -946,17 +952,43 @@ namespace DualRemote
 
             if (!directToRelayOnly)
             {
-                SetStatus("正在验证对方是否已打开 BoBo远程（" + (string.IsNullOrEmpty(hostName) ? cleanHost : hostName) + "）…", Theme.PillTone.Info);
+                string targetLabel = string.IsNullOrEmpty(hostName) ? cleanHost : hostName;
+                int initialProbeTimeoutMs = Tailscale.IsTailnetAddress(cleanHost) ? 8000 : 4500;
+                SetStatus("正在验证对方是否已打开 BoBo远程（" + targetLabel + "）…", Theme.PillTone.Info);
                 try
                 {
                     probe = await BoBoStreamClient.ProbeHostAsync(
-                        cleanHost, BoBoProtocol.DefaultTcpPort, BoBoIdentityStore.Default, 4500, CancellationToken.None);
+                        cleanHost, BoBoProtocol.DefaultTcpPort, BoBoIdentityStore.Default, initialProbeTimeoutMs, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
                     probe = new BoBoHostProbeResult { Error = "探测目标 BoBo远程 失败：" + ex.Message };
                 }
                 if (IsDisposed || request != connectRequestGeneration) return;
+
+                if ((!probe.Reachable || !probe.IsBoBoHost) && probe.TransientFailure)
+                {
+                    SetStatus("首次连接正在唤醒跨网加密通道，正在自动重试（" + targetLabel + "）…", Theme.PillTone.Info);
+                    if (Tailscale.IsTailnetAddress(cleanHost))
+                    {
+                        await Task.Run(delegate
+                        {
+                            if (BoBoEmbeddedTailnet.Default.ShouldRouteHost(cleanHost))
+                                BoBoEmbeddedTailnet.Default.PingPeerSync(cleanHost, 1800);
+                        });
+                        if (IsDisposed || request != connectRequestGeneration) return;
+                    }
+                    try
+                    {
+                        probe = await BoBoStreamClient.ProbeHostAsync(
+                            cleanHost, BoBoProtocol.DefaultTcpPort, BoBoIdentityStore.Default, initialProbeTimeoutMs, CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        probe = new BoBoHostProbeResult { Error = "探测目标 BoBo远程 失败：" + ex.Message };
+                    }
+                    if (IsDisposed || request != connectRequestGeneration) return;
+                }
 
                 if ((!probe.Reachable || !probe.IsBoBoHost) && preference == BoBoRoutePreference.CustomRelayFallback)
                 {

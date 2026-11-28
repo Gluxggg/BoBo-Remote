@@ -304,6 +304,38 @@ func (f *hostUdpPeerForward) close() {
 	})
 }
 
+func (m *tsManager) getForwardTargets() (string, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.forwardTarget, m.udpForwardTarget
+}
+
+func (m *tsManager) setForwardTargetPort(port int) (string, string, bool) {
+	if port <= 0 || port > 65535 {
+		return "", "", false
+	}
+	tcpTarget := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	udpTarget := deriveUdpForwardTarget(tcpTarget)
+	m.mu.Lock()
+	changed := (m.forwardTarget != tcpTarget || m.udpForwardTarget != udpTarget)
+	m.forwardTarget = tcpTarget
+	m.udpForwardTarget = udpTarget
+	srv := m.srv
+	var oldUdpLn net.PacketConn
+	if changed && m.hostUdpLn != nil {
+		oldUdpLn = m.hostUdpLn
+		m.hostUdpLn = nil
+	}
+	m.mu.Unlock()
+	if oldUdpLn != nil {
+		_ = oldUdpLn.Close()
+	}
+	if changed && srv != nil {
+		go m.ensureHostUdpListener(srv)
+	}
+	return tcpTarget, udpTarget, true
+}
+
 func (m *tsManager) ensureHostListener(srv *tsnet.Server) {
 	m.mu.Lock()
 	needTcp := (m.hostLn == nil && m.srv == srv)
@@ -333,7 +365,8 @@ func (m *tsManager) ensureHostListener(srv *tsnet.Server) {
 					if err != nil {
 						return
 					}
-					go forwardConn(conn, m.forwardTarget)
+					tcpTarget, _ := m.getForwardTargets()
+					go forwardConn(conn, tcpTarget)
 				}
 			}()
 		}
@@ -403,7 +436,8 @@ func tuneLocalUdpConn(c *net.UDPConn) {
 
 func (m *tsManager) serveHostUdp(pc net.PacketConn) {
 	defer pc.Close()
-	targetAddr, err := net.ResolveUDPAddr("udp", m.udpForwardTarget)
+	_, udpTarget := m.getForwardTargets()
+	targetAddr, err := net.ResolveUDPAddr("udp", udpTarget)
 	if err != nil {
 		return
 	}
@@ -1301,6 +1335,32 @@ func buildControlMux(token string, m *tsManager, statusOverride func(context.Con
 		default:
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 		}
+	}))
+
+	mux.HandleFunc("/forward-target", authWrap(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if m == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "manager unavailable"})
+			return
+		}
+		port, pErr := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("port")))
+		if pErr != nil || port <= 0 || port > 65535 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid port"})
+			return
+		}
+		tcpTarget, udpTarget, ok := m.setForwardTargetPort(port)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid port"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"forwardTarget":    tcpTarget,
+			"udpForwardTarget": udpTarget,
+		})
 	}))
 
 	mux.HandleFunc("/shutdown", authWrap(func(w http.ResponseWriter, r *http.Request) {
