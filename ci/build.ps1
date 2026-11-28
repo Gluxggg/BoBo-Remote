@@ -10,7 +10,7 @@
 param(
     [string] $OutputDirectory = 'ci-out',
     [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
-    [string] $ReleaseVersion = '7.6.2'
+    [string] $ReleaseVersion = '7.6.3'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,9 +110,24 @@ function Invoke-SelfTestBinary {
     return $procDirect.ExitCode
 }
 
+function Show-SelfTestFailureLog {
+    $logFile = Join-Path $env:TEMP '双端远程-self-test.log'
+    if (Test-Path -LiteralPath $logFile) {
+        Write-Host '=== Failed self-test entries ==='
+        Get-Content -LiteralPath $logFile -Encoding UTF8 | Where-Object { $_ -match '\[失败\]|结果：' } | ForEach-Object { Write-Host $_ }
+        Write-Host '=== Tail of self-test log ==='
+        Get-Content -LiteralPath $logFile -Encoding UTF8 -Tail 30 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "Self-test log not found: $logFile"
+    }
+}
+
 $selfTestCode = Invoke-SelfTestBinary -BinaryPath $exePath
 Write-Host "self-test exit code: $selfTestCode"
-if ($selfTestCode -ne 0) { throw "self-test failed with exit code $selfTestCode" }
+if ($selfTestCode -ne 0) {
+    Show-SelfTestFailureLog
+    throw "self-test failed with exit code $selfTestCode"
+}
 
 $setupSource = Join-Path $repoRoot 'installer\BoBoSetup.cs'
 if (Test-Path -LiteralPath $setupSource) {
@@ -131,7 +146,10 @@ if (Test-Path -LiteralPath $setupSource) {
     if ($LASTEXITCODE -ne 0) { throw "setup csc failed with exit code $LASTEXITCODE" }
     $setupCode = Invoke-SelfTestBinary -BinaryPath $setupExe
     Write-Host "setup self-test exit code: $setupCode"
-    if ($setupCode -ne 0) { throw "setup self-test failed with exit code $setupCode" }
+    if ($setupCode -ne 0) {
+        Show-SelfTestFailureLog
+        throw "setup self-test failed with exit code $setupCode"
+    }
 }
 
 Write-Host 'OK: V6 all-in-one build and self-test passed'

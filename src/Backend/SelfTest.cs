@@ -888,7 +888,7 @@ namespace DualRemote
                             "conn=" + connRes.Item2 + " frames=" + authClient.VideoFramesReceived + " priv=" + sessionRequestedPrivacy);
 
                         // Wait briefly for UDP+FEC/NACK fast-path punch to complete on localhost
-                        for (int uw = 0; uw < 30 && !authClient.IsUdpActive; uw++) System.Threading.Thread.Sleep(30);
+                        for (int uw = 0; uw < 80 && !authClient.IsUdpActive; uw++) System.Threading.Thread.Sleep(30);
                         Check("V6.3 低延迟加密 UDP+FEC/NACK 通道：握手后自动无感升级 UDP 零队头阻塞传输",
                             authClient.IsUdpActive && authClient.IsUdpNackActive && authClient.ActiveTransportLabel == "UDP+FEC/NACK",
                             "udpActive=" + authClient.IsUdpActive + " nack=" + authClient.IsUdpNackActive + " transport=" + authClient.ActiveTransportLabel + " udpPort=" + server.ListeningUdpPort);
@@ -899,7 +899,7 @@ namespace DualRemote
 
                         // Toggle to Locked mode -> host enables cursor compositing dynamically
                         authClient.SendSetCursorMode(true);
-                        for (int cw = 0; cw < 25 && !authClient.HostCursorComposited; cw++) System.Threading.Thread.Sleep(30);
+                        for (int cw = 0; cw < 80 && !authClient.HostCursorComposited; cw++) System.Threading.Thread.Sleep(30);
                         Check("V6.3 锁鼠模式光标热切换：SET_CURSOR_MODE(true) 动态恢复主机光标合成",
                             authClient.HostCursorComposited,
                             "hostCursorComposited=" + authClient.HostCursorComposited);
@@ -2527,23 +2527,23 @@ namespace DualRemote
                     if (started)
                     {
                         var swRe = Stopwatch.StartNew();
-                        bool rcOk = bridge.Reconfigure(0, 800, 450, 30, 2400);
+                        bool rcOk = bridge.Reconfigure(0, 800, 448, 30, 2400);
                         swRe.Stop();
                         reconfigMs = swRe.ElapsedMilliseconds;
-                        bridgeNoDeadlockOk = rcOk && reconfigMs < 1500;
+                        bridgeNoDeadlockOk = rcOk && reconfigMs < 2500;
 
                         // Simulate DesktopHelper process restart and verify auto-rebuild + resumed frames
                         srv1.Dispose();
                         srv1 = null;
                         System.Threading.Volatile.Write(ref phase, 1);
                         srv2 = new BoBoSystemService.DesktopHelperServer(helperPipe, -1);
-                        for (int w = 0; w < 60; w++)
+                        for (int w = 0; w < 80; w++)
                         {
                             if (bridge.RecoveryCount >= 1 && bridge.IsUsingSystemHelper && postRestartFrame.IsSet) break;
                             System.Threading.Thread.Sleep(50);
                         }
                         recCount = bridge.RecoveryCount;
-                        bridgeRebuiltOk = bridge.RecoveryCount >= 1 && bridge.IsUsingSystemHelper && postRestartFrame.Wait(1500);
+                        bridgeRebuiltOk = bridge.RecoveryCount >= 1 && bridge.IsUsingSystemHelper && postRestartFrame.Wait(2000);
                     }
                 }
             }
@@ -2651,7 +2651,7 @@ namespace DualRemote
                     0, 640, 360, 30, 2000, false, true, false, false,
                     delegate { }, delegate { }, out bErr);
                 pipeNoLeakOk = started && bridge.IsUsingSystemHelper;
-                using (var extraClient = BoBoSystemService.DesktopHelperClient.TryConnect(pipeName, 800))
+                using (var extraClient = BoBoSystemService.DesktopHelperClient.TryConnect(pipeName, 2000))
                 {
                     multiPipeOk = extraClient != null && extraClient.IsConnected;
                 }

@@ -453,7 +453,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "7.6.2";
+            return "7.6.3";
         }
 
         internal static Bitmap LoadBrandLogo()

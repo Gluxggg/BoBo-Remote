@@ -1287,19 +1287,23 @@ namespace DualRemote
             private readonly int targetSessionId;
             private readonly bool restrictToConsoleUser;
             private readonly ManualResetEventSlim stopEvent = new ManualResetEventSlim(false);
+            private readonly ManualResetEventSlim listenerReady = new ManualResetEventSlim(false);
+            private readonly ManualResetEventSlim handlersDrained = new ManualResetEventSlim(true);
             private readonly object inputQueueLock = new object();
             private readonly Queue<Action> inputQueue = new Queue<Action>();
             private readonly AutoResetEvent inputWakeEvent = new AutoResetEvent(false);
             private readonly object hostGate = new object();
             private readonly object clientsGate = new object();
             private readonly List<NamedPipeServerStream> activeClientPipes = new List<NamedPipeServerStream>();
+            private readonly NamedPipeServerStream[] activeAcceptPipes = new NamedPipeServerStream[2];
             private readonly Thread inputThread;
             private readonly Thread serverThread;
+            private Thread auxServerThread;
 
             private volatile bool disposed;
             private int injectedPackets;
             private int sasCalls;
-            private NamedPipeServerStream activeServerPipe;
+            private int activeClientHandlers;
             private BoBoCoreInterop.BoBoHostNativeHandle activeHostHandle;
             private long sessionToken;
 
@@ -1328,9 +1332,32 @@ namespace DualRemote
                     Name = "BoBoHelperPipeServer"
                 };
                 serverThread.Start();
+                listenerReady.Wait(1500);
             }
 
             internal void RunBlocking()
+            {
+                auxServerThread = new Thread((ThreadStart)delegate { RunAcceptorLoop(1); })
+                {
+                    IsBackground = true,
+                    Name = "BoBoHelperPipeAux"
+                };
+                auxServerThread.Start();
+                try
+                {
+                    RunAcceptorLoop(0);
+                }
+                finally
+                {
+                    Thread aux = auxServerThread;
+                    if (aux != null && aux.IsAlive)
+                    {
+                        try { aux.Join(1200); } catch { }
+                    }
+                }
+            }
+
+            private void RunAcceptorLoop(int slot)
             {
                 while (!disposed && !stopEvent.IsSet)
                 {
@@ -1339,8 +1366,9 @@ namespace DualRemote
                     {
                         SecurityIdentifier grantedUserSid;
                         pipe = CreateSecuredPipeServer(pipeName, targetSessionId, restrictToConsoleUser, out grantedUserSid);
-                        activeServerPipe = pipe;
+                        activeAcceptPipes[slot] = pipe;
                         IAsyncResult ar = pipe.BeginWaitForConnection(null, null);
+                        try { listenerReady.Set(); } catch { }
                         WaitHandle[] waits = new WaitHandle[] { ar.AsyncWaitHandle, stopEvent.WaitHandle };
                         bool recreateForUserLogon = false;
                         while (!disposed && !stopEvent.IsSet)
@@ -1378,7 +1406,8 @@ namespace DualRemote
 
                         NamedPipeServerStream connectedPipe = pipe;
                         pipe = null;
-                        activeServerPipe = null;
+                        activeAcceptPipes[slot] = null;
+                        bool queued = false;
                         lock (clientsGate)
                         {
                             if (disposed || stopEvent.IsSet)
@@ -1387,8 +1416,14 @@ namespace DualRemote
                                 break;
                             }
                             activeClientPipes.Add(connectedPipe);
+                            activeClientHandlers++;
+                            try { handlersDrained.Reset(); } catch { }
+                            queued = true;
                         }
-                        ThreadPool.QueueUserWorkItem(delegate { HandleClientConnection(connectedPipe); });
+                        if (queued)
+                        {
+                            ThreadPool.QueueUserWorkItem(delegate { HandleClientConnection(connectedPipe); });
+                        }
                     }
                     catch
                     {
@@ -1396,7 +1431,7 @@ namespace DualRemote
                     }
                     finally
                     {
-                        activeServerPipe = null;
+                        activeAcceptPipes[slot] = null;
                         if (pipe != null)
                         {
                             try { pipe.Dispose(); } catch { }
@@ -1660,8 +1695,17 @@ namespace DualRemote
                             }
                         }
                     }
-                    lock (clientsGate) { activeClientPipes.Remove(pipe); }
                     try { pipe.Dispose(); } catch { }
+                    lock (clientsGate)
+                    {
+                        activeClientPipes.Remove(pipe);
+                        activeClientHandlers--;
+                        if (activeClientHandlers <= 0)
+                        {
+                            activeClientHandlers = 0;
+                            try { handlersDrained.Set(); } catch { }
+                        }
+                    }
                 }
             }
 
@@ -1734,12 +1778,16 @@ namespace DualRemote
             {
                 if (disposed) return;
                 disposed = true;
-                stopEvent.Set();
-                inputWakeEvent.Set();
-                NamedPipeServerStream p = activeServerPipe;
-                if (p != null)
+                try { stopEvent.Set(); } catch { }
+                try { listenerReady.Set(); } catch { }
+                try { inputWakeEvent.Set(); } catch { }
+                for (int i = 0; i < activeAcceptPipes.Length; i++)
                 {
-                    try { p.Dispose(); } catch { }
+                    NamedPipeServerStream p = activeAcceptPipes[i];
+                    if (p != null)
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
                 }
                 List<NamedPipeServerStream> clientsCopy;
                 lock (clientsGate)
@@ -1760,16 +1808,23 @@ namespace DualRemote
                         activeHostHandle = null;
                     }
                 }
+                try { handlersDrained.Wait(1500); } catch { }
                 if (serverThread != null && serverThread.IsAlive)
                 {
                     try { serverThread.Join(1200); } catch { }
+                }
+                if (auxServerThread != null && auxServerThread.IsAlive)
+                {
+                    try { auxServerThread.Join(1200); } catch { }
                 }
                 if (inputThread != null && inputThread.IsAlive)
                 {
                     try { inputThread.Join(1200); } catch { }
                 }
-                stopEvent.Dispose();
-                inputWakeEvent.Dispose();
+                try { stopEvent.Dispose(); } catch { }
+                try { listenerReady.Dispose(); } catch { }
+                try { handlersDrained.Dispose(); } catch { }
+                try { inputWakeEvent.Dispose(); } catch { }
             }
         }
 
@@ -1959,21 +2014,44 @@ namespace DualRemote
 
             internal static DesktopHelperClient TryConnect(string pipeName, int timeoutMs)
             {
-                NamedPipeClientStream p = null;
-                try
+                int budgetMs = Math.Max(150, timeoutMs);
+                Stopwatch sw = Stopwatch.StartNew();
+                for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    p = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-                    p.Connect(Math.Max(100, timeoutMs));
-                    var c = new DesktopHelperClient(p);
-                    if (c.Ping()) return c;
-                    c.Dispose();
-                    return null;
+                    int remainingMs = budgetMs - (int)sw.ElapsedMilliseconds;
+                    if (attempt > 0 && remainingMs < 60) break;
+
+                    NamedPipeClientStream p = null;
+                    try
+                    {
+                        p = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                        p.Connect(Math.Max(60, remainingMs));
+                        var c = new DesktopHelperClient(p);
+                        p = null;
+                        if (c.Ping()) return c;
+                        c.Dispose();
+                    }
+                    catch (System.TimeoutException)
+                    {
+                    }
+                    catch (IOException)
+                    {
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                    finally
+                    {
+                        if (p != null) { try { p.Dispose(); } catch { } }
+                    }
+
+                    if (attempt < 2 && (budgetMs - (int)sw.ElapsedMilliseconds) >= 60)
+                    {
+                        Thread.Sleep(25);
+                    }
                 }
-                catch
-                {
-                    if (p != null) { try { p.Dispose(); } catch { } }
-                    return null;
-                }
+                return null;
             }
 
             internal bool Ping()

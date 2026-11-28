@@ -443,7 +443,8 @@ struct BoBoHostSession {
                 continue;
             }
 
-            if (!hasGpuFrame && !hasCpuFrame && !hasEmittedAnyRealFrame && frameIndex == 0) {
+            if (!hasGpuFrame && !hasCpuFrame && !hasEmittedAnyRealFrame &&
+                sentFrameCount.load(std::memory_order_acquire) == 0 && frameIndex < 8) {
                 uint32_t fw = capturer.OutputWidth();
                 uint32_t fh = capturer.OutputHeight();
                 if (fw >= 320 && fh >= 240) {

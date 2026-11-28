@@ -38,7 +38,14 @@ Write-Host '=== Running launcher and installer self-tests ==='
 foreach ($executable in @($launcher, $setup)) {
     $process = Start-Process -FilePath $executable -ArgumentList '--self-test' -Wait -PassThru
     Write-Host "$($executable) --self-test exit code: $($process.ExitCode)"
-    if ($process.ExitCode -ne 0) { throw "Self-test failed for $executable ($($process.ExitCode))" }
+    if ($process.ExitCode -ne 0) {
+        $logFile = Join-Path $env:TEMP '双端远程-self-test.log'
+        if (Test-Path -LiteralPath $logFile) {
+            Write-Host '=== Failed self-test entries ==='
+            Get-Content -LiteralPath $logFile -Encoding UTF8 | Where-Object { $_ -match '\[失败\]|结果：' } | ForEach-Object { Write-Host $_ }
+        }
+        throw "Self-test failed for $executable ($($process.ExitCode))"
+    }
 }
 
 $assetDir = Join-Path $repoRoot 'release-assets'
