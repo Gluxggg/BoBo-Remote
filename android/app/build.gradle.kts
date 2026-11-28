@@ -53,7 +53,7 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            enableV1Signing = true
+            enableV1Signing = false
             enableV2Signing = true
             enableV3Signing = true
         }
@@ -63,7 +63,7 @@ android {
                 storePassword = boboUploadStorePassword
                 keyAlias = boboUploadKeyAlias
                 keyPassword = boboUploadKeyPassword
-                enableV1Signing = true
+                enableV1Signing = false
                 enableV2Signing = true
                 enableV3Signing = true
             }

@@ -139,18 +139,20 @@ jobs:
           BOBO_UPLOAD_KEY_ALIAS: ${{ secrets.BOBO_ANDROID_KEY_ALIAS }}
           BOBO_UPLOAD_KEY_PASSWORD: ${{ secrets.BOBO_ANDROID_KEY_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace "-PboboReleaseVersion=$RELEASE_VERSION" -PboboRequireReleaseSigning=true
-      - name: Verify APK v1/v2/v3 signatures and prepare release asset
+      - name: Verify APK v2/v3 signatures and prepare release asset
         run: |
           apk="android/app/build/outputs/apk/release/app-release.apk"
           sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           apksigner_bin=$(ls -1d "$sdk_root"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1)
-          if [[ -n "$apksigner_bin" ]]; then
-            verify_out=$("$apksigner_bin" verify --verbose "$apk")
-            echo "$verify_out"
-            grep -q "Verified using v1 scheme (JAR signing): true" <<< "$verify_out"
-            grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" <<< "$verify_out"
-            grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" <<< "$verify_out"
+          if [[ -z "$apksigner_bin" ]]; then
+            echo "apksigner not found under ANDROID_SDK_ROOT ($sdk_root)" >&2
+            exit 1
           fi
+          verify_out=$("$apksigner_bin" verify --verbose --print-certs "$apk")
+          echo "$verify_out"
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" <<< "$verify_out"
+          grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" <<< "$verify_out"
+          grep -qi "3a41d808b50a3da6b531a186ddd017e3dc0ea99d0a83f887db71840d87927f5c" <<< "$verify_out"
           mkdir -p release-assets
           cp "$apk" release-assets/BoBoRemote-Android.apk
       - name: Remove temporary keystore
