@@ -53,6 +53,7 @@ namespace DualRemote
         private int displayScalePercent = 100;
         private ControlResolutionMode resolutionMode = ControlResolutionMode.FollowHost;
         private bool autoBitrate = true;
+        private ControlQualityTier qualityTier = ControlQualityTier.Auto;
         private bool trueColor;
         private bool hdrEnabled;
         private int scaleMode = 1;
@@ -189,6 +190,8 @@ namespace DualRemote
             this.hostNativeHeight = this.currentHeight;
             this.currentFps = fps > 0 ? fps : 60;
             this.currentBitrateKbps = bitrateKbps > 0 ? bitrateKbps : 14000;
+            this.autoBitrate = this.currentBitrateKbps <= 12000 && this.currentBitrateKbps != 8000;
+            this.qualityTier = StreamControlCenterModel.InferQualityTier(this.autoBitrate, this.currentBitrateKbps, this.currentWidth, this.currentHeight, this.currentFps);
             this.currentModeTag = string.IsNullOrEmpty(modeTag) ? (this.currentWidth + "x" + this.currentHeight + "@" + this.currentFps) : modeTag;
             this.windowedMode = windowed;
             this.freeMouseMode = freeMouse;
@@ -506,12 +509,13 @@ namespace DualRemote
                 LocalDisplayHeight = viewport.Height > 0 ? viewport.Height : currentHeight,
                 HostNativeWidth = hostNativeWidth > 0 ? hostNativeWidth : currentWidth,
                 HostNativeHeight = hostNativeHeight > 0 ? hostNativeHeight : currentHeight,
-                CurrentWidth = currentWidth,
-                CurrentHeight = currentHeight,
+                CurrentWidth = actualStreamSize.Width > 0 ? actualStreamSize.Width : currentWidth,
+                CurrentHeight = actualStreamSize.Height > 0 ? actualStreamSize.Height : currentHeight,
                 DisplayScalePercent = displayScalePercent,
                 ResolutionMode = resolutionMode,
                 BitrateKbps = currentBitrateKbps,
                 AutoBitrate = autoBitrate,
+                QualityTier = qualityTier,
                 Fps = currentFps,
                 TrueColor = trueColor,
                 HdrEnabled = hdrEnabled,
@@ -542,9 +546,12 @@ namespace DualRemote
                 {
                     resolutionMode = mode;
                     SetSuperDisplayMode(false, false);
-                    string tag = h + "p" + currentFps + " · D3D11VA";
-                    ShowToastHint("正在切换分辨率至 " + w + " × " + h + "…");
-                    await SwitchQualityAsync(w, h, currentFps, currentBitrateKbps, tag);
+                    int nextBps = qualityTier == ControlQualityTier.Custom
+                        ? currentBitrateKbps
+                        : StreamControlCenterModel.ComputeTierBitrateKbps(qualityTier, w, h, currentFps);
+                    string tag = h + "p" + currentFps + " · " + (nextBps / 1000) + "M";
+                    ShowToastHint("正在切换分辨率至 " + w + " × " + h + "（" + (nextBps / 1000) + " Mbps）…");
+                    await SwitchQualityAsync(w, h, currentFps, nextBps, tag);
                 },
                 OnSelectDisplayScale = delegate(int pct)
                 {
@@ -560,14 +567,40 @@ namespace DualRemote
                 OnSelectBitrate = async delegate(int kbps, bool isAuto)
                 {
                     autoBitrate = isAuto;
-                    string label = isAuto ? "自动高清" : ((kbps / 1000) + " Mbps");
+                    qualityTier = StreamControlCenterModel.InferQualityTier(isAuto, kbps,
+                        actualStreamSize.Width > 0 ? actualStreamSize.Width : currentWidth,
+                        actualStreamSize.Height > 0 ? actualStreamSize.Height : currentHeight,
+                        currentFps);
+                    string label = isAuto ? "自动超清" : ((kbps / 1000) + " Mbps");
                     ShowToastHint("正在切换画质码率至 " + label + "…");
                     await SwitchQualityAsync(currentWidth, currentHeight, currentFps, kbps, currentHeight + "p" + currentFps + " · " + label);
                 },
+                OnSelectQualityTier = async delegate(ControlQualityTier tier, int kbps)
+                {
+                    qualityTier = tier;
+                    autoBitrate = (tier == ControlQualityTier.Auto);
+                    int effW = actualStreamSize.Width > 0 ? actualStreamSize.Width : currentWidth;
+                    int effH = actualStreamSize.Height > 0 ? actualStreamSize.Height : currentHeight;
+                    int targetBps = tier == ControlQualityTier.Custom
+                        ? kbps
+                        : StreamControlCenterModel.ComputeTierBitrateKbps(tier, effW, effH, currentFps);
+                    string tierName = tier == ControlQualityTier.Auto ? "自动超清"
+                        : (tier == ControlQualityTier.Original ? "原画"
+                        : (tier == ControlQualityTier.UltraHd ? "超清"
+                        : (tier == ControlQualityTier.StandardHd ? "高清" : "自定义")));
+                    string label = tier == ControlQualityTier.Auto ? "自动超清" : (tierName + " " + (targetBps / 1000) + "M");
+                    ShowToastHint("正在切换画质至 " + label + "…");
+                    await SwitchQualityAsync(currentWidth, currentHeight, currentFps, targetBps, effH + "p" + currentFps + " · " + label);
+                },
                 OnSelectFps = async delegate(int fps)
                 {
-                    ShowToastHint("正在切换帧率至 " + fps + " 帧…");
-                    await SwitchQualityAsync(currentWidth, currentHeight, fps, currentBitrateKbps, currentHeight + "p" + fps + " · D3D11VA");
+                    int effW = actualStreamSize.Width > 0 ? actualStreamSize.Width : currentWidth;
+                    int effH = actualStreamSize.Height > 0 ? actualStreamSize.Height : currentHeight;
+                    int targetBps = qualityTier == ControlQualityTier.Custom
+                        ? currentBitrateKbps
+                        : StreamControlCenterModel.ComputeTierBitrateKbps(qualityTier, effW, effH, fps);
+                    ShowToastHint("正在切换帧率至 " + fps + " 帧（码率 " + (targetBps / 1000) + " Mbps）…");
+                    await SwitchQualityAsync(currentWidth, currentHeight, fps, targetBps, effH + "p" + fps + " · " + (targetBps / 1000) + "M");
                 },
                 OnSelectTrueColor = async delegate(bool tc)
                 {
@@ -586,6 +619,7 @@ namespace DualRemote
                 OnSelectWeakNetwork = async delegate
                 {
                     autoBitrate = true;
+                    qualityTier = ControlQualityTier.Auto;
                     ShowToastHint("已选择弱网抗丢包画质 · 720p / 30 帧");
                     await SwitchQualityAsync(1280, 720, 30, 3500, "弱网抗丢包 · 720p30");
                 },
@@ -1221,6 +1255,7 @@ namespace DualRemote
                         hostNativeHeight = mons[idx].Height;
                     }
                     actualStreamSize = new Size(w, h);
+                    MaybeUpgradeBitrateForActualResolution(w, h, fps);
                     statusOverlay.SetOverlayVisible(false);
                     if (mobileNavBar != null && !mobileNavBar.IsDisposed)
                     {
@@ -1278,7 +1313,10 @@ namespace DualRemote
                     if (gen != sessionGeneration || IsDisposed) return;
                     if (state.RequestId != displayRequestId || (state.MonitorIndex >= 0 && state.MonitorIndex != activeMonitorIndex)) return;
                     if (state.StreamWidth > 0 && state.StreamHeight > 0)
+                    {
                         actualStreamSize = new Size(state.StreamWidth, state.StreamHeight);
+                        MaybeUpgradeBitrateForActualResolution(state.StreamWidth, state.StreamHeight, currentFps);
+                    }
                     displayState = state;
                     if (showDisplayResult && superDisplayMode && state.Active)
                     {
@@ -1744,6 +1782,21 @@ namespace DualRemote
                     }
                 }
             });
+        }
+
+        private void MaybeUpgradeBitrateForActualResolution(int actualW, int actualH, int fps)
+        {
+            if (actualW <= 0 || actualH <= 0 || autoBitrate || qualityTier == ControlQualityTier.Custom) return;
+            int scaledBps = StreamControlCenterModel.ComputeTierBitrateKbps(qualityTier, actualW, actualH, fps > 0 ? fps : currentFps);
+            if (scaledBps > currentBitrateKbps + Math.Max(2000, currentBitrateKbps / 7))
+            {
+                currentBitrateKbps = scaledBps;
+                BoBoStreamClient sc = streamClient;
+                if (sc != null && sc.IsConnected)
+                {
+                    sc.SendReconfigure(activeMonitorIndex, currentWidth, currentHeight, currentFps, currentBitrateKbps, autoBitrate);
+                }
+            }
         }
 
         private string BuildWindowTitle()

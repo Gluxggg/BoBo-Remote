@@ -183,6 +183,7 @@ void MfH264Encoder::Close() {
     isHardware_ = false;
     isD3D11ZeroCopy_ = false;
     isHevc_ = false;
+    lastSampleTimeHns_ = -1;
     encoderName_.clear();
     if (mfStarted_) {
         MFShutdown();
@@ -206,8 +207,9 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
     height_ = (height + 1u) & ~1u;
     fps_ = (fps >= 15 && fps <= 144) ? fps : 60;
     frameDurationHns_ = 10000000LL / static_cast<int64_t>(fps_);
+    lastSampleTimeHns_ = -1;
     if (bitrateKbps < 500) bitrateKbps = 500;
-    if (bitrateKbps > 60000) bitrateKbps = 60000;
+    if (bitrateKbps > 80000) bitrateKbps = 80000;
     bitrateKbps_ = bitrateKbps;
     keyframeRequested_.store(true);
 
@@ -365,6 +367,36 @@ bool IsMfHevcEncodeSupported() {
     return supported;
 }
 
+void MfH264Encoder::ApplyRateControlBufferAndQp(ICodecAPI* api, uint32_t bitrateKbps) {
+    if (!api) return;
+    VARIANT v = {};
+
+    uint64_t meanBps = static_cast<uint64_t>(bitrateKbps) * 1000ULL;
+    if (meanBps > 80000000ULL) meanBps = 80000000ULL;
+    v.vt = VT_UI4;
+    v.ulVal = static_cast<ULONG>(meanBps);
+    api->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+
+    if (useVbr_) {
+        uint64_t maxBps = (meanBps * 120ULL) / 100ULL;
+        if (maxBps > 96000000ULL) maxBps = 96000000ULL;
+        v.ulVal = static_cast<ULONG>(maxBps);
+        api->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
+    }
+
+    // Give high-bitrate/high-FPS encoders sufficient HRD/VBV headroom (~100-200ms up to 2 MiB)
+    // so UI transitions and fast motion bursts do not clamp P-frames to QP=51 macroblocks.
+    uint64_t vbvBytes = (bitrateKbps >= 12000) ? ((meanBps / 8ULL) / 5ULL) : ((meanBps / 8ULL) / 10ULL);
+    if (vbvBytes < 32768ULL) vbvBytes = 32768ULL;
+    if (vbvBytes > 2097152ULL) vbvBytes = 2097152ULL;
+    v.ulVal = static_cast<ULONG>(vbvBytes);
+    api->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
+
+    // Best-effort MaxQP ceiling prevents severe desktop text/UI blur during brief motion spikes.
+    v.ulVal = (bitrateKbps >= 20000) ? 36u : ((bitrateKbps >= 12000) ? 39u : 44u);
+    api->SetValue(&CODECAPI_AVEncVideoMaxQP, &v);
+}
+
 void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps) {
     if (!api) return;
     VARIANT v = {};
@@ -374,8 +406,8 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
     api->SetValue(&CODECAPI_AVEncCommonRealTime, &v);
 
-    // Use CBR with a small buffer to limit IDR bursts and apply live bitrate changes.
-    // FilterAndInspectAnnexB removes CBR filler before the frame goes on the wire.
+    // Use CBR with a generous VBV buffer to preserve live ICodecAPI bitrate changes.
+    // FilterAndInspectAnnexB strips CBR filler NALs before frames hit the wire.
     useVbr_ = false;
     v.vt = VT_UI4;
     v.ulVal = eAVEncCommonRateControlMode_CBR;
@@ -386,27 +418,7 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
         }
     }
 
-    uint64_t meanBps = static_cast<uint64_t>(bitrateKbps) * 1000ULL;
-    if (meanBps > 80000000ULL) meanBps = 80000000ULL;
-    v.vt = VT_UI4;
-    v.ulVal = static_cast<ULONG>(meanBps);
-    api->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
-
-    if (useVbr_) {
-        uint64_t maxBps = (meanBps * 120ULL) / 100ULL;
-        if (maxBps > 80000000ULL) maxBps = 80000000ULL;
-        v.vt = VT_UI4;
-        v.ulVal = static_cast<ULONG>(maxBps);
-        api->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
-    }
-
-    // Tight ~50ms HRD/VBV buffer (capped at 256 KB) prevents giant IDR bursts from tail-dropping Wi-Fi/campus/WireGuard queues
-    uint64_t vbvBytes = (meanBps / 8ULL) / 20ULL;
-    if (vbvBytes < 16384ULL) vbvBytes = 16384ULL;
-    if (vbvBytes > 262144ULL) vbvBytes = 262144ULL;
-    v.vt = VT_UI4;
-    v.ulVal = static_cast<ULONG>(vbvBytes);
-    api->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
+    ApplyRateControlBufferAndQp(api, bitrateKbps);
 
     v.vt = VT_UI4;
     v.ulVal = 0; // Zero B-frames for zero reordering delay
@@ -417,7 +429,7 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVEncVideoMaxNumRefFrame, &v);
 
     v.vt = VT_UI4;
-    v.ulVal = 0; // Fastest speed preset for real-time low-latency streaming
+    v.ulVal = (bitrateKbps >= 14000) ? 50u : 35u; // Balanced speed/motion-estimation quality for sharp high-bitrate text & UI
     api->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
 
     v.vt = VT_UI4;
@@ -427,7 +439,7 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
 
 bool MfH264Encoder::UpdateBitrateLive(uint32_t bitrateKbps) {
     if (bitrateKbps < 500) bitrateKbps = 500;
-    if (bitrateKbps > 60000) bitrateKbps = 60000;
+    if (bitrateKbps > 80000) bitrateKbps = 80000;
     bitrateKbps_ = bitrateKbps;
     if (!codecApi_) return false;
 
@@ -437,19 +449,7 @@ bool MfH264Encoder::UpdateBitrateLive(uint32_t bitrateKbps) {
     v.ulVal = static_cast<ULONG>(meanBps);
     HRESULT hr = codecApi_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
-    if (useVbr_) {
-        uint64_t maxBps = (meanBps * 120ULL) / 100ULL;
-        if (maxBps > 80000000ULL) maxBps = 80000000ULL;
-        v.ulVal = static_cast<ULONG>(maxBps);
-        codecApi_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
-    }
-
-    uint64_t vbvBytes = (meanBps / 8ULL) / 20ULL;
-    if (vbvBytes < 16384ULL) vbvBytes = 16384ULL;
-    if (vbvBytes > 262144ULL) vbvBytes = 262144ULL;
-    v.ulVal = static_cast<ULONG>(vbvBytes);
-    codecApi_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
-
+    ApplyRateControlBufferAndQp(codecApi_.Get(), bitrateKbps);
     return SUCCEEDED(hr);
 }
 
@@ -571,6 +571,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
             if (outError.empty()) outError = "Hardware MFT produced no output during probe";
             return false;
         }
+        lastSampleTimeHns_ = -1;
         keyframeRequested_.store(true);
     }
     return true;
@@ -671,12 +672,16 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
     outMt->SetGUID(MF_MT_SUBTYPE, hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
     outMt->SetUINT32(MF_MT_AVG_BITRATE, bitrateKbps * 1000u);
     outMt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    outMt->SetUINT32(MF_MT_MPEG2_PROFILE, hevc ? eAVEncH265VProfile_Main_420_8 : eAVEncH264VProfile_Main);
+    outMt->SetUINT32(MF_MT_MPEG2_PROFILE, hevc ? eAVEncH265VProfile_Main_420_8 : eAVEncH264VProfile_High);
     MFSetAttributeSize(outMt.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(outMt.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(outMt.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
     hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
+    if (FAILED(hr) && !hevc) {
+        outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
+    }
     if (FAILED(hr)) {
         if (hevc) {
             outMt->DeleteItem(MF_MT_MPEG2_PROFILE);
@@ -803,6 +808,18 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
     }
 }
 
+int64_t MfH264Encoder::ComputeSampleDurationHns(int64_t sampleTimeHns) {
+    int64_t durHns = frameDurationHns_;
+    if (lastSampleTimeHns_ >= 0 && sampleTimeHns > lastSampleTimeHns_) {
+        int64_t delta = sampleTimeHns - lastSampleTimeHns_;
+        if (delta < frameDurationHns_) durHns = frameDurationHns_;
+        else if (delta > 1000000LL) durHns = 1000000LL;
+        else durHns = delta;
+    }
+    lastSampleTimeHns_ = sampleTimeHns;
+    return durHns;
+}
+
 bool MfH264Encoder::EncodeD3D11Texture(ID3D11Texture2D* nv12Tex, int64_t sampleTimeHns,
                                        bool forceKeyframe, std::vector<uint8_t>& outAnnexB,
                                        bool& outIsKeyframe, std::string& outError) {
@@ -830,7 +847,7 @@ bool MfH264Encoder::EncodeD3D11Texture(ID3D11Texture2D* nv12Tex, int64_t sampleT
 
     inSample->AddBuffer(dxBuf.Get());
     inSample->SetSampleTime(sampleTimeHns);
-    inSample->SetSampleDuration(frameDurationHns_);
+    inSample->SetSampleDuration(ComputeSampleDurationHns(sampleTimeHns));
     return EncodeSampleInternal(inSample.Get(), forceKeyframe, outAnnexB, outIsKeyframe, outError);
 }
 
@@ -864,7 +881,7 @@ bool MfH264Encoder::EncodeNv12(const uint8_t* nv12Data, size_t nv12Bytes, int64_
     if (FAILED(hr)) { outError = "MFCreateSample(in) failed"; return false; }
     inSample->AddBuffer(reusableInBuf_.Get());
     inSample->SetSampleTime(sampleTimeHns);
-    inSample->SetSampleDuration(frameDurationHns_);
+    inSample->SetSampleDuration(ComputeSampleDurationHns(sampleTimeHns));
     return EncodeSampleInternal(inSample.Get(), forceKeyframe, outAnnexB, outIsKeyframe, outError);
 }
 

@@ -97,7 +97,7 @@ namespace DualRemote
             new QualityOption("高速 / 局域网 · 2560×1440 · 90 帧 · 22 Mbps", 2560, 1440, 90, 22000),
             new QualityOption("高速 / 局域网 16:10 · 2560×1600 · 90 帧 · 24 Mbps", 2560, 1600, 90, 24000),
             new QualityOption("局域网高刷 · 2560×1440 · 120 帧 · 30 Mbps", 2560, 1440, 120, 30000),
-            new QualityOption("极速电竞高刷 · 2560×1440 · 144 帧 · 36 Mbps", 2560, 1440, 144, 36000),
+            new QualityOption("极速电竞高刷 · 2560×1440 · 144 帧 · 45 Mbps", 2560, 1440, 144, 45000),
             new QualityOption("4K 超清办公 · 3840×2160 · 60 帧 · 35 Mbps", 3840, 2160, 60, 35000),
             new QualityOption("自动推荐 · 根据线路选择画质", 1920, 1080, 60, 10000)
         };
@@ -1853,7 +1853,7 @@ namespace DualRemote
                 },
                 OnSelectFps = delegate(int fps)
                 {
-                    int idx = fps >= 144 ? 7 : (fps >= 90 ? 4 : 0);
+                    int idx = fps >= 144 ? 7 : (fps >= 120 ? 6 : (fps >= 90 ? 4 : 0));
                     SwitchActiveStreamQuality(idx);
                 },
                 OnToggleMuteHostAudio = delegate(bool mute)

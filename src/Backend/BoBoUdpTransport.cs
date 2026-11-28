@@ -799,7 +799,7 @@ namespace DualRemote
                 groupSize = 3;
                 emitFec = true;
             }
-            else if (nackEnabled && recentLossPct < 0.3 && rttMs < 30.0 && jitterMs < 10.0)
+            else if (nackEnabled && recentLossPct < 0.3 && rttMs < 55.0 && jitterMs < 16.0 && burstLossStreak == 0)
             {
                 groupSize = 8;
                 emitFec = true;
@@ -843,7 +843,7 @@ namespace DualRemote
             double audioAndCtrlReserve = 0.02;
             double totalExpansion = fecFactor * headerFactor * (1.0 + rtxReserve + audioAndCtrlReserve);
 
-            int safeWire = Math.Max(600, Math.Min(60000, totalWireBudgetKbps));
+            int safeWire = Math.Max(600, Math.Min(80000, totalWireBudgetKbps));
             encoderBitrateKbps = Math.Max(450, Math.Min(safeWire, (int)Math.Floor(safeWire / totalExpansion)));
             pacerWireKbps = safeWire;
             if (signal == BoBoCongestionSignal.Overuse) pacerDrainMargin = 1.08;
@@ -1084,26 +1084,73 @@ namespace DualRemote
 
             lock (gate)
             {
-                CachedFrame existing;
-                if (frames.TryGetValue(frameId, out existing))
-                {
-                    totalBytes -= existing.ByteCount;
-                    frames.Remove(frameId);
-                }
+                InsertFrameLocked(frameId, entry);
+            }
+        }
 
-                frames[frameId] = entry;
-                order.Enqueue(frameId);
-                totalBytes += frameBytes;
+        internal void BeginFrame(uint frameId, int dataCount)
+        {
+            if (dataCount <= 0 || dataCount > BoBoUdpFec.MaxDataShardsPerFrame) return;
+            var entry = new CachedFrame
+            {
+                FrameId = frameId,
+                Shards = new byte[dataCount][],
+                LastSentTicks = new long[dataCount],
+                RetryCounts = new byte[dataCount],
+                ByteCount = 0
+            };
+            lock (gate)
+            {
+                InsertFrameLocked(frameId, entry);
+            }
+        }
 
-                while (order.Count > 0 && (frames.Count > MaxCachedFrames || totalBytes > MaxCachedBytes))
+        internal void StoreSentShard(uint frameId, byte[] shard)
+        {
+            if (shard == null || shard.Length < BoBoUdpFec.ShardHeaderBytes) return;
+            if ((shard[12] & BoBoUdpFec.FlagParity) != 0) return;
+            int idx = BoBoUdpCrypto.ReadUInt16LE(shard, 13);
+            if (idx < 0) return;
+
+            lock (gate)
+            {
+                CachedFrame entry;
+                if (!frames.TryGetValue(frameId, out entry) || idx >= entry.Shards.Length) return;
+                if (entry.Shards[idx] != null) return;
+                if (shard.Length > MaxCachedBytes) return;
+
+                entry.Shards[idx] = shard;
+                entry.ByteCount += shard.Length;
+                totalBytes += shard.Length;
+                EvictOverflowLocked(entry);
+            }
+        }
+
+        private void InsertFrameLocked(uint frameId, CachedFrame entry)
+        {
+            CachedFrame existing;
+            if (frames.TryGetValue(frameId, out existing))
+            {
+                totalBytes -= existing.ByteCount;
+                frames.Remove(frameId);
+            }
+
+            frames[frameId] = entry;
+            order.Enqueue(frameId);
+            totalBytes += entry.ByteCount;
+            EvictOverflowLocked(entry);
+        }
+
+        private void EvictOverflowLocked(CachedFrame protectedEntry)
+        {
+            while (order.Count > 0 && (frames.Count > MaxCachedFrames || totalBytes > MaxCachedBytes))
+            {
+                uint oldestId = order.Dequeue();
+                CachedFrame oldest;
+                if (frames.TryGetValue(oldestId, out oldest) && !object.ReferenceEquals(oldest, protectedEntry))
                 {
-                    uint oldestId = order.Dequeue();
-                    CachedFrame oldest;
-                    if (frames.TryGetValue(oldestId, out oldest) && !object.ReferenceEquals(oldest, entry))
-                    {
-                        frames.Remove(oldestId);
-                        totalBytes -= oldest.ByteCount;
-                    }
+                    frames.Remove(oldestId);
+                    totalBytes -= oldest.ByteCount;
                 }
             }
         }
@@ -1594,7 +1641,8 @@ namespace DualRemote
                                 }
                                 else
                                 {
-                                    groupEligible = hasNewerFrame || idleMs >= 14.0;
+                                    double pacerTailGraceMs = Math.Max(14.0, Math.Min(28.0, baseRtt * 0.4));
+                                    groupEligible = hasNewerFrame || idleMs >= pacerTailGraceMs;
                                 }
                                 if (!groupEligible) continue;
 
@@ -1974,7 +2022,7 @@ namespace DualRemote
                     currentFps = targetFps;
                     return;
                 }
-                int maxBitrate = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, enablingAuto ? 18000 : 30000);
+                int maxBitrate = isLanLink ? targetBitrateKbps : Math.Min(targetBitrateKbps, enablingAuto ? 18000 : 45000);
                 int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 90);
                 currentBitrateKbps = Math.Min(currentBitrateKbps, maxBitrate);
                 currentFps = Math.Min(currentFps, maxFps);
@@ -2028,15 +2076,17 @@ namespace DualRemote
             {
                 congestionSignal = BoBoCongestionSignal.Overuse;
                 long now = Stopwatch.GetTimestamp();
-                if (lastDecreaseTicks != 0 && ElapsedMs(lastDecreaseTicks, now) < 600.0)
+                double cooldownMs = enabled ? 600.0 : 850.0;
+                if (lastDecreaseTicks != 0 && ElapsedMs(lastDecreaseTicks, now) < cooldownMs)
                 {
                     newBitrateKbps = currentBitrateKbps;
                     newFps = currentFps;
                     return false;
                 }
 
-                int floorBps = enabled ? 600 : Math.Min(targetBitrateKbps, 1200);
-                int reduced = Math.Max(floorBps, ClampBitrate((int)(currentBitrateKbps * 0.65)));
+                int floorBps = enabled ? 600 : ManualFloorKbps();
+                double factor = enabled ? 0.65 : 0.80;
+                int reduced = Math.Max(floorBps, ClampBitrate((int)(currentBitrateKbps * factor)));
                 if (reduced < currentBitrateKbps)
                 {
                     currentBitrateKbps = reduced;
@@ -2160,7 +2210,9 @@ namespace DualRemote
                 {
                     congestionSignal = BoBoCongestionSignal.Overuse;
                 }
-                else if (delayTrendMs > overuseThresholdMs * 0.5 || effectiveJitterMs >= 18.0 || queueDelayMs >= 26.0)
+                else if (delayTrendMs > overuseThresholdMs * 0.5 ||
+                         effectiveJitterMs >= (enabled ? 26.0 : 32.0) ||
+                         queueDelayMs >= (enabled ? 26.0 : 34.0))
                 {
                     congestionSignal = BoBoCongestionSignal.Hold;
                 }
@@ -2174,8 +2226,8 @@ namespace DualRemote
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= (enabled ? 750.0 : 700.0))
                     {
-                        int floorBps = enabled ? 600 : Math.Min(targetBitrateKbps, 1200);
-                        int next = Math.Max(floorBps, ClampBitrate((int)(currentBitrateKbps * (enabled ? 0.65 : 0.68))));
+                        int floorBps = enabled ? 600 : ManualFloorKbps();
+                        int next = Math.Max(floorBps, ClampBitrate((int)(currentBitrateKbps * (enabled ? 0.65 : 0.72))));
                         if (next < currentBitrateKbps)
                         {
                             currentBitrateKbps = next;
@@ -2189,7 +2241,7 @@ namespace DualRemote
                 {
                     if (lastDecreaseTicks == 0 || ElapsedMs(lastDecreaseTicks, now) >= (enabled ? 950.0 : 900.0))
                     {
-                        int floorBps = enabled ? 600 : Math.Min(targetBitrateKbps, 1500);
+                        int floorBps = enabled ? 600 : ManualFloorKbps();
                         int next = Math.Max(floorBps, ClampBitrate((int)(currentBitrateKbps * 0.84)));
                         if (next < currentBitrateKbps)
                         {
@@ -2202,18 +2254,18 @@ namespace DualRemote
                         overuseStartTicks = 0;
                     }
                 }
-                else if (congestionSignal == BoBoCongestionSignal.Normal &&
-                         smoothedLossPct < (enabled ? 0.5 : 1.0) &&
-                         queueDelayMs < 30.0 &&
+                else if ((enabled ? (congestionSignal == BoBoCongestionSignal.Normal) : (congestionSignal != BoBoCongestionSignal.Overuse)) &&
+                         smoothedLossPct < (enabled ? 0.5 : 1.2) &&
+                         queueDelayMs < (enabled ? 30.0 : 35.0) &&
                          effectiveJitterMs < 35.0)
                 {
-                    int maxBps = (enabled && !isLanLink) ? Math.Min(targetBitrateKbps, 30000) : targetBitrateKbps;
-                    double incInterval = enabled ? 2000.0 : 900.0;
+                    int maxBps = (enabled && !isLanLink) ? Math.Min(targetBitrateKbps, 45000) : targetBitrateKbps;
+                    double incInterval = enabled ? 1800.0 : 900.0;
                     if (currentBitrateKbps < maxBps && ElapsedMs(lastIncreaseTicks, now) >= incInterval)
                     {
                         int step = enabled
-                            ? Math.Max(400, (int)(currentBitrateKbps * 0.12))
-                            : Math.Max(900, (int)(currentBitrateKbps * 0.24));
+                            ? Math.Max(400, (int)(currentBitrateKbps * 0.14))
+                            : Math.Max(1000, (int)(currentBitrateKbps * 0.24));
                         int next = Math.Min(maxBps, currentBitrateKbps + step);
                         if (next != currentBitrateKbps)
                         {
@@ -2227,7 +2279,9 @@ namespace DualRemote
                 // Always prioritize high FPS ("保帧率、降码率"); only reduce FPS under sustained extreme bottleneck.
                 if (enabled)
                 {
-                    int maxFps = isLanLink ? targetFps : Math.Min(targetFps, 90);
+                    int maxFps = (isLanLink || (currentBitrateKbps >= 14000 && smoothedRttMs > 0.0 && smoothedRttMs <= 65.0))
+                        ? targetFps
+                        : Math.Min(targetFps, 90);
                     if (currentBitrateKbps <= 2000)
                     {
                         if (lowBitrateSinceTicks == 0) lowBitrateSinceTicks = now;
@@ -2250,7 +2304,7 @@ namespace DualRemote
                 }
                 else
                 {
-                    if (currentBitrateKbps <= 1500 && targetBitrateKbps > 2000)
+                    if (currentBitrateKbps <= 2000 && targetBitrateKbps > 2500)
                     {
                         if (lowBitrateSinceTicks == 0) lowBitrateSinceTicks = now;
                         else if (ElapsedMs(lowBitrateSinceTicks, now) >= 2500.0 && currentFps > Math.Min(targetFps, 45))
@@ -2276,10 +2330,15 @@ namespace DualRemote
             }
         }
 
+        private int ManualFloorKbps()
+        {
+            return Math.Min(targetBitrateKbps, Math.Max(2500, (int)((long)targetBitrateKbps * 35L / 100L)));
+        }
+
         private static int ClampBitrate(int kbps)
         {
             if (kbps < 600) return 600;
-            if (kbps > 60000) return 60000;
+            if (kbps > 80000) return 80000;
             return kbps;
         }
 

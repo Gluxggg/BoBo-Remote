@@ -642,6 +642,7 @@ namespace DualRemote
             RunV76WinlogonAndZeroLossSelfTests();
             RunV761SecurityAndTransportIsolationSelfTests();
             RunV762LockScreenAndSecuritySelfTests();
+            RunHighRefreshUltraQualitySelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -2737,6 +2738,93 @@ namespace DualRemote
             }
             Check("V7.6.2 BoBoTsNet.exe 256 位全摘要完整性校验与篡改自愈还原",
                 tsnetTamperRepairOk, "ok=" + tsnetTamperRepairOk);
+        }
+
+        private static void RunHighRefreshUltraQualitySelfTests()
+        {
+            Log("");
+            Log("—— 高刷超清/原画动态码率扩展 + 固定档位防坍缩 + 发送后重传缓存 + 80M 线速预算自检 ——");
+
+            // 1. Dynamic quality tier scaling across resolution & FPS (1080p60 -> 1440p60 -> 1440p144)
+            int ultra1080p60 = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.UltraHd, 1920, 1080, 60);
+            int ultra1440p60 = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.UltraHd, 2560, 1440, 60);
+            int ultra1440p144 = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.UltraHd, 2560, 1440, 144);
+            int orig1440p144 = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.Original, 2560, 1440, 144);
+            var ccModel = new StreamControlCenterModel
+            {
+                CurrentWidth = 2560,
+                CurrentHeight = 1440,
+                Fps = 144,
+                AutoBitrate = false,
+                QualityTier = ControlQualityTier.UltraHd,
+                BitrateKbps = ultra1440p144
+            };
+            List<CcMenuItem> rootItems = UuControlCenterSession.BuildRootMenuItems(ccModel, null);
+            List<CcMenuItem> qualityItems = null;
+            foreach (CcMenuItem item in rootItems)
+            {
+                if (item.Text == "画质" && item.SubmenuBuilder != null)
+                {
+                    qualityItems = item.SubmenuBuilder();
+                    break;
+                }
+            }
+            bool has120Fps = qualityItems != null && qualityItems.Any(q => q.Text == "120 帧");
+            bool has144Fps = qualityItems != null && qualityItems.Any(q => q.Text == "144 帧");
+            bool hasScaledUltra = qualityItems != null && qualityItems.Any(q => q.Text == "超清 " + (ultra1440p144 / 1000) + "M");
+            Check("高刷画质档位动态扩展：2K144Hz 自动抬升超清/原画码率并包含 120/144 帧菜单",
+                ultra1080p60 == 16000 && ultra1440p60 >= 22000 && ultra1440p144 >= 38000 && orig1440p144 >= 70000 &&
+                has120Fps && has144Fps && hasScaledUltra,
+                "1080p60=" + ultra1080p60 + " 1440p60=" + ultra1440p60 + " 1440p144=" + ultra1440p144 + " orig=" + orig1440p144);
+
+            // 2. Manual high-refresh preset must resist collapse to 1.4 Mbps and recover under normal 18-24ms jitter
+            var highAbr = new BoBoAdaptiveBitrateController(false, ultra1440p144, 144, 42.0, false);
+            int tmpBps, tmpFps;
+            highAbr.OnTelemetry(42.0, 0.0, 18.0, Stopwatch.GetTimestamp(), out tmpBps, out tmpFps);
+            bool steadyHeld = highAbr.CurrentBitrateKbps == ultra1440p144 && highAbr.CurrentFps == 144;
+            for (int i = 0; i < 8; i++)
+            {
+                highAbr.OnCongestionBackpressure(out tmpBps, out tmpFps);
+                highAbr.OnTelemetry(225.0, 4.5, 40.0, Stopwatch.GetTimestamp() + (i + 1) * Stopwatch.Frequency, out tmpBps, out tmpFps);
+            }
+            int floorObserved = highAbr.CurrentBitrateKbps;
+            bool antiCollapseOk = floorObserved >= 15000 && highAbr.CurrentFps == 144;
+            long recTicks = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 12L;
+            for (int i = 0; i < 16; i++)
+            {
+                recTicks += Stopwatch.Frequency;
+                highAbr.OnTelemetry(43.0, 0.0, 22.0, recTicks, out tmpBps, out tmpFps);
+            }
+            bool recoveredUnderJitterOk = highAbr.CurrentBitrateKbps == ultra1440p144 && highAbr.CurrentFps == 144;
+            Check("高刷固定档位防坍缩：拥塞下不跌穿保护地板(>=15M)，22ms 常规抖动下可顺利回升满速",
+                steadyHeld && antiCollapseOk && recoveredUnderJitterOk,
+                "steady=" + steadyHeld + " floor=" + floorObserved + " recovered=" + highAbr.CurrentBitrateKbps);
+
+            // 3. Sent-only retransmit cache does not serve unsent shards (prevents premature NACK storms)
+            var txCache = new BoBoUdpRetransmitCache();
+            byte[] bigAu = new byte[8 * BoBoUdpFec.DefaultSendShardPayloadBytes];
+            List<byte[]> bigShards = BoBoUdpFec.BuildVideoShards(10u, 100u, 2560, 1440, true, bigAu, 0.0, true, true, 42.0, 11.0, 0, true);
+            txCache.BeginFrame(10u, 8);
+            txCache.StoreSentShard(10u, bigShards[0]);
+            long nowT = Stopwatch.GetTimestamp();
+            byte[] retxSent0 = txCache.TryGetForRetransmit(10u, 0, nowT, 0.0, 2);
+            byte[] retxUnsent5 = txCache.TryGetForRetransmit(10u, 5, nowT, 0.0, 2);
+            bool txOnlyCacheOk = retxSent0 != null && (retxSent0[12] & BoBoUdpFec.FlagRetransmit) != 0 && retxUnsent5 == null;
+            Check("重传缓存按分片发送状态渐进登记：已发送分片可补发，未上线路尾分片不触发虚假重传",
+                txOnlyCacheOk,
+                "sent0=" + (retxSent0 != null) + " unsent5=" + (retxUnsent5 != null));
+
+            // 4. 80 Mbps wire budget allocation stays safe inside pacer drain margin
+            int enc80, wire80, grp80;
+            double margin80;
+            BoBoUdpFec.ComputeWireBudgetAllocation(
+                75000, 0.0, true, 42.0, 11.0, 0,
+                BoBoUdpCrypto.GcmOverheadBytes, BoBoCongestionSignal.Normal,
+                out enc80, out wire80, out margin80, out grp80);
+            double estOut80 = enc80 * ((grp80 + 1.0) / grp80) * 1.08;
+            Check("80 Mbps 高刷原画线速总预算分流：编码目标 >=55 Mbps 且 Pacer 排水留足余量",
+                enc80 >= 55000 && wire80 == 75000 && grp80 == 8 && estOut80 <= wire80 * margin80,
+                "enc=" + enc80 + " wire=" + wire80 + " grp=" + grp80 + " estOut=" + Math.Round(estOut80, 0));
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

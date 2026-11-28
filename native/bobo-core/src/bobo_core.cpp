@@ -53,6 +53,7 @@ struct BoBoHostSession {
         bool preferHevc = false;
         int32_t bitrateKbps = 14000;
         int32_t fps = 60;
+        int32_t monitorIndex = 0;
         ID3D11Device* zeroCopyDev = nullptr;
     };
 
@@ -94,12 +95,46 @@ struct BoBoHostSession {
     int encodingGpuSlot = -1;
     std::chrono::steady_clock::time_point startClock = std::chrono::steady_clock::now();
 
+    static uint32_t QueryMonitorRefreshHz(int32_t monIdx) {
+        std::vector<MONITORINFOEXW> mons;
+        auto enumProc = [](HMONITOR hMon, HDC, LPRECT, LPARAM lParam) -> BOOL {
+            auto* out = reinterpret_cast<std::vector<MONITORINFOEXW>*>(lParam);
+            MONITORINFOEXW mi = {};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(hMon, &mi)) {
+                out->push_back(mi);
+            }
+            return TRUE;
+        };
+        EnumDisplayMonitors(nullptr, nullptr, enumProc, reinterpret_cast<LPARAM>(&mons));
+        if (mons.empty()) return 0;
+        std::stable_sort(mons.begin(), mons.end(), [](const MONITORINFOEXW& a, const MONITORINFOEXW& b) {
+            bool ap = (a.dwFlags & MONITORINFOF_PRIMARY) != 0;
+            bool bp = (b.dwFlags & MONITORINFOF_PRIMARY) != 0;
+            return ap > bp;
+        });
+        size_t pick = (monIdx >= 0 && static_cast<size_t>(monIdx) < mons.size()) ? static_cast<size_t>(monIdx) : 0;
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(mons[pick].szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+            dm.dmDisplayFrequency >= 30 && dm.dmDisplayFrequency <= 360) {
+            return static_cast<uint32_t>(dm.dmDisplayFrequency);
+        }
+        return 0;
+    }
+
     void RunEncodeLoop() {
         HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         MfH264Encoder encoder;
         std::vector<uint8_t> h264Buf;
-        uint32_t encW = 0, encH = 0;
-        int32_t encBps = 0;
+        uint32_t encW = 0, encH = 0, encFps = 0;
+        int32_t encMon = -1;
+        int32_t encBps = 0, appliedMftBps = 0;
+        uint32_t hostRefreshHz = 0;
+        int32_t lastReqFpsRaw = 0;
+        auto vfrWinStart = std::chrono::steady_clock::now();
+        int vfrFrameCount = 0;
+        double vfrBoost = 1.0;
         bool encOpen = false;
         int consecutiveEncodeFailures = 0;
 
@@ -120,7 +155,7 @@ struct BoBoHostSession {
                     if (encOpen) {
                         encoder.Close();
                         encOpen = false;
-                        encW = encH = 0;
+                        encW = encH = encFps = 0;
                     }
                     lk.lock();
                     encodingGpuSlot = -1;
@@ -153,24 +188,43 @@ struct BoBoHostSession {
                 continue;
             }
 
+            int32_t reqFpsRaw = (work.fps >= 15 && work.fps <= 144) ? work.fps : 60;
+            if (!encOpen || work.monitorIndex != encMon || reqFpsRaw != lastReqFpsRaw) {
+                hostRefreshHz = QueryMonitorRefreshHz(work.monitorIndex);
+                lastReqFpsRaw = reqFpsRaw;
+            }
+            uint32_t reqEncFps = static_cast<uint32_t>(reqFpsRaw);
+            if (hostRefreshHz >= 30 && hostRefreshHz <= 360) {
+                uint32_t capHz = std::max<uint32_t>(60u, hostRefreshHz);
+                if (reqEncFps > capHz) reqEncFps = capHz;
+            }
+
             bool needZeroCopy = (!work.compositeCursor && work.zeroCopyDev != nullptr && work.gpuTex != nullptr);
             bool zeroCopyMismatch = encOpen &&
                 ((needZeroCopy && !encoder.IsD3D11ZeroCopy() && encoderAllowZeroCopy.load(std::memory_order_acquire)) ||
                  (!needZeroCopy && encoder.IsD3D11ZeroCopy()));
-            if (!encOpen || encW != work.width || encH != work.height || zeroCopyMismatch ||
+            if (!encOpen || encW != work.width || encH != work.height || encFps != reqEncFps ||
+                work.monitorIndex != encMon || zeroCopyMismatch ||
                 encoderResetRequested.exchange(false)) {
                 encoder.Close();
                 encOpen = false;
                 std::string encOpenErr;
                 ID3D11Device* zcDev = (!work.compositeCursor) ? work.zeroCopyDev : nullptr;
+                int32_t clampedReqBps = (work.bitrateKbps >= 500 && work.bitrateKbps <= 80000) ? work.bitrateKbps : 14000;
                 if (encoder.Open(work.width, work.height,
-                                 static_cast<uint32_t>(work.fps > 0 ? work.fps : 60),
-                                 static_cast<uint32_t>(work.bitrateKbps > 0 ? work.bitrateKbps : 14000),
+                                 reqEncFps,
+                                 static_cast<uint32_t>(clampedReqBps),
                                  encOpenErr, zcDev, work.preferHevc, true)) {
                     encOpen = true;
                     encW = work.width;
                     encH = work.height;
-                    encBps = work.bitrateKbps;
+                    encFps = reqEncFps;
+                    encMon = work.monitorIndex;
+                    encBps = clampedReqBps;
+                    appliedMftBps = clampedReqBps;
+                    vfrWinStart = std::chrono::steady_clock::now();
+                    vfrFrameCount = 0;
+                    vfrBoost = 1.0;
                     consecutiveEncodeFailures = 0;
                     activeVideoCodec.store(encoder.IsHevc() ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
                     encoderAllowZeroCopy.store(encoder.IsD3D11ZeroCopy(), std::memory_order_release);
@@ -183,9 +237,15 @@ struct BoBoHostSession {
                     Sleep(20);
                     continue;
                 }
-            } else if (work.bitrateKbps != encBps && work.bitrateKbps >= 500 && work.bitrateKbps <= 60000) {
-                encoder.UpdateBitrateLive(static_cast<uint32_t>(work.bitrateKbps));
-                encBps = work.bitrateKbps;
+            } else {
+                int32_t baseBps = (work.bitrateKbps >= 500 && work.bitrateKbps <= 80000) ? work.bitrateKbps : encBps;
+                int32_t effBps = static_cast<int32_t>(std::min<double>(80000.0, static_cast<double>(baseBps) * vfrBoost));
+                if (effBps < 500) effBps = 500;
+                if (baseBps != encBps || std::abs(effBps - appliedMftBps) >= std::max(200, appliedMftBps / 12)) {
+                    encoder.UpdateBitrateLive(static_cast<uint32_t>(effBps));
+                    encBps = baseBps;
+                    appliedMftBps = effBps;
+                }
             }
 
             bool useGpuThisFrame = encoder.IsD3D11ZeroCopy() && (work.gpuTex != nullptr);
@@ -211,6 +271,23 @@ struct BoBoHostSession {
 
             if (encOk) {
                 consecutiveEncodeFailures = 0;
+                ++vfrFrameCount;
+                auto vfrNow = std::chrono::steady_clock::now();
+                double vfrElapsedSec = std::chrono::duration<double>(vfrNow - vfrWinStart).count();
+                if (vfrElapsedSec >= 0.40 || vfrFrameCount >= 24) {
+                    if (encFps >= 90 && vfrFrameCount >= 6 && vfrElapsedSec >= 0.12) {
+                        double measuredFps = static_cast<double>(vfrFrameCount) / vfrElapsedSec;
+                        if (measuredFps >= 14.0 && measuredFps < static_cast<double>(encFps) * 0.82) {
+                            vfrBoost = std::min(1.75, static_cast<double>(encFps) / measuredFps);
+                        } else {
+                            vfrBoost = 1.0;
+                        }
+                    } else {
+                        vfrBoost = 1.0;
+                    }
+                    vfrWinStart = vfrNow;
+                    vfrFrameCount = 0;
+                }
                 if (!h264Buf.empty() && onVideo) {
                     auto nowClock = std::chrono::steady_clock::now();
                     int64_t msSinceStart = std::chrono::duration_cast<std::chrono::milliseconds>(nowClock - startClock).count();
@@ -317,7 +394,7 @@ struct BoBoHostSession {
                     reqW = targetWidth;
                     reqH = targetHeight;
                     reqFps = (fps >= 15 && fps <= 144) ? fps : 60;
-                    reqBps = (bitrateKbps >= 500 && bitrateKbps <= 60000) ? bitrateKbps : 10000;
+                    reqBps = (bitrateKbps >= 500 && bitrateKbps <= 80000) ? bitrateKbps : 10000;
                     reqHevc = preferHevcVideo;
                 }
                 liveFpsTarget.store(reqFps, std::memory_order_release);
@@ -367,7 +444,7 @@ struct BoBoHostSession {
             }
 
             int32_t pendingBps = liveBitratePending.exchange(0, std::memory_order_acq_rel);
-            if (pendingBps >= 500 && pendingBps <= 60000) {
+            if (pendingBps >= 500 && pendingBps <= 80000) {
                 curBps = pendingBps;
             }
             int32_t targetFpsNow = liveFpsTarget.load(std::memory_order_acquire);
@@ -486,6 +563,7 @@ struct BoBoHostSession {
                     staged.preferHevc = reqHevcNow;
                     staged.bitrateKbps = curBps;
                     staged.fps = curFps;
+                    staged.monitorIndex = curMon;
                     staged.zeroCopyDev = (capturer.UsingDxgi() && !curCompositeCursor) ? capturer.Device() : nullptr;
                     stagedGpuSlot = staged.gpuSlot;
                 }
@@ -586,9 +664,9 @@ struct QueuedH264Frame {
 struct BoundedVideoDecodeQueue {
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    static constexpr size_t kSoftTrimFrames = 8;
-    static constexpr size_t kMaxFrames = 12;
-    static constexpr size_t kMaxBytes = 4u * 1024u * 1024u; // 4 MiB hard cap
+    static constexpr size_t kSoftTrimFrames = 20;
+    static constexpr size_t kMaxFrames = 32;
+    static constexpr size_t kMaxBytes = 12u * 1024u * 1024u; // 12 MiB hard cap (handles NACK bursts at 2K/4K 144Hz)
     static constexpr double kMaxWaitMs = 250.0;
     static constexpr double kIdrRequestCooldownMs = 300.0;
 
@@ -1975,8 +2053,8 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
         q.Push(makeFrame(true, 1024), atMs(0));
         int32_t lastPushRc = BOBO_PUSH_VIDEO_ACCEPTED;
         size_t maxObservedDepth = 0;
-        for (int i = 1; i <= 15; ++i) {
-            lastPushRc = q.Push(makeFrame(false, 1024), atMs(i * 10));
+        for (int i = 1; i <= 36; ++i) {
+            lastPushRc = q.Push(makeFrame(false, 1024), atMs(i * 5));
             maxObservedDepth = std::max(maxObservedDepth, q.frames.size());
             if (lastPushRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) break;
         }
@@ -1984,21 +2062,21 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
                           (maxObservedDepth <= BoundedVideoDecodeQueue::kMaxFrames) &&
                           q.Empty() && q.waitingForKeyframe && (q.queueResets == 1);
         // Orphan delta during cooldown (1) and after 300ms cooldown (2), then fresh IDR recovery
-        int32_t orphanSoonRc = q.Push(makeFrame(false, 512), atMs(170));
-        int32_t orphanLateRc = q.Push(makeFrame(false, 512), atMs(450));
-        int32_t recoveryKeyRc = q.Push(makeFrame(true, 2048), atMs(460));
+        int32_t orphanSoonRc = q.Push(makeFrame(false, 512), atMs(260));
+        int32_t orphanLateRc = q.Push(makeFrame(false, 512), atMs(560));
+        int32_t recoveryKeyRc = q.Push(makeFrame(true, 2048), atMs(570));
         bool recoveryOk = (orphanSoonRc == BOBO_PUSH_VIDEO_ACCEPTED) &&
                           (orphanLateRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) &&
                           (recoveryKeyRc == BOBO_PUSH_VIDEO_ACCEPTED) &&
                           !q.waitingForKeyframe && (q.frames.size() == 1);
 
-        // 6b. Byte cap (4 MiB) reset on deltas & single oversized keyframe acceptance (no deadlock)
+        // 6b. Byte cap (12 MiB) reset on deltas & single oversized keyframe acceptance (no deadlock)
         BoundedVideoDecodeQueue qBytes;
         qBytes.Push(makeFrame(true, 102400), atMs(0));
-        qBytes.Push(makeFrame(false, 2u * 1024u * 1024u), atMs(10));
-        int32_t byteOverflowRc = qBytes.Push(makeFrame(false, 2u * 1024u * 1024u), atMs(20));
+        qBytes.Push(makeFrame(false, 6u * 1024u * 1024u), atMs(10));
+        int32_t byteOverflowRc = qBytes.Push(makeFrame(false, 6u * 1024u * 1024u), atMs(20));
         BoundedVideoDecodeQueue qBigKey;
-        int32_t bigKeyRc = qBigKey.Push(makeFrame(true, (4u * 1024u * 1024u) + 512u), atMs(0));
+        int32_t bigKeyRc = qBigKey.Push(makeFrame(true, (12u * 1024u * 1024u) + 512u), atMs(0));
         bool byteCapOk = (byteOverflowRc == BOBO_PUSH_VIDEO_NEED_KEYFRAME) && qBytes.Empty() &&
                          (bigKeyRc == BOBO_PUSH_VIDEO_ACCEPTED) && (qBigKey.frames.size() == 1);
 
@@ -2025,7 +2103,7 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
         bool stalePopDropped = !qPop.Pop(popped, waitMs, moreQueuedPop, atMs(2300)) &&
                                qPop.Empty() && qPop.waitingForKeyframe;
 
-        check("Bounded video decode queue (12 frames / 4MiB / 250ms / IDR recovery)",
+        check("Bounded video decode queue (32 frames / 12MiB / 250ms / IDR recovery)",
               capResetOk && recoveryOk && byteCapOk && ageJumpOk && ageExpireOk && popOk && stalePopDropped,
               "cap=" + std::to_string(capResetOk) + " rec=" + std::to_string(recoveryOk) +
                   " bytes=" + std::to_string(byteCapOk) + " age=" + std::to_string(ageJumpOk && ageExpireOk) +
@@ -2343,7 +2421,7 @@ BOBO_API int32_t __stdcall BoBoHost_Reconfigure(
 
 BOBO_API int32_t __stdcall BoBoHost_SetBitrate(void* handle, int32_t bitrateKbps) {
     auto* session = static_cast<BoBoHostSession*>(handle);
-    if (!session || bitrateKbps < 500 || bitrateKbps > 60000) return 0;
+    if (!session || bitrateKbps < 500 || bitrateKbps > 80000) return 0;
     {
         std::lock_guard<std::mutex> lk(session->cfgMutex);
         session->bitrateKbps = bitrateKbps;

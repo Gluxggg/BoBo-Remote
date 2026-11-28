@@ -22,6 +22,15 @@ namespace DualRemote
         ViewOnly = 2
     }
 
+    internal enum ControlQualityTier
+    {
+        Auto = 0,
+        StandardHd = 1,
+        UltraHd = 2,
+        Original = 3,
+        Custom = 4
+    }
+
     /// <summary>
     /// 控制中心实时状态与回调模型（由 NativeStreamForm / MainForm 共同驱动，
     /// 窗口顶栏「控制中心」按钮与全屏贴边悬浮球复用同一份完整菜单与实时状态）。
@@ -44,6 +53,7 @@ namespace DualRemote
 
         internal int BitrateKbps = 14000;
         internal bool AutoBitrate = true;
+        internal ControlQualityTier QualityTier = ControlQualityTier.Auto;
         internal int Fps = 60;
         internal bool TrueColor = false;
         internal bool HdrEnabled = false;
@@ -82,6 +92,7 @@ namespace DualRemote
         internal Action OnSwitchNextDisplay;
 
         internal Action<int, bool> OnSelectBitrate;
+        internal Action<ControlQualityTier, int> OnSelectQualityTier;
         internal Action<int> OnSelectFps;
         internal Action<bool> OnSelectTrueColor;
         internal Action<bool> OnToggleHdr;
@@ -116,6 +127,52 @@ namespace DualRemote
 
         internal Action OnToggleFullscreen;
         internal Action OnDisconnect;
+
+        internal static int ComputeTierBitrateKbps(ControlQualityTier tier, int width, int height, int fps)
+        {
+            double pixels = Math.Max(1280.0 * 720.0, (double)Math.Max(320, width) * Math.Max(240, height));
+            double resScale = Math.Pow(Math.Max(0.75, Math.Min(4.0, pixels / (1920.0 * 1080.0))), 0.72);
+            double fpsScale = Math.Pow(Math.Max(0.65, Math.Min(2.4, Math.Max(30, fps) / 60.0)), 0.65);
+
+            int baseKbps;
+            int minKbps;
+            int maxKbps;
+            if (tier == ControlQualityTier.StandardHd)
+            {
+                baseKbps = 8000;
+                minKbps = 8000;
+                maxKbps = 32000;
+            }
+            else if (tier == ControlQualityTier.Original)
+            {
+                baseKbps = 30000;
+                minKbps = 30000;
+                maxKbps = 80000;
+            }
+            else
+            {
+                baseKbps = 16000;
+                minKbps = 16000;
+                maxKbps = 60000;
+            }
+
+            int scaled = (int)(Math.Round((baseKbps * resScale * fpsScale) / 1000.0) * 1000.0);
+            if (scaled < minKbps) scaled = minKbps;
+            if (scaled > maxKbps) scaled = maxKbps;
+            return scaled;
+        }
+
+        internal static ControlQualityTier InferQualityTier(bool autoBitrate, int bitrateKbps, int width, int height, int fps)
+        {
+            if (autoBitrate) return ControlQualityTier.Auto;
+            if (bitrateKbps == ComputeTierBitrateKbps(ControlQualityTier.Original, width, height, fps) || bitrateKbps >= 28000)
+                return ControlQualityTier.Original;
+            if (bitrateKbps == ComputeTierBitrateKbps(ControlQualityTier.UltraHd, width, height, fps) || bitrateKbps == 14000)
+                return ControlQualityTier.UltraHd;
+            if (bitrateKbps == ComputeTierBitrateKbps(ControlQualityTier.StandardHd, width, height, fps) || bitrateKbps == 8000)
+                return ControlQualityTier.StandardHd;
+            return ControlQualityTier.Custom;
+        }
     }
 
     internal enum CcIcon
@@ -545,47 +602,76 @@ namespace DualRemote
 
         private static List<CcMenuItem> BuildQualitySubmenu(StreamControlCenterModel m)
         {
+            int hdKbps = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.StandardHd, m.CurrentWidth, m.CurrentHeight, m.Fps);
+            int ultraKbps = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.UltraHd, m.CurrentWidth, m.CurrentHeight, m.Fps);
+            int origKbps = StreamControlCenterModel.ComputeTierBitrateKbps(ControlQualityTier.Original, m.CurrentWidth, m.CurrentHeight, m.Fps);
+            ControlQualityTier activeTier = m.AutoBitrate
+                ? ControlQualityTier.Auto
+                : (m.QualityTier == ControlQualityTier.Auto
+                    ? StreamControlCenterModel.InferQualityTier(false, m.BitrateKbps, m.CurrentWidth, m.CurrentHeight, m.Fps)
+                    : m.QualityTier);
+
             var items = new List<CcMenuItem>();
             items.Add(new CcMenuItem
             {
-                Text = "自动 (高清)",
-                RadioSelected = m.AutoBitrate,
-                OnClick = delegate { if (m.OnSelectBitrate != null) m.OnSelectBitrate(10000, true); }
+                Text = "自动 (超清)",
+                RadioSelected = m.AutoBitrate || activeTier == ControlQualityTier.Auto,
+                OnClick = delegate
+                {
+                    if (m.OnSelectQualityTier != null) m.OnSelectQualityTier(ControlQualityTier.Auto, ultraKbps);
+                    else if (m.OnSelectBitrate != null) m.OnSelectBitrate(ultraKbps, true);
+                }
             });
             items.Add(new CcMenuItem
             {
-                Text = "原画 30M",
-                RadioSelected = !m.AutoBitrate && m.BitrateKbps == 30000,
-                OnClick = delegate { if (m.OnSelectBitrate != null) m.OnSelectBitrate(30000, false); }
+                Text = "原画 " + (origKbps / 1000) + "M",
+                RadioSelected = !m.AutoBitrate && activeTier == ControlQualityTier.Original,
+                OnClick = delegate
+                {
+                    if (m.OnSelectQualityTier != null) m.OnSelectQualityTier(ControlQualityTier.Original, origKbps);
+                    else if (m.OnSelectBitrate != null) m.OnSelectBitrate(origKbps, false);
+                }
             });
             items.Add(new CcMenuItem
             {
-                Text = "超清 14M",
-                RadioSelected = !m.AutoBitrate && m.BitrateKbps == 14000,
-                OnClick = delegate { if (m.OnSelectBitrate != null) m.OnSelectBitrate(14000, false); }
+                Text = "超清 " + (ultraKbps / 1000) + "M",
+                RadioSelected = !m.AutoBitrate && activeTier == ControlQualityTier.UltraHd,
+                OnClick = delegate
+                {
+                    if (m.OnSelectQualityTier != null) m.OnSelectQualityTier(ControlQualityTier.UltraHd, ultraKbps);
+                    else if (m.OnSelectBitrate != null) m.OnSelectBitrate(ultraKbps, false);
+                }
             });
             items.Add(new CcMenuItem
             {
-                Text = "高清 8M",
-                RadioSelected = !m.AutoBitrate && m.BitrateKbps == 8000,
-                OnClick = delegate { if (m.OnSelectBitrate != null) m.OnSelectBitrate(8000, false); }
+                Text = "高清 " + (hdKbps / 1000) + "M",
+                RadioSelected = !m.AutoBitrate && activeTier == ControlQualityTier.StandardHd,
+                OnClick = delegate
+                {
+                    if (m.OnSelectQualityTier != null) m.OnSelectQualityTier(ControlQualityTier.StandardHd, hdKbps);
+                    else if (m.OnSelectBitrate != null) m.OnSelectBitrate(hdKbps, false);
+                }
             });
             items.Add(new CcMenuItem
             {
                 Text = "自定义",
-                RadioSelected = !m.AutoBitrate && m.BitrateKbps != 30000 && m.BitrateKbps != 14000 && m.BitrateKbps != 8000,
+                RadioSelected = !m.AutoBitrate && activeTier == ControlQualityTier.Custom,
                 SubmenuBuilder = delegate
                 {
                     var custom = new List<CcMenuItem>();
-                    int[] rates = new[] { 50000, 36000, 22000, 18000, 12000, 6000, 4000 };
+                    int[] rates = new[] { 80000, 65000, 50000, 36000, 22000, 18000, 12000, 6000, 4000 };
                     foreach (int kbps in rates)
                     {
                         int cap = kbps;
                         custom.Add(new CcMenuItem
                         {
-                            Text = (cap / 1000) + " Mbps" + (cap >= 36000 ? " (局域网高码)" : (cap <= 6000 ? " (弱网抗卡顿)" : "")),
-                            RadioSelected = !m.AutoBitrate && m.BitrateKbps == cap,
-                            OnClick = delegate { if (m.OnSelectBitrate != null) m.OnSelectBitrate(cap, false); }
+                            Text = (cap / 1000) + " Mbps" + (cap >= 36000 ? " (高刷原画)" : (cap <= 6000 ? " (弱网抗卡顿)" : "")),
+                            RadioSelected = !m.AutoBitrate && activeTier == ControlQualityTier.Custom && m.BitrateKbps == cap,
+                            OnClick = delegate
+                            {
+                                if (m.OnSelectQualityTier != null) m.OnSelectQualityTier(ControlQualityTier.Custom, cap);
+                                else if (m.OnSelectBitrate != null) m.OnSelectBitrate(cap, false);
+                            }
                         });
                     }
                     return custom;
@@ -594,7 +680,7 @@ namespace DualRemote
 
             items.Add(new CcMenuItem { IsSeparator = true });
 
-            foreach (int fps in new[] { 144, 90, 60, 30 })
+            foreach (int fps in new[] { 144, 120, 90, 60, 30 })
             {
                 int cap = fps;
                 items.Add(new CcMenuItem

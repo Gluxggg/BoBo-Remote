@@ -7,6 +7,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
@@ -2012,6 +2013,12 @@ namespace DualRemote
 
         private sealed class HostUdpSession : IDisposable
         {
+            [DllImport("winmm.dll")]
+            private static extern uint timeBeginPeriod(uint uPeriod);
+
+            [DllImport("winmm.dll")]
+            private static extern uint timeEndPeriod(uint uPeriod);
+
             private sealed class QueuedVideoFrame
             {
                 internal byte[] H264;
@@ -2150,7 +2157,7 @@ namespace DualRemote
 
             internal void SetPacingBitrate(int kbps)
             {
-                if (kbps >= 600 && kbps <= 60000)
+                if (kbps >= 600 && kbps <= 80000)
                 {
                     int _;
                     ApplyWireBudget(kbps, lastCongestionSignal, out _);
@@ -2159,7 +2166,7 @@ namespace DualRemote
 
             internal void SetPacingProfile(int kbps, double headroomFactor)
             {
-                if (kbps >= 600 && kbps <= 60000) pacingBitrateKbps = kbps;
+                if (kbps >= 600 && kbps <= 80000) pacingBitrateKbps = kbps;
                 double clamped = Math.Max(1.05, Math.Min(1.50, headroomFactor));
                 Volatile.Write(ref pacingHeadroom, clamped);
             }
@@ -2491,8 +2498,8 @@ namespace DualRemote
 
                     // Allow an IDR to span multiple frame intervals. Bound queue age as well
                     // as frame count so a busy desktop cannot keep accumulating latency.
-                    overflow = videoQueue.Count >= 24 || (videoQueue.Count > 0 &&
-                        now - videoQueue.Peek().EnqueuedTicks >= Stopwatch.Frequency * 150 / 1000);
+                    overflow = videoQueue.Count >= 36 || (videoQueue.Count > 0 &&
+                        now - videoQueue.Peek().EnqueuedTicks >= Stopwatch.Frequency * 165 / 1000);
                     if (overflow)
                     {
                         QueuedVideoFrame first = videoQueue.Peek();
@@ -2528,61 +2535,72 @@ namespace DualRemote
                 int packetHeadersBytes = crypto.ActiveOverheadBytes + 48; // UDP plus IPv6 header
                 long ticksPerMs = Stopwatch.Frequency / 1000;
                 long nextSendTick = 0;
-                while (!disposed)
+                bool timer1ms = false;
+                try { timer1ms = timeBeginPeriod(1) == 0; } catch { }
+                try
                 {
-                    QueuedVideoFrame frame = null;
-                    lock (videoQueueGate)
+                    while (!disposed)
                     {
-                        if (disposed) break;
-                        if (videoQueue.Count > 0) frame = videoQueue.Dequeue();
-                        else
+                        QueuedVideoFrame frame = null;
+                        lock (videoQueueGate)
                         {
-                            try { videoWake.Reset(); } catch (ObjectDisposedException) { break; }
+                            if (disposed) break;
+                            if (videoQueue.Count > 0) frame = videoQueue.Dequeue();
+                            else
+                            {
+                                try { videoWake.Reset(); } catch (ObjectDisposedException) { break; }
+                            }
+                        }
+
+                        if (frame == null)
+                        {
+                            try { videoWake.Wait(); } catch (ObjectDisposedException) { break; }
+                            continue;
+                        }
+
+                        IPEndPoint ep = remoteEp;
+                        if (!IsActivated || ep == null) continue;
+
+                        uint fid = unchecked((uint)Interlocked.Increment(ref nextFrameId));
+                        List<byte[]> shards = BoBoUdpFec.BuildVideoShards(
+                            fid, frame.TimestampMs, frame.Width, frame.Height, frame.IsKey, frame.H264,
+                            Volatile.Read(ref recentLossPct), interleavedFec, nackEnabled,
+                            Volatile.Read(ref recentRttMs), Volatile.Read(ref recentJitterMs), Volatile.Read(ref burstLossStreak),
+                            frame.IsHevc);
+                        int dataShardCount = (frame.H264.Length + BoBoUdpFec.DefaultSendShardPayloadBytes - 1) / BoBoUdpFec.DefaultSendShardPayloadBytes;
+                        if (retransmitCache != null) retransmitCache.BeginFrame(fid, dataShardCount);
+                        double headroom = Volatile.Read(ref pacingHeadroom);
+                        double bytesPerSec = Math.Max(600.0, pacingBitrateKbps * headroom) * 125.0;
+                        double ticksPerByte = Stopwatch.Frequency / bytesPerSec;
+                        int maxBurstBytes = (activePathRank >= 40 && Volatile.Read(ref recentRttMs) < 80.0) ? 65536 : 32768;
+                        int burstAllowanceBytes = Math.Max(4600, Math.Min(maxBurstBytes, (int)(bytesPerSec * (activePathRank >= 40 ? 0.012 : 0.008))));
+                        long burstTicks = (long)(burstAllowanceBytes * ticksPerByte);
+                        long spinThreshold = (ticksPerMs * 3L) / 2L;
+                        for (int i = 0; i < shards.Count && IsActivated; i++)
+                        {
+                            long now = Stopwatch.GetTimestamp();
+                            while (nextSendTick - now >= spinThreshold && IsActivated)
+                            {
+                                Thread.Sleep(1);
+                                now = Stopwatch.GetTimestamp();
+                            }
+                            while (nextSendTick > now && IsActivated)
+                            {
+                                Thread.SpinWait(64);
+                                now = Stopwatch.GetTimestamp();
+                            }
+                            if (!IsActivated) break;
+                            byte[] shard = shards[i];
+                            SendSealed(BoBoUdpPacketType.VideoShard, shard, 0, shard.Length, ep);
+                            if (retransmitCache != null) retransmitCache.StoreSentShard(fid, shard);
+                            nextSendTick = Math.Max(nextSendTick, now - burstTicks) +
+                                (long)((shard.Length + packetHeadersBytes) * ticksPerByte);
                         }
                     }
-
-                    if (frame == null)
-                    {
-                        try { videoWake.Wait(); } catch (ObjectDisposedException) { break; }
-                        continue;
-                    }
-
-                    IPEndPoint ep = remoteEp;
-                    if (!IsActivated || ep == null) continue;
-
-                    uint fid = unchecked((uint)Interlocked.Increment(ref nextFrameId));
-                    List<byte[]> shards = BoBoUdpFec.BuildVideoShards(
-                        fid, frame.TimestampMs, frame.Width, frame.Height, frame.IsKey, frame.H264,
-                        Volatile.Read(ref recentLossPct), interleavedFec, nackEnabled,
-                        Volatile.Read(ref recentRttMs), Volatile.Read(ref recentJitterMs), Volatile.Read(ref burstLossStreak),
-                        frame.IsHevc);
-                    if (retransmitCache != null) retransmitCache.StoreFrame(fid, shards);
-                    double headroom = Volatile.Read(ref pacingHeadroom);
-                    double bytesPerSec = Math.Max(600.0, pacingBitrateKbps * headroom) * 125.0;
-                    double ticksPerByte = Stopwatch.Frequency / bytesPerSec;
-                    int maxBurstBytes = (activePathRank >= 40 && Volatile.Read(ref recentRttMs) < 60.0) ? 4600 : 2300;
-                    int burstAllowanceBytes = Math.Max(2300, Math.Min(maxBurstBytes, (int)(bytesPerSec * 0.0025)));
-                    long burstTicks = (long)(burstAllowanceBytes * ticksPerByte);
-                    long spinThreshold = (ticksPerMs * 3L) / 2L;
-                    for (int i = 0; i < shards.Count && IsActivated; i++)
-                    {
-                        long now = Stopwatch.GetTimestamp();
-                        while (nextSendTick - now >= spinThreshold && IsActivated)
-                        {
-                            Thread.Sleep(1);
-                            now = Stopwatch.GetTimestamp();
-                        }
-                        while (nextSendTick > now && IsActivated)
-                        {
-                            Thread.SpinWait(64);
-                            now = Stopwatch.GetTimestamp();
-                        }
-                        if (!IsActivated) break;
-                        byte[] shard = shards[i];
-                        SendSealed(BoBoUdpPacketType.VideoShard, shard, 0, shard.Length, ep);
-                        nextSendTick = Math.Max(nextSendTick, now - burstTicks) +
-                            (long)((shard.Length + packetHeadersBytes) * ticksPerByte);
-                    }
+                }
+                finally
+                {
+                    if (timer1ms) { try { timeEndPeriod(1); } catch { } }
                 }
             }
 

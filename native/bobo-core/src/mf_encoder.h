@@ -61,6 +61,7 @@ public:
     bool IsHardware() const { return isHardware_; }
     bool IsD3D11ZeroCopy() const { return isD3D11ZeroCopy_; }
     bool IsHevc() const { return isHevc_; }
+    uint32_t Fps() const { return fps_; }
     uint32_t BitrateKbps() const { return bitrateKbps_; }
 
 private:
@@ -72,6 +73,8 @@ private:
                             bool& outD3D11Bound, std::string& outError);
     bool isHevc_ = false;
     void ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32_t bitrateKbps);
+    void ApplyRateControlBufferAndQp(ICodecAPI* api, uint32_t bitrateKbps);
+    int64_t ComputeSampleDurationHns(int64_t sampleTimeHns);
     bool EncodeSampleInternal(IMFSample* inSample, bool forceKeyframe,
                               std::vector<uint8_t>& outAnnexB, bool& outIsKeyframe, std::string& outError);
     void StartAsyncEventPump();
@@ -88,6 +91,7 @@ private:
     uint32_t fps_ = 60;
     uint32_t bitrateKbps_ = 10000;
     int64_t frameDurationHns_ = 166666;
+    int64_t lastSampleTimeHns_ = -1;
     std::string encoderName_;
 
     UINT d3dResetToken_ = 0;
