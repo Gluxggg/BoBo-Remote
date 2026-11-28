@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val boboVersionName = providers.gradleProperty("boboReleaseVersion").orElse("7.6.0").get()
+val boboVersionName = providers.gradleProperty("boboReleaseVersion").orElse("7.6.1").get()
 val releaseVersionMatch = requireNotNull(
     Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matchEntire(boboVersionName)
 ) { "boboReleaseVersion must be a numeric major.minor.patch version" }
@@ -14,6 +14,25 @@ require(releaseMinor < 100 && releasePatch < 100) { "The Android minor and patch
 // Keep upgrades ordered while preserving versionCode 623 for the installed 6.2.3 release.
 val boboVersionCode = releaseMajor * 10_000L + releaseMinor * 100L + releasePatch - 59_580L
 require(boboVersionCode in 1L..2_100_000_000L) { "The Android version code is out of range" }
+
+val boboUploadStorePath = System.getenv("BOBO_UPLOAD_STORE_FILE")
+    ?: providers.gradleProperty("boboUploadStoreFile").orNull
+val boboUploadStorePassword = System.getenv("BOBO_UPLOAD_STORE_PASSWORD")
+    ?: providers.gradleProperty("boboUploadStorePassword").orNull
+val boboUploadKeyAlias = System.getenv("BOBO_UPLOAD_KEY_ALIAS")
+    ?: providers.gradleProperty("boboUploadKeyAlias").orNull
+val boboUploadKeyPassword = System.getenv("BOBO_UPLOAD_KEY_PASSWORD")
+    ?: providers.gradleProperty("boboUploadKeyPassword").orNull
+val hasBoboReleaseKeystore = !boboUploadStorePath.isNullOrBlank() &&
+    file(boboUploadStorePath).exists() &&
+    !boboUploadStorePassword.isNullOrBlank() &&
+    !boboUploadKeyAlias.isNullOrBlank() &&
+    !boboUploadKeyPassword.isNullOrBlank()
+if (providers.gradleProperty("boboRequireReleaseSigning").orNull == "true") {
+    check(hasBoboReleaseKeystore) {
+        "Official release builds require BOBO_UPLOAD_STORE_FILE and Android signing credentials."
+    }
+}
 
 android {
     namespace = "com.bobo.remote"
@@ -32,6 +51,25 @@ android {
         }
     }
 
+    signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+        if (hasBoboReleaseKeystore) {
+            create("release") {
+                storeFile = file(boboUploadStorePath!!)
+                storePassword = boboUploadStorePassword
+                keyAlias = boboUploadKeyAlias
+                keyPassword = boboUploadKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -40,8 +78,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Unsigned release or debug-signed for easy sideloading when keystore isn't supplied
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasBoboReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

@@ -101,29 +101,275 @@ namespace DualRemote
             }
         }
 
-        internal static string GetServiceStatusLabel()
+        internal static string GetProgramFilesRoot64()
         {
+            try
+            {
+                string pf64 = Environment.GetEnvironmentVariable("ProgramW6432");
+                if (!string.IsNullOrWhiteSpace(pf64)) return pf64.Trim();
+            }
+            catch { }
+            return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        }
+
+        internal static string GetProtectedRootDirectory()
+        {
+            return Path.Combine(GetProgramFilesRoot64(), "BoBoRemote");
+        }
+
+        internal static string GetProtectedServiceDirectory()
+        {
+            return Path.Combine(GetProtectedRootDirectory(), "Service");
+        }
+
+        internal static string GetProtectedServiceExePath()
+        {
+            return Path.Combine(GetProtectedServiceDirectory(), "BoBo远程.exe");
+        }
+
+        internal static string GetProtectedServiceCoreDllPath()
+        {
+            return Path.Combine(GetProtectedServiceDirectory(), "BoBoCore.dll");
+        }
+
+        internal static bool IsPathUnderProtectedProgramFiles(string candidatePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath)) return false;
+            try
+            {
+                string trimmed = candidatePath.Trim().Trim('"');
+                if (trimmed.Contains("..")) return false;
+                string full = Path.GetFullPath(trimmed).TrimEnd('\\') + "\\";
+                string pf = GetProgramFilesRoot64();
+                if (string.IsNullOrWhiteSpace(pf)) return false;
+                string normPf = Path.GetFullPath(pf).TrimEnd('\\') + "\\";
+                return full.StartsWith(normPf, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static DirectorySecurity BuildProtectedDirectorySecurity()
+        {
+            var ds = new DirectorySecurity();
+            ds.SetAccessRuleProtection(true, false);
+            var sys = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            ds.AddAccessRule(new FileSystemAccessRule(
+                sys,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            ds.AddAccessRule(new FileSystemAccessRule(
+                admins,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            ds.AddAccessRule(new FileSystemAccessRule(
+                users,
+                FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            return ds;
+        }
+
+        internal static void EnsureProtectedDirectoryAcl(string dirPath)
+        {
+            if (string.IsNullOrWhiteSpace(dirPath)) return;
+            Directory.CreateDirectory(dirPath);
+            DirectorySecurity ds = BuildProtectedDirectorySecurity();
+            Directory.SetAccessControl(dirPath, ds);
+        }
+
+        internal static string ExtractExePathFromCommandLine(string cmdLine)
+        {
+            if (string.IsNullOrWhiteSpace(cmdLine)) return "";
+            string s = cmdLine.Trim();
+            string rawPath = s;
+            if (s.StartsWith("\"", StringComparison.Ordinal))
+            {
+                int endQuote = s.IndexOf('"', 1);
+                rawPath = endQuote > 1 ? s.Substring(1, endQuote - 1) : s.Trim('"');
+            }
+            else
+            {
+                int exeIdx = s.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+                if (exeIdx >= 0)
+                {
+                    int after = exeIdx + 4;
+                    if (after == s.Length || char.IsWhiteSpace(s[after]))
+                        rawPath = s.Substring(0, after);
+                }
+                else
+                {
+                    int sp = s.IndexOf(' ');
+                    if (sp > 0) rawPath = s.Substring(0, sp);
+                }
+            }
+            rawPath = (rawPath ?? "").Trim().Trim('"');
+            if (string.IsNullOrEmpty(rawPath)) return "";
+            try { return Path.GetFullPath(rawPath); }
+            catch { return rawPath; }
+        }
+
+        internal static string QueryRegisteredServiceBinaryPath()
+        {
+            IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+            if (scm == IntPtr.Zero) return "";
+            IntPtr svc = IntPtr.Zero;
+            IntPtr buf = IntPtr.Zero;
+            try
+            {
+                svc = OpenServiceW(scm, ServiceName, SERVICE_QUERY_CONFIG);
+                if (svc == IntPtr.Zero) return "";
+                int needed = 0;
+                QueryServiceConfigW(svc, IntPtr.Zero, 0, out needed);
+                if (needed <= 0) needed = 4096;
+                buf = Marshal.AllocHGlobal(needed);
+                if (!QueryServiceConfigW(svc, buf, needed, out needed)) return "";
+                var cfg = (QUERY_SERVICE_CONFIG)Marshal.PtrToStructure(buf, typeof(QUERY_SERVICE_CONFIG));
+                return ExtractExePathFromCommandLine(cfg.lpBinaryPathName);
+            }
+            catch
+            {
+                return "";
+            }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                CloseServiceHandle(scm);
+            }
+        }
+
+        internal static void InspectInstalledService(
+            out bool installed,
+            out bool running,
+            out bool securePath,
+            out string exePath,
+            out string binaryVersion)
+        {
+            installed = false;
+            running = false;
+            securePath = false;
+            exePath = "";
+            binaryVersion = "";
+
             try
             {
                 using (var sc = new ServiceController(ServiceName))
                 {
-                    switch (sc.Status)
-                    {
-                        case ServiceControllerStatus.Running: return "服务运行中（支持锁屏/Win+L/UAC）";
-                        case ServiceControllerStatus.StartPending: return "服务启动中…";
-                        case ServiceControllerStatus.Stopped: return "已安装但未启动";
-                        default: return "状态：" + sc.Status;
-                    }
+                    ServiceControllerStatus st = sc.Status;
+                    installed = (int)st >= 0;
+                    running = (st == ServiceControllerStatus.Running);
                 }
             }
             catch
             {
-                return "未安装（锁屏时系统将拦截画面与输入）";
+                installed = false;
+                running = false;
             }
+            if (!installed) return;
+
+            exePath = QueryRegisteredServiceBinaryPath();
+            securePath = IsPathUnderProtectedProgramFiles(exePath);
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                try
+                {
+                    string svcDir = Path.GetDirectoryName(exePath);
+                    string verStamp = string.IsNullOrEmpty(svcDir) ? null : Path.Combine(svcDir, "service-version.txt");
+                    if (!string.IsNullOrEmpty(verStamp) && File.Exists(verStamp))
+                    {
+                        string textVer = (File.ReadAllText(verStamp, Encoding.UTF8) ?? "").Trim();
+                        if (!string.IsNullOrEmpty(textVer)) binaryVersion = textVer;
+                    }
+                    if (string.IsNullOrEmpty(binaryVersion) && File.Exists(exePath))
+                    {
+                        FileVersionInfo fvi = FileVersionInfo.GetVersionInfo(exePath);
+                        string raw = !string.IsNullOrWhiteSpace(fvi.ProductVersion) ? fvi.ProductVersion : fvi.FileVersion;
+                        if (!string.IsNullOrWhiteSpace(raw) && !raw.StartsWith("0.0.0", StringComparison.Ordinal))
+                        {
+                            string[] parts = raw.Trim().Split('.');
+                            if (parts.Length >= 3) binaryVersion = parts[0] + "." + parts[1] + "." + parts[2];
+                            else binaryVersion = raw.Trim();
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        internal static bool NeedsServiceUpgradeOrMigration(out string reason)
+        {
+            reason = "";
+            bool installed, running, securePath;
+            string exePath, binVer;
+            InspectInstalledService(out installed, out running, out securePath, out exePath, out binVer);
+            if (!installed) return false;
+            if (!securePath)
+            {
+                reason = "当前锁屏服务仍在用户目录运行，需迁移至受保护系统目录。";
+                return true;
+            }
+            if (!File.Exists(GetProtectedServiceCoreDllPath()))
+            {
+                reason = "受保护服务目录缺少核心模块，需同步修复。";
+                return true;
+            }
+            if (string.IsNullOrEmpty(binVer) || AppUpdater.CompareVersions(binVer, AppUpdater.CurrentVersion) < 0)
+            {
+                reason = "锁屏服务版本（" + (string.IsNullOrEmpty(binVer) ? "未知" : "v" + binVer) + "）落后于当前主程序 v" + AppUpdater.CurrentVersion + "。";
+                return true;
+            }
+            return false;
+        }
+
+        internal static string GetServiceStatusLabel()
+        {
+            bool installed, running, securePath;
+            string exePath, binVer;
+            InspectInstalledService(out installed, out running, out securePath, out exePath, out binVer);
+            if (!installed)
+            {
+                return "未安装（登录后锁屏 / UAC 时系统将拦截画面与输入）";
+            }
+            if (!securePath)
+            {
+                return "安全边界待迁移（仍在用户目录运行，请点击升级/迁移至 Program Files）";
+            }
+            if (!running)
+            {
+                return "已安装但未启动（受保护系统目录，点击修复启动）";
+            }
+            string upgReason;
+            if (NeedsServiceUpgradeOrMigration(out upgReason))
+            {
+                return "服务运行中（" + (string.IsNullOrEmpty(binVer) ? "旧版" : "v" + binVer) + "，建议同步升级至 v" + AppUpdater.CurrentVersion + "）";
+            }
+            return "服务运行中 v" + binVer + "（受保护系统目录 | 支持登录后锁屏/UAC，开机未登录前不监听网络）";
         }
 
         internal static int RunServiceHost()
         {
+            if (IsRunningAsSystem())
+            {
+                try
+                {
+                    string exe = Process.GetCurrentProcess().MainModule.FileName;
+                    if (!IsPathUnderProtectedProgramFiles(exe)) return 5;
+                }
+                catch
+                {
+                    return 5;
+                }
+            }
             try
             {
                 ServiceBase.Run(new ServiceBase[] { new BoBoWindowsService() });
@@ -137,14 +383,32 @@ namespace DualRemote
 
         internal static int RunDesktopHelper(int requestedSessionId)
         {
+            if (IsRunningAsSystem())
+            {
+                try
+                {
+                    string exe = Process.GetCurrentProcess().MainModule.FileName;
+                    if (!IsPathUnderProtectedProgramFiles(exe)) return 5;
+                }
+                catch
+                {
+                    return 5;
+                }
+            }
             int sid = requestedSessionId >= 0 ? requestedSessionId : GetActiveConsoleSessionIdSafe();
             if (sid < 0) sid = Process.GetCurrentProcess().SessionId;
             try
             {
                 string err;
-                BoBoCoreInterop.EnsureLoaded(out err);
+                if (!BoBoCoreInterop.EnsureLoaded(out err))
+                {
+                    return 6;
+                }
             }
-            catch { }
+            catch
+            {
+                return 6;
+            }
 
             try
             {
@@ -160,18 +424,128 @@ namespace DualRemote
             }
         }
 
-        internal static bool InstallAndStartService(out string message)
+        private static void StopProcessesMatchingPath(string targetExePath, int excludePid)
+        {
+            if (string.IsNullOrWhiteSpace(targetExePath)) return;
+            string fullTarget;
+            try { fullTarget = Path.GetFullPath(targetExePath); }
+            catch { return; }
+            string procName = Path.GetFileNameWithoutExtension(fullTarget);
+            Process[] procs = null;
+            try { procs = Process.GetProcessesByName(procName); }
+            catch { return; }
+            foreach (Process p in procs)
+            {
+                try
+                {
+                    if (p.Id == excludePid) continue;
+                    string pPath = "";
+                    try { pPath = Path.GetFullPath(p.MainModule.FileName); } catch { }
+                    if (!string.Equals(pPath, fullTarget, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!p.HasExited)
+                    {
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    try { p.Dispose(); } catch { }
+                }
+            }
+        }
+
+        private static void RollbackProtectedServiceFiles(string targetExe, string targetCoreDll, string targetVerFile, string prevRegisteredExe)
+        {
+            try
+            {
+                using (var sc = new ServiceController(ServiceName))
+                {
+                    if (sc.Status != ServiceControllerStatus.Stopped && sc.Status != ServiceControllerStatus.StopPending)
+                    {
+                        sc.Stop();
+                        sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(6));
+                    }
+                }
+            }
+            catch { }
+
+            StopProcessesMatchingPath(targetExe, Process.GetCurrentProcess().Id);
+
+            bool hasBackup = File.Exists(targetExe + ".bak") && File.Exists(targetCoreDll + ".bak");
+            if (hasBackup)
+            {
+                try { File.Copy(targetExe + ".bak", targetExe, true); } catch { }
+                try { File.Copy(targetCoreDll + ".bak", targetCoreDll, true); } catch { }
+                if (File.Exists(targetVerFile + ".bak"))
+                {
+                    try { File.Copy(targetVerFile + ".bak", targetVerFile, true); } catch { }
+                }
+                if (!string.IsNullOrWhiteSpace(prevRegisteredExe) &&
+                    IsPathUnderProtectedProgramFiles(prevRegisteredExe) &&
+                    File.Exists(prevRegisteredExe))
+                {
+                    IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
+                    if (scm != IntPtr.Zero)
+                    {
+                        IntPtr svc = IntPtr.Zero;
+                        try
+                        {
+                            svc = OpenServiceW(scm, ServiceName, SERVICE_ALL_ACCESS);
+                            if (svc != IntPtr.Zero)
+                            {
+                                ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                    "\"" + prevRegisteredExe + "\" --service", null, IntPtr.Zero, null, null, null, ServiceDisplayName);
+                            }
+                        }
+                        finally
+                        {
+                            if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                            CloseServiceHandle(scm);
+                        }
+                    }
+                }
+                try
+                {
+                    using (var sc = new ServiceController(ServiceName))
+                    {
+                        if (sc.Status != ServiceControllerStatus.Running)
+                        {
+                            if (sc.Status != ServiceControllerStatus.StartPending) sc.Start();
+                            sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(6));
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void CleanupBackupFiles(params string[] paths)
+        {
+            for (int i = 0; i < paths.Length; i++)
+            {
+                try { if (!string.IsNullOrEmpty(paths[i]) && File.Exists(paths[i])) File.Delete(paths[i]); } catch { }
+            }
+        }
+
+        internal static bool UpgradeService(out string message, string firewallAppExeOverride = null)
+        {
+            return InstallAndStartService(out message, firewallAppExeOverride);
+        }
+
+        internal static bool InstallAndStartService(out string message, string firewallAppExeOverride = null)
         {
             if (!IsProcessElevated() && !IsRunningAsSystem())
             {
-                message = "需要管理员权限才能安装系统服务。";
+                message = "需要管理员权限才能安装或升级锁屏穿透服务。";
                 return false;
             }
 
-            string mainExe;
+            string sourceExe;
             try
             {
-                mainExe = Process.GetCurrentProcess().MainModule.FileName;
+                sourceExe = Process.GetCurrentProcess().MainModule.FileName;
             }
             catch (Exception ex)
             {
@@ -179,17 +553,111 @@ namespace DualRemote
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe))
+            if (string.IsNullOrWhiteSpace(sourceExe) || !File.Exists(sourceExe))
             {
-                message = "主程序文件不存在：" + mainExe;
+                message = "主程序文件不存在：" + sourceExe;
                 return false;
             }
 
-            string binPath = "\"" + mainExe + "\" --service";
+            string coreErr;
+            byte[] coreBytes = BoBoCoreInterop.GetEmbeddedCoreDllBytes(out coreErr);
+            if (coreBytes == null)
+            {
+                message = coreErr ?? "无法提取内嵌 BoBoCore.dll。";
+                return false;
+            }
+
+            string rootDir = GetProtectedRootDirectory();
+            string svcDir = GetProtectedServiceDirectory();
+            string targetExe = GetProtectedServiceExePath();
+            string targetCoreDll = GetProtectedServiceCoreDllPath();
+            string targetVerFile = Path.Combine(svcDir, "service-version.txt");
+            string prevRegisteredExe = QueryRegisteredServiceBinaryPath();
+
+            try
+            {
+                EnsureProtectedDirectoryAcl(rootDir);
+                EnsureProtectedDirectoryAcl(svcDir);
+            }
+            catch (Exception ex)
+            {
+                message = "创建受保护系统服务目录失败：" + ex.Message;
+                return false;
+            }
+
+            // Stop active service & helper before replacing files in %ProgramFiles%\BoBoRemote\Service
+            try
+            {
+                using (var sc = new ServiceController(ServiceName))
+                {
+                    if (sc.Status != ServiceControllerStatus.Stopped && sc.Status != ServiceControllerStatus.StopPending)
+                    {
+                        sc.Stop();
+                        sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(8));
+                    }
+                    else if (sc.Status == ServiceControllerStatus.StopPending)
+                    {
+                        sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(8));
+                    }
+                }
+            }
+            catch { }
+
+            int curPid = Process.GetCurrentProcess().Id;
+            StopProcessesMatchingPath(targetExe, curPid);
+            Thread.Sleep(150);
+
+            bool createdBackup = false;
+            try
+            {
+                CleanupBackupFiles(targetExe + ".bak", targetCoreDll + ".bak", targetVerFile + ".bak");
+                if (File.Exists(targetExe))
+                {
+                    File.Copy(targetExe, targetExe + ".bak", true);
+                    createdBackup = true;
+                }
+                if (File.Exists(targetCoreDll))
+                {
+                    File.Copy(targetCoreDll, targetCoreDll + ".bak", true);
+                    createdBackup = true;
+                }
+                if (File.Exists(targetVerFile))
+                {
+                    File.Copy(targetVerFile, targetVerFile + ".bak", true);
+                }
+
+                bool sameBinary = false;
+                try { sameBinary = string.Equals(Path.GetFullPath(sourceExe), Path.GetFullPath(targetExe), StringComparison.OrdinalIgnoreCase); }
+                catch { }
+                if (!sameBinary)
+                {
+                    string exeTmp = targetExe + ".tmp";
+                    File.Copy(sourceExe, exeTmp, true);
+                    if (File.Exists(targetExe)) File.Delete(targetExe);
+                    File.Move(exeTmp, targetExe);
+                }
+
+                string dllTmp = targetCoreDll + ".tmp";
+                File.WriteAllBytes(dllTmp, coreBytes);
+                if (File.Exists(targetCoreDll)) File.Delete(targetCoreDll);
+                File.Move(dllTmp, targetCoreDll);
+
+                File.WriteAllText(targetVerFile, AppUpdater.CurrentVersion ?? "", new UTF8Encoding(false));
+                EnsureProtectedDirectoryAcl(svcDir);
+            }
+            catch (Exception ex)
+            {
+                if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
+                message = "复制服务程序与核心模块至受保护目录失败：" + ex.Message;
+                return false;
+            }
+
+            string binPath = "\"" + targetExe + "\" --service";
             IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
             if (scm == IntPtr.Zero)
             {
                 int err = Marshal.GetLastWin32Error();
+                if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
                 message = "打开 Windows 服务管理器失败（错误码 " + err + "）。";
                 return false;
             }
@@ -217,13 +685,14 @@ namespace DualRemote
                     if (svc == IntPtr.Zero)
                     {
                         int err = Marshal.GetLastWin32Error();
+                        if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
                         message = "创建系统服务失败（错误码 " + err + "）。";
                         return false;
                     }
                 }
                 else
                 {
-                    ChangeServiceConfigW(
+                    if (!ChangeServiceConfigW(
                         svc,
                         SERVICE_NO_CHANGE,
                         SERVICE_AUTO_START,
@@ -234,7 +703,13 @@ namespace DualRemote
                         null,
                         null,
                         null,
-                        ServiceDisplayName);
+                        ServiceDisplayName))
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
+                        message = "更新系统服务配置失败（错误码 " + err + "）。";
+                        return false;
+                    }
                 }
 
                 ConfigureServiceMetadataAndRecovery(svc);
@@ -248,7 +723,9 @@ namespace DualRemote
             EnsureSoftwareSasPolicy();
             try
             {
-                BoBoNatTraversal.ConfigureFirewallRulesForPaths(mainExe, BoBoEmbeddedTailnet.GetExpectedBinaryPath(), true);
+                string tsnetExe = BoBoEmbeddedTailnet.GetExpectedBinaryPath();
+                string fwAppExe = !string.IsNullOrWhiteSpace(firewallAppExeOverride) ? firewallAppExeOverride : sourceExe;
+                BoBoNatTraversal.ConfigureFirewallRulesForPaths(fwAppExe, tsnetExe, true);
             }
             catch { }
 
@@ -262,12 +739,42 @@ namespace DualRemote
                         sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
                     }
                 }
-                message = "锁屏穿透服务已安装并启动。";
+
+                int sid = GetActiveConsoleSessionIdSafe();
+                if (sid >= 0)
+                {
+                    bool pipeVerified = false;
+                    string pipeVer = "";
+                    for (int attempt = 0; attempt < 8; attempt++)
+                    {
+                        using (DesktopHelperClient probe = DesktopHelperClient.TryConnect(GetPipeNameForSession(sid), 400))
+                        {
+                            if (probe != null)
+                            {
+                                pipeVer = probe.ServerVersion;
+                                pipeVerified = string.IsNullOrEmpty(pipeVer) ||
+                                    string.Equals(pipeVer, AppUpdater.CurrentVersion, StringComparison.OrdinalIgnoreCase);
+                                if (pipeVerified) break;
+                            }
+                        }
+                        Thread.Sleep(250);
+                    }
+                    if (!pipeVerified)
+                    {
+                        if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
+                        message = "服务已启动但未能验证会话采编管道（版本：" + (pipeVer ?? "无响应") + "），已自动回滚。";
+                        return false;
+                    }
+                }
+
+                CleanupBackupFiles(targetExe + ".bak", targetCoreDll + ".bak", targetVerFile + ".bak");
+                message = "锁屏穿透服务已部署至受保护目录并启动校验通过（v" + AppUpdater.CurrentVersion + "）。";
                 return true;
             }
             catch (Exception ex)
             {
-                message = "服务已注册但启动超时：" + ex.Message;
+                if (createdBackup) RollbackProtectedServiceFiles(targetExe, targetCoreDll, targetVerFile, prevRegisteredExe);
+                message = "服务启动校验失败：" + ex.Message;
                 return false;
             }
         }
@@ -280,6 +787,7 @@ namespace DualRemote
                 return false;
             }
 
+            string prevExe = QueryRegisteredServiceBinaryPath();
             try
             {
                 using (var sc = new ServiceController(ServiceName))
@@ -293,6 +801,13 @@ namespace DualRemote
             }
             catch { }
 
+            int curPid = Process.GetCurrentProcess().Id;
+            StopProcessesMatchingPath(GetProtectedServiceExePath(), curPid);
+            if (!string.IsNullOrEmpty(prevExe) && IsPathUnderProtectedProgramFiles(prevExe))
+            {
+                StopProcessesMatchingPath(prevExe, curPid);
+            }
+
             IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
             if (scm == IntPtr.Zero)
             {
@@ -302,24 +817,22 @@ namespace DualRemote
             try
             {
                 IntPtr svc = OpenServiceW(scm, ServiceName, SERVICE_ALL_ACCESS);
-                if (svc == IntPtr.Zero)
+                if (svc != IntPtr.Zero)
                 {
-                    message = "服务未安装。";
-                    return true;
-                }
-                try
-                {
-                    bool deleted = DeleteService(svc);
-                    int err = deleted ? 0 : Marshal.GetLastWin32Error();
-                    if (!deleted && err != ERROR_SERVICE_MARKED_FOR_DELETE)
+                    try
                     {
-                        message = "删除服务失败（错误码 " + err + "）。";
-                        return false;
+                        bool deleted = DeleteService(svc);
+                        int err = deleted ? 0 : Marshal.GetLastWin32Error();
+                        if (!deleted && err != ERROR_SERVICE_MARKED_FOR_DELETE)
+                        {
+                            message = "删除服务失败（错误码 " + err + "）。";
+                            return false;
+                        }
                     }
-                }
-                finally
-                {
-                    CloseServiceHandle(svc);
+                    finally
+                    {
+                        CloseServiceHandle(svc);
+                    }
                 }
             }
             finally
@@ -333,7 +846,12 @@ namespace DualRemote
             }
             catch { }
 
-            message = "锁屏穿透服务已卸载。";
+            string svcDir = GetProtectedServiceDirectory();
+            string rootDir = GetProtectedRootDirectory();
+            try { if (Directory.Exists(svcDir)) Directory.Delete(svcDir, true); } catch { }
+            try { if (Directory.Exists(rootDir) && Directory.GetFileSystemEntries(rootDir).Length == 0) Directory.Delete(rootDir, false); } catch { }
+
+            message = "锁屏穿透服务与受保护服务目录已卸载。";
             return true;
         }
 
@@ -346,7 +864,8 @@ namespace DualRemote
             try
             {
                 string mainExe = Process.GetCurrentProcess().MainModule.FileName;
-                var psi = new ProcessStartInfo(mainExe, "--install-service")
+                string switchArg = IsServiceInstalled() ? "--upgrade-service" : "--install-service";
+                var psi = new ProcessStartInfo(mainExe, switchArg)
                 {
                     UseShellExecute = true,
                     Verb = "runas",
@@ -359,13 +878,24 @@ namespace DualRemote
                         message = "未能启动提权安装进程。";
                         return false;
                     }
-                    p.WaitForExit(20000);
-                    if (p.ExitCode == 0 || IsServiceRunning())
+                    if (!p.WaitForExit(25000))
                     {
-                        message = "锁屏穿透与防火墙规则已就绪。";
+                        message = "提权服务配置超时（25s）。";
+                        return false;
+                    }
+                    string upgReason;
+                    bool healthy = IsServiceRunning() && !NeedsServiceUpgradeOrMigration(out upgReason);
+                    if (p.ExitCode == 0 && healthy)
+                    {
+                        message = "锁屏穿透服务已部署至受保护系统目录并校验通过。";
                         return true;
                     }
-                    message = "安装进程返回退出码 " + p.ExitCode + "。";
+                    if (p.ExitCode == 0 && IsServiceRunning())
+                    {
+                        message = "锁屏穿透服务与防火墙规则已就绪。";
+                        return true;
+                    }
+                    message = "服务配置未通过（退出码 " + p.ExitCode + "），详情可在设置页查看服务状态。";
                     return false;
                 }
             }
@@ -592,6 +1122,7 @@ namespace DualRemote
                 return null;
             }
             if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe)) return null;
+            if (!IsPathUnderProtectedProgramFiles(mainExe)) return null;
 
             IntPtr curToken = IntPtr.Zero;
             IntPtr dupToken = IntPtr.Zero;
@@ -855,7 +1386,12 @@ namespace DualRemote
                         {
                             byte acc = BoBoCoreInterop.IsInputDesktopAccessible() ? (byte)1 : (byte)0;
                             byte uipi = BoBoCoreInterop.IsForegroundUipiBlocked() ? (byte)1 : (byte)0;
-                            WritePipeMessage(pipe, writeLock, OpPong, new byte[] { acc, uipi });
+                            byte[] verBytes = Encoding.UTF8.GetBytes(AppUpdater.CurrentVersion ?? "");
+                            byte[] rep = new byte[2 + verBytes.Length];
+                            rep[0] = acc;
+                            rep[1] = uipi;
+                            if (verBytes.Length > 0) Buffer.BlockCopy(verBytes, 0, rep, 2, verBytes.Length);
+                            WritePipeMessage(pipe, writeLock, OpPong, rep);
                         }
                         else if (op == OpCreateSession)
                         {
@@ -1193,6 +1729,7 @@ namespace DualRemote
             private readonly NamedPipeClientStream pipe;
             private readonly object writeLock = new object();
             private readonly object rpcLock = new object();
+            private readonly object rpcStateLock = new object();
             private readonly AutoResetEvent rpcEvent = new AutoResetEvent(false);
             private readonly Thread readerThread;
 
@@ -1200,15 +1737,20 @@ namespace DualRemote
             private volatile bool disconnected;
             private Action<byte[], bool, int, int, uint> videoHandler;
             private Action<byte[], int, int, int> audioHandler;
-            private int lastVideoCodec = BoBoCoreInterop.VideoCodecH264;
-            private int lastAudioCodec = BoBoCoreInterop.AudioCodecAdpcm;
+            private volatile int lastVideoCodec = BoBoCoreInterop.VideoCodecH264;
+            private volatile int lastAudioCodec = BoBoCoreInterop.AudioCodecAdpcm;
+            private volatile string serverVersion = "";
 
+            private byte rpcExpectedOp;
             private byte rpcResultOp;
             private byte[] rpcResultPayload;
+
+            internal event Action Disconnected;
 
             internal bool IsConnected { get { return !disposed && !disconnected && pipe.IsConnected; } }
             internal int VideoCodec { get { return lastVideoCodec; } }
             internal int AudioCodec { get { return lastAudioCodec; } }
+            internal string ServerVersion { get { return serverVersion ?? ""; } }
 
             private DesktopHelperClient(NamedPipeClientStream connectedPipe)
             {
@@ -1243,7 +1785,13 @@ namespace DualRemote
             internal bool Ping()
             {
                 byte[] rep = SendRpc(OpPing, null, OpPong, 1200);
-                return rep != null;
+                if (rep == null) return false;
+                if (rep.Length > 2)
+                {
+                    try { serverVersion = Encoding.UTF8.GetString(rep, 2, rep.Length - 2).Trim(); }
+                    catch { }
+                }
+                return true;
             }
 
             internal bool CreateHostSession(
@@ -1386,12 +1934,27 @@ namespace DualRemote
                 lock (rpcLock)
                 {
                     if (disposed || disconnected) return null;
-                    rpcResultOp = 0;
-                    rpcResultPayload = null;
-                    rpcEvent.Reset();
-                    if (!WritePipeMessage(pipe, writeLock, reqOp, payload)) return null;
-                    if (!rpcEvent.WaitOne(timeoutMs)) return null;
-                    return rpcResultOp == expectedReplyOp ? rpcResultPayload : null;
+                    lock (rpcStateLock)
+                    {
+                        rpcExpectedOp = expectedReplyOp;
+                        rpcResultOp = 0;
+                        rpcResultPayload = null;
+                        rpcEvent.Reset();
+                    }
+                    if (!WritePipeMessage(pipe, writeLock, reqOp, payload))
+                    {
+                        lock (rpcStateLock) { rpcExpectedOp = 0; }
+                        return null;
+                    }
+                    bool signaled = rpcEvent.WaitOne(timeoutMs);
+                    lock (rpcStateLock)
+                    {
+                        byte gotOp = rpcResultOp;
+                        byte[] gotPayload = rpcResultPayload;
+                        rpcExpectedOp = 0;
+                        rpcResultPayload = null;
+                        return (signaled && gotOp == expectedReplyOp) ? gotPayload : null;
+                    }
                 }
             }
 
@@ -1438,9 +2001,15 @@ namespace DualRemote
                         }
                         else if (op == OpCreateReply || op == OpAck || op == OpPong || op == OpSuperDisplayReply)
                         {
-                            rpcResultOp = op;
-                            rpcResultPayload = payload;
-                            rpcEvent.Set();
+                            lock (rpcStateLock)
+                            {
+                                if (op == rpcExpectedOp || rpcExpectedOp == 0)
+                                {
+                                    rpcResultOp = op;
+                                    rpcResultPayload = payload ?? new byte[0];
+                                    try { rpcEvent.Set(); } catch { }
+                                }
+                            }
                         }
                     }
                 }
@@ -1448,7 +2017,19 @@ namespace DualRemote
                 finally
                 {
                     disconnected = true;
-                    try { rpcEvent.Set(); } catch { }
+                    lock (rpcStateLock)
+                    {
+                        rpcExpectedOp = 0;
+                        try { rpcEvent.Set(); } catch { }
+                    }
+                    if (!disposed)
+                    {
+                        Action disc = Disconnected;
+                        if (disc != null)
+                        {
+                            ThreadPool.QueueUserWorkItem(delegate { try { disc(); } catch { } });
+                        }
+                    }
                 }
             }
 
@@ -1458,7 +2039,11 @@ namespace DualRemote
                 disposed = true;
                 disconnected = true;
                 try { pipe.Dispose(); } catch { }
-                try { rpcEvent.Set(); } catch { }
+                lock (rpcStateLock)
+                {
+                    rpcExpectedOp = 0;
+                    try { rpcEvent.Set(); } catch { }
+                }
                 if (readerThread != null && readerThread.IsAlive)
                 {
                     try { readerThread.Join(800); } catch { }
@@ -1471,61 +2056,103 @@ namespace DualRemote
 
         /// <summary>
         /// 宿主采编/输入统一桥接：优先连接同主机 Session 的 SYSTEM Helper（全程不断流穿透 Winlogon 与 UAC），
-        /// 不可用时无缝回退至进程内 BoBoCoreInterop。
+        /// 不可用时无缝回退至进程内 BoBoCoreInterop，并在 Helper 重启后自动重连重建采集并请求关键帧。
         /// </summary>
         internal sealed class BoBoSecureDesktopBridge : IDisposable
         {
             private readonly object gate = new object();
-            private DesktopHelperClient helperClient;
-            private BoBoCoreInterop.BoBoHostNativeHandle localHandle;
+            private readonly Func<string> customPipeNameProvider;
+            private volatile DesktopHelperClient helperClient;
+            private volatile BoBoCoreInterop.BoBoHostNativeHandle localHandle;
+            private volatile int cachedVideoCodec = BoBoCoreInterop.VideoCodecH264;
+            private volatile int cachedAudioCodec = BoBoCoreInterop.AudioCodecAdpcm;
             private long lastHelperProbeTicks;
-            private bool disposed;
+            private volatile bool disposed;
 
-            private DesktopHelperClient EnsureHelperConnectedLocked()
+            private bool sessionActive;
+            private bool recovering;
+            private int recoveryCount;
+            private int cfgMonitor;
+            private int cfgWidth;
+            private int cfgHeight;
+            private int cfgFps;
+            private int cfgBitrateKbps;
+            private bool cfgMuteHost;
+            private bool cfgCompositeCursor;
+            private bool cfgPreferAac;
+            private bool cfgPreferHevc;
+            private Action<byte[], bool, int, int, uint> userOnVideo;
+            private Action<byte[], int, int, int> userOnAudio;
+
+            internal BoBoSecureDesktopBridge(Func<string> pipeNameProvider = null)
             {
-                if (disposed || IsRunningAsSystem()) return null;
-                if (helperClient != null && helperClient.IsConnected) return helperClient;
-                if (helperClient != null)
-                {
-                    try { helperClient.Dispose(); } catch { }
-                    helperClient = null;
-                }
-                long now = Stopwatch.GetTimestamp();
-                if (lastHelperProbeTicks != 0 && ((now - lastHelperProbeTicks) * 1000.0 / Stopwatch.Frequency) < 2500.0)
-                {
-                    return null;
-                }
+                customPipeNameProvider = pipeNameProvider;
+            }
+
+            private string ResolveTargetPipeName()
+            {
+                if (customPipeNameProvider != null) return customPipeNameProvider();
                 int sid = GetActiveConsoleSessionIdSafe();
                 if (sid < 0) sid = Process.GetCurrentProcess().SessionId;
-                DesktopHelperClient client = DesktopHelperClient.TryConnect(GetPipeNameForSession(sid), ConnectTimeoutMs);
+                return GetPipeNameForSession(sid);
+            }
+
+            private DesktopHelperClient TryConnectHelper(bool bypassCooldown)
+            {
+                if (disposed) return null;
+                if (customPipeNameProvider == null && IsRunningAsSystem()) return null;
+
+                DesktopHelperClient cur = helperClient;
+                if (cur != null && cur.IsConnected) return cur;
+
+                lock (gate)
+                {
+                    cur = helperClient;
+                    if (cur != null && cur.IsConnected) return cur;
+                    if (cur != null)
+                    {
+                        helperClient = null;
+                        try { cur.Dispose(); } catch { }
+                    }
+                    long now = Stopwatch.GetTimestamp();
+                    if (!bypassCooldown && lastHelperProbeTicks != 0 &&
+                        ((now - lastHelperProbeTicks) * 1000.0 / Stopwatch.Frequency) < 2500.0)
+                    {
+                        return null;
+                    }
+                    lastHelperProbeTicks = now;
+                }
+
+                string targetPipe = ResolveTargetPipeName();
+                if (string.IsNullOrEmpty(targetPipe)) return null;
+                DesktopHelperClient client = DesktopHelperClient.TryConnect(targetPipe, ConnectTimeoutMs);
                 if (client != null)
                 {
-                    helperClient = client;
-                    lastHelperProbeTicks = 0;
-                    return client;
+                    lock (gate) { lastHelperProbeTicks = 0; }
                 }
-                lastHelperProbeTicks = now;
-                return null;
+                return client;
             }
 
             internal bool IsUsingSystemHelper
             {
                 get
                 {
-                    lock (gate) { return helperClient != null && helperClient.IsConnected; }
+                    DesktopHelperClient hc = helperClient;
+                    return hc != null && hc.IsConnected;
                 }
             }
+
+            internal int RecoveryCount { get { return Volatile.Read(ref recoveryCount); } }
 
             internal int VideoCodec
             {
                 get
                 {
-                    lock (gate)
-                    {
-                        if (helperClient != null) return helperClient.VideoCodec;
-                        if (localHandle != null) return localHandle.VideoCodec;
-                        return BoBoCoreInterop.VideoCodecH264;
-                    }
+                    DesktopHelperClient hc = helperClient;
+                    if (hc != null) return hc.VideoCodec;
+                    BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                    if (lh != null) return lh.VideoCodec;
+                    return cachedVideoCodec;
                 }
             }
 
@@ -1533,12 +2160,182 @@ namespace DualRemote
             {
                 get
                 {
+                    DesktopHelperClient hc = helperClient;
+                    if (hc != null) return hc.AudioCodec;
+                    BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                    if (lh != null) return lh.AudioCodec;
+                    return cachedAudioCodec;
+                }
+            }
+
+            private void AttachHelperClient(DesktopHelperClient client)
+            {
+                if (client == null) return;
+                client.Disconnected += delegate { OnHelperClientDisconnected(client); };
+                cachedVideoCodec = client.VideoCodec;
+                cachedAudioCodec = client.AudioCodec;
+                helperClient = client;
+            }
+
+            private void OnHelperClientDisconnected(DesktopHelperClient deadClient)
+            {
+                bool shouldRecover = false;
+                lock (gate)
+                {
+                    if (disposed || !sessionActive) return;
+                    if (object.ReferenceEquals(helperClient, deadClient))
+                    {
+                        helperClient = null;
+                    }
+                    if (!recovering)
+                    {
+                        recovering = true;
+                        shouldRecover = true;
+                    }
+                }
+                try { deadClient.Dispose(); } catch { }
+                if (shouldRecover)
+                {
+                    Task.Run(delegate { RecoverHelperSessionLoop(); });
+                }
+            }
+
+            private void WaitForPendingRecoveryBriefly()
+            {
+                for (int i = 0; i < 16 && !disposed; i++)
+                {
                     lock (gate)
                     {
-                        if (helperClient != null) return helperClient.AudioCodec;
-                        if (localHandle != null) return localHandle.AudioCodec;
-                        return BoBoCoreInterop.AudioCodecAdpcm;
+                        if (!recovering || !sessionActive) return;
                     }
+                    Thread.Sleep(40);
+                }
+            }
+
+            private void RecoverHelperSessionLoop()
+            {
+                try
+                {
+                    int[] delays = customPipeNameProvider != null
+                        ? new int[] { 40, 80, 120, 180, 260, 400 }
+                        : new int[] { 80, 180, 320, 500, 800, 1000, 1200 };
+
+                    for (int attempt = 0; attempt < delays.Length && !disposed; attempt++)
+                    {
+                        int mon, w, h, fps, bps;
+                        bool mute, comp, pAac, pHevc;
+                        Action<byte[], bool, int, int, uint> cbV;
+                        Action<byte[], int, int, int> cbA;
+                        lock (gate)
+                        {
+                            if (disposed || !sessionActive) return;
+                            mon = cfgMonitor;
+                            w = cfgWidth;
+                            h = cfgHeight;
+                            fps = cfgFps;
+                            bps = cfgBitrateKbps;
+                            mute = cfgMuteHost;
+                            comp = cfgCompositeCursor;
+                            pAac = cfgPreferAac;
+                            pHevc = cfgPreferHevc;
+                            cbV = userOnVideo;
+                            cbA = userOnAudio;
+                        }
+
+                        DesktopHelperClient nextClient = TryConnectHelper(true);
+                        if (nextClient != null)
+                        {
+                            string helperErr;
+                            if (nextClient.CreateHostSession(
+                                mon, w, h, fps, bps, mute, comp, pAac, pHevc,
+                                cbV, cbA, out helperErr))
+                            {
+                                bool attached = false;
+                                lock (gate)
+                                {
+                                    if (!disposed && sessionActive)
+                                    {
+                                        DesktopHelperClient prev = helperClient;
+                                        BoBoCoreInterop.BoBoHostNativeHandle prevLocal = localHandle;
+                                        localHandle = null;
+                                        AttachHelperClient(nextClient);
+                                        attached = true;
+                                        if (prev != null && !object.ReferenceEquals(prev, nextClient))
+                                        {
+                                            ThreadPool.QueueUserWorkItem(delegate { try { prev.Dispose(); } catch { } });
+                                        }
+                                        if (prevLocal != null)
+                                        {
+                                            ThreadPool.QueueUserWorkItem(delegate { try { prevLocal.Dispose(); } catch { } });
+                                        }
+                                    }
+                                }
+                                if (attached)
+                                {
+                                    Interlocked.Increment(ref recoveryCount);
+                                    try { nextClient.RequestKeyframe(); } catch { }
+                                    return;
+                                }
+                                try { nextClient.DestroyHostSession(); } catch { }
+                            }
+                            try { nextClient.Dispose(); } catch { }
+                        }
+
+                        try { Thread.Sleep(delays[attempt]); } catch { }
+                    }
+
+                    // Helper stayed offline; fall back to in-process capture when interactive desktop is accessible
+                    if (!disposed && customPipeNameProvider == null && !IsSecureDesktopBlockedWithoutService())
+                    {
+                        int mon, w, h, fps, bps;
+                        bool mute, comp, pAac, pHevc;
+                        Action<byte[], bool, int, int, uint> cbV;
+                        Action<byte[], int, int, int> cbA;
+                        lock (gate)
+                        {
+                            if (disposed || !sessionActive || localHandle != null || helperClient != null) return;
+                            mon = cfgMonitor;
+                            w = cfgWidth;
+                            h = cfgHeight;
+                            fps = cfgFps;
+                            bps = cfgBitrateKbps;
+                            mute = cfgMuteHost;
+                            comp = cfgCompositeCursor;
+                            pAac = cfgPreferAac;
+                            pHevc = cfgPreferHevc;
+                            cbV = userOnVideo;
+                            cbA = userOnAudio;
+                        }
+                        string localErr;
+                        BoBoCoreInterop.BoBoHostNativeHandle fallbackLocal = BoBoCoreInterop.CreateHostSession(
+                            mon, w, h, fps, bps, mute, cbV, cbA, out localErr, comp, pAac, pHevc);
+                        if (fallbackLocal != null)
+                        {
+                            lock (gate)
+                            {
+                                if (!disposed && sessionActive && helperClient == null && localHandle == null)
+                                {
+                                    cachedVideoCodec = fallbackLocal.VideoCodec;
+                                    cachedAudioCodec = fallbackLocal.AudioCodec;
+                                    localHandle = fallbackLocal;
+                                    fallbackLocal = null;
+                                }
+                            }
+                            if (fallbackLocal != null)
+                            {
+                                try { fallbackLocal.Dispose(); } catch { }
+                            }
+                            else
+                            {
+                                Interlocked.Increment(ref recoveryCount);
+                                try { localHandle.RequestKeyframe(); } catch { }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    lock (gate) { recovering = false; }
                 }
             }
 
@@ -1557,14 +2354,27 @@ namespace DualRemote
                 out string error)
             {
                 StopHostSession();
-
-                // 若当前并非 SYSTEM 进程且服务运行中，优先接入活跃控制台会话的 SYSTEM Helper
-                DesktopHelperClient client = null;
                 lock (gate)
                 {
+                    if (disposed) { error = "Bridge disposed"; return false; }
+                    sessionActive = true;
+                    recovering = false;
+                    cfgMonitor = monitorIndex;
+                    cfgWidth = targetWidth;
+                    cfgHeight = targetHeight;
+                    cfgFps = fps;
+                    cfgBitrateKbps = bitrateKbps;
+                    cfgMuteHost = muteHostSpeakers;
+                    cfgCompositeCursor = compositeCursor;
+                    cfgPreferAac = preferAacAudio;
+                    cfgPreferHevc = preferHevcVideo;
+                    userOnVideo = onVideo;
+                    userOnAudio = onAudio;
                     lastHelperProbeTicks = 0;
-                    client = EnsureHelperConnectedLocked();
                 }
+
+                // Prefer SYSTEM Helper when available so capture survives Winlogon/UAC switches seamlessly
+                DesktopHelperClient client = TryConnectHelper(true);
                 if (client != null)
                 {
                     string helperErr;
@@ -1573,93 +2383,164 @@ namespace DualRemote
                         muteHostSpeakers, compositeCursor, preferAacAudio, preferHevcVideo,
                         onVideo, onAudio, out helperErr))
                     {
-                        error = "";
-                        return true;
+                        bool keep = false;
+                        lock (gate)
+                        {
+                            if (!disposed && sessionActive)
+                            {
+                                AttachHelperClient(client);
+                                keep = true;
+                            }
+                        }
+                        if (keep)
+                        {
+                            error = "";
+                            return true;
+                        }
+                        try { client.DestroyHostSession(); } catch { }
                     }
-                    lock (gate)
-                    {
-                        if (object.ReferenceEquals(helperClient, client)) helperClient = null;
-                    }
-                    client.Dispose();
+                    try { client.Dispose(); } catch { }
+                }
+
+                if (customPipeNameProvider != null)
+                {
+                    lock (gate) { sessionActive = false; }
+                    error = "未能连接到测试管道服务。";
+                    return false;
                 }
 
                 BoBoCoreInterop.BoBoHostNativeHandle local = BoBoCoreInterop.CreateHostSession(
                     monitorIndex, targetWidth, targetHeight, fps, bitrateKbps, muteHostSpeakers,
                     onVideo, onAudio, out error, compositeCursor, preferAacAudio, preferHevcVideo);
-                if (local == null) return false;
-                lock (gate) { localHandle = local; }
+                if (local == null)
+                {
+                    lock (gate) { sessionActive = false; }
+                    return false;
+                }
+                bool keepLocal = false;
+                lock (gate)
+                {
+                    if (!disposed && sessionActive)
+                    {
+                        cachedVideoCodec = local.VideoCodec;
+                        cachedAudioCodec = local.AudioCodec;
+                        localHandle = local;
+                        keepLocal = true;
+                    }
+                }
+                if (!keepLocal)
+                {
+                    try { local.Dispose(); } catch { }
+                    error = "会话已关闭。";
+                    return false;
+                }
                 return true;
             }
 
             internal bool Reconfigure(int monitorIndex, int width, int height, int fps, int bitrateKbps)
             {
+                if (disposed) return false;
                 lock (gate)
                 {
-                    if (disposed) return false;
-                    if (helperClient != null && helperClient.IsConnected)
-                        return helperClient.Reconfigure(monitorIndex, width, height, fps, bitrateKbps);
-                    if (localHandle != null)
-                        return localHandle.Reconfigure(monitorIndex, width, height, fps, bitrateKbps);
-                    return false;
+                    if (disposed || !sessionActive) return false;
+                    cfgMonitor = monitorIndex;
+                    cfgWidth = width;
+                    cfgHeight = height;
+                    cfgFps = fps;
+                    cfgBitrateKbps = bitrateKbps;
                 }
+
+                DesktopHelperClient hc = helperClient;
+                BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                if (hc == null && lh == null && recovering)
+                {
+                    WaitForPendingRecoveryBriefly();
+                    hc = helperClient;
+                    lh = localHandle;
+                }
+
+                if (hc != null && hc.IsConnected)
+                {
+                    return hc.Reconfigure(monitorIndex, width, height, fps, bitrateKbps);
+                }
+                if (lh != null)
+                {
+                    return lh.Reconfigure(monitorIndex, width, height, fps, bitrateKbps);
+                }
+                return false;
             }
 
             internal bool SetBitrate(int bitrateKbps)
             {
+                if (disposed) return false;
                 lock (gate)
                 {
                     if (disposed) return false;
-                    if (helperClient != null && helperClient.IsConnected) { helperClient.SetBitrate(bitrateKbps); return true; }
-                    if (localHandle != null) return localHandle.SetBitrate(bitrateKbps);
-                    return false;
+                    cfgBitrateKbps = bitrateKbps;
                 }
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected) { hc.SetBitrate(bitrateKbps); return true; }
+                BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                if (lh != null) return lh.SetBitrate(bitrateKbps);
+                return false;
             }
 
             internal bool SetFps(int fps)
             {
+                if (disposed) return false;
                 lock (gate)
                 {
                     if (disposed) return false;
-                    if (helperClient != null && helperClient.IsConnected) { helperClient.SetFps(fps); return true; }
-                    if (localHandle != null) return localHandle.SetFps(fps);
-                    return false;
+                    cfgFps = fps;
                 }
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected) { hc.SetFps(fps); return true; }
+                BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                if (lh != null) return lh.SetFps(fps);
+                return false;
             }
 
             internal void SetCompositeCursor(bool enable)
             {
-                lock (gate)
+                if (disposed) return;
+                lock (gate) { cfgCompositeCursor = enable; }
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected) hc.SetCompositeCursor(enable);
+                else
                 {
-                    if (disposed) return;
-                    if (helperClient != null && helperClient.IsConnected) helperClient.SetCompositeCursor(enable);
-                    else if (localHandle != null) localHandle.SetCompositeCursor(enable);
+                    BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                    if (lh != null) lh.SetCompositeCursor(enable);
                 }
             }
 
             internal void RequestKeyframe()
             {
-                lock (gate)
+                if (disposed) return;
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected) hc.RequestKeyframe();
+                else
                 {
-                    if (disposed) return;
-                    if (helperClient != null && helperClient.IsConnected) helperClient.RequestKeyframe();
-                    else if (localHandle != null) localHandle.RequestKeyframe();
+                    BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                    if (lh != null) lh.RequestKeyframe();
                 }
             }
 
             internal void SetMuteHost(bool mute)
             {
-                lock (gate)
+                if (disposed) return;
+                lock (gate) { cfgMuteHost = mute; }
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected) hc.SetMuteHost(mute);
+                else
                 {
-                    if (disposed) return;
-                    if (helperClient != null && helperClient.IsConnected) helperClient.SetMuteHost(mute);
-                    else if (localHandle != null) localHandle.SetMuteHost(mute);
+                    BoBoCoreInterop.BoBoHostNativeHandle lh = localHandle;
+                    if (lh != null) lh.SetMuteHost(mute);
                 }
             }
 
             internal void InjectInput(int monitorIndex, BoBoInputPacket pkt)
             {
-                DesktopHelperClient hc;
-                lock (gate) { hc = helperClient; }
+                DesktopHelperClient hc = helperClient;
                 if (hc != null && hc.IsConnected)
                 {
                     hc.InjectInput(monitorIndex, pkt);
@@ -1673,8 +2554,7 @@ namespace DualRemote
             internal void InjectUnicodeText(string text)
             {
                 if (string.IsNullOrEmpty(text)) return;
-                DesktopHelperClient hc;
-                lock (gate) { hc = helperClient; }
+                DesktopHelperClient hc = helperClient;
                 if (hc != null && hc.IsConnected)
                 {
                     hc.InjectUnicodeText(text);
@@ -1687,8 +2567,7 @@ namespace DualRemote
 
             internal bool SendSAS()
             {
-                DesktopHelperClient hc;
-                lock (gate) { hc = EnsureHelperConnectedLocked(); }
+                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
                 if (hc != null && hc.IsConnected)
                 {
                     hc.SendSAS();
@@ -1699,8 +2578,7 @@ namespace DualRemote
 
             internal bool ApplySuperDisplay(int monitorIndex, int clientW, int clientH, out int actualW, out int actualH)
             {
-                DesktopHelperClient hc;
-                lock (gate) { hc = EnsureHelperConnectedLocked(); }
+                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
                 if (hc != null && hc.IsConnected)
                 {
                     return hc.ApplySuperDisplay(monitorIndex, clientW, clientH, out actualW, out actualH);
@@ -1710,8 +2588,7 @@ namespace DualRemote
 
             internal void RestoreSuperDisplay()
             {
-                DesktopHelperClient hc;
-                lock (gate) { hc = EnsureHelperConnectedLocked(); }
+                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
                 if (hc != null && hc.IsConnected)
                 {
                     hc.RestoreSuperDisplay();
@@ -1732,10 +2609,14 @@ namespace DualRemote
                 BoBoCoreInterop.BoBoHostNativeHandle lh;
                 lock (gate)
                 {
+                    sessionActive = false;
+                    recovering = false;
                     hc = helperClient;
                     lh = localHandle;
                     localHandle = null;
                     helperClient = null;
+                    userOnVideo = null;
+                    userOnAudio = null;
                 }
                 if (hc != null)
                 {
@@ -1758,7 +2639,9 @@ namespace DualRemote
 
         // ==================== Win32 SCM & Token P/Invokes ====================
 
+        private const uint SC_MANAGER_CONNECT = 0x0001u;
         private const uint SC_MANAGER_ALL_ACCESS = 0xF003Fu;
+        private const uint SERVICE_QUERY_CONFIG = 0x0001u;
         private const uint SERVICE_ALL_ACCESS = 0xF01FFu;
         private const uint SERVICE_NO_CHANGE = 0xFFFFFFFFu;
         private const uint SERVICE_WIN32_OWN_PROCESS = 0x00000010u;
@@ -1778,6 +2661,25 @@ namespace DualRemote
         private const short SW_HIDE = 0;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400u;
         private const uint CREATE_NO_WINDOW = 0x08000000u;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct QUERY_SERVICE_CONFIG
+        {
+            public uint dwServiceType;
+            public uint dwStartType;
+            public uint dwErrorControl;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string lpBinaryPathName;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string lpLoadOrderGroup;
+            public uint dwTagId;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string lpDependencies;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string lpServiceStartName;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string lpDisplayName;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct SC_ACTION
@@ -1842,6 +2744,10 @@ namespace DualRemote
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr OpenServiceW(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfigW(IntPtr hService, IntPtr lpServiceConfig, int cbBufSize, out int pcbBytesNeeded);
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr CreateServiceW(

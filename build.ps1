@@ -32,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.6.0' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.6.1' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
 $BuildDir        = Join-Path $Root '.cache\build'
 $StageRoot       = Join-Path $BuildDir 'clean-stage'
@@ -98,6 +98,14 @@ function Invoke-CompileStage {
 
     $verFile = Join-Path $BuildDir 'app-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
+    $cleanAsmVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.1' }
+    $asmInfoFile = Join-Path $BuildDir 'AssemblyVersionInfo.cs'
+    $asmInfoText = @(
+        "[assembly: System.Reflection.AssemblyVersion(`"$cleanAsmVer.0`")]"
+        "[assembly: System.Reflection.AssemblyFileVersion(`"$cleanAsmVer.0`")]"
+        "[assembly: System.Reflection.AssemblyInformationalVersion(`"$BuildVersion`")]"
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($asmInfoFile, $asmInfoText, (New-Object System.Text.UTF8Encoding($false)))
 
     $refNames = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Security.dll', 'System.ServiceProcess.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')
     $refs = @($refNames | ForEach-Object { Join-Path $csc.Framework $_ })
@@ -123,6 +131,7 @@ function Invoke-CompileStage {
     if (Test-Path -LiteralPath $appIcon) { $argsList += "/win32icon:$appIcon" }
     if (Test-Path -LiteralPath $brandLogo) { $argsList += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
     $argsList += $sources
+    $argsList += $asmInfoFile
 
     & $csc.Compiler @argsList
     if ($LASTEXITCODE -ne 0) { throw "csc.exe 编译 BoBo远程.exe 失败（exit=$LASTEXITCODE）" }
@@ -180,6 +189,14 @@ function Build-SetupInstaller {
 
     $verFile = Join-Path $setupBuildDir 'setup-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
+    $cleanSetupVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.1' }
+    $setupAsmFile = Join-Path $setupBuildDir 'SetupAssemblyInfo.cs'
+    $setupAsmText = @(
+        "[assembly: System.Reflection.AssemblyVersion(`"$cleanSetupVer.0`")]"
+        "[assembly: System.Reflection.AssemblyFileVersion(`"$cleanSetupVer.0`")]"
+        "[assembly: System.Reflection.AssemblyInformationalVersion(`"$BuildVersion`")]"
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($setupAsmFile, $setupAsmText, (New-Object System.Text.UTF8Encoding($false)))
 
     $manifest = Join-Path $Root 'src\app.manifest'
     $appIcon  = Join-Path $Root 'assets\bobo-remote.ico'
@@ -196,6 +213,7 @@ function Build-SetupInstaller {
     if (Test-Path -LiteralPath $appIcon) { $setupArgs += "/win32icon:$appIcon" }
     if (Test-Path -LiteralPath $brandLogo) { $setupArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
     $setupArgs += $setupSrc
+    $setupArgs += $setupAsmFile
 
     & $csc.Compiler @setupArgs
     if ($LASTEXITCODE -ne 0) { throw "编译安装向导 BoBoSetup.cs 失败（exit=$LASTEXITCODE）" }

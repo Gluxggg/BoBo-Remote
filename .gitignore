@@ -29,4 +29,45 @@ apple/**/.swiftpm/
 apple/BoBoRemoteiOS/build/
 apple/BoBoRemoteiOS/*.xcodeproj/
 dist-apple/
+dist-android/
+ci-out-*/
 one-sku-study.zip
+
+# 环境变量与本地密钥（隔离上传与上下文读取）
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+
+# 证书、私钥、签名仓库与 SSH 密钥
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+*.mobileprovision
+id_rsa*
+id_ed25519*
+
+# 敏感配置与凭据文件
+*secret*.json
+*secret*.yaml
+*secret*.yml
+*secrets*.json
+*credential*.json
+*credentials*.json
+service-account*.json
+google-services.json
+GoogleService-Info.plist
+ExportOptions*.plist
+*.tfvars
+*.tfvars.json
+.npmrc
+.pypirc
+.antigravityignore

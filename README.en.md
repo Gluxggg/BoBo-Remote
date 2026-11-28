@@ -26,15 +26,15 @@
 
 **BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + pure Go + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no BoBo vendor accounts** and **bundles zero external third-party remote desktop engine binaries**.
 
-### At a Glance (`v7.6.0`)
+### At a Glance (`v7.6.1`)
 
-- **Seamless Windows Lock Screen (`Win+L` / `Winlogon`), UAC & `Ctrl+Alt+Del` Control (`v7.6.0`)**:
-  - **Dual-Mode `SYSTEM` Service & ACL-Secured Named Pipe ([`BoBoSystemService.cs`](src/Backend/BoBoSystemService.cs))**: Registers auto-starting, auto-recovering **`BoBoRemoteService`** (`NT AUTHORITY\SYSTEM`), tracks active console session switches, and spawns `--desktop-helper` via `CreateProcessAsUserW` into the interactive session; streams and injects over an ACL-hardened binary Named Pipe (`LocalSystem` + `Administrators` + active console user SID) with transparent in-process fallback;
-  - **Dynamic `OpenInputDesktop` Switching & `sas.dll!SendSAS(FALSE)` ([`BoBoCore.dll`](native/bobo-core/src/bobo_core.cpp) · [`screen_capture.cpp`](native/bobo-core/src/screen_capture.cpp))**: Continuously transitions `Default` <-> `Winlogon` <-> `UAC` desktops inside capture encoding and an **`HWND`-free `InputWorkerLoop`**, enabling uninterrupted viewing, PIN/password unlock, UAC clicks, and `Ctrl+Alt+Del` (`SEND_SAS`) while preserving local privacy/IME hooks and offering 1-click install/repair in Setup UAC and **Settings -> Network & Engines**.
-- **Cross-Network Symmetric NAT Traversal & Zero-Burst Pacing (`v7.6.0` Deep Fix)**:
-  - **Client `"PUNC"` Reverse Learning, `PortDelta` Prediction & NAT-PMP/UPnP IGD ([`BoBoNatTraversal.cs`](src/Backend/BoBoNatTraversal.cs) · [`BoBoStreamClient.cs`](src/Backend/BoBoStreamClient.cs))**: Stops client UDP sockets from dropping authenticated host `"PUNC"` probes before endpoint activation, signs/exchanges **`ObservedPortDelta` (`"delta"`) strides**, runs concurrent **`NAT-PMP (:5351)` + `HttpWebRequest` UPnP IGD** router mapping, publishes `publicIpv6s`, pins `BoBoTsNet` WireGuard to `:49813`, strips peer public IPs via `ExtractPeerDirectCandidateIps` to bypass DERP, and unlocks full-port UDP firewall rules;
-  - **Sub-ms 2-Shard Micro-Burst Pacer & Tight-FEC High-RTT Slow-Start ([`BoBoHostServer.cs`](src/Backend/BoBoHostServer.cs) · [`BoBoUdpTransport.cs`](src/Backend/BoBoUdpTransport.cs))**: Replaces coarse `4ms/14KB` bursts with **`2300 B / 4600 B` (2-shard) micro-bursts + `Thread.SpinWait(64)`** pacing, activates tight `G=2` FEC on high RTT, and warms fixed-bitrate presets at `3200 kbps` slow-start (`900ms` / `+24%` ramp) atop the `v7.5.0` 90 Hz decoupled GPU NV12 pipeline so Frame-0 IDR never triggers campus/hotspot queue bloat.
-- **120 Hz Tactile Motion + Four-Platform AEAD `AES-128-GCM` + 2 ms Curtain (`v7.3` – `v7.5`)**: Zero-idle-overhead [`UiTransition`](src/UiTransition.cs) 120 Hz spring/ripple motion, unified **`BoBo6.2`** wire spec with standard `AES-128-GCM`, GCC delay-gradient ABR, interleaved `XOR FEC + NACK`, hardware `H.265 (HEVC)` + `AAC-LC 96 kbps`, 2 ms Z-order curtain hardening, and 2 GiB SHA-256 transfers.
+- **Windows Post-Logon Lock Screen (`Win+L`), UAC Continuity & Service Privilege Isolation (`v7.6.1`)**:
+  - **ACL-Protected Service Staging ([`BoBoSystemService.cs`](src/Backend/BoBoSystemService.cs) · [`BoBoCoreInterop.cs`](src/Backend/BoBoCoreInterop.cs))**: Stages `BoBoRemoteService` (`NT AUTHORITY\SYSTEM`) and verified `BoBoCore.dll` exclusively under **`%ProgramFiles%\BoBoRemote\Service\`** with protected ACLs (`SYSTEM` and `Administrators` writable only, inheritance disabled), refuses `SYSTEM` execution from user-writable folders, uses `LoadLibraryExW` safe DLL loading + SHA-256 verification, and performs transactional stop/backup/upgrade/pipe-verify/rollback across Setup and `AppUpdater`;
+  - **Honest Session Scope & Lock-Free Auto-Rebuild**: Once an interactive user session is logged in and listening on `:49810`, `--desktop-helper` tracks **`Win+L` lock screens, UAC prompts, and `Ctrl+Alt+Del` (`SendSAS`)** with lock-free codec atomics (fixing the `4.5s` reconfigure contention) and automatically rebuilds active capture if the helper restarts; cold-boot pre-logon screens do not accept incoming sessions before initial user logon;
+- **Per-Path Isolated Cross-Network ABR, Stateless `BOP7` Punching & Wire-Budget-First Pacing (`v7.6.1`)**:
+  - **Path Metric Isolation ([`BoBoUdpTransport.cs`](src/Backend/BoBoUdpTransport.cs) · [`BoBoStreamClient.cs`](src/Backend/BoBoStreamClient.cs) · [`BoBoHostServer.cs`](src/Backend/BoBoHostServer.cs))**: Replaces sealed punch pings with stateless HMAC-authenticated **`BOP7`** probes and stops lower-rank `HelloAck` replies on healthy paths so probe traffic never creates `sendSeq` gaps, prevents TLS `PONG` RTT from overwriting active UDP RTT, converges symmetric NAT `ObservedPortDelta` expansion in [`BoBoNatTraversal.cs`](src/Backend/BoBoNatTraversal.cs), and runs `NAT-PMP + UPnP IGD` concurrently with independent timeouts, renewal, and disconnect teardown;
+  - **Wire-Budget-First Pacing**: Deducts live FEC (`G=2/3/5/8`), framing, and retransmit reserves from total send budget before setting encoder bitrate, preventing high-RTT FEC bursts from overflowing the `2-shard` micro-burst pacer.
+- **Persistent Android `v1+v2+v3` Release Signing & Encrypted Migration Backup**: Fixes ephemeral debug-keystore rotation across releases with a permanent `v1+v2+v3` keystore and adds **PBKDF2 + AES-256-GCM identity/peer backup export & import** for existing `v7.5.0`/`v7.6.0` users; `PRIVACY_STATE` and `RECONFIGURED` now wait for real host state confirmation, and `bobo-relay` enforces a bounded `-drain-timeout`.
 
 <p align="center">
   <a href="#why-bobo-remote">Comparison</a> ·
@@ -55,13 +55,13 @@
 
 ## Why BoBo Remote?
 
-| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.6.0`) |
+| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.6.1`) |
 | --- | --- | --- |
 | **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No BoBo vendor accounts, zero telemetry**: config & keys stay local; 1-click **in-app Tailscale (`:49813`)** + **IPv6/STUN/NAT-PMP/UPnP P2P punching** + **BYO-VPS TCP+UDP relay** |
-| **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: **HW H.265 / H.264**, **2K @ 90 Hz WAN**, **Lock-Screen/UAC access**, Super Display, privacy shield, and 2 GiB file transfer |
-| **Install Mode & Lock-Screen Access** | Bundled closed-source system services and ads | **Portable or Opt-In `SYSTEM` Service**: runs portable with zero install, or registers open-source **`BoBoRemoteService`** via Setup UAC / Settings UI for seamless **`Win+L` unlock, UAC & `Ctrl+Alt+Del`** |
-| **Weak-Network Media Engine** | Black-box transport and throttled vendor relays | **HW `H.265` + `AES-128-GCM` UDP + `PUNC`/IPv6/UPnP punching + 2-shard SpinWait pacing + Tight-FEC (`G=2`) + `NACK` + GCC ABR + `AAC-LC 96k`** |
-| **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + `WDA_EXCLUDEFROMCAPTURE` + 2ms burst curtain + low-level input locks + 120 Hz on-demand tactile UI** |
+| **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: **HW H.265 / H.264**, **2K @ 90 Hz WAN**, **Post-Logon Lock/UAC access**, Super Display, privacy shield, and 2 GiB file transfer |
+| **Install Mode & Lock-Screen Access** | Bundled closed-source system services and ads | **Portable or Protected `SYSTEM` Service**: runs portable without daemons, or stages open-source **`BoBoRemoteService`** into ACL-locked `Program Files\BoBoRemote\Service` for **post-logon `Win+L` unlock, UAC & `Ctrl+Alt+Del`** |
+| **Weak-Network Media Engine** | Black-box transport and throttled vendor relays | **HW `H.265` + `AES-128-GCM` UDP + Stateless `BOP7`/IPv6/UPnP punching + Wire-Budget Pacer + Path-Isolated ABR + Tight-FEC/`NACK` + `AAC-LC 96k`** |
+| **Security & Privacy Shield** | Superficial black screens often leave taskbars clickable or leak IME popups | **Explicit pairing + `WDA_EXCLUDEFROMCAPTURE` + 2ms burst curtain + real-state `PRIVACY_STATE` ack + hardware input lock + 120 Hz tactile UI** |
 
 ---
 
@@ -97,12 +97,12 @@
 
 ## Four-Platform Matrix & Release Sizes
 
-| Platform | OS Requirement | `v7.6.0` Release Artifact | Controller (Client) | Controlled (Host) | Highlights |
+| Platform | OS Requirement | `v7.6.1` Release Artifact | As Controller (Receiving) | As Controlled Host (Sending) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.2 MB)<br>`BoBoRemote-Update-x64.zip` (~9.2 MB) | ✅ **Full**<br>Includes Android nav & iOS viewing | ✅ **Full**<br>DXGI/GDI + MF HEVC/H.264/AAC + WASAPI + **`SYSTEM` Lock/UAC Service** | Embedded `BoBoCore.dll` (**Decoupled 90 Hz + 4-Slot GPU NV12 Ring + `Winlogon` dynamic sync + `SendSAS`**) + **`PUNC`/IPv6/UPnP/`PortDelta` punching + Sub-ms Pacer** + `:49813` `BoBoTsNet` |
-| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full**<br>`MediaCodec` decode + 48kHz stereo | ✅ **Rootless Full**<br>`MediaProjection` + Accessibility | **`AES-128-GCM` UDP+FEC/NACK**, trackpad/touch modes, floating ball, PC shortcut bar, Bluetooth VK map |
-| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full**<br>`AVSampleBufferDisplayLayer` | ✅ **Full**<br>`ScreenCaptureKit` audio + VideoToolbox | **`CryptoKit AES-128-GCM` UDP+FEC/NACK**, Super Display, `⌘ → Ctrl`, capture-excluded shield + `CGEventTap` |
-| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **Foreground Controller**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only** | **`AES-128-GCM` UDP+FEC/NACK**, embedded ReplayKit Broadcast Extension; sign via Sideloadly / AltStore / SideStore / Xcode |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.2 MB)<br>`BoBoRemote-Update-x64.zip` (~9.2 MB) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>Includes Android nav & iOS viewing | ✅ **Full · Encrypted UDP+FEC/NACK + TLS Fallback**<br>DXGI/GDI + MF HEVC/H.264/AAC + **`Program Files` `SYSTEM` Service** | Embedded `BoBoCore.dll` (90 Hz ring + lock-free Helper auto-rebuild/`SendSAS`) + stateless `BOP7`/IPv6/UPnP punching + **Wire-Budget Pacer** + `:49813` `BoBoTsNet` |
+| **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>`MediaCodec` decode + 48kHz stereo | ✅ **Rootless Full · Currently TLS Streaming**<br>`MediaProjection` + Accessibility | Persistent `v1+v2+v3` signing, **encrypted Identity/Peer Backup Export & Import**, trackpad/touch, floating ball, Bluetooth VK map |
+| **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>`AVSampleBufferDisplayLayer` | ✅ **Full · Currently TLS Streaming**<br>`ScreenCaptureKit` audio + VideoToolbox | CryptoKit + VideoToolbox, Super Display, `⌘ → Ctrl`, capture-excluded shield + `CGEventTap` |
+| **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **Foreground Full · Encrypted UDP + TLS Fallback**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only · Currently TLS Streaming** | Embedded ReplayKit Broadcast Extension; sign via Sideloadly / AltStore / SideStore / Xcode |
 
 > Full permission & multi-platform setup steps live in [**Cross-Platform Installation & Setup Guide (`docs/CROSS-PLATFORM-GUIDE.md`)**](docs/CROSS-PLATFORM-GUIDE.md).
 
@@ -110,31 +110,31 @@
 
 ## Architecture & Protocol Pipeline
 
-### Shipped Architecture (`BoBo6.2` · `v7.6.0`)
+### Shipped Architecture (`BoBo6.2` · `v7.6.1`)
 
 ```mermaid
 flowchart LR
-  subgraph WINHOST["Windows Host Dual-Layer Secure Desktop Architecture (v7.6.0)"]
+  subgraph WINHOST["Windows Host Protected Dual-Layer Desktop Architecture (v7.6.1)"]
     direction TB
-    SVC["BoBoRemoteService (NT AUTHORITY\SYSTEM · --service)"]
-    HLP["--desktop-helper (Active Console Session SYSTEM)"]
-    DESK["WinSta0 Default <-> Winlogon Lock Screen <-> UAC (OpenInputDesktop + SendSAS)"]
-    PIPE["ACL-Secured Binary Named Pipe (BoBoRemote.DesktopHelper.<sid>)"]
+    SVC["BoBoRemoteService (ACL-Locked Program Files\BoBoRemote\Service)"]
+    HLP["--desktop-helper (Session Console SYSTEM · Auto-Rebuild)"]
+    DESK["WinSta0 Default <-> Post-Logon Winlogon Lock <-> UAC (SendSAS)"]
+    PIPE["ACL-Secured Named Pipe (Lock-Free Codec & RPC/Media Split)"]
     SVC -->|CreateProcessAsUserW| HLP
     HLP <-->|Dynamic Desktop Sync & HWND-Free Input| DESK
     PIPE <--> HLP
   end
 
-  subgraph PROTO["BoBo6.2 Protocol & Zero-Loss Cross-Network Engine"]
+  subgraph PROTO["BoBo6.2 Protocol & Path-Isolated Real-Time Engine"]
     direction TB
-    DISC["UDP 49812 / NAT-PMP / UPnP IGD · LAN Discovery + Router Mapping + STUN"]
-    TLS["TCP 49810 / tsnet (:49813+addrs) / Custom Relay · TLS 1.2+ TOFU + HOST_NOTICE/SEND_SAS"]
-    AUTH["RSA Challenge + 4-Digit PIN + HEVC/H.264 Negotiation"]
-    UDP["UDP 49811 · AES-128-GCM · PUNC Reverse Punch/PortDelta + 2-Shard Micro-Burst + Tight-FEC + NACK"]
+    DISC["UDP 49812 / NAT-PMP+UPnP (Parallel Lease+Cleanup) + STUN"]
+    TLS["TCP 49810 / tsnet (:49813+addrs) / Custom Relay · TLS 1.2+ TOFU + Isolated TLS RTT"]
+    AUTH["RSA Challenge + 4-Digit PIN + Verified Privacy/Reconfig Ack"]
+    UDP["UDP 49811 · AES-128-GCM · BOP7 Stateless Punch + Wire-Budget Pacer + Tight-FEC + NACK"]
     DISC --> TLS --> AUTH --> UDP
   end
 
-  NET["Direct LAN > Direct IPv6 / NAT-PMP+UPnP / PUNC Punch > VPS UDP Relay (bobo-relay) > tsnet (/udp-bridge)"]
+  NET["Direct LAN > Direct IPv6 / NAT-PMP+UPnP / BOP7 Punch > VPS UDP Relay > tsnet (/udp-bridge)"]
 
   WINHOST <--> PROTO
   PROTO <--> NET
@@ -162,13 +162,13 @@ flowchart LR
 
 Download the artifact for your platform from [**GitHub Releases (latest)**](https://github.com/Gluxggg/BoBo-Remote/releases/latest) and verify hashes against `SHA256SUMS.txt`:
 
-- **Windows 10 / 11 x64**: Run **`BoBoRemote-Setup-x64.exe`** (installs to `%LOCALAPPDATA%\BoBoRemote`; prompts UAC to automatically register **`BoBoRemoteService`** for lock-screen/UAC penetration and full-port UDP firewall rules, then de-elevates the GUI via `explorer.exe` — or gracefully installs in standard user mode if UAC is declined; preserves pairings/relays on upgrade and includes in-app SHA-256 updater) or unzip **`BoBoRemote-Portable-x64.zip`** and click **Settings → Network & Engines → Install/Repair** to enable lock-screen access.
-- **Android 8.0+**: Install **`BoBoRemote-Android.apk`**. Controlling requires zero permissions; for rootless host mode, enable **Screen Capture** and **BoBo Remote Accessibility Touch Service**.
+- **Windows 10 / 11 x64**: Run **`BoBoRemote-Setup-x64.exe`** (desktop UI installs to `%LOCALAPPDATA%\BoBoRemote`; when UAC is approved or triggered via **Settings → Network & Engines**, **`BoBoRemoteService`** and SHA-256 verified `BoBoCore.dll` are staged separately into ACL-locked `%ProgramFiles%\BoBoRemote\Service\` with transactional upgrade/rollback and real status reporting).
+- **Android 8.0+**: Install **`BoBoRemote-Android.apk`** (signed from `v7.6.1` onward with a persistent `v1+v2+v3` certificate for seamless future upgrades; users upgrading from `v7.5.0`/`v7.6.0` can export an encrypted backup in **Settings → Identity & Pairing Migration** before uninstalling and re-import in one tap). Controlling requires zero permissions; rootless host mode uses **Screen Capture** and **Accessibility Touch Service**.
 - **macOS 13.0+**: Open **`BoBoRemote-macOS.dmg`** (Universal 2) and drag `BoBoRemote.app` into `Applications`; grant **Screen & System Audio Recording** and **Accessibility** when hosting.
 - **iOS / iPadOS 16.0+**: Sideload **`BoBoRemote-iOS-Unsigned.ipa`** via [Sideloadly](https://sideloadly.io/), [AltStore](https://altstore.io/), [SideStore](https://sidestore.io/), or Xcode, trust the developer certificate, and allow **Local Network** access.
 
 ### 4-Step First Full Connection
-1. **Enable Lock-Screen / UAC Service (Recommended on Windows Hosts)**: Approve the installer UAC prompt or click **Install/Repair** in **Settings → Network & Engines** (`BoBo远程.exe --install-service`) so `Win+L` lock screens, PIN/password unlock, UAC prompts, and `Ctrl+Alt+Del` stay uninterrupted.
+1. **Enable Protected Lock-Screen / UAC Service (Recommended on Windows Hosts)**: Approve installer UAC or click **Install/Repair** in **Settings → Network & Engines** (`BoBo远程.exe --install-service`) so once logged into your desktop, `Win+L` lock screens, PIN/password unlock, UAC prompts, and `Ctrl+Alt+Del` continue seamlessly without dropping the stream (pre-logon cold boot before user logon does not expose `:49810`).
 2. **Establish Reachability**: Keep peers on the same LAN (`UDP 49812`), click **Sign In** in the built-in Tailscale card (`BoBoTsNet` pins `:49813` and extracts peer public IPv6/IPv4 candidates to bypass DERP), dial IPv6, or configure [`bobo-relay`](tools/bobo-relay/README.md).
 3. **Generate a 4-Digit PIN**: On the host, enable incoming control and generate a **4-digit temporary pairing PIN** (valid 120s).
 4. **Pair & Connect**: Select the discovered host or enter its address/9-digit code on the controller to complete one-time TOFU pairing; future reconnects verify pinned certificates automatically.
@@ -214,13 +214,13 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.6.0`)**
-- **Local Windows suite**:
-  - **15/15** native `BoBoCore.dll` self-tests (adds `Winlogon` input-desktop accessibility/UIPI probe and dynamic desktop-sync teardown alongside decoupled `90 Hz` Capture+Encode threads, 4-slot GPU NV12 ring, `AMDh265Encoder` HEVC/H.264, D3D11, `AAC-LC 48 kHz`/ADPCM, and `12f / 4 MiB / 250 ms` decode queue; MSVC `/W4 /WX` with 0 warnings)
-  - **10/10** pure-Go `native/bobo-tsnet` unit tests (`pickPreferredWireGuardPort` `:49813` + `PeerDTO.Addrs` + `4 MB` UDP buffers + `/udp-bridge` SSRF check) + `--self-test`, and **5/5** pure-Go `tools/bobo-relay` unit tests
-  - **163/163** managed `BoBo远程.exe --self-test` checks (verified locally with full `DesktopHelperServer/Client` ACL-hardened Named Pipe RPC & `HWND`-free input/SAS dispatch, symmetric NAT `ObservedPortDelta` stride expansion, `BoBoTsNet` direct public IPv6/IPv4 stripping, `225 ms` Tight-FEC `G=2` + `3200 kbps` slow-start ramp, and all prior `v7.5`/`BoBo6.2` suites; 0 `/warn:4` warnings)
-  - GUI installer `--self-test` exited **0** (`7/7` checks, `/warnaserror+`), **109/109** `UiSmoke760` checks (+ **5/5** screenshot visual audit PASS including **Settings → Network & Engines** `BoBoRemoteService` card), **15/15** `CurtainSmoke731` checks, and **11/11** PowerShell UTF-8 BOM + AST syntax checks (`Errors=0`)
-- **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` + `assembleRelease`), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA), publishing all artifacts alongside `SHA256SUMS.txt`. (Live `Win+L` / UAC physical unlock flows and dual-NAT cross-carrier punching depend on live endpoints.)
+**Verified Test Coverage (`v7.6.1`)**
+- **Local Windows & Pure-Go suite**:
+  - **15/15** native `BoBoCore.dll` self-tests (adds `Winlogon` accessibility/UIPI probe and dynamic desktop sync alongside decoupled `90 Hz` Capture+Encode + 4-slot GPU NV12 ring; MSVC `/W4 /WX` with 0 warnings)
+  - **10/10** pure-Go `native/bobo-tsnet` unit tests + `--self-test`, and **6/6** pure-Go `tools/bobo-relay` unit tests (including `TestRelayCloseBoundedWithOpenTcpSession` enforcing bounded `DrainTimeout` exit)
+  - Full managed `BoBo远程.exe --self-test` suite (covers `v7.6.1` ACL-protected `Program Files\BoBoRemote\Service` guardrails, lock-free `DesktopHelper` reconfigure + helper-restart auto-rebuild, stateless `BOP7` punch seq isolation + path loss reset, Wire-Budget-First `G=2/3/5/8` rate allocation, honest `PRIVACY_STATE` reporting, and all prior `BoBo6.2`–`v7.6` checks; 0 `/warn:4` warnings)
+  - GUI installer `--self-test` (`/warnaserror+`, `EXIT=0`), `UiSmoke` + visual screenshot audit, `CurtainSmoke`, and PowerShell UTF-8 BOM + AST syntax checks (`Errors=0`)
+- **GitHub Actions Four-Platform Pipeline**: Automated CI & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` incl. encrypted backup migration + persistent `v1+v2+v3` signed `assembleRelease`), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA), publishing all artifacts alongside `SHA256SUMS.txt`. (Live post-logon `Win+L` / UAC unlock, helper crash recovery, and campus/hotspot cross-carrier latency & loss still require two-machine physical endpoint validation.)
 
 ---
 
@@ -293,7 +293,7 @@ BoBo-Remote/
 | **V7.3 (`v7.3.0` – `v7.3.2`)** | **Full P1 + Minimalist UI, 2ms Curtain Hardening & 120 Hz Tactile Motion**: Standard AEAD `AES-128-GCM`, GCC delay-gradient ABR, four-platform `UDP+FEC/NACK`, `AAC-LC 96 kbps` audio, grouped-card UI redesign, `2 ms` curtain burst pump, and `120 Hz` on-demand easing engine | ✅ Done |
 | **V7.4 (`v7.4.0`)** | **Cross-Network IPv6/STUN Direct Racing & 2K @ 90 Hz Engine**: ① End-to-end hardware **`H.265 (HEVC)`** negotiation & graceful H.264 fallback; ② Embedded `BoBoTsNet` **`:49811` UDP + `/udp-bridge`** with `1060 B` MTU shards; ③ **Global IPv6 direct racing + domestic RFC 5389 STUN / ICE-Lite bidirectional punching**; ④ **`bobo-relay` UDP `:49811` blind relay + built-in `:49812` STUN server**; ⑤ Anti-freeze TCP (`depth` scaling + `400 ms` IDR + telemetry recovery) & **2K @ 90 Hz / 30 Mbps** WAN ABR | ✅ Done |
 | **V7.5 (`v7.5.0`)** | **Zero-Lag Cross-Network Punching, Always-On Anti-Bufferbloat & Decoupled 90 Hz Pipeline**: ① **Decoupled Capture + Encode + 4-Slot GPU NV12 Ring** + microsecond `YieldProcessor` VBlank pacing; ② **Always-on GCC Ceiling Mode (90 FPS preserved on fixed bitrate presets)**; ③ **Kernel-routed IPv6/STUN + Symmetric NAT port-delta punching + `1.4s` continuous probing & seamless direct promotion** + `2–4 MiB` UDP buffers; ④ **`36-frame / 4 MiB` high-RTT NACK recovery** | ✅ Done |
-| **V7.6 (`v7.6.0`)** | **Lock-Screen/UAC Continuity + Cross-Network Zero-Loss Pacing**: ① **`BoBoRemoteService` (`SYSTEM`)** + session Helper + `OpenInputDesktop`/`SendSAS` + ACL Named Pipe enabling uninterrupted `Win+L` unlock, UAC control & `Ctrl+Alt+Del`; ② Fixed client `"PUNC"` reverse learning + **`PortDelta` stride prediction** + **NAT-PMP/UPnP IGD** + **fixed `BoBoTsNet :49813` direct IP extraction** + full-port UDP firewall rules; ③ **2-shard `SpinWait(64)` micro-burst pacer + `3200 kbps` slow-start + Tight-FEC (`G=2`)** eliminating campus/hotspot IDR queue drops | ✅ Done |
+| **V7.6 (`v7.6.0` – `v7.6.1`)** | **Lock-Screen Continuity, Privilege Boundary Hardening & Path-Isolated Congestion Control**: ① Protected `%ProgramFiles%\BoBoRemote\Service` ACL isolation for `BoBoRemoteService` (`SYSTEM`) + SHA-256/`LoadLibraryExW` + transactional upgrade & rollback; ② Lock-free Helper pipe reconfigure + auto-rebuild on helper restart; ③ Stateless `BOP7` punch, per-path RTT/loss isolation, and **Wire-Budget-First Pacing**; ④ Persistent `v1+v2+v3` Android signing + PBKDF2/AES-GCM migration backup, parallel `NAT-PMP/UPnP` lease renewal/teardown, honest `PRIVACY_STATE` ack, and bounded `bobo-relay` exit | ✅ Done |
 | **V8 / P2** | `AV1` / `H.264 4:4:4` codec negotiation (ultra-crisp text & IDE rendering), HDR / multi-monitor enhancements, native Android/Apple HEVC hardware encoding parity, `TCP 443` TURN fallback, and Linux client exploration | 🚧 Planned / Evolving |
 
 ---

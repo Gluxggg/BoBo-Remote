@@ -291,6 +291,42 @@ func TestStunBindingResponse(t *testing.T) {
 	}
 }
 
+func TestRelayCloseBoundedWithOpenTcpSession(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	srv := NewRelayServer(RelayConfig{
+		ListenAddr:   "127.0.0.1:0",
+		TargetAddr:   echoAddr,
+		MaxSessions:  4,
+		DrainTimeout: 150 * time.Millisecond,
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.DialTimeout("tcp", srv.RelayAddr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("PIN")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	srv.Close()
+	elapsed := time.Since(start)
+	if elapsed > 800*time.Millisecond {
+		t.Fatalf("RelayServer.Close blocked %v with open TCP connection (want <= 800ms)", elapsed)
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

@@ -279,4 +279,62 @@ class BoBoProtocolGoldenTest {
             rootDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun verifyEncryptedIdentityBackupMigrationRoundTrip() {
+        val rootDir = Files.createTempDirectory("bobo-android-backup-test").toFile()
+        try {
+            val orig = BoBoIdentityStore(File(rootDir, "orig"), "PixelSource")
+            orig.ensureLoaded()
+            val peerThumb = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            assertTrue(
+                orig.authorizeOrUpdatePeer(
+                    com.bobo.remote.protocol.BoBoAuthorizedPeer(
+                        nodeId = "peer-node-01",
+                        deviceCode = "123456789",
+                        deviceName = "DesktopOffice",
+                        certThumbprint = peerThumb,
+                        lastHost = "192.168.1.50"
+                    )
+                )
+            )
+            val origCode = orig.deviceCode
+            val origThumb = orig.certThumbprint
+            val origNode = orig.nodeId
+
+            val backupJson = orig.exportEncryptedBackup("BoBoSecret#761")
+            val restored = BoBoIdentityStore(File(rootDir, "restored"), "PixelTarget")
+            restored.ensureLoaded()
+            assertTrue(restored.certThumbprint != origThumb)
+
+            // Wrong passphrase MUST fail
+            var wrongFailed = false
+            try {
+                restored.importEncryptedBackup(backupJson, "WrongPass")
+            } catch (_: Exception) {
+                wrongFailed = true
+            }
+            assertTrue("Wrong passphrase must fail GCM authentication", wrongFailed)
+
+            // Correct passphrase restores exact identity & peers & working RSA key
+            restored.importEncryptedBackup(backupJson, "BoBoSecret#761")
+            assertEquals(origCode, restored.deviceCode)
+            assertEquals(origThumb, restored.certThumbprint)
+            assertEquals(origNode, restored.nodeId)
+            assertTrue(restored.isPeerAuthorized("peer-node-01", peerThumb))
+
+            val sig = restored.signAuthChallenge("abcdef01", origThumb)
+            assertTrue(
+                BoBoIdentityStore.verifyAuthChallenge(
+                    restored.certificateDerBase64,
+                    origThumb,
+                    "abcdef01",
+                    origThumb,
+                    sig
+                )
+            )
+        } finally {
+            rootDir.deleteRecursively()
+        }
+    }
 }

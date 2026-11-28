@@ -806,10 +806,17 @@ namespace DualRemote
                 "可选命令行组网补充（优先使用内置通道）",
                 EngineAvailability(Engines.TailscalePresent), 98);
 
-            bool lockSvcReady = BoBoSystemService.IsServiceRunning();
-            var lockSvcBadge = new Theme.Badge(lockSvcReady ? "已就绪" : "未配置",
-                lockSvcReady ? Theme.PillTone.Success : Theme.PillTone.Neutral);
-            var lockSvcBtn = Theme.Action(lockSvcReady ? "重新配置" : "安装/修复", Theme.ButtonStyle.Secondary);
+            bool svcInstalled, svcRunning, svcSecure;
+            string svcExe, svcVer, svcUpReason;
+            BoBoSystemService.InspectInstalledService(out svcInstalled, out svcRunning, out svcSecure, out svcExe, out svcVer);
+            bool svcNeedsUpgrade = svcRunning && BoBoSystemService.NeedsServiceUpgradeOrMigration(out svcUpReason);
+            string initBadgeText = !svcInstalled ? "未配置" : (svcNeedsUpgrade ? "需升级" : (svcRunning ? "已就绪" : "未启动"));
+            Theme.PillTone initBadgeTone = (!svcInstalled || !svcRunning)
+                ? Theme.PillTone.Neutral
+                : (svcNeedsUpgrade ? Theme.PillTone.Warning : Theme.PillTone.Success);
+            string initBtnText = !svcInstalled ? "安装/修复" : (svcNeedsUpgrade ? "升级/迁移" : (svcRunning ? "重新配置" : "安装/修复"));
+            var lockSvcBadge = new Theme.Badge(initBadgeText, initBadgeTone);
+            var lockSvcBtn = Theme.Action(initBtnText, Theme.ButtonStyle.Secondary);
             var lockSvcBox = Theme.Grid(3);
             Theme.FixedColumn(lockSvcBox, 78);
             Theme.FixedColumn(lockSvcBox, 8);
@@ -834,10 +841,16 @@ namespace DualRemote
                         BeginInvoke((MethodInvoker)delegate
                         {
                             if (IsDisposed) return;
-                            bool nowReady = BoBoSystemService.IsServiceRunning();
-                            lockSvcBadge.UpdateStatus(nowReady ? "已就绪" : "未配置",
-                                nowReady ? Theme.PillTone.Success : Theme.PillTone.Neutral);
-                            lockSvcBtn.Text = nowReady ? "重新配置" : "安装/修复";
+                            bool nowInst, nowRun, nowSec;
+                            string nowExe, nowVer, nowUpReason;
+                            BoBoSystemService.InspectInstalledService(out nowInst, out nowRun, out nowSec, out nowExe, out nowVer);
+                            bool nowNeedsUp = nowRun && BoBoSystemService.NeedsServiceUpgradeOrMigration(out nowUpReason);
+                            string nowBadgeText = !nowInst ? "未配置" : (nowNeedsUp ? "需升级" : (nowRun ? "已就绪" : "未启动"));
+                            Theme.PillTone nowTone = (!nowInst || !nowRun)
+                                ? Theme.PillTone.Neutral
+                                : (nowNeedsUp ? Theme.PillTone.Warning : Theme.PillTone.Success);
+                            lockSvcBadge.UpdateStatus(nowBadgeText, nowTone);
+                            lockSvcBtn.Text = !nowInst ? "安装/修复" : (nowNeedsUp ? "升级/迁移" : (nowRun ? "重新配置" : "安装/修复"));
                             lockSvcBtn.Enabled = true;
                             if (lockSvcText != null) lockSvcText.SubtitleText = BoBoSystemService.GetServiceStatusLabel();
                             ShowSettingsBanner(svcMsg, ok ? Theme.PillTone.Success : Theme.PillTone.Alert);

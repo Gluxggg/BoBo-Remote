@@ -640,6 +640,7 @@ namespace DualRemote
             RunV74CrossNetAndHevcSelfTests();
             RunV75ZeroLagSelfTests();
             RunV76WinlogonAndZeroLossSelfTests();
+            RunV761SecurityAndTransportIsolationSelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -833,17 +834,30 @@ namespace DualRemote
                     bool sessionStarted = false;
                     bool sessionRequestedPrivacy = false;
                     bool privacyCmdToggledOff = false;
+                    bool forcePrivacyFail = false;
+                    bool reportedPrivacyActive = true;
                     var frameEvt = new System.Threading.ManualResetEventSlim(false);
                     var sessionEndedEvt = new System.Threading.ManualResetEventSlim(false);
                     var privOffEvt = new System.Threading.ManualResetEventSlim(false);
+                    var privAckEvt = new System.Threading.ManualResetEventSlim(false);
                     server.SessionStateChanged += delegate(bool active, string peer, bool reqPriv)
                     {
                         if (active) { sessionStarted = true; sessionRequestedPrivacy = reqPriv; }
                         else sessionEndedEvt.Set();
                     };
-                    server.PrivacyCommandReceived += delegate(bool enable)
+                    server.PrivacyStateController = delegate(bool enable)
                     {
-                        if (!enable) { privacyCmdToggledOff = true; privOffEvt.Set(); }
+                        if (!enable)
+                        {
+                            privacyCmdToggledOff = true;
+                            privOffEvt.Set();
+                            return System.Threading.Tasks.Task.FromResult(false);
+                        }
+                        if (forcePrivacyFail)
+                        {
+                            return System.Threading.Tasks.Task.FromResult(false);
+                        }
+                        return System.Threading.Tasks.Task.FromResult(true);
                     };
 
                     using (var authClient = new BoBoStreamClient(clientId))
@@ -889,9 +903,22 @@ namespace DualRemote
                             authClient.HostCursorComposited,
                             "hostCursorComposited=" + authClient.HostCursorComposited);
 
+                        authClient.RemotePrivacyStateChanged += delegate(bool act)
+                        {
+                            reportedPrivacyActive = act;
+                            privAckEvt.Set();
+                        };
                         authClient.SendSetPrivacy(false);
-                        bool gotPrivOff = privOffEvt.Wait(3000) && privacyCmdToggledOff;
-                        Check("V6 直连控制：主控端直接开关被控端防窥指令", gotPrivOff, "toggledOff=" + privacyCmdToggledOff);
+                        bool gotPrivOff = privOffEvt.Wait(3000) && privAckEvt.Wait(3000) && privacyCmdToggledOff && !reportedPrivacyActive;
+
+                        privAckEvt.Reset();
+                        reportedPrivacyActive = true;
+                        forcePrivacyFail = true;
+                        authClient.SendSetPrivacy(true);
+                        bool honestFailAck = privAckEvt.Wait(3000) && !reportedPrivacyActive;
+                        Check("V6 直连控制：主控端直接开关防窥与真实防窥状态回执（失败不虚报成功）",
+                            gotPrivOff && honestFailAck,
+                            "toggledOff=" + privacyCmdToggledOff + " honestFailAck=" + honestFailAck);
 
                         using (var viewportEvt = new System.Threading.ManualResetEventSlim(false))
                         {
@@ -2411,6 +2438,192 @@ namespace DualRemote
             Check("V7.6 高RTT Tight-FEC(G=2) + 固定档位首帧 3200kbps 慢启动无丢包爬坡",
                 emitKeyFec76 && fecGroupKey76 == 2 && emitFec76 && fecGroup76 == 2 && initSlowOk && rampOk,
                 "fecKeyG=" + fecGroupKey76 + " fecG=" + fecGroup76 + " initOk=" + initSlowOk + " endBps=" + slowStartAbr.CurrentBitrateKbps);
+        }
+
+        private static void RunV761SecurityAndTransportIsolationSelfTests()
+        {
+            Log("");
+            Log("—— v7.6.1 服务安全边界 + 无锁 Helper 重建 + 无状态打洞丢包隔离 + 线速总预算分流自检 ——");
+
+            // 1. P0 Protected service directory ACL & path traversal guard
+            System.Security.AccessControl.DirectorySecurity ds = BoBoSystemService.BuildProtectedDirectorySecurity();
+            bool aclProtected = ds != null && ds.AreAccessRulesProtected;
+            bool usersReadOnly = false;
+            bool usersNoWrite = true;
+            bool systemFull = false;
+            bool adminFull = false;
+            if (ds != null)
+            {
+                var usersSid = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null);
+                var sysSid = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.LocalSystemSid, null);
+                var admSid = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null);
+                foreach (System.Security.AccessControl.FileSystemAccessRule rule in ds.GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)))
+                {
+                    if (rule.AccessControlType != System.Security.AccessControl.AccessControlType.Allow) continue;
+                    if (rule.IdentityReference.Equals(usersSid))
+                    {
+                        if ((rule.FileSystemRights & System.Security.AccessControl.FileSystemRights.ReadAndExecute) != 0)
+                            usersReadOnly = true;
+                        if ((rule.FileSystemRights & (System.Security.AccessControl.FileSystemRights.Write |
+                                                        System.Security.AccessControl.FileSystemRights.Delete |
+                                                        System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles |
+                                                        System.Security.AccessControl.FileSystemRights.ChangePermissions |
+                                                        System.Security.AccessControl.FileSystemRights.TakeOwnership)) != 0)
+                            usersNoWrite = false;
+                    }
+                    else if (rule.IdentityReference.Equals(sysSid) &&
+                             (rule.FileSystemRights & System.Security.AccessControl.FileSystemRights.FullControl) == System.Security.AccessControl.FileSystemRights.FullControl)
+                    {
+                        systemFull = true;
+                    }
+                    else if (rule.IdentityReference.Equals(admSid) &&
+                             (rule.FileSystemRights & System.Security.AccessControl.FileSystemRights.FullControl) == System.Security.AccessControl.FileSystemRights.FullControl)
+                    {
+                        adminFull = true;
+                    }
+                }
+            }
+            string userAppPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BoBoRemote", "BoBo远程.exe");
+            string travPath = Path.Combine(BoBoSystemService.GetProgramFilesRoot64(), "..", "Temp", "evil.exe");
+            string protExePath = BoBoSystemService.GetProtectedServiceExePath();
+            bool pathGuardOk = !BoBoSystemService.IsPathUnderProtectedProgramFiles(userAppPath)
+                && !BoBoSystemService.IsPathUnderProtectedProgramFiles(travPath)
+                && BoBoSystemService.IsPathUnderProtectedProgramFiles(protExePath)
+                && string.Equals(BoBoSystemService.ExtractExePathFromCommandLine("\"" + protExePath + "\" --service"), protExePath, StringComparison.OrdinalIgnoreCase);
+            Check("V7.6.1 P0 服务目录 ACL 隔离（禁用继承、仅 SYSTEM/Admin 可写、拒收用户路径与目录穿越）",
+                aclProtected && usersReadOnly && usersNoWrite && systemFull && adminFull && pathGuardOk,
+                "acl=" + aclProtected + " uRO=" + usersReadOnly + " uNoW=" + usersNoWrite + " path=" + pathGuardOk);
+
+            // 2. P1-3 Lock-free Reconfigure (<500ms while video callback inspects VideoCodec) + Helper restart auto-recovery
+            string helperPipe = "BoBoRemote.SelfTest761." + Guid.NewGuid().ToString("N");
+            bool bridgeNoDeadlockOk = false;
+            bool bridgeRebuiltOk = false;
+            long reconfigMs = -1;
+            int recCount = 0;
+            BoBoSystemService.DesktopHelperServer srv1 = null;
+            BoBoSystemService.DesktopHelperServer srv2 = null;
+            try
+            {
+                srv1 = new BoBoSystemService.DesktopHelperServer(helperPipe, -1);
+                using (var bridge = new BoBoSystemService.BoBoSecureDesktopBridge(delegate { return helperPipe; }))
+                {
+                    var postRestartFrame = new System.Threading.ManualResetEventSlim(false);
+                    int phase = 0;
+                    string bErr;
+                    bool started = bridge.StartHostSession(
+                        0, 640, 360, 30, 2000, false, true, false, false,
+                        delegate(byte[] data, bool isKey, int w, int h, uint ts)
+                        {
+                            // Mirror BoBoHostServer.cs video callback reading bridge.VideoCodec without deadlocking Reconfigure
+                            int codecCheck = bridge.VideoCodec;
+                            if (System.Threading.Volatile.Read(ref phase) == 1 && data != null && data.Length > 0 && codecCheck >= 0)
+                            {
+                                postRestartFrame.Set();
+                            }
+                        },
+                        delegate { },
+                        out bErr);
+                    if (started)
+                    {
+                        var swRe = Stopwatch.StartNew();
+                        bool rcOk = bridge.Reconfigure(0, 800, 450, 30, 2400);
+                        swRe.Stop();
+                        reconfigMs = swRe.ElapsedMilliseconds;
+                        bridgeNoDeadlockOk = rcOk && reconfigMs < 1500;
+
+                        // Simulate DesktopHelper process restart and verify auto-rebuild + resumed frames
+                        srv1.Dispose();
+                        srv1 = null;
+                        System.Threading.Volatile.Write(ref phase, 1);
+                        srv2 = new BoBoSystemService.DesktopHelperServer(helperPipe, -1);
+                        for (int w = 0; w < 60; w++)
+                        {
+                            if (bridge.RecoveryCount >= 1 && bridge.IsUsingSystemHelper && postRestartFrame.IsSet) break;
+                            System.Threading.Thread.Sleep(50);
+                        }
+                        recCount = bridge.RecoveryCount;
+                        bridgeRebuiltOk = bridge.RecoveryCount >= 1 && bridge.IsUsingSystemHelper && postRestartFrame.Wait(1500);
+                    }
+                }
+            }
+            finally
+            {
+                if (srv1 != null) { try { srv1.Dispose(); } catch { } }
+                if (srv2 != null) { try { srv2.Dispose(); } catch { } }
+            }
+            Check("V7.6.1 P1-3 桥接无锁热重配（无 4.5s 死锁）+ Helper 重启自动重建采集并恢复推流",
+                bridgeNoDeadlockOk && bridgeRebuiltOk,
+                "reconfigMs=" + reconfigMs + " noDeadlock=" + bridgeNoDeadlockOk + " recCount=" + recCount + " rebuilt=" + bridgeRebuiltOk);
+
+            // 3. P1-4 Stateless punch probes do not advance sendSeq or trigger false packet loss
+            byte[] k761 = BoBoUdpCrypto.GenerateRandomKey32();
+            byte[] wrongK = BoBoUdpCrypto.GenerateRandomKey32();
+            bool statelessPunchOk = false;
+            bool lossIsolationOk = false;
+            using (var hostC = new BoBoUdpCrypto(0x76101234u, k761, true, BoBoUdpCipherMode.Aes128Gcm))
+            using (var cliC = new BoBoUdpCrypto(0x76101234u, k761, false, BoBoUdpCipherMode.Aes128Gcm))
+            using (var badC = new BoBoUdpCrypto(0x76101234u, wrongK, false, BoBoUdpCipherMode.Aes128Gcm))
+            {
+                bool allVerified = true;
+                for (int i = 0; i < 24; i++)
+                {
+                    byte[] p = hostC.BuildStatelessPunchProbe();
+                    if (!cliC.TryVerifyStatelessPunchProbe(p, p.Length) || badC.TryVerifyStatelessPunchProbe(p, p.Length))
+                    {
+                        allVerified = false;
+                        break;
+                    }
+                }
+                byte[] pkt1 = hostC.Seal(BoBoUdpPacketType.VideoShard, new byte[] { 1, 2, 3, 4 }, 0, 4);
+                BoBoUdpPacketType pt1;
+                uint seq1;
+                byte[] pl1;
+                bool open1 = cliC.TryOpen(pkt1, pkt1.Length, out pt1, out seq1, out pl1);
+                statelessPunchOk = allVerified && open1 && seq1 == 1u;
+
+                var isoAsm = new BoBoUdpVideoAssembler { NackEnabled = true };
+                isoAsm.RecordReceivedUdpSeq(seq1);
+                isoAsm.RecordReceivedUdpSeq(25u); // simulated stale non-active gap spike before endpoint switch
+                isoAsm.RefreshLossWindow(Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2L);
+                double beforeSwitchLoss = isoAsm.LatestLossPct;
+                isoAsm.ResetLossBaseline(Stopwatch.GetTimestamp());
+                isoAsm.RecordReceivedUdpSeq(30u);
+                isoAsm.RecordReceivedUdpSeq(31u);
+                isoAsm.RefreshLossWindow(Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2L);
+                lossIsolationOk = beforeSwitchLoss > 5.0 && isoAsm.LatestLossPct == 0.0;
+            }
+            Check("V7.6.1 P1-4 BOP7 无状态认证打洞不耗 sendSeq + 切换链路丢包基线平滑重置",
+                statelessPunchOk && lossIsolationOk,
+                "stateless=" + statelessPunchOk + " lossIso=" + lossIsolationOk);
+
+            // 4. P1-5 Wire-budget-first rate allocation guarantees encoder + G=2 FEC + headers <= pacer ceiling
+            int[] wireTargets = new int[] { 3200, 8000, 15000 };
+            double[] losses = new double[] { 0.0, 1.2, 3.0 };
+            double[] rtts = new double[] { 18.0, 115.0, 225.0 };
+            BoBoCongestionSignal[] sigs = new BoBoCongestionSignal[] {
+                BoBoCongestionSignal.Normal, BoBoCongestionSignal.Hold, BoBoCongestionSignal.Overuse
+            };
+            bool wireBudgetOk = true;
+            for (int ti = 0; ti < wireTargets.Length; ti++)
+            {
+                int encBps, pacerWire;
+                double drainMargin;
+                int grpSz;
+                BoBoUdpFec.ComputeWireBudgetAllocation(
+                    wireTargets[ti], losses[ti], true, rtts[ti], 8.0, ti == 2 ? 2 : 0,
+                    BoBoUdpCrypto.GcmOverheadBytes, sigs[ti],
+                    out encBps, out pacerWire, out drainMargin, out grpSz);
+                double estWireOutput = encBps * ((grpSz + 1.0) / grpSz) * 1.09;
+                double pacerCap = pacerWire * drainMargin;
+                if (encBps < 450 || estWireOutput > pacerCap)
+                {
+                    wireBudgetOk = false;
+                    break;
+                }
+            }
+            Check("V7.6.1 P1-5 线速总预算优先分流：G=2/3/5 高延迟冗余加协议头绝不超过 Pacer 排水上限",
+                wireBudgetOk,
+                "ok=" + wireBudgetOk);
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

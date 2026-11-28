@@ -120,15 +120,42 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Test and assemble Android APK
+      - name: Stage persistent release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.BOBO_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$KEYSTORE_B64" ]]; then
+            echo "Missing BOBO_ANDROID_KEYSTORE_BASE64 secret for release APK signing." >&2
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/bobo-release.p12"
+          chmod 600 "$RUNNER_TEMP/bobo-release.p12"
+      - name: Test and assemble signed Android APK
         working-directory: android
         env:
           RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
-        run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace "-PboboReleaseVersion=$RELEASE_VERSION"
-      - name: Prepare Android release asset
+          BOBO_UPLOAD_STORE_FILE: ${{ runner.temp }}/bobo-release.p12
+          BOBO_UPLOAD_STORE_PASSWORD: ${{ secrets.BOBO_ANDROID_KEYSTORE_PASSWORD }}
+          BOBO_UPLOAD_KEY_ALIAS: ${{ secrets.BOBO_ANDROID_KEY_ALIAS }}
+          BOBO_UPLOAD_KEY_PASSWORD: ${{ secrets.BOBO_ANDROID_KEY_PASSWORD }}
+        run: gradle :app:testDebugUnitTest :app:assembleRelease --stacktrace "-PboboReleaseVersion=$RELEASE_VERSION" -PboboRequireReleaseSigning=true
+      - name: Verify APK v1/v2/v3 signatures and prepare release asset
         run: |
+          apk="android/app/build/outputs/apk/release/app-release.apk"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          apksigner_bin=$(ls -1d "$sdk_root"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1)
+          if [[ -n "$apksigner_bin" ]]; then
+            verify_out=$("$apksigner_bin" verify --verbose "$apk")
+            echo "$verify_out"
+            grep -q "Verified using v1 scheme (JAR signing): true" <<< "$verify_out"
+            grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" <<< "$verify_out"
+            grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" <<< "$verify_out"
+          fi
           mkdir -p release-assets
-          cp android/app/build/outputs/apk/release/app-release.apk release-assets/BoBoRemote-Android.apk
+          cp "$apk" release-assets/BoBoRemote-Android.apk
+      - name: Remove temporary keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/bobo-release.p12"
       - uses: actions/upload-artifact@v4
         with:
           name: release-android

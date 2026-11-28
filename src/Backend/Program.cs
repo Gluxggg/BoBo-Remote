@@ -32,11 +32,14 @@ namespace DualRemote
             bool runAsService = false;
             bool runDesktopHelper = false;
             bool installService = false;
+            bool upgradeService = false;
             bool uninstallService = false;
             int helperSessionId = -1;
             string updatedVersion = null;
-            foreach (string arg in args)
+            string firewallExe = null;
+            foreach (string rawArg in args)
             {
+                string arg = rawArg;
                 if (string.Equals(arg, "--self-test", StringComparison.OrdinalIgnoreCase))
                 {
                     selfTest = true;
@@ -57,6 +60,10 @@ namespace DualRemote
                 {
                     installService = true;
                 }
+                else if (string.Equals(arg, "--upgrade-service", StringComparison.OrdinalIgnoreCase))
+                {
+                    upgradeService = true;
+                }
                 else if (string.Equals(arg, "--uninstall-service", StringComparison.OrdinalIgnoreCase))
                 {
                     uninstallService = true;
@@ -65,6 +72,10 @@ namespace DualRemote
                 {
                     int parsedSid;
                     if (int.TryParse(arg.Substring(10), out parsedSid)) helperSessionId = parsedSid;
+                }
+                else if (arg != null && arg.StartsWith("--firewall-exe=", StringComparison.OrdinalIgnoreCase))
+                {
+                    firewallExe = arg.Substring(15).Trim().Trim('"');
                 }
                 else if (arg != null && arg.StartsWith("--updated-version=", StringComparison.OrdinalIgnoreCase))
                 {
@@ -89,7 +100,14 @@ namespace DualRemote
             if (installService)
             {
                 string svcMsg;
-                bool ok = BoBoSystemService.InstallAndStartService(out svcMsg);
+                bool ok = BoBoSystemService.InstallAndStartService(out svcMsg, firewallExe);
+                try { Console.WriteLine(svcMsg); } catch { }
+                return ok ? 0 : 1;
+            }
+            if (upgradeService)
+            {
+                string svcMsg;
+                bool ok = BoBoSystemService.UpgradeService(out svcMsg, firewallExe);
                 try { Console.WriteLine(svcMsg); } catch { }
                 return ok ? 0 : 1;
             }

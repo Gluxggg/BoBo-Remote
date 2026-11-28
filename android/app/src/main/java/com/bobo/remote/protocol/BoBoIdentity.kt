@@ -23,12 +23,17 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import javax.crypto.Cipher
 import javax.crypto.Mac
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import java.util.Arrays
 
 data class BoBoAuthorizedPeer(
     val nodeId: String,
@@ -276,8 +281,175 @@ class BoBoIdentityStore(
         }
     }
 
+    /**
+     * 导出加密的身份私钥、证书、9 位设备码与已授权信任设备名单（PBKDF2-HMAC-SHA256 + AES-256-GCM）。
+     * 用于 Android 从 v7.5.0/v7.6.0 临时签名迁移至持久化正式签名时无损保留配对关系。
+     */
+    fun exportEncryptedBackup(passphrase: String, extraState: JSONObject? = null): String {
+        require(passphrase.length >= 4) { "备份口令至少需要 4 个字符" }
+        ensureLoaded()
+        val inner = JSONObject()
+        synchronized(lock) {
+            inner.put("nodeId", nodeId)
+            inner.put("deviceCode", deviceCode)
+            inner.put("deviceName", deviceName)
+            inner.put("certThumbprint", certThumbprint)
+            inner.put("privateKeyDerB64", java.util.Base64.getEncoder().encodeToString(privateKey.encoded))
+            inner.put("certificateDerB64", java.util.Base64.getEncoder().encodeToString(certificate.encoded))
+            val arr = JSONArray()
+            for (p in peers.values) {
+                arr.put(JSONObject().apply {
+                    put("nodeId", p.nodeId)
+                    put("deviceCode", p.deviceCode)
+                    put("deviceName", p.deviceName)
+                    put("certThumbprint", p.certThumbprint)
+                    put("lastHost", p.lastHost)
+                    put("authorizedAtMs", p.authorizedAtMs)
+                })
+            }
+            inner.put("authorizedPeers", arr)
+            if (extraState != null) inner.put("extraState", extraState)
+        }
+
+        val salt = ByteArray(16).also { secureRandom.nextBytes(it) }
+        val iv = ByteArray(12).also { secureRandom.nextBytes(it) }
+        val rawKey = deriveBackupAesKeyBytes(passphrase, salt, BACKUP_PBKDF2_ITERATIONS)
+        val plain = inner.toString().toByteArray(StandardCharsets.UTF_8)
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, "AES"), GCMParameterSpec(128, iv))
+            val ct = cipher.doFinal(plain)
+            JSONObject().apply {
+                put("format", BACKUP_FORMAT_MAGIC)
+                put("version", 1)
+                put("kdf", "PBKDF2WithHmacSHA256")
+                put("iterations", BACKUP_PBKDF2_ITERATIONS)
+                put("salt", java.util.Base64.getEncoder().encodeToString(salt))
+                put("iv", java.util.Base64.getEncoder().encodeToString(iv))
+                put("ct", java.util.Base64.getEncoder().encodeToString(ct))
+            }.toString(2)
+        } finally {
+            Arrays.fill(rawKey, 0.toByte())
+            Arrays.fill(plain, 0.toByte())
+        }
+    }
+
+    /**
+     * 解密并校验身份私钥、X.509 证书匹配性及已授权信任设备名单后落盘替换当前实例状态。
+     */
+    fun importEncryptedBackup(backupJson: String, passphrase: String): JSONObject? {
+        require(passphrase.length >= 4) { "请输入至少 4 位备份口令" }
+        ensureLoaded()
+        val env = JSONObject(backupJson.trim())
+        require(env.optString("format", "") == BACKUP_FORMAT_MAGIC) { "不是有效的 BoBo 身份备份文件" }
+        val version = env.optInt("version", 0)
+        require(version == 1) { "不支持的备份文件版本: $version" }
+        val iters = env.optInt("iterations", BACKUP_PBKDF2_ITERATIONS).coerceIn(10_000, 600_000)
+        val salt = java.util.Base64.getDecoder().decode(env.getString("salt"))
+        val iv = java.util.Base64.getDecoder().decode(env.getString("iv"))
+        val ct = java.util.Base64.getDecoder().decode(env.getString("ct"))
+        require(salt.size == 16 && iv.size == 12 && ct.size >= 16) { "备份文件加密参数损坏" }
+
+        val rawKey = deriveBackupAesKeyBytes(passphrase, salt, iters)
+        val plain = try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, "AES"), GCMParameterSpec(128, iv))
+            cipher.doFinal(ct)
+        } finally {
+            Arrays.fill(rawKey, 0.toByte())
+        }
+
+        val inner = try {
+            JSONObject(String(plain, StandardCharsets.UTF_8))
+        } finally {
+            Arrays.fill(plain, 0.toByte())
+        }
+
+        val keyBytes = java.util.Base64.getDecoder().decode(inner.getString("privateKeyDerB64"))
+        val certBytes = java.util.Base64.getDecoder().decode(inner.getString("certificateDerB64"))
+        val importedPriv = KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(keyBytes))
+        val importedCert = CertificateFactory.getInstance("X.509")
+            .generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
+
+        // Cryptographically prove the private key corresponds to the certificate's public key
+        val probe = ByteArray(32).also { secureRandom.nextBytes(it) }
+        val signer = Signature.getInstance("SHA256withRSA").apply {
+            initSign(importedPriv)
+            update(probe)
+        }
+        val sig = signer.sign()
+        val verifier = Signature.getInstance("SHA256withRSA").apply {
+            initVerify(importedCert.publicKey)
+            update(probe)
+        }
+        require(verifier.verify(sig)) { "备份中的私钥与证书不匹配" }
+
+        val actualThumb = computeCertSha256Hex(importedCert.encoded)
+        val claimedThumb = inner.optString("certThumbprint", "")
+        require(claimedThumb.isBlank() || fixedTimeEqualsHex(actualThumb, claimedThumb)) { "证书指纹校验失败" }
+        val derivedCode = deriveNineDigitCode(actualThumb)
+        val importedNode = inner.optString("nodeId", "").ifBlank { actualThumb.substring(0, 24) }
+        val importedName = inner.optString("deviceName", "").ifBlank { deviceName }
+
+        val restoredPeers = LinkedHashMap<String, BoBoAuthorizedPeer>()
+        val arr = inner.optJSONArray("authorizedPeers")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val p = arr.optJSONObject(i) ?: continue
+                val thumb = p.optString("certThumbprint", "").trim().lowercase(Locale.US)
+                val nid = p.optString("nodeId", "").trim()
+                if (nid.isNotEmpty() && BoBoProtocol.isValidHexSha256(thumb)) {
+                    restoredPeers[thumb] = BoBoAuthorizedPeer(
+                        nodeId = nid,
+                        deviceCode = p.optString("deviceCode", ""),
+                        deviceName = p.optString("deviceName", ""),
+                        certThumbprint = thumb,
+                        lastHost = p.optString("lastHost", ""),
+                        authorizedAtMs = p.optLong("authorizedAtMs", System.currentTimeMillis())
+                    )
+                }
+            }
+        }
+
+        synchronized(lock) {
+            if (!storageDir.exists()) storageDir.mkdirs()
+            val keyTmp = File(storageDir, "bobo_identity_key.der.tmp")
+            val certTmp = File(storageDir, "bobo_identity_cert.der.tmp")
+            keyTmp.writeBytes(importedPriv.encoded)
+            certTmp.writeBytes(importedCert.encoded)
+            val keyDst = File(storageDir, "bobo_identity_key.der")
+            val certDst = File(storageDir, "bobo_identity_cert.der")
+            if (keyDst.exists()) keyDst.delete()
+            if (certDst.exists()) certDst.delete()
+            check(keyTmp.renameTo(keyDst) && certTmp.renameTo(certDst)) { "保存恢复密钥文件失败" }
+
+            privateKey = importedPriv
+            certificate = importedCert
+            certThumbprint = actualThumb
+            deviceCode = derivedCode
+            nodeId = importedNode
+            deviceName = importedName
+            peers.clear()
+            peers.putAll(restoredPeers)
+            saveMetaLocked()
+            loaded = true
+        }
+        return inner.optJSONObject("extraState")
+    }
+
     companion object {
+        private const val BACKUP_FORMAT_MAGIC = "BoBoIdentityBackup"
+        private const val BACKUP_PBKDF2_ITERATIONS = 120_000
         private val secureRandom = SecureRandom()
+
+        private fun deriveBackupAesKeyBytes(passphrase: String, salt: ByteArray, iterations: Int): ByteArray {
+            val spec = PBEKeySpec(passphrase.toCharArray(), salt, iterations, 256)
+            return try {
+                SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+            } finally {
+                spec.clearPassword()
+            }
+        }
 
         fun computeCertSha256Hex(derBytes: ByteArray): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(derBytes)

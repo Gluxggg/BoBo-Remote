@@ -90,6 +90,45 @@ import java.net.URI
 
 class MainActivity : ComponentActivity() {
 
+    private var pendingExportPassphrase: String? = null
+    private var pendingImportCallback: ((String) -> Unit)? = null
+
+    private val exportBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        val passphrase = pendingExportPassphrase
+        pendingExportPassphrase = null
+        if (uri == null || passphrase.isNullOrBlank()) return@registerForActivityResult
+        runCatching {
+            val json = BoBoAppRuntime.identity.exportEncryptedBackup(passphrase)
+            contentResolver.openOutputStream(uri)?.use { out ->
+                out.write(json.toByteArray(Charsets.UTF_8))
+                out.flush()
+            } ?: error("无法打开备份写入流")
+        }.onSuccess {
+            Toast.makeText(this, "已加密导出设备码与配对名单", Toast.LENGTH_LONG).show()
+        }.onFailure { err ->
+            Toast.makeText(this, "导出备份失败：${err.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val importBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val cb = pendingImportCallback
+        pendingImportCallback = null
+        if (uri == null || cb == null) return@registerForActivityResult
+        runCatching {
+            contentResolver.openInputStream(uri)?.use { input ->
+                input.bufferedReader(Charsets.UTF_8).readText()
+            } ?: error("无法读取备份文件")
+        }.onSuccess { content ->
+            cb(content)
+        }.onFailure { err ->
+            Toast.makeText(this, "读取备份失败：${err.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -137,6 +176,17 @@ class MainActivity : ComponentActivity() {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText(label, value))
                         Toast.makeText(this, "已复制 $label", Toast.LENGTH_SHORT).show()
+                    },
+                    onExportBackupWithPassphrase = { passphrase ->
+                        pendingExportPassphrase = passphrase
+                        exportBackupLauncher.launch("BoBoRemote-Identity-Backup.json")
+                    },
+                    onPickBackupFileForImport = { onContent ->
+                        pendingImportCallback = onContent
+                        importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                    },
+                    onShowToast = { msg ->
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                     },
                     onLaunchStream = { target, name, privacy ->
                         val intent = Intent(this, StreamActivity::class.java).apply {
@@ -238,6 +288,9 @@ private fun BoBoHomeScreen(
     onStopProjection: () -> Unit,
     onOpenAccessibility: () -> Unit,
     onCopyText: (String, String) -> Unit,
+    onExportBackupWithPassphrase: (String) -> Unit,
+    onPickBackupFileForImport: ((String) -> Unit) -> Unit,
+    onShowToast: (String) -> Unit,
     onLaunchStream: (target: RemoteTarget, name: String, autoPrivacy: Boolean) -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -245,12 +298,18 @@ private fun BoBoHomeScreen(
     val authorizedPeers by BoBoAppRuntime.authorizedPeers.collectAsState()
     val activePeer by BoBoAppRuntime.activeSessionPeer.collectAsState()
     val projectionGranted by BoBoAppRuntime.projectionGranted.collectAsState()
+    val deviceCode by BoBoAppRuntime.deviceCode.collectAsState()
     val scope = rememberCoroutineScope()
 
     var targetInput by remember { mutableStateOf("") }
     var autoPrivacy by remember { mutableStateOf(true) }
     var connecting by remember { mutableStateOf(false) }
     var statusNotice by remember { mutableStateOf("") }
+
+    var backupMode by remember { mutableStateOf<String?>(null) }
+    var backupPendingJson by remember { mutableStateOf<String?>(null) }
+    var backupPassphrase by remember { mutableStateOf("") }
+    var backupError by remember { mutableStateOf("") }
 
     // Pairing dialog state
     var pendingPairHost by remember { mutableStateOf<RemoteTarget?>(null) }
@@ -399,7 +458,7 @@ private fun BoBoHomeScreen(
                     onConnectManual = ::connectManual
                 )
                 1 -> LocalHostTab(
-                    deviceCode = BoBoAppRuntime.identity.formattedDeviceCode,
+                    deviceCode = deviceCode.ifBlank { BoBoAppRuntime.identity.formattedDeviceCode },
                     deviceName = BoBoAppRuntime.identity.deviceName,
                     localPair = localPair,
                     countdown = pairCountdown,
@@ -417,12 +476,93 @@ private fun BoBoHomeScreen(
                 )
                 2 -> SettingsTab(
                     identity = BoBoAppRuntime.identity,
+                    deviceCode = deviceCode.ifBlank { BoBoAppRuntime.identity.formattedDeviceCode },
                     peers = authorizedPeers,
                     allowIncoming = BoBoAppRuntime.hostServer.allowIncomingControl,
-                    onAllowIncomingChange = { allowed -> scope.launch(Dispatchers.IO) { BoBoAppRuntime.setAllowIncoming(allowed) } }
+                    onAllowIncomingChange = { allowed -> scope.launch(Dispatchers.IO) { BoBoAppRuntime.setAllowIncoming(allowed) } },
+                    onRequestExportBackup = {
+                        backupPassphrase = ""
+                        backupError = ""
+                        backupPendingJson = null
+                        backupMode = "export"
+                    },
+                    onRequestImportBackup = {
+                        onPickBackupFileForImport { content ->
+                            backupPendingJson = content
+                            backupPassphrase = ""
+                            backupError = ""
+                            backupMode = "import"
+                        }
+                    }
                 )
             }
         }
+    }
+
+    val curBackupMode = backupMode
+    if (curBackupMode != null) {
+        val isExport = curBackupMode == "export"
+        AlertDialog(
+            onDismissRequest = { backupMode = null; backupPendingJson = null },
+            title = { Text(if (isExport) "导出加密身份备份" else "导入恢复身份备份", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        if (isExport) {
+                            "请设置至少 4 位备份口令。该文件将加密保存本机 9 位设备码、TLS 私钥与已配对名单，用于从 v7.5.0/v7.6.0 覆盖签名切换升级时无损迁移。"
+                        } else {
+                            "请输入导出备份时设置的口令，恢复原设备码与已配对名单："
+                        },
+                        fontSize = 13.sp,
+                        color = BoBoInkMuted
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = backupPassphrase,
+                        onValueChange = { backupPassphrase = it; backupError = "" },
+                        label = { Text("备份口令（至少 4 位）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (backupError.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(backupError, color = BoBoDanger, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = backupPassphrase.length >= 4,
+                    onClick = {
+                        if (isExport) {
+                            val pass = backupPassphrase
+                            backupMode = null
+                            onExportBackupWithPassphrase(pass)
+                        } else {
+                            val json = backupPendingJson ?: ""
+                            val pass = backupPassphrase
+                            runCatching {
+                                BoBoAppRuntime.identity.importEncryptedBackup(json, pass)
+                                BoBoAppRuntime.reloadAfterIdentityImport()
+                            }.onSuccess {
+                                backupMode = null
+                                backupPendingJson = null
+                                onShowToast("已恢复设备码与配对信任名单，当前服务已同步刷新")
+                            }.onFailure { err ->
+                                backupError = "口令错误或备份损坏：${err.message}"
+                            }
+                        }
+                    }
+                ) {
+                    Text(if (isExport) "选择保存位置" else "立即导入恢复")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { backupMode = null; backupPendingJson = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 
     // 4-Digit Temporary PIN Dialog
@@ -777,9 +917,12 @@ private fun LocalHostTab(
 @Composable
 private fun SettingsTab(
     identity: BoBoIdentityStore,
+    deviceCode: String,
     peers: List<BoBoAuthorizedPeer>,
     allowIncoming: Boolean,
-    onAllowIncomingChange: (Boolean) -> Unit
+    onAllowIncomingChange: (Boolean) -> Unit,
+    onRequestExportBackup: () -> Unit,
+    onRequestImportBackup: () -> Unit
 ) {
     var allowState by remember { mutableStateOf(allowIncoming) }
 
@@ -802,8 +945,28 @@ private fun SettingsTab(
                             onAllowIncomingChange(it)
                         })
                     }
-                    Text("协议版本：BoBo6 v6.2（TCP+TLS 1.2 :49810 / UDP :49812）", fontSize = 12.sp, color = BoBoInkMuted)
-                    Text("证书指纹：${identity.certThumbprint.take(24)}...", fontSize = 12.sp, color = BoBoInkMuted)
+                    Text("协议版本：BoBo6 v6.2（TCP+TLS 1.2 :49810 / 媒体 UDP :49811 / 发现 UDP :49812）", fontSize = 12.sp, color = BoBoInkMuted)
+                    Text("当前设备码：$deviceCode · 证书指纹：${identity.certThumbprint.take(24)}...", fontSize = 12.sp, color = BoBoInkMuted)
+                }
+            }
+        }
+        item {
+            Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = BoBoCardWhite)) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("身份与配对加密备份迁移", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text(
+                        "自 v7.6.1 起正式版启用固定签名证书。若当前安装的是 v7.5.0/v7.6.0 旧包，请先导出加密备份，卸载旧包后再装新版导入即可保留 9 位设备码与全部授权设备。",
+                        fontSize = 12.sp,
+                        color = BoBoInkMuted
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onRequestExportBackup, modifier = Modifier.weight(1f)) {
+                            Text("导出加密备份")
+                        }
+                        OutlinedButton(onClick = onRequestImportBackup, modifier = Modifier.weight(1f)) {
+                            Text("导入恢复备份")
+                        }
+                    }
                 }
             }
         }

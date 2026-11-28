@@ -125,6 +125,7 @@ namespace DualRemote
         private readonly byte[] encHmacKey;
         private readonly byte[] decAesKey;
         private readonly byte[] decHmacKey;
+        private readonly byte[] punchHmacKey;
         private readonly object encGate = new object();
         private readonly object decGate = new object();
 
@@ -230,6 +231,7 @@ namespace DualRemote
                 encHmac = new HMACSHA256(encHmacKey);
                 decHmac = new HMACSHA256(decHmacKey);
             }
+            punchHmacKey = DeriveDirectionKey(key32, sessionId, "BoBo7.6-UDP-PUNCH");
         }
 
         private static void EnsureCngGcmProvider(out IntPtr hAlg, out int objLen)
@@ -318,6 +320,49 @@ namespace DualRemote
                 rng.GetBytes(key);
             }
             return key;
+        }
+
+        internal const int StatelessPunchBytes = 32;
+
+        internal byte[] BuildStatelessPunchProbe()
+        {
+            if (disposed || punchHmacKey == null) return null;
+            byte[] pkt = new byte[StatelessPunchBytes];
+            WriteUInt32LE(pkt, 0, sessionId);
+            pkt[4] = 0x42; // B
+            pkt[5] = 0x4F; // O
+            pkt[6] = 0x50; // P
+            pkt[7] = 0x37; // 7
+            WriteInt64LE(pkt, 8, Stopwatch.GetTimestamp());
+            using (var h = new HMACSHA256(punchHmacKey))
+            {
+                byte[] tag = h.ComputeHash(pkt, 0, 16);
+                Buffer.BlockCopy(tag, 0, pkt, 16, 16);
+            }
+            return pkt;
+        }
+
+        internal static bool IsPossibleStatelessPunchProbe(byte[] buf, int length)
+        {
+            return buf != null && length == StatelessPunchBytes &&
+                buf[4] == 0x42 && buf[5] == 0x4F && buf[6] == 0x50 && buf[7] == 0x37;
+        }
+
+        internal bool TryVerifyStatelessPunchProbe(byte[] buf, int length)
+        {
+            if (disposed || punchHmacKey == null || !IsPossibleStatelessPunchProbe(buf, length)) return false;
+            if (ReadUInt32LE(buf, 0) != sessionId) return false;
+            byte[] tag;
+            using (var h = new HMACSHA256(punchHmacKey))
+            {
+                tag = h.ComputeHash(buf, 0, 16);
+            }
+            uint diff = 0;
+            for (int i = 0; i < 16; i++)
+            {
+                diff |= (uint)(buf[16 + i] ^ tag[i]);
+            }
+            return diff == 0;
         }
 
         internal static uint GenerateRandomSessionId()
@@ -643,6 +688,7 @@ namespace DualRemote
                 Array.Clear(decNonceScratch, 0, decNonceScratch.Length);
                 Array.Clear(decTagScratch, 0, decTagScratch.Length);
             }
+            if (punchHmacKey != null) Array.Clear(punchHmacKey, 0, punchHmacKey.Length);
         }
 
         internal static void WriteUInt16LE(byte[] b, int o, ushort v)
@@ -763,6 +809,46 @@ namespace DualRemote
                 groupSize = 5;
                 emitFec = true;
             }
+        }
+
+        /// <summary>
+        /// P1-5 线速总预算优先分配：先确定总网络发送预算，再按当前 FEC 组大小、协议头占比与重传预留扣除开销，
+        /// 得到不会撑爆 Pacer 发送队列的编码目标码率，并保持 Pacer 排水能力高于总发送码率。
+        /// </summary>
+        internal static void ComputeWireBudgetAllocation(
+            int totalWireBudgetKbps,
+            double recentLossPct,
+            bool nackEnabled,
+            double rttMs,
+            double jitterMs,
+            int burstLossStreak,
+            int cipherOverheadBytes,
+            BoBoCongestionSignal signal,
+            out int encoderBitrateKbps,
+            out int pacerWireKbps,
+            out double pacerDrainMargin,
+            out int activeGroupSize)
+        {
+            bool emitFec;
+            SelectFecParams(6, false, recentLossPct, nackEnabled, rttMs, jitterMs, burstLossStreak,
+                out activeGroupSize, out emitFec);
+            if (activeGroupSize < 1) activeGroupSize = 1;
+
+            double fecFactor = emitFec ? ((activeGroupSize + 1.0) / activeGroupSize) : 1.0;
+            double perPacketOverhead = ShardHeaderBytes + Math.Max(BoBoUdpCrypto.OverheadBytes, cipherOverheadBytes) + 48.0;
+            double headerFactor = ((DefaultSendShardPayloadBytes + perPacketOverhead) / DefaultSendShardPayloadBytes) * 1.015;
+            double rtxReserve = nackEnabled
+                ? Math.Min(0.10, 0.02 + Math.Max(0.0, recentLossPct) * 0.012)
+                : 0.015;
+            double audioAndCtrlReserve = 0.02;
+            double totalExpansion = fecFactor * headerFactor * (1.0 + rtxReserve + audioAndCtrlReserve);
+
+            int safeWire = Math.Max(600, Math.Min(60000, totalWireBudgetKbps));
+            encoderBitrateKbps = Math.Max(450, Math.Min(safeWire, (int)Math.Floor(safeWire / totalExpansion)));
+            pacerWireKbps = safeWire;
+            if (signal == BoBoCongestionSignal.Overuse) pacerDrainMargin = 1.08;
+            else if (signal == BoBoCongestionSignal.Hold) pacerDrainMargin = 1.15;
+            else pacerDrainMargin = 1.24;
         }
 
         internal static List<byte[]> BuildVideoShards(
@@ -1165,6 +1251,20 @@ namespace DualRemote
                 awaitingKeyframe = true;
                 awaitingKeyframeSinceTicks = nowTicks;
                 lastPliTicks = 0;
+                hasSeqBaseline = false;
+                highestSeq = 0;
+                windowReceived = 0;
+                windowExpected = 0;
+                windowStartTicks = nowTicks;
+                latestLossPct = 0.0;
+            }
+        }
+
+        /// <summary>切换活跃端点或过滤非活跃探测后，仅平滑重置丢包统计窗口而保留在途视频重组桶。</summary>
+        internal void ResetLossBaseline(long nowTicks)
+        {
+            lock (gate)
+            {
                 hasSeqBaseline = false;
                 highestSeq = 0;
                 windowReceived = 0;

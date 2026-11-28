@@ -934,7 +934,6 @@ public final class BoBoUdpChannel: @unchecked Sendable {
                 return false
             }
             if becameActive { assembler.reset(nowNs: nowNs) }
-            assembler.recordReceivedUdpSeq(opened.seq, nowNs: nowNs)
         case .videoShard:
             let rtt: Double? = stateLock.withLock {
                 guard !_closed && _activated else { return nil }

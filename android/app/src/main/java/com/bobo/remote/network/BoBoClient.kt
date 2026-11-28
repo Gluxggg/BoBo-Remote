@@ -299,7 +299,7 @@ class BoBoStreamClient(private val identity: BoBoIdentityStore) {
                                 }
                                 "PONG" -> {
                                     val sent = msg.optLong("ts", 0L)
-                                    if (sent > 0L) {
+                                    if (sent > 0L && udpChannel?.isActive != true) {
                                         val rtt = (System.nanoTime() - sent) / 1_000_000.0
                                         if (rtt in 0.0..10_000.0) listener.onRttUpdated(rtt)
                                     }

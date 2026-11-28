@@ -57,7 +57,7 @@ namespace DualRemote
         private volatile ActiveClientConnection activeStreamConn;
 
         internal event Action<bool, string, bool> SessionStateChanged;
-        internal event Action<bool> PrivacyCommandReceived;
+        internal Func<bool, Task<bool>> PrivacyStateController;
         internal event Action<BoBoAuthorizedPeer> PeerPaired;
         internal event Action<string> ClipboardTextReceived;
         internal event Action<string, string> FileReceived;
@@ -599,6 +599,12 @@ namespace DualRemote
             int lastLockNoticeTick = 0;
             bool streamNotifiedStarted = false;
             int activeMonitorIndex = 0;
+            int appliedMon = 0;
+            int appliedW = 0;
+            int appliedH = 0;
+            int appliedFps = 0;
+            int appliedWireBps = 0;
+            int lastReportedCapKbps = -1;
             var display = new SessionDisplay();
             int lastRecoveryKeyTick = 0;
             string clientNodeId = "";
@@ -998,7 +1004,14 @@ namespace DualRemote
 
                             abrController = new BoBoAdaptiveBitrateController(reqAutoBitrate, reqBps, reqFps, initRttMs, isLanClient);
                             int startBps = abrController.CurrentBitrateKbps;
+                            int startEncBps = startBps;
                             int startFps = abrController.CurrentFps;
+                            appliedMon = reqMon;
+                            appliedW = reqW;
+                            appliedH = reqH;
+                            appliedFps = startFps;
+                            appliedWireBps = startBps;
+                            lastReportedCapKbps = -1;
                             bool hostCompositeCursor = !clientNativeCursor || !clientFreeMouse;
                             Interlocked.Exchange(ref videoQueueDepth, 0);
                             Interlocked.Exchange(ref audioQueueDepth, 0);
@@ -1049,16 +1062,29 @@ namespace DualRemote
                                         if (abr == null || h == null || !hostStarted) return;
                                         int nextBps, nextFps;
                                         bool changed = abr.OnTelemetry(rttMs, lossPct, jitterMs, Stopwatch.GetTimestamp(), out nextBps, out nextFps);
-                                        if (curU != null) curU.SetPacingProfile(nextBps, abr.PacingHeadroomFactor);
+                                        int effEnc = nextBps;
+                                        if (curU != null) curU.ApplyWireBudget(nextBps, abr.CurrentSignal, out effEnc);
                                         if (changed)
                                         {
-                                            h.SetBitrate(nextBps);
+                                            Volatile.Write(ref appliedWireBps, nextBps);
+                                            Volatile.Write(ref appliedFps, nextFps);
+                                            Volatile.Write(ref lastReportedCapKbps, effEnc);
+                                            h.SetBitrate(effEnc);
                                             h.SetFps(nextFps);
                                             var note = new Dictionary<string, object>();
                                             note["type"] = "BITRATE_UPDATED";
                                             note["bitrateKbps"] = nextBps;
                                             note["fps"] = nextFps;
                                             conn.SendJsonHighPriorityFireAndForget(note);
+                                        }
+                                        else if (curU != null)
+                                        {
+                                            int prevCap = Volatile.Read(ref lastReportedCapKbps);
+                                            if (prevCap <= 0 || Math.Abs(effEnc - prevCap) >= Math.Max(150, prevCap / 10))
+                                            {
+                                                Volatile.Write(ref lastReportedCapKbps, effEnc);
+                                                h.SetBitrate(effEnc);
+                                            }
                                         }
                                     },
                                     delegate
@@ -1076,10 +1102,14 @@ namespace DualRemote
                                         {
                                             int pBps, pFps;
                                             bool pChanged = abr.OnDirectPathPromoted(out pBps, out pFps);
-                                            if (curU != null) curU.SetPacingProfile(pBps, abr.PacingHeadroomFactor);
+                                            int effEnc = pBps;
+                                            if (curU != null) curU.ApplyWireBudget(pBps, abr.CurrentSignal, out effEnc);
                                             if (pChanged)
                                             {
-                                                h.SetBitrate(pBps);
+                                                Volatile.Write(ref appliedWireBps, pBps);
+                                                Volatile.Write(ref appliedFps, pFps);
+                                                Volatile.Write(ref lastReportedCapKbps, effEnc);
+                                                h.SetBitrate(effEnc);
                                                 h.SetFps(pFps);
                                                 var note = new Dictionary<string, object>();
                                                 note["type"] = "BITRATE_UPDATED";
@@ -1089,6 +1119,8 @@ namespace DualRemote
                                             }
                                         }
                                     });
+                                uSess.ApplyWireBudget(startBps, abrController.CurrentSignal, out startEncBps);
+                                lastReportedCapKbps = startEncBps;
                                 activeUdpSession = uSess;
                                 udpSessions[udpSid] = uSess;
                                 List<BoBoUdpCandidate> clientInitCands = BoBoNatTraversal.ParseCandidatesFromKey(msg, "udpCandidates");
@@ -1100,7 +1132,7 @@ namespace DualRemote
 
                             string hostErr;
                             hostStarted = nativeHost.StartHostSession(
-                                reqMon, reqW, reqH, startFps, startBps, muteHost,
+                                reqMon, reqW, reqH, startFps, startEncBps, muteHost,
                                 hostCompositeCursor, clientAcceptsAac, useHevc,
                                 delegate(byte[] h264, bool isKey, int w, int h, uint tsMs)
                                 {
@@ -1292,6 +1324,7 @@ namespace DualRemote
                             }
                             if (activeUdpSession != null && mediaUdp != null && boundUdpPort > 0)
                             {
+                                HostUdpSession leaseOwner = activeUdpSession;
                                 UdpClient curMediaUdp = mediaUdp;
                                 int curUdpPort = boundUdpPort;
                                 string sHost = customStunHost;
@@ -1307,18 +1340,19 @@ namespace DualRemote
                                             stunTask = hostStunSession.ProbeDualStackAsync(curMediaUdp.Client, stunServers, 900, ct);
                                         }
                                         catch { }
-                                        Task<IPEndPoint> mapTask = BoBoNatTraversal.TryMapRouterPortAsync(curUdpPort, 750, ct);
+                                        Task<BoBoNatTraversal.RouterPortMappingLease> mapTask = BoBoNatTraversal.TryAcquireRouterPortLeaseAsync(curUdpPort, 750, ct);
                                         BoBoNatTraversal.StunDualProbeResult stunRes = null;
-                                        IPEndPoint routerEp = null;
+                                        BoBoNatTraversal.RouterPortMappingLease routerLease = null;
                                         if (stunTask != null)
                                         {
                                             try { stunRes = await stunTask.ConfigureAwait(false); } catch { }
                                         }
-                                        try { routerEp = await mapTask.ConfigureAwait(false); } catch { }
+                                        try { routerLease = await mapTask.ConfigureAwait(false); } catch { }
+                                        if (routerLease != null) leaseOwner.AttachRouterLease(routerLease);
                                         if (ct.IsCancellationRequested || !object.ReferenceEquals(activeStreamConn, conn)) return;
 
                                         var mappedList = stunRes != null ? stunRes.AllEndpoints() : new List<IPEndPoint>();
-                                        if (routerEp != null) mappedList.Add(routerEp);
+                                        if (routerLease != null && routerLease.ExternalEndPoint != null) mappedList.Add(routerLease.ExternalEndPoint);
                                         bool symHint = stunRes != null && stunRes.IsSymmetricIPv4;
                                         int delta = stunRes != null ? stunRes.ObservedPortDelta : 0;
                                         List<BoBoUdpCandidate> cands = BoBoNatTraversal.GatherLocalCandidates(curUdpPort, mappedList, symHint, delta);
@@ -1348,6 +1382,13 @@ namespace DualRemote
                             lock (streamOwnerGate)
                             {
                                 if (!object.ReferenceEquals(activeStreamConn, conn) || ct.IsCancellationRequested) break;
+                                int prevMon = appliedMon;
+                                int prevW = appliedW;
+                                int prevH = appliedH;
+                                int prevFps = appliedFps;
+                                int prevWireBps = appliedWireBps;
+                                bool prevAuto = abrController.AutoEnabled;
+
                                 int reqMon = BoBoProtocol.GetInt(msg, "monitorIndex", activeMonitorIndex);
                                 int reqW = BoBoProtocol.GetInt(msg, "width", display.RequestedWidth);
                                 int reqH = BoBoProtocol.GetInt(msg, "height", display.RequestedHeight);
@@ -1371,8 +1412,38 @@ namespace DualRemote
                                 }
                                 Volatile.Write(ref activeMonitorIndex, reqMon);
                                 display.GetStreamSize(reqAuto ? wanPixelBudget : long.MaxValue, out reqW, out reqH);
-                                if (activeUdpSession != null) activeUdpSession.SetPacingBitrate(reqBps);
-                                nativeHost.Reconfigure(reqMon, reqW, reqH, reqFps, reqBps);
+
+                                int effEncBps = reqBps;
+                                HostUdpSession curU = activeUdpSession;
+                                if (curU != null) curU.ApplyWireBudget(reqBps, abrController.CurrentSignal, out effEncBps);
+                                bool reconfigOk = nativeHost.Reconfigure(reqMon, reqW, reqH, reqFps, effEncBps);
+                                if (reconfigOk)
+                                {
+                                    appliedMon = reqMon;
+                                    appliedW = reqW;
+                                    appliedH = reqH;
+                                    appliedFps = reqFps;
+                                    appliedWireBps = reqBps;
+                                    lastReportedCapKbps = effEncBps;
+                                    ackCfg["ok"] = true;
+                                }
+                                else
+                                {
+                                    // Roll back logical target so client state stays honest when reconfigure times out or fails
+                                    Volatile.Write(ref activeMonitorIndex, prevMon);
+                                    abrController.UpdateTarget(prevAuto, prevWireBps, prevFps);
+                                    display.SetRequestedStream(prevW, prevH);
+                                    int revertEnc = prevWireBps;
+                                    if (curU != null) curU.ApplyWireBudget(prevWireBps, abrController.CurrentSignal, out revertEnc);
+                                    reqMon = prevMon;
+                                    reqW = prevW;
+                                    reqH = prevH;
+                                    reqFps = prevFps;
+                                    reqBps = prevWireBps;
+                                    ackCfg["ok"] = false;
+                                    ackCfg["error"] = "采编配置切换超时或失败，已保持当前参数";
+                                }
+
                                 ackCfg["type"] = "RECONFIGURED";
                                 ackCfg["monitorIndex"] = reqMon;
                                 ackCfg["width"] = reqW;
@@ -1412,11 +1483,17 @@ namespace DualRemote
                             if (abrController != null)
                             {
                                 int nextBps, nextFps;
-                                if (abrController.OnTelemetry(rttMs, lossPct, out nextBps, out nextFps))
+                                bool changed = abrController.OnTelemetry(rttMs, lossPct, out nextBps, out nextFps);
+                                int effEnc = nextBps;
+                                HostUdpSession curU = activeUdpSession;
+                                if (curU != null) curU.ApplyWireBudget(nextBps, abrController.CurrentSignal, out effEnc);
+                                if (changed)
                                 {
-                                    nativeHost.SetBitrate(nextBps);
+                                    Volatile.Write(ref appliedWireBps, nextBps);
+                                    Volatile.Write(ref appliedFps, nextFps);
+                                    Volatile.Write(ref lastReportedCapKbps, effEnc);
+                                    nativeHost.SetBitrate(effEnc);
                                     nativeHost.SetFps(nextFps);
-                                    if (activeUdpSession != null) activeUdpSession.SetPacingBitrate(nextBps);
                                     var note = new Dictionary<string, object>();
                                     note["type"] = "BITRATE_UPDATED";
                                     note["bitrateKbps"] = nextBps;
@@ -1430,7 +1507,11 @@ namespace DualRemote
                         if (msgType == "TRANSPORT_FALLBACK")
                         {
                             if (activeUdpSession != null) activeUdpSession.Deactivate();
-                            if (nativeHost != null) nativeHost.RequestKeyframe();
+                            if (nativeHost != null)
+                            {
+                                if (abrController != null) nativeHost.SetBitrate(abrController.CurrentBitrateKbps);
+                                nativeHost.RequestKeyframe();
+                            }
                             continue;
                         }
 
@@ -1458,15 +1539,26 @@ namespace DualRemote
                                 display.UpdateDesktop(activeMonitorIndex, BoBoCoreInterop.EnumerateMonitors(), nativeHost);
                                 int streamW, streamH;
                                 display.GetStreamSize(abrController.AutoEnabled ? wanPixelBudget : long.MaxValue, out streamW, out streamH);
-                                nativeHost.Reconfigure(activeMonitorIndex, streamW, streamH, abrController.CurrentFps, abrController.CurrentBitrateKbps);
+                                int effEnc = abrController.CurrentBitrateKbps;
+                                if (activeUdpSession != null) activeUdpSession.ApplyWireBudget(abrController.CurrentBitrateKbps, abrController.CurrentSignal, out effEnc);
+                                bool sdReconfigOk = nativeHost.Reconfigure(activeMonitorIndex, streamW, streamH, abrController.CurrentFps, effEnc);
+                                if (sdReconfigOk)
+                                {
+                                    appliedW = streamW;
+                                    appliedH = streamH;
+                                    appliedFps = abrController.CurrentFps;
+                                    appliedWireBps = abrController.CurrentBitrateKbps;
+                                    lastReportedCapKbps = effEnc;
+                                }
 
                                 ackSd["type"] = "SUPER_DISPLAY_STATE";
+                                ackSd["ok"] = sdReconfigOk;
                                 ackSd["active"] = display.Active;
                                 ackSd["nativeMatch"] = display.NativeMatch;
                                 ackSd["monitorIndex"] = activeMonitorIndex;
                                 // Older clients read width/height as the physical desktop size.
-                                ackSd["width"] = display.ViewportProtocol ? streamW : display.DesktopWidth;
-                                ackSd["height"] = display.ViewportProtocol ? streamH : display.DesktopHeight;
+                                ackSd["width"] = display.ViewportProtocol ? (sdReconfigOk ? streamW : appliedW) : display.DesktopWidth;
+                                ackSd["height"] = display.ViewportProtocol ? (sdReconfigOk ? streamH : appliedH) : display.DesktopHeight;
                                 display.WriteViewportState(ackSd);
                             }
                             await conn.SendJsonSafeAsync(ackSd, ct).ConfigureAwait(false);
@@ -1488,11 +1580,32 @@ namespace DualRemote
                         if (msgType == "SET_PRIVACY")
                         {
                             bool enable = BoBoProtocol.GetBool(msg, "enable", false);
-                            Action<bool> privEv = PrivacyCommandReceived;
-                            if (privEv != null) { try { privEv(enable); } catch { } }
+                            bool actualActive = false;
+                            Func<bool, Task<bool>> privCtrl = PrivacyStateController;
+                            if (privCtrl != null)
+                            {
+                                try
+                                {
+                                    Task<bool> ctrlTask = privCtrl(enable);
+                                    if (ctrlTask != null)
+                                    {
+                                        Task done = await Task.WhenAny(ctrlTask, Task.Delay(2500, ct)).ConfigureAwait(false);
+                                        if (done == ctrlTask)
+                                        {
+                                            actualActive = await ctrlTask.ConfigureAwait(false);
+                                        }
+                                    }
+                                }
+                                catch
+                                {
+                                    actualActive = false;
+                                }
+                            }
                             var ackP = new Dictionary<string, object>();
                             ackP["type"] = "PRIVACY_STATE";
-                            ackP["active"] = enable;
+                            ackP["active"] = actualActive;
+                            ackP["requested"] = enable;
+                            ackP["ok"] = (actualActive == enable);
                             await conn.SendJsonSafeAsync(ackP, ct).ConfigureAwait(false);
                             continue;
                         }
@@ -1864,9 +1977,10 @@ namespace DualRemote
             int nextBps, nextFps;
             if (abr.OnCongestionBackpressure(out nextBps, out nextFps))
             {
-                host.SetBitrate(nextBps);
+                int effEnc = nextBps;
+                if (udpSess != null) udpSess.ApplyWireBudget(nextBps, abr.CurrentSignal, out effEnc);
+                host.SetBitrate(effEnc);
                 host.SetFps(nextFps);
-                if (udpSess != null) udpSess.SetPacingBitrate(nextBps);
                 var note = new Dictionary<string, object>();
                 note["type"] = "BITRATE_UPDATED";
                 note["bitrateKbps"] = nextBps;
@@ -1988,12 +2102,58 @@ namespace DualRemote
                 videoPacerThread.Start();
             }
 
+            private BoBoNatTraversal.RouterPortMappingLease routerLease;
+            private BoBoCongestionSignal lastCongestionSignal = BoBoCongestionSignal.Normal;
+
             internal uint SessionId { get { return crypto.SessionId; } }
             internal bool IsActivated { get { return activated && !disposed && remoteEp != null; } }
 
+            internal void AttachRouterLease(BoBoNatTraversal.RouterPortMappingLease lease)
+            {
+                if (lease == null) return;
+                BoBoNatTraversal.RouterPortMappingLease prev = Interlocked.Exchange(ref routerLease, lease);
+                if (prev != null && !object.ReferenceEquals(prev, lease))
+                {
+                    try { prev.Dispose(); } catch { }
+                }
+                if (disposed)
+                {
+                    BoBoNatTraversal.RouterPortMappingLease cur = Interlocked.Exchange(ref routerLease, null);
+                    if (cur != null) { try { cur.Dispose(); } catch { } }
+                }
+            }
+
+            internal int ApplyWireBudget(int totalWireBudgetKbps, BoBoCongestionSignal signal, out int effectiveEncoderKbps)
+            {
+                int wireKbps;
+                double drainMargin;
+                int groupSize;
+                BoBoUdpFec.ComputeWireBudgetAllocation(
+                    totalWireBudgetKbps,
+                    Volatile.Read(ref recentLossPct),
+                    nackEnabled,
+                    Volatile.Read(ref recentRttMs),
+                    Volatile.Read(ref recentJitterMs),
+                    Volatile.Read(ref burstLossStreak),
+                    crypto.ActiveOverheadBytes,
+                    signal,
+                    out effectiveEncoderKbps,
+                    out wireKbps,
+                    out drainMargin,
+                    out groupSize);
+                lastCongestionSignal = signal;
+                pacingBitrateKbps = wireKbps;
+                Volatile.Write(ref pacingHeadroom, Math.Max(1.05, Math.Min(1.50, drainMargin)));
+                return effectiveEncoderKbps;
+            }
+
             internal void SetPacingBitrate(int kbps)
             {
-                if (kbps >= 600 && kbps <= 60000) pacingBitrateKbps = kbps;
+                if (kbps >= 600 && kbps <= 60000)
+                {
+                    int _;
+                    ApplyWireBudget(kbps, lastCongestionSignal, out _);
+                }
             }
 
             internal void SetPacingProfile(int kbps, double headroomFactor)
@@ -2095,7 +2255,6 @@ namespace DualRemote
 
             private async Task IcePunchLoopAsync(CancellationToken ct)
             {
-                byte[] punchPayload = new byte[] { 0x50, 0x55, 0x4E, 0x43 }; // PUNC
                 try
                 {
                     while (!disposed && !ct.IsCancellationRequested)
@@ -2107,9 +2266,13 @@ namespace DualRemote
                             {
                                 snapshot = punchTargets.ToArray();
                             }
-                            for (int i = 0; i < snapshot.Length && !disposed && !ct.IsCancellationRequested; i++)
+                            byte[] punchProbe = snapshot.Length > 0 ? crypto.BuildStatelessPunchProbe() : null;
+                            if (punchProbe != null)
                             {
-                                SendSealed(BoBoUdpPacketType.Ping, punchPayload, 0, punchPayload.Length, snapshot[i]);
+                                for (int i = 0; i < snapshot.Length && !disposed && !ct.IsCancellationRequested; i++)
+                                {
+                                    SendRawDatagram(punchProbe, snapshot[i]);
+                                }
                             }
 
                             long until = Interlocked.Read(ref fastPunchUntilTicks);
@@ -2145,13 +2308,32 @@ namespace DualRemote
             {
                 if (disposed || sender == null) return;
                 sender = BoBoNatTraversal.NormalizeRemoteEndPoint(sender) ?? sender;
+                long nowTicks = Stopwatch.GetTimestamp();
+
+                if (crypto.TryVerifyStatelessPunchProbe(buf, length))
+                {
+                    if (onActivity != null) { try { onActivity(); } catch { } }
+                    if (!IPAddress.IsLoopback(sender.Address) && BoBoNatTraversal.IsAllowedRemoteCandidateIp(sender.Address))
+                    {
+                        lock (candGate)
+                        {
+                            bool exists = false;
+                            for (int j = 0; j < punchTargets.Count; j++)
+                            {
+                                if (punchTargets[j].Equals(sender)) { exists = true; break; }
+                            }
+                            if (!exists && punchTargets.Count < 24) punchTargets.Add(sender);
+                        }
+                    }
+                    return;
+                }
+
                 BoBoUdpPacketType ptype;
                 uint seq;
                 byte[] plain;
                 if (!crypto.TryOpen(buf, length, out ptype, out seq, out plain)) return;
                 if (onActivity != null) { try { onActivity(); } catch { } }
 
-                long nowTicks = Stopwatch.GetTimestamp();
                 if (ptype == BoBoUdpPacketType.Hello)
                 {
                     int incRank = 30;
@@ -2163,12 +2345,18 @@ namespace DualRemote
                         forceSel = (plain[9] & 1) != 0;
                     }
 
-                    SendSealed(BoBoUdpPacketType.HelloAck, plain, 0, plain != null ? plain.Length : 0, sender);
-
                     IPEndPoint curEp = remoteEp;
                     long prevRx = Interlocked.Read(ref lastActiveEpRxTicks);
                     double silentMs = prevRx == 0 ? 10000.0 : ((nowTicks - prevRx) * 1000.0 / Stopwatch.Frequency);
                     bool sameEp = curEp != null && sender.Equals(curEp);
+                    // Ignore stale lower-rank backup probes while higher-rank path is healthy so crypto sendSeq stays gap-free
+                    if (activated && incRank < activePathRank && silentMs <= 1800.0)
+                    {
+                        return;
+                    }
+
+                    SendSealed(BoBoUdpPacketType.HelloAck, plain, 0, plain != null ? plain.Length : 0, sender);
+
                     if (!activated || incRank > activePathRank || (incRank == activePathRank && (forceSel || sameEp)) || silentMs > 1800.0)
                     {
                         int prevRank = activated ? activePathRank : 0;
@@ -2417,6 +2605,12 @@ namespace DualRemote
                 SendSealed(BoBoUdpPacketType.CursorShape, buf, 0, buf.Length, ep);
             }
 
+            private void SendRawDatagram(byte[] packet, IPEndPoint ep)
+            {
+                if (disposed || ep == null || packet == null) return;
+                try { BoBoNatTraversal.SendDualStack(udp.Client, packet, packet.Length, ep); } catch { }
+            }
+
             private void SendSealed(BoBoUdpPacketType type, byte[] plain, int off, int len, IPEndPoint ep)
             {
                 if (disposed || ep == null) return;
@@ -2434,6 +2628,8 @@ namespace DualRemote
             {
                 disposed = true;
                 activated = false;
+                BoBoNatTraversal.RouterPortMappingLease lease = Interlocked.Exchange(ref routerLease, null);
+                if (lease != null) { try { lease.Dispose(); } catch { } }
                 lock (videoQueueGate) { videoQueue.Clear(); }
                 if (retransmitCache != null) retransmitCache.Clear();
                 try { videoWake.Set(); } catch { }

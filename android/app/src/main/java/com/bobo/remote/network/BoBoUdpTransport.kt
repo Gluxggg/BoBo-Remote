@@ -869,7 +869,6 @@ class BoBoUdpChannel(
                         if (activated.compareAndSet(false, true)) {
                             assembler.reset(nowNs)
                         }
-                        assembler.recordReceivedUdpSeq(opened.seq, nowNs)
                     }
                     BoBoUdpPacketType.VIDEO_SHARD -> {
                         if (!activated.get()) continue

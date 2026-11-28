@@ -10,7 +10,7 @@
 param(
     [string] $OutputDirectory = 'ci-out',
     [ValidatePattern('^[0-9]+[.][0-9]+[.][0-9]+$')]
-    [string] $ReleaseVersion = '7.6.0'
+    [string] $ReleaseVersion = '7.6.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +56,13 @@ $outputRoot = Join-Path $repoRoot $OutputDirectory
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $versionPath = Join-Path $outputRoot 'app-version.txt'
 [System.IO.File]::WriteAllText($versionPath, $ReleaseVersion, (New-Object System.Text.UTF8Encoding($false)))
+$asmInfoPath = Join-Path $outputRoot 'AssemblyVersionInfo.cs'
+$asmInfoBody = @(
+    "[assembly: System.Reflection.AssemblyVersion(`"$ReleaseVersion.0`")]"
+    "[assembly: System.Reflection.AssemblyFileVersion(`"$ReleaseVersion.0`")]"
+    "[assembly: System.Reflection.AssemblyInformationalVersion(`"$ReleaseVersion`")]"
+) -join "`r`n"
+[System.IO.File]::WriteAllText($asmInfoPath, $asmInfoBody, (New-Object System.Text.UTF8Encoding($false)))
 $exePath = Join-Path $outputRoot 'BoBoRemote.exe'
 if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
@@ -79,6 +86,7 @@ $compilerArgs = @(
 if (Test-Path -LiteralPath $appIcon) { $compilerArgs += "/win32icon:$appIcon" }
 if (Test-Path -LiteralPath $brandLogo) { $compilerArgs += "/resource:$brandLogo,DualRemote.bobo-logo.png" }
 $compilerArgs += $sources
+$compilerArgs += $asmInfoPath
 & $compiler @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 Write-Host "compiled $($sources.Count) source files -> $exePath ($((Get-Item -LiteralPath $exePath).Length) bytes)"

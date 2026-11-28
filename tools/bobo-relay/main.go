@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	relayVersion    = "7.6.0"
+	relayVersion    = "7.6.1"
 	stunMagicCookie = uint32(0x2112A442)
 )
 
@@ -53,6 +53,7 @@ type RelayConfig struct {
 	MaxBandwidthMbps float64
 	Region           string
 	DialTimeout      time.Duration
+	DrainTimeout     time.Duration
 }
 
 type RelayServer struct {
@@ -75,9 +76,12 @@ type RelayServer struct {
 	stunPort  int
 	httpSrv   *http.Server
 	httpLn    net.Listener
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	wg          sync.WaitGroup
+	connsMu     sync.Mutex
+	connsClosed bool
+	activeConns map[net.Conn]struct{}
 }
 
 func deriveUdpTargetAddr(tcpTarget, explicitUdp string) string {
@@ -100,10 +104,14 @@ func NewRelayServer(cfg RelayConfig) *RelayServer {
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = 5 * time.Second
 	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = 10 * time.Second
+	}
 	s := &RelayServer{
-		cfg:       cfg,
-		startedAt: time.Now(),
-		stopCh:    make(chan struct{}),
+		cfg:         cfg,
+		startedAt:   time.Now(),
+		stopCh:      make(chan struct{}),
+		activeConns: make(map[net.Conn]struct{}),
 	}
 	s.accepting.Store(true)
 	return s
@@ -229,6 +237,46 @@ func (s *RelayServer) SetAccepting(v bool) {
 	s.accepting.Store(v)
 }
 
+func (s *RelayServer) trackConn(c net.Conn) bool {
+	if c == nil {
+		return false
+	}
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	if s.connsClosed {
+		return false
+	}
+	if s.activeConns == nil {
+		s.activeConns = make(map[net.Conn]struct{})
+	}
+	s.activeConns[c] = struct{}{}
+	return true
+}
+
+func (s *RelayServer) untrackConn(c net.Conn) {
+	if c == nil {
+		return
+	}
+	s.connsMu.Lock()
+	if s.activeConns != nil {
+		delete(s.activeConns, c)
+	}
+	s.connsMu.Unlock()
+}
+
+func (s *RelayServer) snapshotActiveConns(markClosed bool) []net.Conn {
+	s.connsMu.Lock()
+	if markClosed {
+		s.connsClosed = true
+	}
+	conns := make([]net.Conn, 0, len(s.activeConns))
+	for c := range s.activeConns {
+		conns = append(conns, c)
+	}
+	s.connsMu.Unlock()
+	return conns
+}
+
 func (s *RelayServer) Close() {
 	s.stopOnce.Do(func() {
 		s.accepting.Store(false)
@@ -247,7 +295,32 @@ func (s *RelayServer) Close() {
 			_ = s.httpSrv.Shutdown(ctx)
 			cancel()
 		}
-		s.wg.Wait()
+
+		drain := s.cfg.DrainTimeout
+		if drain <= 0 {
+			drain = 10 * time.Second
+		}
+		deadline := time.Now().Add(drain)
+		for _, c := range s.snapshotActiveConns(false) {
+			_ = c.SetDeadline(deadline)
+		}
+
+		waitDone := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(waitDone)
+		}()
+
+		timer := time.NewTimer(drain)
+		defer timer.Stop()
+		select {
+		case <-waitDone:
+		case <-timer.C:
+			for _, c := range s.snapshotActiveConns(true) {
+				_ = c.Close()
+			}
+			<-waitDone
+		}
 	})
 }
 
@@ -386,6 +459,10 @@ func (s *RelayServer) acceptLoop() {
 
 func (s *RelayServer) relayConn(client net.Conn) {
 	defer client.Close()
+	if !s.trackConn(client) {
+		return
+	}
+	defer s.untrackConn(client)
 	if tc, ok := client.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
@@ -396,6 +473,10 @@ func (s *RelayServer) relayConn(client net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	if !s.trackConn(upstream) {
+		return
+	}
+	defer s.untrackConn(upstream)
 	if tc, ok := upstream.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
@@ -635,6 +716,7 @@ func main() {
 	maxSessions := flag.Int("max-sessions", 64, "maximum concurrent relayed sessions (<=0 unlimited)")
 	maxBwMbps := flag.Float64("max-bandwidth-mbps", 200.0, "reference relay bandwidth capacity in Mbps")
 	region := flag.String("region", "", "optional region label reported in /bobo-relay/health")
+	drainTimeout := flag.Duration("drain-timeout", 10*time.Second, "max wait for active TCP relay sessions during graceful shutdown")
 	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -657,6 +739,7 @@ func main() {
 		MaxSessions:      *maxSessions,
 		MaxBandwidthMbps: *maxBwMbps,
 		Region:           strings.TrimSpace(*region),
+		DrainTimeout:     *drainTimeout,
 	})
 	if err := srv.Start(); err != nil {
 		log.Fatalf("start bobo-relay failed: %v", err)

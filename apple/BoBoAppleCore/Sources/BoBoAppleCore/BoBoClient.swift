@@ -342,7 +342,7 @@ public final class BoBoStreamClient: @unchecked Sendable {
                         case "PRIVACY_STATE":
                             delegate?.streamClientDidUpdatePrivacy(active: (msg["active"] as? NSNumber)?.boolValue ?? false)
                         case "PONG":
-                            if let sent = (msg["ts"] as? NSNumber)?.int64Value, sent > 0 {
+                            if let sent = (msg["ts"] as? NSNumber)?.int64Value, sent > 0, !self.isUdpChannelActive {
                                 let nowNs = Int64(DispatchTime.now().uptimeNanoseconds)
                                 let rtt = Double(nowNs - sent) / 1_000_000.0
                                 if rtt >= 0 && rtt < 10_000 {
@@ -517,6 +517,10 @@ public final class BoBoStreamClient: @unchecked Sendable {
 
     private func connectedConnection() -> BoBoFramedConnection? {
         lock.withLock { _isConnected ? framedConn : nil }
+    }
+
+    private var isUdpChannelActive: Bool {
+        lock.withLock { udpChannel?.isActive == true }
     }
 
     private func isCurrent(_ conn: BoBoFramedConnection) -> Bool {

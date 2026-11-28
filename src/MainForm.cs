@@ -1125,19 +1125,41 @@ namespace DualRemote
                     boboHostServer = new BoBoHostServer(BoBoIdentityStore.Default, BoBoProtocol.DefaultTcpPort, true);
                     boboHostServer.AllowIncomingControl = allowIncomingControl;
                     boboHostServer.SessionStateChanged += OnBoBoHostSessionStateChanged;
-                    boboHostServer.PrivacyCommandReceived += delegate(bool enable)
+                    boboHostServer.PrivacyStateController = delegate(bool enable)
                     {
-                        if (IsDisposed || !IsHandleCreated) return;
+                        var tcs = new System.Threading.Tasks.TaskCompletionSource<bool>(
+                            System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+                        if (IsDisposed || !IsHandleCreated)
+                        {
+                            tcs.TrySetResult(false);
+                            return tcs.Task;
+                        }
                         try
                         {
                             BeginInvoke(new Action(delegate
                             {
-                                if (IsDisposed) return;
-                                if (enable) ActivatePrivacyFromRemoteCommand();
-                                else DeactivatePrivacyFromRemoteCommand();
+                                bool actual = false;
+                                try
+                                {
+                                    if (!IsDisposed)
+                                    {
+                                        actual = enable
+                                            ? ActivatePrivacyFromRemoteCommand()
+                                            : DeactivatePrivacyFromRemoteCommand();
+                                    }
+                                }
+                                catch
+                                {
+                                    actual = !IsDisposed && privacyCurtain != null && privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+                                }
+                                tcs.TrySetResult(actual);
                             }));
                         }
-                        catch { }
+                        catch
+                        {
+                            tcs.TrySetResult(false);
+                        }
+                        return tcs.Task;
                     };
                     boboHostServer.PeerPaired += delegate(BoBoAuthorizedPeer peer)
                     {
@@ -2478,28 +2500,36 @@ namespace DualRemote
             SyncActiveControlIndicators();
         }
 
-        /// <summary>主控端发起的幂等「立即开启被控端防窥」指令：已开启时保持不闪烁。</summary>
-        private void ActivatePrivacyFromRemoteCommand()
+        /// <summary>主控端发起的幂等「立即开启被控端防窥」指令：返回遮罩与硬件键鼠锁定实际生效状态。</summary>
+        private bool ActivatePrivacyFromRemoteCommand()
         {
-            if (IsDisposed || privacyGuard.SessionLocked) return;
-            if (privacyCurtain.IsActive && !privacyCurtain.IsPreview) return;
+            if (IsDisposed) return false;
+            if (privacyGuard.SessionLocked)
+                return privacyCurtain != null && privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+            if (privacyCurtain.IsActive && !privacyCurtain.IsPreview) return true;
             privacyGuard.OnManualActivate();
             ClearPrivacyButtonFocus();
             string msg;
             bool ok = privacyCurtain.Activate(privacyConfig, false, out msg);
             if (!ok) privacyGuard.OnManualExit(DateTime.UtcNow);
-            ShowDisplayBanner(ok ? "主控端已触发防窥模式，本机物理屏已瞬间遮挡。" : (msg ?? "开启防窥壁纸失败。"),
-                ok ? Theme.PillTone.Success : Theme.PillTone.Alert);
+            bool actuallyActive = ok && privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+            ShowDisplayBanner(actuallyActive ? "主控端已触发防窥模式，本机物理屏已瞬间遮挡。" : (msg ?? "开启防窥壁纸失败。"),
+                actuallyActive ? Theme.PillTone.Success : Theme.PillTone.Alert);
+            return actuallyActive;
         }
 
-        /// <summary>主控端发起的幂等「立即关闭被控端防窥」指令：不触发本机锁屏。</summary>
-        private void DeactivatePrivacyFromRemoteCommand()
+        /// <summary>主控端发起的幂等「立即关闭被控端防窥」指令：返回取消后的实际防窥状态（成功关闭返回 false）。</summary>
+        private bool DeactivatePrivacyFromRemoteCommand()
         {
-            if (IsDisposed || !privacyCurtain.IsActive) return;
+            if (IsDisposed) return false;
+            if (!privacyCurtain.IsActive) return false;
             privacyGuard.OnManualExit(DateTime.UtcNow);
             ClearPrivacyButtonFocus();
             privacyCurtain.Deactivate(false);
-            ShowDisplayBanner("主控端已关闭防窥模式。", Theme.PillTone.Info);
+            bool stillActive = privacyCurtain.IsActive && !privacyCurtain.IsPreview;
+            ShowDisplayBanner(stillActive ? "退出防窥遮罩未完全成功。" : "主控端已关闭防窥模式。",
+                stillActive ? Theme.PillTone.Warning : Theme.PillTone.Info);
+            return stillActive;
         }
 
         private Task PollRemoteGuardTick()

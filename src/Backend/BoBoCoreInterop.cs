@@ -144,6 +144,12 @@ namespace DualRemote
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryW(string lpFileName);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibraryExW(string lpFileName, IntPtr hFile, uint dwFlags);
+
+        private const uint LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x00000100u;
+        private const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800u;
+
         [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
         private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
@@ -479,7 +485,11 @@ namespace DualRemote
                         return false;
                     }
 
-                    IntPtr mod = LoadLibraryW(dllPath);
+                    IntPtr mod = LoadLibraryExW(dllPath, IntPtr.Zero, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+                    if (mod == IntPtr.Zero && Marshal.GetLastWin32Error() == 87)
+                    {
+                        mod = LoadLibraryW(dllPath);
+                    }
                     if (mod == IntPtr.Zero)
                     {
                         int gle = Marshal.GetLastWin32Error();
@@ -570,13 +580,13 @@ namespace DualRemote
             return (T)(object)Marshal.GetDelegateForFunctionPointer(proc, typeof(T));
         }
 
-        private static string MaterializeEmbeddedCoreDll(out string error)
+        internal static byte[] GetEmbeddedCoreDllBytes(out string error)
         {
             error = null;
             byte[] dllBytes = TryDecompressEmbeddedResource();
-            if (dllBytes == null || dllBytes.Length < 4096)
+            if ((dllBytes == null || dllBytes.Length < 4096) && !BoBoSystemService.IsRunningAsSystem())
             {
-                // Fallback only for local development when running un-embedded test binary next to repo
+                // Fallback only for non-SYSTEM local development when running un-embedded test binary next to repo
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string[] devCandidates = new string[]
                 {
@@ -604,6 +614,51 @@ namespace DualRemote
                 error = "未在当前 BoBo远程.exe 中找到内嵌核心模块 DualRemote.BoBoCore.dll.gz。";
                 return null;
             }
+            return dllBytes;
+        }
+
+        private static string MaterializeEmbeddedCoreDll(out string error)
+        {
+            error = null;
+            if (BoBoSystemService.IsRunningAsSystem())
+            {
+                string sysBaseDir = AppDomain.CurrentDomain.BaseDirectory;
+                if (!BoBoSystemService.IsPathUnderProtectedProgramFiles(sysBaseDir))
+                {
+                    error = "安全策略已阻止 SYSTEM 服务/Helper 从非受保护目录加载 BoBoCore.dll。";
+                    return null;
+                }
+                string protectedDll = Path.Combine(sysBaseDir, "BoBoCore.dll");
+                if (!File.Exists(protectedDll))
+                {
+                    error = "受保护系统目录缺少核心模块：" + protectedDll;
+                    return null;
+                }
+                byte[] embeddedBytes = TryDecompressEmbeddedResource();
+                if (embeddedBytes != null && embeddedBytes.Length >= 4096)
+                {
+                    try
+                    {
+                        string embeddedHash = ComputeSha256Prefix(embeddedBytes, 12);
+                        byte[] diskBytes = File.ReadAllBytes(protectedDll);
+                        if (diskBytes.Length != embeddedBytes.Length ||
+                            !string.Equals(ComputeSha256Prefix(diskBytes, 12), embeddedHash, StringComparison.OrdinalIgnoreCase))
+                        {
+                            error = "受保护系统目录中的 BoBoCore.dll 与当前服务主程序摘要不一致，请升级或重新安装锁屏服务。";
+                            return null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        error = "校验受保护系统目录 BoBoCore.dll 失败：" + ex.Message;
+                        return null;
+                    }
+                }
+                return protectedDll;
+            }
+
+            byte[] dllBytes = GetEmbeddedCoreDllBytes(out error);
+            if (dllBytes == null) return null;
 
             string hash12 = ComputeSha256Prefix(dllBytes, 12);
             string coreRoot = Path.Combine(RecentStore.DirPath, "core");

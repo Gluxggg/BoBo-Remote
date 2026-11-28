@@ -476,28 +476,42 @@ namespace DualRemote
             return list;
         }
 
-        internal static List<IPEndPoint> ExpandPunchEndpoints(IList<BoBoUdpCandidate> candidates, int maxTotal)
+        private static readonly int[] SymNeighborhoodDeltas = new int[]
         {
-            var result = new List<IPEndPoint>();
+            1, -1, 2, -2, 3, -3, 4, -4, 5, 6, 7, 8, -5, -6, 10, 12
+        };
+
+        /// <summary>主被控共用的对称 NAT 候选与端口步长预测生成器，避免双端展开规则分叉。</summary>
+        internal static List<BoBoUdpCandidate> ExpandCandidatesWithPortPrediction(IList<BoBoUdpCandidate> candidates, int maxTotal)
+        {
+            var result = new List<BoBoUdpCandidate>();
             if (candidates == null || candidates.Count == 0 || maxTotal <= 0) return result;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // First pass: add all exact candidate endpoints in priority/rank order
+            // First pass: exact candidates in priority/rank order
             for (int i = 0; i < candidates.Count && result.Count < maxTotal; i++)
             {
+                BoBoUdpCandidate c = candidates[i];
                 IPEndPoint ep;
-                if (candidates[i] == null || !candidates[i].TryGetIPEndPoint(out ep)) continue;
+                if (c == null || !c.TryGetIPEndPoint(out ep)) continue;
                 IPAddress normAddr = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
-                ep = new IPEndPoint(normAddr, ep.Port);
-                string key = ep.Address.ToString() + ":" + ep.Port.ToString(CultureInfo.InvariantCulture);
+                string host = normAddr.ToString();
+                string key = host + ":" + ep.Port.ToString(CultureInfo.InvariantCulture);
                 if (seen.Add(key))
                 {
-                    result.Add(ep);
+                    result.Add(new BoBoUdpCandidate
+                    {
+                        Kind = c.Kind,
+                        Host = host,
+                        Port = ep.Port,
+                        Priority = c.Priority,
+                        SymmetricHint = c.SymmetricHint,
+                        PortDelta = c.PortDelta
+                    });
                 }
             }
 
-            // Second pass: for Symmetric NAT IPv4 srflx endpoints, probe observed stride deltas first then neighborhood ports
-            int[] deltas = new int[] { 1, -1, 2, -2, 3, -3, 4, -4, 5, 6, 7, 8, -5, -6, 10, 12 };
+            // Second pass: observed PortDelta strides then neighborhood deltas for symmetric IPv4 NAT
             for (int i = 0; i < candidates.Count && result.Count < maxTotal; i++)
             {
                 BoBoUdpCandidate c = candidates[i];
@@ -505,6 +519,7 @@ namespace DualRemote
                 if (c == null || (!c.SymmetricHint && c.PortDelta == 0) || !c.TryGetIPEndPoint(out ep)) continue;
                 IPAddress addr = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
                 if (addr.AddressFamily != AddressFamily.InterNetwork) continue;
+                string host = addr.ToString();
 
                 if (c.PortDelta != 0 && Math.Abs(c.PortDelta) <= 64)
                 {
@@ -512,23 +527,50 @@ namespace DualRemote
                     {
                         int sp = ep.Port + k * c.PortDelta;
                         if (sp < 1024 || sp > 65535) continue;
-                        string key = addr.ToString() + ":" + sp.ToString(CultureInfo.InvariantCulture);
-                        if (seen.Add(key)) result.Add(new IPEndPoint(addr, sp));
+                        string key = host + ":" + sp.ToString(CultureInfo.InvariantCulture);
+                        if (seen.Add(key))
+                        {
+                            result.Add(new BoBoUdpCandidate
+                            {
+                                Kind = c.Kind,
+                                Host = host,
+                                Port = sp,
+                                Priority = Math.Max(1, c.Priority - k)
+                            });
+                        }
                     }
                 }
 
-                for (int d = 0; d < deltas.Length && result.Count < maxTotal; d++)
+                for (int d = 0; d < SymNeighborhoodDeltas.Length && result.Count < maxTotal; d++)
                 {
-                    int np = ep.Port + deltas[d];
+                    int np = ep.Port + SymNeighborhoodDeltas[d];
                     if (np < 1024 || np > 65535) continue;
-                    string key = addr.ToString() + ":" + np.ToString(CultureInfo.InvariantCulture);
+                    string key = host + ":" + np.ToString(CultureInfo.InvariantCulture);
                     if (seen.Add(key))
                     {
-                        result.Add(new IPEndPoint(addr, np));
+                        result.Add(new BoBoUdpCandidate
+                        {
+                            Kind = c.Kind,
+                            Host = host,
+                            Port = np,
+                            Priority = Math.Max(1, c.Priority - 5 - d)
+                        });
                     }
                 }
             }
 
+            return result;
+        }
+
+        internal static List<IPEndPoint> ExpandPunchEndpoints(IList<BoBoUdpCandidate> candidates, int maxTotal)
+        {
+            List<BoBoUdpCandidate> expanded = ExpandCandidatesWithPortPrediction(candidates, maxTotal);
+            var result = new List<IPEndPoint>(expanded.Count);
+            for (int i = 0; i < expanded.Count; i++)
+            {
+                IPEndPoint ep;
+                if (expanded[i].TryGetIPEndPoint(out ep)) result.Add(ep);
+            }
             return result;
         }
 
@@ -1111,7 +1153,176 @@ namespace DualRemote
             return xml.Substring(start, end - start).Trim();
         }
 
-        private static async Task<IPEndPoint> TryNatPmpMapAsync(IPAddress gatewayIp, int localUdpPort, int timeoutMs, CancellationToken ct)
+        internal sealed class RouterPortMappingLease : IDisposable
+        {
+            private readonly CancellationTokenSource renewCts = new CancellationTokenSource();
+            private readonly bool isNatPmp;
+            private readonly IPAddress gatewayIp;
+            private readonly Uri upnpControlUri;
+            private readonly string upnpServiceType;
+            private readonly IPAddress localLanIp;
+            private readonly int internalPort;
+            private readonly int externalPort;
+            private readonly int leaseSeconds;
+            private int disposed;
+
+            internal IPEndPoint ExternalEndPoint { get; private set; }
+            internal string ProtocolName { get { return isNatPmp ? "NAT-PMP" : "UPnP"; } }
+            internal int InternalPort { get { return internalPort; } }
+            internal int ExternalPort { get { return externalPort; } }
+
+            internal RouterPortMappingLease(
+                IPEndPoint externalEndPoint,
+                int internalPort,
+                IPAddress natPmpGateway,
+                int leaseSeconds)
+            {
+                ExternalEndPoint = externalEndPoint;
+                isNatPmp = true;
+                gatewayIp = natPmpGateway;
+                this.internalPort = internalPort;
+                externalPort = externalEndPoint.Port;
+                this.leaseSeconds = Math.Max(600, leaseSeconds);
+                StartRenewalLoop();
+            }
+
+            internal RouterPortMappingLease(
+                IPEndPoint externalEndPoint,
+                int internalPort,
+                Uri controlUri,
+                string serviceType,
+                IPAddress localLanIp,
+                int leaseSeconds)
+            {
+                ExternalEndPoint = externalEndPoint;
+                isNatPmp = false;
+                upnpControlUri = controlUri;
+                upnpServiceType = serviceType;
+                this.localLanIp = localLanIp;
+                this.internalPort = internalPort;
+                externalPort = externalEndPoint.Port;
+                this.leaseSeconds = Math.Max(600, leaseSeconds);
+                StartRenewalLoop();
+            }
+
+            private void StartRenewalLoop()
+            {
+                CancellationToken ct = renewCts.Token;
+                int renewIntervalMs = Math.Max(300000, (leaseSeconds * 1000) / 2);
+                Task.Run(async delegate
+                {
+                    try
+                    {
+                        while (!ct.IsCancellationRequested && Volatile.Read(ref disposed) == 0)
+                        {
+                            await Task.Delay(renewIntervalMs, ct).ConfigureAwait(false);
+                            if (ct.IsCancellationRequested || Volatile.Read(ref disposed) != 0) break;
+                            await RenewOnceAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+                    catch { }
+                });
+            }
+
+            private async Task RenewOnceAsync(CancellationToken ct)
+            {
+                try
+                {
+                    if (isNatPmp)
+                    {
+                        await SendNatPmpMappingPacketAsync(gatewayIp, internalPort, externalPort, (uint)leaseSeconds, 750, ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await SendUpnpAddPortMappingAsync(upnpControlUri, upnpServiceType, localLanIp, internalPort, externalPort, leaseSeconds, 900, ct).ConfigureAwait(false);
+                    }
+                }
+                catch { }
+            }
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+                try { renewCts.Cancel(); } catch { }
+                try { renewCts.Dispose(); } catch { }
+
+                if (isNatPmp && gatewayIp != null)
+                {
+                    Task _rel = Task.Run(async delegate
+                    {
+                        try
+                        {
+                            using (var cts = new CancellationTokenSource(500))
+                            {
+                                await SendNatPmpMappingPacketAsync(gatewayIp, internalPort, 0, 0u, 450, cts.Token).ConfigureAwait(false);
+                            }
+                        }
+                        catch { }
+                    });
+                }
+                else if (!isNatPmp && upnpControlUri != null && !string.IsNullOrEmpty(upnpServiceType))
+                {
+                    Task _rel = Task.Run(async delegate
+                    {
+                        try
+                        {
+                            using (var cts = new CancellationTokenSource(650))
+                            {
+                                string delBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+                                    "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                                    "<u:DeletePortMapping xmlns:u=\"" + upnpServiceType + "\">" +
+                                    "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + externalPort + "</NewExternalPort>" +
+                                    "<NewProtocol>UDP</NewProtocol>" +
+                                    "</u:DeletePortMapping></s:Body></s:Envelope>";
+                                await UpnpHttpRequestAsync("POST", upnpControlUri, upnpServiceType + "#DeletePortMapping", delBody, 600, cts.Token).ConfigureAwait(false);
+                            }
+                        }
+                        catch { }
+                    });
+                }
+            }
+        }
+
+        private static async Task<int> SendNatPmpMappingPacketAsync(
+            IPAddress gatewayIp,
+            int internalPort,
+            int externalPort,
+            uint lifetimeSec,
+            int timeoutMs,
+            CancellationToken ct)
+        {
+            if (gatewayIp == null || !IsPrivateLanIPv4(gatewayIp) || internalPort <= 0 || internalPort > 65535) return 0;
+            using (var udp = new UdpClient(AddressFamily.InterNetwork))
+            {
+                try
+                {
+                    udp.Connect(new IPEndPoint(gatewayIp, 5351));
+                    byte[] mapReq = new byte[12];
+                    mapReq[0] = 0; mapReq[1] = 1; // UDP
+                    mapReq[4] = (byte)(internalPort >> 8); mapReq[5] = (byte)(internalPort & 0xFF);
+                    mapReq[6] = (byte)(externalPort >> 8); mapReq[7] = (byte)(externalPort & 0xFF);
+                    mapReq[8] = (byte)((lifetimeSec >> 24) & 0xFF);
+                    mapReq[9] = (byte)((lifetimeSec >> 16) & 0xFF);
+                    mapReq[10] = (byte)((lifetimeSec >> 8) & 0xFF);
+                    mapReq[11] = (byte)(lifetimeSec & 0xFF);
+                    await udp.SendAsync(mapReq, mapReq.Length).ConfigureAwait(false);
+                    if (lifetimeSec == 0) return 0;
+
+                    Task<UdpReceiveResult> rxTask = udp.ReceiveAsync();
+                    if (await Task.WhenAny(rxTask, Task.Delay(Math.Min(400, timeoutMs), ct)).ConfigureAwait(false) != rxTask) return 0;
+                    byte[] r = (await rxTask.ConfigureAwait(false)).Buffer;
+                    if (r == null || r.Length < 16 || r[0] != 0 || r[1] != 129 || ((r[2] << 8) | r[3]) != 0) return 0;
+                    int mappedPort = (r[10] << 8) | r[11];
+                    return (mappedPort > 0 && mappedPort <= 65535) ? mappedPort : 0;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+        }
+
+        private static async Task<RouterPortMappingLease> TryNatPmpLeaseAsync(IPAddress gatewayIp, int localUdpPort, int timeoutMs, CancellationToken ct)
         {
             if (gatewayIp == null || !IsPrivateLanIPv4(gatewayIp) || localUdpPort <= 0 || localUdpPort > 65535) return null;
             using (var udp = new UdpClient(AddressFamily.InterNetwork))
@@ -1124,26 +1335,16 @@ namespace DualRemote
                     await udp.SendAsync(extReq, extReq.Length).ConfigureAwait(false);
 
                     Task<UdpReceiveResult> rx1Task = udp.ReceiveAsync();
-                    if (await Task.WhenAny(rx1Task, Task.Delay(Math.Min(350, timeoutMs), ct)).ConfigureAwait(false) != rx1Task) return null;
+                    if (await Task.WhenAny(rx1Task, Task.Delay(Math.Min(400, timeoutMs), ct)).ConfigureAwait(false) != rx1Task) return null;
                     byte[] r1 = (await rx1Task.ConfigureAwait(false)).Buffer;
                     if (r1 == null || r1.Length < 12 || r1[0] != 0 || r1[1] != 128 || ((r1[2] << 8) | r1[3]) != 0) return null;
                     IPAddress extIp = new IPAddress(new byte[] { r1[8], r1[9], r1[10], r1[11] });
                     if (!IsAllowedRemoteCandidateIp(extIp) || IsPrivateLanIPv4(extIp)) return null;
 
-                    byte[] mapReq = new byte[12];
-                    mapReq[0] = 0; mapReq[1] = 1; // UDP
-                    mapReq[4] = (byte)(localUdpPort >> 8); mapReq[5] = (byte)(localUdpPort & 0xFF);
-                    mapReq[6] = (byte)(localUdpPort >> 8); mapReq[7] = (byte)(localUdpPort & 0xFF);
-                    mapReq[10] = 0x0E; mapReq[11] = 0x10; // 3600s
-                    await udp.SendAsync(mapReq, mapReq.Length).ConfigureAwait(false);
-
-                    Task<UdpReceiveResult> rx2Task = udp.ReceiveAsync();
-                    if (await Task.WhenAny(rx2Task, Task.Delay(Math.Min(350, timeoutMs), ct)).ConfigureAwait(false) != rx2Task) return null;
-                    byte[] r2 = (await rx2Task.ConfigureAwait(false)).Buffer;
-                    if (r2 == null || r2.Length < 16 || r2[0] != 0 || r2[1] != 129 || ((r2[2] << 8) | r2[3]) != 0) return null;
-                    int mappedPort = (r2[10] << 8) | r2[11];
+                    const int leaseSec = 3600;
+                    int mappedPort = await SendNatPmpMappingPacketAsync(gatewayIp, localUdpPort, localUdpPort, (uint)leaseSec, timeoutMs, ct).ConfigureAwait(false);
                     if (mappedPort <= 0 || mappedPort > 65535) return null;
-                    return new IPEndPoint(extIp, mappedPort);
+                    return new RouterPortMappingLease(new IPEndPoint(extIp, mappedPort), localUdpPort, gatewayIp, leaseSec);
                 }
                 catch
                 {
@@ -1152,7 +1353,28 @@ namespace DualRemote
             }
         }
 
-        private static async Task<IPEndPoint> TryUpnpIgdMapAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
+        private static Task<string> SendUpnpAddPortMappingAsync(
+            Uri ctrlUri,
+            string chosenType,
+            IPAddress localLan,
+            int internalPort,
+            int externalPort,
+            int leaseSeconds,
+            int timeoutMs,
+            CancellationToken ct)
+        {
+            string addBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+                "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                "<u:AddPortMapping xmlns:u=\"" + chosenType + "\">" +
+                "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + externalPort + "</NewExternalPort>" +
+                "<NewProtocol>UDP</NewProtocol><NewInternalPort>" + internalPort + "</NewInternalPort>" +
+                "<NewInternalClient>" + localLan + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
+                "<NewPortMappingDescription>BoBoRemoteUDP</NewPortMappingDescription><NewLeaseDuration>" + leaseSeconds + "</NewLeaseDuration>" +
+                "</u:AddPortMapping></s:Body></s:Envelope>";
+            return UpnpHttpRequestAsync("POST", ctrlUri, chosenType + "#AddPortMapping", addBody, timeoutMs, ct);
+        }
+
+        private static async Task<RouterPortMappingLease> TryUpnpIgdLeaseAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
         {
             if (localUdpPort <= 0 || localUdpPort > 65535) return null;
             IPAddress localLan = TryGetKernelRoutedLocalAddress(AddressFamily.InterNetwork);
@@ -1233,15 +1455,8 @@ namespace DualRemote
                 IPAddress ctrlIp;
                 if (!IPAddress.TryParse(ctrlUri.Host, out ctrlIp) || !IsPrivateLanIPv4(ctrlIp)) return null;
 
-                string addBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
-                    "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
-                    "<u:AddPortMapping xmlns:u=\"" + chosenType + "\">" +
-                    "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + localUdpPort + "</NewExternalPort>" +
-                    "<NewProtocol>UDP</NewProtocol><NewInternalPort>" + localUdpPort + "</NewInternalPort>" +
-                    "<NewInternalClient>" + localLan + "</NewInternalClient><NewEnabled>1</NewEnabled>" +
-                    "<NewPortMappingDescription>BoBoRemoteUDP</NewPortMappingDescription><NewLeaseDuration>3600</NewLeaseDuration>" +
-                    "</u:AddPortMapping></s:Body></s:Envelope>";
-                string addResp = await UpnpHttpRequestAsync("POST", ctrlUri, chosenType + "#AddPortMapping", addBody, timeoutMs, ct).ConfigureAwait(false);
+                const int leaseSec = 3600;
+                string addResp = await SendUpnpAddPortMappingAsync(ctrlUri, chosenType, localLan, localUdpPort, localUdpPort, leaseSec, timeoutMs, ct).ConfigureAwait(false);
                 if (addResp == null) return null;
 
                 string extBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
@@ -1253,7 +1468,7 @@ namespace DualRemote
                 IPAddress extIp;
                 if (IPAddress.TryParse(extIpStr, out extIp) && IsAllowedRemoteCandidateIp(extIp) && !IsPrivateLanIPv4(extIp))
                 {
-                    return new IPEndPoint(extIp, localUdpPort);
+                    return new RouterPortMappingLease(new IPEndPoint(extIp, localUdpPort), localUdpPort, ctrlUri, chosenType, localLan, leaseSec);
                 }
             }
             catch { }
@@ -1312,27 +1527,68 @@ namespace DualRemote
             });
         }
 
-        internal static async Task<IPEndPoint> TryMapRouterPortAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
+        /// <summary>独立超时并行探测 NAT-PMP 与 UPnP IGD，返回带自动续租与会话结束清理能力的映射租约。</summary>
+        internal static async Task<RouterPortMappingLease> TryAcquireRouterPortLeaseAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
         {
             if (localUdpPort <= 0 || localUdpPort > 65535) return null;
-            using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            int budgetMs = Math.Max(300, timeoutMs);
+            IPAddress gw = GetDefaultIPv4Gateway();
+
+            using (var pmpCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using (var upnpCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                linked.CancelAfter(Math.Max(250, timeoutMs));
-                try
+                pmpCts.CancelAfter(budgetMs);
+                upnpCts.CancelAfter(budgetMs);
+
+                var pending = new List<Task<RouterPortMappingLease>>(2);
+                if (gw != null)
                 {
-                    IPAddress gw = GetDefaultIPv4Gateway();
-                    if (gw != null)
+                    pending.Add(TryNatPmpLeaseAsync(gw, localUdpPort, budgetMs, pmpCts.Token));
+                }
+                pending.Add(TryUpnpIgdLeaseAsync(localUdpPort, budgetMs, upnpCts.Token));
+
+                RouterPortMappingLease winner = null;
+                while (pending.Count > 0)
+                {
+                    Task<RouterPortMappingLease> done = await Task.WhenAny(pending).ConfigureAwait(false);
+                    pending.Remove(done);
+                    RouterPortMappingLease candidate = null;
+                    try { candidate = await done.ConfigureAwait(false); } catch { }
+                    if (candidate != null && winner == null)
                     {
-                        IPEndPoint pmp = await TryNatPmpMapAsync(gw, localUdpPort, timeoutMs, linked.Token).ConfigureAwait(false);
-                        if (pmp != null) return pmp;
+                        winner = candidate;
+                        try { pmpCts.Cancel(); } catch { }
+                        try { upnpCts.Cancel(); } catch { }
+                        break;
                     }
-                    return await TryUpnpIgdMapAsync(localUdpPort, timeoutMs, linked.Token).ConfigureAwait(false);
                 }
-                catch
+
+                // Clean up any secondary mapping if it already completed concurrently on a different port/protocol
+                for (int i = 0; i < pending.Count; i++)
                 {
-                    return null;
+                    Task<RouterPortMappingLease> rem = pending[i];
+                    Task _cleanup = rem.ContinueWith(delegate(Task<RouterPortMappingLease> t)
+                    {
+                        if (!t.IsFaulted && !t.IsCanceled && t.Result != null)
+                        {
+                            RouterPortMappingLease extra = t.Result;
+                            if (winner == null || !string.Equals(extra.ProtocolName, winner.ProtocolName, StringComparison.Ordinal) ||
+                                extra.ExternalPort != winner.ExternalPort)
+                            {
+                                extra.Dispose();
+                            }
+                        }
+                    }, TaskScheduler.Default);
                 }
+
+                return winner;
             }
+        }
+
+        internal static async Task<IPEndPoint> TryMapRouterPortAsync(int localUdpPort, int timeoutMs, CancellationToken ct)
+        {
+            RouterPortMappingLease lease = await TryAcquireRouterPortLeaseAsync(localUdpPort, timeoutMs, ct).ConfigureAwait(false);
+            return lease != null ? lease.ExternalEndPoint : null;
         }
 
         private static int elevatedFirewallConfigured;

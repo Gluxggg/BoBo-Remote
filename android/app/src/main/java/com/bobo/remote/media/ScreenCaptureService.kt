@@ -62,6 +62,8 @@ object BoBoAppRuntime {
     val hostReady: StateFlow<Boolean> = _hostReady
     private val _projectionGranted = MutableStateFlow(false)
     val projectionGranted: StateFlow<Boolean> = _projectionGranted
+    private val _deviceCode = MutableStateFlow("")
+    val deviceCode: StateFlow<String> = _deviceCode
 
     @Volatile private var captureService: ScreenCaptureService? = null
 
@@ -72,6 +74,7 @@ object BoBoAppRuntime {
         val deviceName = "${Build.MANUFACTURER} ${Build.MODEL}".trim().ifBlank { "Android Device" }
         identity = BoBoIdentityStore(File(app.filesDir, "bobo6"), deviceName)
         identity.ensureLoaded()
+        _deviceCode.value = identity.formattedDeviceCode
         refreshAuthorizedPeers()
 
         val downloads = File(app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir, "BoBoRemote")
@@ -120,7 +123,17 @@ object BoBoAppRuntime {
 
     @Synchronized
     fun refreshAuthorizedPeers() {
+        _deviceCode.value = identity.formattedDeviceCode
         _authorizedPeers.value = identity.listAuthorizedPeers()
+    }
+
+    @Synchronized
+    fun reloadAfterIdentityImport() {
+        if (!initialized) return
+        hostServer.stop()
+        _hostReady.value = hostServer.start().isSuccess
+        refreshAuthorizedPeers()
+        discovery.sendProbeNow()
     }
 
     fun setAllowIncoming(allow: Boolean) {

@@ -420,6 +420,16 @@ namespace BoBoSetup
             }
         }
 
+        internal static string LastServiceActionSummary { get; private set; }
+
+        private static string GetProtectedServiceExePath()
+        {
+            string pf64 = null;
+            try { pf64 = Environment.GetEnvironmentVariable("ProgramW6432"); } catch { }
+            if (string.IsNullOrWhiteSpace(pf64)) pf64 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            return Path.Combine(pf64 ?? "", "BoBoRemote", "Service", MainExeName);
+        }
+
         internal static string GetAppVersion()
         {
             try
@@ -437,7 +447,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "7.6.0";
+            return "7.6.1";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -677,8 +687,17 @@ namespace BoBoSetup
             ConfigureWindowsFirewallRules(mainExe, true);
             if (IsAdministrator())
             {
-                Report(report, 99, "正在注册锁屏远控与穿透服务…");
-                TryRunMainExeSwitch(mainExe, "--install-service", 15000);
+                Report(report, 99, "正在部署并校验受保护目录锁屏服务…");
+                string svcDetail;
+                bool svcOk = TryRunMainExeSwitch(mainExe, "--upgrade-service", 25000, out svcDetail);
+                LastServiceActionSummary = svcOk
+                    ? "锁屏穿透服务已部署至 Program Files 受保护目录并校验通过。"
+                    : ("锁屏穿透服务部署未完成（" + svcDetail + "），可在软件设置中重新安装/修复。");
+                Report(report, 99, LastServiceActionSummary);
+            }
+            else
+            {
+                LastServiceActionSummary = "当前为标准用户安装，未配置管理员锁屏穿透服务（不影响常规远控，可在设置中一键启用）。";
             }
 
             Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
@@ -690,12 +709,23 @@ namespace BoBoSetup
             if (!IsSafeInstallDir(installDir, out reason))
                 throw new InvalidOperationException(reason);
 
+            LastServiceActionSummary = "";
             string fullDir = Path.GetFullPath(installDir).TrimEnd('\\');
             string mainExeUninstall = Path.Combine(fullDir, MainExeName);
-            if (IsAdministrator() && File.Exists(mainExeUninstall))
+            string protectedSvcExe = GetProtectedServiceExePath();
+            string svcSwitchExe = File.Exists(protectedSvcExe) ? protectedSvcExe : (File.Exists(mainExeUninstall) ? mainExeUninstall : null);
+            if (IsAdministrator() && !string.IsNullOrEmpty(svcSwitchExe))
             {
                 Report(report, 6, "正在停止并卸载锁屏穿透服务…");
-                TryRunMainExeSwitch(mainExeUninstall, "--uninstall-service", 12000);
+                string unDetail;
+                bool unOk = TryRunMainExeSwitch(svcSwitchExe, "--uninstall-service", 15000, out unDetail);
+                LastServiceActionSummary = unOk
+                    ? "锁屏穿透服务及受保护服务目录已移除。"
+                    : ("锁屏穿透服务卸载提示：" + unDetail);
+            }
+            else if (!IsAdministrator() && File.Exists(protectedSvcExe))
+            {
+                LastServiceActionSummary = "检测到系统级锁屏服务仍存在，如需彻底移除请以管理员身份运行卸载程序。";
             }
             Report(report, 10, "正在关闭运行中的 BoBo Remote 进程…");
             StopRunningProcessesInDir(fullDir);
@@ -779,9 +809,14 @@ namespace BoBoSetup
             }
         }
 
-        private static bool TryRunMainExeSwitch(string mainExe, string arguments, int timeoutMs)
+        private static bool TryRunMainExeSwitch(string mainExe, string arguments, int timeoutMs, out string detail)
         {
-            if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe)) return false;
+            detail = "";
+            if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe))
+            {
+                detail = "程序文件不存在";
+                return false;
+            }
             try
             {
                 var psi = new ProcessStartInfo(mainExe, arguments ?? "")
@@ -789,17 +824,39 @@ namespace BoBoSetup
                     WorkingDirectory = Path.GetDirectoryName(mainExe),
                     CreateNoWindow = true,
                     UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
                 using (Process p = Process.Start(psi))
                 {
-                    if (p == null) return false;
-                    if (!p.WaitForExit(Math.Max(1000, timeoutMs))) return false;
+                    if (p == null)
+                    {
+                        detail = "无法启动子进程";
+                        return false;
+                    }
+                    string stdout = "";
+                    try { stdout = p.StandardOutput.ReadToEnd(); } catch { }
+                    if (!p.WaitForExit(Math.Max(1000, timeoutMs)))
+                    {
+                        try { p.Kill(); } catch { }
+                        detail = "执行超时";
+                        return false;
+                    }
+                    if (!string.IsNullOrWhiteSpace(stdout))
+                    {
+                        detail = stdout.Trim().Replace("\r", "").Replace("\n", " ");
+                    }
+                    else
+                    {
+                        detail = "退出码 " + p.ExitCode;
+                    }
                     return p.ExitCode == 0;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                detail = ex.Message;
                 return false;
             }
         }
@@ -1813,10 +1870,13 @@ namespace BoBoSetup
                     BeginInvoke((MethodInvoker)delegate
                     {
                         installing = false;
+                        string svcLine = string.IsNullOrEmpty(InstallerEngine.LastServiceActionSummary)
+                            ? ""
+                            : ("\r\n" + InstallerEngine.LastServiceActionSummary);
                         doneSummary.Text =
                             "安装路径：" + options.InstallDir + "\r\n" +
-                            (options.CreateDesktopShortcut ? "已自动创建桌面快捷方式「BoBo Remote」\r\n" : "") +
-                            "首次打开软件时会自动弹出 7 步灰白框选新手引导，带你快速上手。";
+                            (options.CreateDesktopShortcut ? "已自动创建桌面快捷方式「BoBo Remote」" : "未创建桌面快捷方式") +
+                            svcLine;
                         ShowPanel(donePage);
                         if (options.LaunchAfterInstall)
                         {
@@ -1926,7 +1986,10 @@ namespace BoBoSetup
                     if (IsDisposed || !IsHandleCreated) return;
                     BeginInvoke((MethodInvoker)delegate
                     {
-                        MessageBox.Show(this, "BoBo Remote 已成功卸载。", "卸载完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        string extra = string.IsNullOrEmpty(InstallerEngine.LastServiceActionSummary)
+                            ? ""
+                            : ("\r\n" + InstallerEngine.LastServiceActionSummary);
+                        MessageBox.Show(this, "BoBo Remote 已卸载完成。" + extra, "卸载完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         Close();
                     });
                 }

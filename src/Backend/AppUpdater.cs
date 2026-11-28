@@ -67,7 +67,7 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "7.6.0";
+        internal const string FallbackVersion = "7.6.1";
 
         /// <summary>当前内嵌架构指纹；与发布流水线写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
         internal const string CurrentEnginesStamp = "bobo-v6-allinone-inproc";
@@ -800,12 +800,28 @@ namespace DualRemote
 
             try
             {
+                bool svcInstalled, svcRunning, svcSecure;
+                string svcExe, svcVer;
+                BoBoSystemService.InspectInstalledService(out svcInstalled, out svcRunning, out svcSecure, out svcExe, out svcVer);
+                string sourceExe = Path.Combine(fullSource, "BoBo远程.exe");
+                string launchedExe = Path.Combine(fullTarget, "BoBo远程.exe");
+
+                // Migrate legacy service binary out of user install dir before copying into fullTarget
+                if (svcInstalled && !svcSecure && File.Exists(sourceExe))
+                {
+                    TryRunElevatedServiceSwitch(sourceExe, "--upgrade-service --firewall-exe=\"" + launchedExe + "\"", 25000);
+                }
+
                 CopyTreeWithRetry(fullSource, fullTarget);
                 UpdateUninstallDisplayVersion(fullTarget, version);
 
-                string launchedExe = Path.Combine(fullTarget, "BoBo远程.exe");
                 if (File.Exists(launchedExe))
                 {
+                    string upgReason;
+                    if (svcInstalled && BoBoSystemService.NeedsServiceUpgradeOrMigration(out upgReason))
+                    {
+                        TryRunElevatedServiceSwitch(launchedExe, "--upgrade-service", 25000);
+                    }
                     var psi = new ProcessStartInfo(launchedExe,
                         string.IsNullOrEmpty(version) ? "" : "--updated-version=" + version)
                     {
@@ -820,6 +836,33 @@ namespace DualRemote
             catch
             {
                 return 5;
+            }
+        }
+
+        private static bool TryRunElevatedServiceSwitch(string exePath, string switchArg, int timeoutMs)
+        {
+            if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath)) return false;
+            try
+            {
+                bool admin = BoBoSystemService.IsProcessElevated() || BoBoSystemService.IsRunningAsSystem();
+                var psi = new ProcessStartInfo(exePath, switchArg)
+                {
+                    WorkingDirectory = Path.GetDirectoryName(exePath),
+                    UseShellExecute = !admin,
+                    CreateNoWindow = admin,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                if (!admin) psi.Verb = "runas";
+                using (Process p = Process.Start(psi))
+                {
+                    if (p == null) return false;
+                    if (!p.WaitForExit(Math.Max(2000, timeoutMs))) return false;
+                    return p.ExitCode == 0;
+                }
+            }
+            catch
+            {
+                return false;
             }
         }
 
