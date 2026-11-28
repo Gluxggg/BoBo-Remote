@@ -32,11 +32,13 @@ struct DecoderProbeResult {
 struct DecodedFrame {
     bool isGpuTexture = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> gpuTexture;
+    Microsoft::WRL::ComPtr<IMFSample> sampleKeepAlive;
     uint32_t subresourceIndex = 0;
     std::vector<uint8_t> cpuNv12;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t stride = 0;
+    uint32_t surfaceHeight = 0;
 };
 
 class MfHardwareDecoder {
@@ -66,6 +68,10 @@ private:
     Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> dxgiManager_;
     Microsoft::WRL::ComPtr<IMFTransform> decoder_;
     std::string activeDecoderName_;
+    uint32_t targetWidth_ = 0;
+    uint32_t targetHeight_ = 0;
+    uint32_t surfaceWidth_ = 0;
+    uint32_t surfaceHeight_ = 0;
     uint32_t outWidth_ = 0;
     uint32_t outHeight_ = 0;
     uint32_t outStride_ = 0;

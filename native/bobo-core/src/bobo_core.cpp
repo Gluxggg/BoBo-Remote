@@ -1766,11 +1766,6 @@ void BoBoClientSession::RunDecodeLoop() {
             decoderOpened = decoder.OpenCodec(item.codec, w, h, err);
             if (decoderOpened) {
                 activeDecoderCodec = item.codec;
-            } else if (item.codec == VideoCodec::HEVC) {
-                decoderOpened = decoder.OpenCodec(VideoCodec::H264, w, h, err);
-                if (decoderOpened) {
-                    activeDecoderCodec = VideoCodec::H264;
-                }
             }
             {
                 std::lock_guard<std::mutex> slk(statsMutex);
@@ -1814,12 +1809,15 @@ void BoBoClientSession::RunDecodeLoop() {
         if (haveLatest && !skipPresent) {
             auto tRen0 = std::chrono::steady_clock::now();
             bool ok = false;
+            uint32_t visW = (item.width > 0 && item.width < latestFrame.width) ? item.width : latestFrame.width;
+            uint32_t visH = (item.height > 0 && item.height < latestFrame.height) ? item.height : latestFrame.height;
             if (latestFrame.gpuTexture) {
                 ok = renderer.PresentNv12Texture(latestFrame.gpuTexture.Get(), latestFrame.subresourceIndex,
-                                                 latestFrame.width, latestFrame.height, err);
+                                                 visW, visH, err);
             } else if (!latestFrame.cpuNv12.empty()) {
-                ok = renderer.PresentNv12CpuBuffer(latestFrame.cpuNv12.data(), latestFrame.width,
-                                                   latestFrame.height, latestFrame.stride, err);
+                ok = renderer.PresentNv12CpuBuffer(latestFrame.cpuNv12.data(), visW,
+                                                   visH, latestFrame.stride,
+                                                   latestFrame.surfaceHeight, err);
             }
             auto tRen1 = std::chrono::steady_clock::now();
             if (ok) {
@@ -2003,6 +2001,82 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
 
     encoder.Close();
     capturer.Shutdown();
+
+    // 3b. Cross-GPU 1080p interoperability: D3D11 NV12 upload, backward-PTS guard, forced-IDR SPS/PPS & 1088->1080 aperture crop
+    {
+        bool xGpuOk = false;
+        std::string xDetail = "skipped";
+        MfH264Encoder enc1080;
+        std::string xErr;
+        if (enc1080.Open(1920, 1080, 30, 8000, xErr, renderer.Device(), false, true)) {
+            std::vector<uint8_t> f1080(1920u * 1080u * 3u / 2u, 128);
+            std::memset(f1080.data(), 36, 1920u * 1080u);
+            std::vector<uint8_t> tmpOut;
+            bool tmpKey = false;
+            bool feedOk = enc1080.EncodeNv12(f1080.data(), f1080.size(), 50000LL, false, tmpOut, tmpKey, xErr);
+            for (int d = 1; d <= 3 && feedOk; ++d) {
+                feedOk = enc1080.EncodeNv12(f1080.data(), f1080.size(), static_cast<int64_t>(d) * 333333LL, false, tmpOut, tmpKey, xErr);
+            }
+            std::vector<uint8_t> midIdr;
+            bool midKey = false;
+            for (int f = 0; f < 4 && feedOk && (!midKey || midIdr.empty()); ++f) {
+                std::vector<uint8_t> chunk;
+                bool isK = false;
+                if (!enc1080.EncodeNv12(f1080.data(), f1080.size(), static_cast<int64_t>(4 + f) * 333333LL, f == 0, chunk, isK, xErr)) {
+                    feedOk = false;
+                    break;
+                }
+                if (isK && !chunk.empty()) {
+                    midIdr = std::move(chunk);
+                    midKey = true;
+                }
+            }
+
+            bool hasSps = false, hasPps = false;
+            for (size_t i = 0; i + 4 < midIdr.size(); ) {
+                size_t sc = 0;
+                if (midIdr[i] == 0 && midIdr[i + 1] == 0 && midIdr[i + 2] == 1) sc = 3;
+                else if (midIdr[i] == 0 && midIdr[i + 1] == 0 && midIdr[i + 2] == 0 && midIdr[i + 3] == 1) sc = 4;
+                if (sc == 0) { ++i; continue; }
+                uint8_t nt = static_cast<uint8_t>(midIdr[i + sc] & 0x1F);
+                if (nt == 7) hasSps = true;
+                if (nt == 8) hasPps = true;
+                i += sc + 1;
+            }
+
+            bool coldDecoded = false;
+            uint32_t decW = 0, decH = 0;
+            bool keepAliveOk = true;
+            if (feedOk && midKey && hasSps && hasPps && d3dOk) {
+                MfHardwareDecoder coldDec;
+                std::string cdErr;
+                if (coldDec.Initialize(renderer.Device(), cdErr) && coldDec.OpenCodec(VideoCodec::H264, 1920, 1080, cdErr)) {
+                    for (int f = 0; f < 4 && !coldDecoded; ++f) {
+                        if (coldDec.SubmitAccessUnit(midIdr.data(), midIdr.size(), static_cast<int64_t>(f) * 333333LL, cdErr)) {
+                            bool needMore = false;
+                            DecodedFrame df;
+                            while (coldDec.PullDecodedFrame(df, needMore)) {
+                                decW = df.width;
+                                decH = df.height;
+                                if (df.isGpuTexture && !df.sampleKeepAlive) keepAliveOk = false;
+                                coldDecoded = true;
+                                df = DecodedFrame{};
+                            }
+                        }
+                    }
+                    coldDec.CloseCodec();
+                }
+            }
+            xGpuOk = feedOk && midKey && hasSps && hasPps && (!d3dOk || (coldDecoded && decW == 1920 && decH == 1080 && keepAliveOk));
+            xDetail = enc1080.EncoderName() + " sps=" + (hasSps ? "1" : "0") + " pps=" + (hasPps ? "1" : "0") +
+                      " dec=" + std::to_string(decW) + "x" + std::to_string(decH);
+            enc1080.Close();
+        } else {
+            xDetail = xErr;
+        }
+        check("Cross-GPU 1080p D3D11 NV12 upload, backward-PTS, forced-IDR SPS/PPS & 1088->1080 crop",
+              xGpuOk, xDetail);
+    }
 
     // 4. SuperFill zero-black-bar viewport rect verification (16:9 host on 2880x1800 16:10 laptop)
     {
@@ -2324,6 +2398,7 @@ BOBO_API void* __stdcall BoBoHost_CreateV3(
     session->fps = fps > 0 ? fps : 60;
     session->bitrateKbps = bitrateKbps > 0 ? bitrateKbps : 14000;
     session->preferHevcVideo = (preferHevcVideo != 0);
+    session->activeVideoCodec.store(preferHevcVideo != 0 ? kVideoCodecHevc : kVideoCodecH264, std::memory_order_release);
     session->compositeCursor.store(compositeCursor != 0, std::memory_order_release);
     session->onVideo = onVideo;
     session->onAudio = onAudio;

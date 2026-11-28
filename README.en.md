@@ -26,8 +26,14 @@
 
 **BoBo Remote** is a ground-up, MIT-licensed, four-platform native remote desktop and encrypted file-transfer suite. Built on a single deterministic wire specification — [**BoBo6.2**](protocol/BOBO6-SPEC.md) — across **C++17 + pure Go + C# WinForms (Windows)**, **Kotlin + Jetpack Compose (Android)**, and **Swift / SwiftUI (macOS & iOS / iPadOS)**, it requires **no BoBo vendor accounts** and **bundles zero external third-party remote desktop engine binaries**.
 
-### At a Glance (`v7.6.3`)
+### At a Glance (`v7.6.5`)
 
+- **High-Refresh (`120 / 144 Hz`) Ultra/Original Clarity & Anti-Collapse Overhaul (`v7.6.5`)**:
+  - **Resolution + Refresh-Scaled Quality Tiers & `80 Mbps` Pipeline ([`StreamControlCenter.cs`](src/StreamControlCenter.cs) · [`NativeStreamForm.cs`](src/NativeStreamForm.cs) · [`mf_encoder.cpp`](native/bobo-core/src/mf_encoder.cpp))**: Automatically scales **HD / Ultra / Original** bitrates with both resolution and FPS (`30/60/90/120/144 Hz`, e.g., `43 Mbps` Ultra / `75 Mbps` Original at `1440p144` up to `80 Mbps`), widens encoder VBV headroom from `256 KB` to `100–200 ms` (`<= 2 MiB`), raises `QualityVsSpeed` to `35/50` with `AVEncVideoMaxQP` + H.264 High Profile fallback, reopens MFTs on dynamic FPS changes, and applies up to `1.75x` VFR motion compensation at `90–144 Hz`;
+  - **`1 ms` UDP Pacer, Sent-Only NACK Cache & Manual-Preset Floor ([`BoBoHostServer.cs`](src/Backend/BoBoHostServer.cs) · [`BoBoUdpTransport.cs`](src/Backend/BoBoUdpTransport.cs) · [`bobo_core.cpp`](native/bobo-core/src/bobo_core.cpp))**: Enables per-process `timeBeginPeriod(1)` and `32–64 KB` burst credit in `VideoPacerLoop`, registers shards in `BoBoUdpRetransmitCache` only after wire transmission (eliminating false NACK storms at `0.0%` loss), protects manual presets with a `35%` (`>= 2.5 Mbps`) floor and moderate-jitter recovery, and expands the client decode queue to **`32 frames / 12 MiB`** so NACK burst flushes never trigger spurious IDR resets;
+- **Cross-GPU (NVIDIA ↔ NVIDIA, NVIDIA ↔ AMD, Intel & Optimus Hybrid) Codec Hardening (`v7.6.4`)**:
+  - **NVENC / AMF / QSV Unified Encoding ([`mf_encoder.cpp`](native/bobo-core/src/mf_encoder.cpp))**: Handles NVENC/QSV async `MF_E_TRANSFORM_STREAM_CHANGE` output renegotiation, matches GPU adapter `LUID` with a **D3D11 NV12 upload ring** (solving Optimus iGPU/dGPU mismatches and Locked-Mouse/GDI NVENC fallbacks), enforces strictly monotonic input PTS after probe warmup, and ensures complete **`VPS / SPS / PPS`** parameter sets before every forced IDR;
+  - **Clean Cross-Vendor Decoding & Cropping ([`mf_decoder.cpp`](native/bobo-stream-player/src/mf_decoder.cpp) · [`d3d11_renderer.cpp`](native/bobo-stream-player/src/d3d11_renderer.cpp))**: Crops `1920x1088` / `2560x1472` decoder macroblock padding via `MF_MT_MINIMUM_DISPLAY_APERTURE`, keeps decoded `IMFSample` alive through GPU `VideoProcessorBlt`, adds `CopySubresourceRegion` single-slice fallback, and removes the pump-less async decoder fallback;
 - **Windows Post-Logon Lock Screen (`Win+L`), UAC Continuity & Full-Stack Security Hardening (`v7.6.2` – `v7.6.3`)**:
   - **Seamless `Winlogon` Switch, Zero-Gap Dual Pipe & `16x8` Chroma Alignment ([`BoBoSystemService.cs`](src/Backend/BoBoSystemService.cs) · [`bobo_core.cpp`](native/bobo-core/src/bobo_core.cpp))**: Fixes the single-instance pipe leak caused when pre-stream `RestoreSuperDisplay`/`ApplySuperDisplay` blocked `StartHostSession`, upgrades the SYSTEM Helper pipe to 16 concurrent instances with dual zero-gap acceptors, drained `Dispose`, connect retry, caller PID/session/binary checks (`GetNamedPipeClientProcessId`), and dynamic post-logon user SID ACL refresh, shuts down DXGI before `SetThreadDesktop` with automatic HWND-free worker respawn into `Winlogon`, extends initial MFT warmup to 8 samples on headless/static displays, aligns encoder output to `16x8` to eliminate the right-edge green chroma bar, and enables Lock Service opt-in by default in Setup;
   - **Defense-in-Depth Boundary Upgrade ([`BoBoIdentity.cs`](src/Backend/BoBoIdentity.cs) · [`BoBoEmbeddedTailnet.cs`](src/Backend/BoBoEmbeddedTailnet.cs) · [`BoBoCoreInterop.cs`](src/Backend/BoBoCoreInterop.cs))**: Isolates `BoBoRemoteService` (`SYSTEM`) under ACL-locked `%ProgramFiles%\BoBoRemote\Service\` verified with full 256-bit SHA-256 + `LoadLibraryExW`, seals `authorized-peers` under cert-bound `CurrentUser` DPAPI (`authorized-peers.dpapi`, rejecting plaintext tampering fail-closed), enforces 256-bit SHA-256 verification and self-repair on `BoBoTsNet.exe` (never running under `SYSTEM`), tightens the privacy hook fallback window to `60 ms`, and enforces HTTPS after updater redirects;
@@ -56,7 +62,7 @@
 
 ## Why BoBo Remote?
 
-| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.6.3`) |
+| Dimension | Commercial Remote Desktop Suites | BoBo Remote (`v7.6.5`) |
 | --- | --- | --- |
 | **Accounts & Server Control** | Mandatory vendor accounts; device metadata & routing hosted on third-party clouds | **No BoBo vendor accounts, zero telemetry**: config & keys stay local; 1-click **in-app Tailscale (`:49813`)** + **IPv6/STUN/NAT-PMP/UPnP P2P punching** + **BYO-VPS TCP+UDP relay** |
 | **Licensing & Feature Gates** | Proprietary; high FPS, 2K/4K, privacy shield, and mobile features paywalled | **100% MIT open-source with all features unlocked**: **HW H.265 / H.264**, **2K @ 90 Hz WAN**, **Post-Logon Lock/UAC access**, Super Display, privacy shield, and 2 GiB file transfer |
@@ -83,7 +89,7 @@
 - **Dual TCP+UDP `bobo-relay` + Built-In STUN ([`BoBoRelayScheduler`](src/Backend/BoBoRelayScheduler.cs) · [`tools/bobo-relay`](tools/bobo-relay/README.md))**: Adds `-udp-listen :49811` and `-stun-listen :49812` alongside `/bobo-relay/health` (`udpPort`/`stunPort`, CPU, sessions, Mbps) for load-aware failover and mid-session hot migration across up to 12 relays.
 
 ### 4. In-Process Native Media Core (`H.265` + `AAC-LC` + 2K @ 90 Hz Pipeline)
-- **Windows (`BoBoCore.dll`)**: **DXGI Desktop Duplication** (GDI fallback) → GPU D3D11 NV12 → **Media Foundation HW `H.265 (HEVC)` / `H.264` encode** (with automatic capability probe and H.264 fallback) → **Bounded low-latency decode queue (`12 frames / 4 MiB / 250 ms` + anti-artifact IDR auto-recovery) + D3D11 Flip-Model render** → **WASAPI 48 kHz stereo + OS-native Media Foundation `AAC-LC 96 kbps` ADTS** (`AudioAac`); WAN ABR scales cleanly to **2K @ 90 Hz / 30 Mbps**.
+- **Windows (`BoBoCore.dll`)**: **DXGI Desktop Duplication** (GDI fallback) → GPU D3D11 NV12 → **Media Foundation HW `H.265 (HEVC)` / `H.264` encode** (with automatic capability probe and H.264 fallback) → **Bounded low-latency decode queue (`32 frames / 12 MiB / 250 ms` + anti-artifact IDR auto-recovery) + D3D11 Flip-Model render** → **WASAPI 48 kHz stereo + OS-native Media Foundation `AAC-LC 96 kbps` ADTS** (`AudioAac`); scales smoothly up to **2K @ 144 Hz / 80 Mbps**.
 - **Android / macOS / iOS**: Android `MediaCodec` zero-copy decode + rootless `MediaProjection` + `AccessibilityService` host; macOS driverless `ScreenCaptureKit` + VideoToolbox + `CGEventTap` + `⌘ → Ctrl`; iOS foreground controller + `ReplayKit Broadcast Extension`.
 
 ### 5. Business-Minimalist Desktop UI, 120 Hz Tactile Motion & 3-Line HUD
@@ -98,9 +104,9 @@
 
 ## Four-Platform Matrix & Release Sizes
 
-| Platform | OS Requirement | `v7.6.3` Release Artifact | As Controller (Receiving) | As Controlled Host (Sending) | Highlights |
+| Platform | OS Requirement | `v7.6.5` Release Artifact | As Controller (Receiving) | As Controlled Host (Sending) | Highlights |
 | --- | --- | --- | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.2 MB)<br>`BoBoRemote-Update-x64.zip` (~9.2 MB) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>Includes Android nav & iOS viewing | ✅ **Full · Encrypted UDP+FEC/NACK + TLS Fallback**<br>DXGI/GDI + MF HEVC/H.264/AAC + **`Program Files` `SYSTEM` Service** | Embedded `BoBoCore.dll` (90 Hz ring + lock-free Helper auto-rebuild/`SendSAS`) + stateless `BOP7`/IPv6/UPnP punching + **Wire-Budget Pacer** + `:49813` `BoBoTsNet` |
+| **Windows** | Windows 10 / 11 x64 | `BoBoRemote-Setup-x64.exe` (~9.5 MB)<br>`BoBoRemote-Portable-x64.zip` (~9.2 MB)<br>`BoBoRemote-Update-x64.zip` (~9.2 MB) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>Includes Android nav & iOS viewing | ✅ **Full · Encrypted UDP+FEC/NACK + TLS Fallback**<br>DXGI/GDI + MF HEVC/H.264/AAC + **`Program Files` `SYSTEM` Service** | Embedded `BoBoCore.dll` (144 Hz scaling + `2 MiB` VBV + lock-free Helper rebuild/`SendSAS`) + stateless `BOP7`/IPv6/UPnP punching + **`1 ms` UDP Pacer** + `:49813` `BoBoTsNet` |
 | **Android** | Android 8.0+ (API 26+) | `BoBoRemote-Android.apk` (~1.1 MB) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>`MediaCodec` decode + 48kHz stereo | ✅ **Rootless Full · Currently TLS Streaming**<br>`MediaProjection` + Accessibility | Persistent `v2+v3` signing, **encrypted Identity/Peer Backup Export & Import**, trackpad/touch, floating ball, Bluetooth VK map |
 | **macOS** | macOS 13.0+ (Ventura+) | `BoBoRemote-macOS.dmg` (~2.6 MB)<br>Universal 2 (Apple Silicon & Intel) | ✅ **Full · Encrypted UDP + TLS Fallback**<br>`AVSampleBufferDisplayLayer` | ✅ **Full · Currently TLS Streaming**<br>`ScreenCaptureKit` audio + VideoToolbox | CryptoKit + VideoToolbox, Super Display, `⌘ → Ctrl`, capture-excluded shield + `CGEventTap` |
 | **iOS / iPadOS** | iOS / iPadOS 16.0+ | `BoBoRemote-iOS-Unsigned.ipa` (~850 KB) | ✅ **Foreground Full · Encrypted UDP + TLS Fallback**<br>VideoToolbox decode + touch/trackpad | 👁️ **ReplayKit View-Only · Currently TLS Streaming** | Embedded ReplayKit Broadcast Extension; sign via Sideloadly / AltStore / SideStore / Xcode |
@@ -111,11 +117,11 @@
 
 ## Architecture & Protocol Pipeline
 
-### Shipped Architecture (`BoBo6.2` · `v7.6.3`)
+### Shipped Architecture (`BoBo6.2` · `v7.6.5`)
 
 ```mermaid
 flowchart LR
-  subgraph WINHOST["Windows Host Protected Dual-Layer Desktop Architecture (v7.6.3)"]
+  subgraph WINHOST["Windows Host Protected Dual-Layer Desktop Architecture (v7.6.5)"]
     direction TB
     SVC["BoBoRemoteService (ACL-Locked Program Files\BoBoRemote\Service)"]
     HLP["--desktop-helper (Session Console SYSTEM · Auto-Rebuild)"]
@@ -215,13 +221,13 @@ if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
 bash apple/scripts/package-ios-ipa.sh
 ```
 
-**Verified Test Coverage (`v7.6.3`)**
+**Verified Test Coverage (`v7.6.5`)**
 - **Local Windows & Pure-Go suite**:
-  - **`16/16`** native `BoBoCore.dll` self-tests (`MSVC /W4 /WX` zero warnings, including `2022x1138 -> 2016x1136` `16x8` alignment, 8-sample software MFT warmup, and `Winlogon` desktop switch worker recovery)
+  - **`17/17`** native `BoBoCore.dll` self-tests (`MSVC /W4 /WX` zero warnings, including dynamic FPS encoder reopen, `2 MiB` VBV/`MaxQP` encoding, `32-frame / 12 MiB` decode queue, cross-GPU `1920x1080` D3D11 NV12 upload, backward-PTS monotonic guard, mid-stream forced-IDR `SPS/PPS` cold decode with `1088->1080` aperture crop, `2022x1138 -> 2016x1136` `16x8` alignment, and `Winlogon` worker recovery)
   - **`10/10`** pure-Go `native/bobo-tsnet` unit tests + `--self-test`, and **`6/6`** pure-Go `tools/bobo-relay` unit tests (including `TestRelayCloseBoundedWithOpenTcpSession` enforcing bounded `DrainTimeout` exit)
-  - Full managed `BoBo远程.exe --self-test` suite (covering dual-acceptor zero-gap 16-instance SYSTEM pipe with drained teardown + peer auth, `16x8` encoder alignment, DPAPI `authorized-peers.dpapi` tamper rejection, and 256-bit `BoBoTsNet.exe` tamper self-repair alongside all prior `BoBo6.2`–`v7.6.1` checks; 0 `/warn:4` warnings)
-  - GUI installer `--self-test` (`/warnaserror+`, `EXIT=0`), `UiSmoke`, `CurtainSmoke`, and PowerShell UTF-8 BOM + AST syntax checks (`Errors=0`)
-- **GitHub Actions Four-Platform Pipeline**: Automated CI (with explicit Windows `--self-test` failure log surfacing) & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` incl. encrypted backup migration + persistent `v2+v3` signed `assembleRelease`), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA), publishing all artifacts alongside `SHA256SUMS.txt`. (Live post-logon `Win+L` / UAC unlock, helper crash recovery, and campus/hotspot cross-carrier latency & loss still require two-machine physical endpoint validation.)
+  - Full managed `BoBo远程.exe --self-test` suite (covering `2K144Hz` dynamic tier bitrate scaling, high-refresh preset anti-collapse & 22ms jitter recovery, sent-only retransmit cache isolation, `80 Mbps` wire-budget allocation, dual-acceptor zero-gap 16-instance SYSTEM pipe with drained teardown + peer auth, `16x8` encoder alignment, DPAPI `authorized-peers.dpapi` tamper rejection, and 256-bit `BoBoTsNet.exe` tamper self-repair alongside all prior `BoBo6.2`–`v7.6.1` checks; 0 `/warn:4` warnings)
+  - GUI installer `--self-test` (`/warnaserror+`, `EXIT=0`), `CurtainSmoke`, and PowerShell UTF-8 BOM + AST syntax checks (`Errors=0`)
+- **GitHub Actions Four-Platform Pipeline**: Automated CI (with explicit Windows `--self-test` failure log surfacing) & Release workflows test Go crates, build Windows x64, Android (`testDebugUnitTest` incl. encrypted backup migration + persistent `v2+v3` signed `assembleRelease`), macOS (`swift test` + Universal 2 DMG), and iOS (unsigned IPA), publishing all artifacts alongside `SHA256SUMS.txt`. (Live two-machine NVIDIA ↔ NVIDIA / NVIDIA ↔ AMD streaming, post-logon `Win+L` / UAC unlock, and campus/hotspot latency & loss still require physical multi-GPU endpoint validation.)
 
 ---
 
@@ -294,7 +300,7 @@ BoBo-Remote/
 | **V7.3 (`v7.3.0` – `v7.3.2`)** | **Full P1 + Minimalist UI, 2ms Curtain Hardening & 120 Hz Tactile Motion**: Standard AEAD `AES-128-GCM`, GCC delay-gradient ABR, four-platform `UDP+FEC/NACK`, `AAC-LC 96 kbps` audio, grouped-card UI redesign, `2 ms` curtain burst pump, and `120 Hz` on-demand easing engine | ✅ Done |
 | **V7.4 (`v7.4.0`)** | **Cross-Network IPv6/STUN Direct Racing & 2K @ 90 Hz Engine**: ① End-to-end hardware **`H.265 (HEVC)`** negotiation & graceful H.264 fallback; ② Embedded `BoBoTsNet` **`:49811` UDP + `/udp-bridge`** with `1060 B` MTU shards; ③ **Global IPv6 direct racing + domestic RFC 5389 STUN / ICE-Lite bidirectional punching**; ④ **`bobo-relay` UDP `:49811` blind relay + built-in `:49812` STUN server**; ⑤ Anti-freeze TCP (`depth` scaling + `400 ms` IDR + telemetry recovery) & **2K @ 90 Hz / 30 Mbps** WAN ABR | ✅ Done |
 | **V7.5 (`v7.5.0`)** | **Zero-Lag Cross-Network Punching, Always-On Anti-Bufferbloat & Decoupled 90 Hz Pipeline**: ① **Decoupled Capture + Encode + 4-Slot GPU NV12 Ring** + microsecond `YieldProcessor` VBlank pacing; ② **Always-on GCC Ceiling Mode (90 FPS preserved on fixed bitrate presets)**; ③ **Kernel-routed IPv6/STUN + Symmetric NAT port-delta punching + `1.4s` continuous probing & seamless direct promotion** + `2–4 MiB` UDP buffers; ④ **`36-frame / 4 MiB` high-RTT NACK recovery** | ✅ Done |
-| **V7.6 (`v7.6.0` – `v7.6.3`)** | **Lock-Screen Continuity, Privilege Boundary Hardening & Path-Isolated Congestion Control**: ① Zero-leak 16-instance dual-acceptor SYSTEM pipe with drained teardown + caller PID/binary verification, DXGI teardown + HWND-free worker respawn into `Winlogon`, 8-sample headless MFT warmup, `16x8` chroma alignment, and default Setup lock-service opt-in; ② Protected `%ProgramFiles%\BoBoRemote\Service` ACLs + 256-bit SHA-256 (`BoBoCore`/`BoBoTsNet`) + cert-bound `authorized-peers.dpapi` sealing; ③ Stateless `BOP7` punch, per-path RTT/loss isolation, and **Wire-Budget-First Pacing**; ④ Persistent `v2+v3` Android signing + PBKDF2/AES-GCM migration backup, parallel `NAT-PMP/UPnP` lease renewal/teardown, honest `PRIVACY_STATE` ack, and bounded `bobo-relay` exit | ✅ Done |
+| **V7.6 (`v7.6.0` – `v7.6.5`)** | **High-Refresh Clarity, Cross-GPU Parity & Hardening**: ① **High-refresh (`120/144 Hz`) Ultra/Original clarity & anti-collapse (`v7.6.5`)**: resolution+FPS quality scaling up to `80 Mbps`, `2 MiB` VBV/`MaxQP`, `1 ms` UDP pacer, sent-only retransmit cache, `35%` manual-preset floor & `32f/12MiB` decode queue; ② **NVIDIA ↔ AMD / Intel / Optimus hybrid GPU parity** (NVENC `STREAM_CHANGE` renegotiation, LUID GPU NV12 upload ring, monotonic PTS, complete `VPS/SPS/PPS`, `1088/1472` aperture crop + `IMFSample` keep-alive); ③ Zero-leak 16-instance dual-acceptor SYSTEM pipe + caller PID/binary verification, DXGI teardown + HWND-free `Winlogon` worker respawn, `16x8` chroma alignment, and default Setup lock-service opt-in; ④ Protected `%ProgramFiles%\BoBoRemote\Service` ACLs + 256-bit SHA-256 + cert-bound `authorized-peers.dpapi`, stateless `BOP7` punch, Wire-Budget Pacing, and persistent `v2+v3` Android signing | ✅ Done |
 | **V8 / P2** | `AV1` / `H.264 4:4:4` codec negotiation (ultra-crisp text & IDE rendering), HDR / multi-monitor enhancements, native Android/Apple HEVC hardware encoding parity, `TCP 443` TURN fallback, and Linux client exploration | 🚧 Planned / Evolving |
 
 ---

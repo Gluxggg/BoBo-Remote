@@ -1,8 +1,10 @@
 #include "mf_encoder.h"
 
+#include <dxgi1_2.h>
 #include <mferror.h>
 #include <wmcodecdsp.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -164,7 +166,91 @@ void MfH264Encoder::StopAsyncEventPump() {
     asyncState_.reset();
 }
 
-void MfH264Encoder::Close() {
+static bool TryGetDeviceLuid(ID3D11Device* dev, LUID& outLuid) {
+    if (!dev) return false;
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC desc = {};
+    if (FAILED(dev->QueryInterface(IID_PPV_ARGS(dxgiDev.GetAddressOf()))) || !dxgiDev) return false;
+    if (FAILED(dxgiDev->GetAdapter(adapter.GetAddressOf())) || !adapter) return false;
+    if (FAILED(adapter->GetDesc(&desc))) return false;
+    outLuid = desc.AdapterLuid;
+    return true;
+}
+
+static bool TryGetActivateLuid(IMFActivate* act, LUID& outLuid) {
+    if (!act) return false;
+    UINT32 cb = 0;
+    LUID blobLuid = {};
+    if (SUCCEEDED(act->GetBlob(MFT_ENUM_ADAPTER_LUID,
+                               reinterpret_cast<UINT8*>(&blobLuid),
+                               sizeof(LUID),
+                               &cb)) &&
+        cb == sizeof(LUID)) {
+        outLuid = blobLuid;
+        return (outLuid.LowPart != 0 || outLuid.HighPart != 0);
+    }
+    UINT64 raw = 0;
+    if (SUCCEEDED(act->GetUINT64(MFT_ENUM_ADAPTER_LUID, &raw)) && raw != 0) {
+        outLuid.LowPart = static_cast<DWORD>(raw & 0xFFFFFFFFULL);
+        outLuid.HighPart = static_cast<LONG>(static_cast<int32_t>(raw >> 32));
+        return true;
+    }
+    return false;
+}
+
+static bool CreateD3D11DeviceForLuid(const LUID* targetLuid,
+                                     Microsoft::WRL::ComPtr<ID3D11Device>& outDev,
+                                     Microsoft::WRL::ComPtr<ID3D11DeviceContext>& outCtx) {
+    outDev.Reset();
+    outCtx.Reset();
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.GetAddressOf()))) || !factory) {
+        return false;
+    }
+
+    const D3D_FEATURE_LEVEL levels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0
+    };
+    for (UINT idx = 0; ; ++idx) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(idx, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (FAILED(adapter->GetDesc1(&desc))) continue;
+        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || desc.VendorId == 0x1414) continue;
+        if (targetLuid &&
+            (desc.AdapterLuid.LowPart != targetLuid->LowPart ||
+             desc.AdapterLuid.HighPart != targetLuid->HighPart)) {
+            continue;
+        }
+        D3D_FEATURE_LEVEL chosen = D3D_FEATURE_LEVEL_11_0;
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+        HRESULT hr = D3D11CreateDevice(
+            adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+            levels, static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
+            D3D11_SDK_VERSION, outDev.ReleaseAndGetAddressOf(), &chosen, outCtx.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            hr = D3D11CreateDevice(
+                adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+                levels, static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
+                D3D11_SDK_VERSION, outDev.ReleaseAndGetAddressOf(), &chosen, outCtx.ReleaseAndGetAddressOf());
+        }
+        if (SUCCEEDED(hr) && outDev && outCtx) {
+            Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
+            if (SUCCEEDED(outDev.As(&mt)) && mt) {
+                mt->SetMultithreadProtected(TRUE);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void MfH264Encoder::ResetMediaObjects() {
     StopAsyncEventPump();
     if (encoder_) {
         encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -176,15 +262,33 @@ void MfH264Encoder::Close() {
     codecApi_.Reset();
     eventGen_.Reset();
     encoder_.Reset();
+    uploadStagingTex_.Reset();
+    for (int s = 0; s < 4; ++s) {
+        uploadRing_[s].Reset();
+    }
+    uploadTexW_ = 0;
+    uploadTexH_ = 0;
+    uploadSlot_ = 0;
+    boundD3dCtx_.Reset();
+    boundD3dDev_.Reset();
     d3dMgr_.Reset();
     d3dResetToken_ = 0;
-    cachedSpsPps_.clear();
+    cachedVps_.clear();
+    cachedSps_.clear();
+    cachedPps_.clear();
     isAsync_ = false;
     isHardware_ = false;
     isD3D11ZeroCopy_ = false;
+    d3dUploadMode_ = false;
     isHevc_ = false;
-    lastSampleTimeHns_ = -1;
+    lastInputPtsHns_ = -1;
+    outBufMinSize_ = 0;
+    outProvidesSamples_ = false;
     encoderName_.clear();
+}
+
+void MfH264Encoder::Close() {
+    ResetMediaObjects();
     if (mfStarted_) {
         MFShutdown();
         mfStarted_ = false;
@@ -207,7 +311,6 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
     height_ = (height + 1u) & ~1u;
     fps_ = (fps >= 15 && fps <= 144) ? fps : 60;
     frameDurationHns_ = 10000000LL / static_cast<int64_t>(fps_);
-    lastSampleTimeHns_ = -1;
     if (bitrateKbps < 500) bitrateKbps = 500;
     if (bitrateKbps > 80000) bitrateKbps = 80000;
     bitrateKbps_ = bitrateKbps;
@@ -225,21 +328,58 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
             &outType,
             &activates,
             &count);
-        if (SUCCEEDED(ehr) && activates) {
+        if (SUCCEEDED(ehr) && activates && count > 0) {
+            auto releaseAll = [&]() {
+                for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
+                CoTaskMemFree(activates);
+            };
+
+            LUID capLuid = {};
+            const bool hasCapLuid = TryGetDeviceLuid(d3dDevice, capLuid);
+
+            // Pass 1: Zero-copy using the capture D3D11Device when its GPU LUID matches the encoder MFT LUID.
+            if (d3dDevice) {
+                for (UINT32 i = 0; i < count; ++i) {
+                    LUID actLuid = {};
+                    const bool hasActLuid = TryGetActivateLuid(activates[i], actLuid);
+                    if (hasCapLuid && hasActLuid &&
+                        (actLuid.LowPart != capLuid.LowPart || actLuid.HighPart != capLuid.HighPart)) {
+                        continue;
+                    }
+                    std::string hwErr;
+                    if (TryOpenCandidate(activates[i], true, hevc, true, width_, height_, fps_, bitrateKbps_, d3dDevice, hwErr)) {
+                        releaseAll();
+                        return true;
+                    }
+                }
+            }
+
+            // Pass 2: Owned adapter-matched D3D11 device + GPU NV12 upload ring (covers NVENC on Locked-Mouse/GDI & Optimus dual-GPU).
+            for (UINT32 i = 0; i < count; ++i) {
+                LUID actLuid = {};
+                const bool hasActLuid = TryGetActivateLuid(activates[i], actLuid);
+                Microsoft::WRL::ComPtr<ID3D11Device> ownedDev;
+                Microsoft::WRL::ComPtr<ID3D11DeviceContext> ownedCtx;
+                if (CreateD3D11DeviceForLuid(hasActLuid ? &actLuid : nullptr, ownedDev, ownedCtx) && ownedDev) {
+                    std::string hwErr;
+                    if (TryOpenCandidate(activates[i], true, hevc, false, width_, height_, fps_, bitrateKbps_, ownedDev.Get(), hwErr)) {
+                        releaseAll();
+                        return true;
+                    }
+                }
+            }
+
+            // Pass 3: CPU-memory hardware MFT fallback (without IMFDXGIDeviceManager).
             for (UINT32 i = 0; i < count; ++i) {
                 std::string hwErr;
-                if (d3dDevice && TryOpenCandidate(activates[i], true, hevc, width_, height_, fps_, bitrateKbps_, d3dDevice, hwErr)) {
-                    for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-                    CoTaskMemFree(activates);
-                    return true;
-                }
-                if (TryOpenCandidate(activates[i], true, hevc, width_, height_, fps_, bitrateKbps_, nullptr, hwErr)) {
-                    for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-                    CoTaskMemFree(activates);
+                if (TryOpenCandidate(activates[i], true, hevc, false, width_, height_, fps_, bitrateKbps_, nullptr, hwErr)) {
+                    releaseAll();
                     return true;
                 }
             }
-            for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
+
+            releaseAll();
+        } else if (activates) {
             CoTaskMemFree(activates);
         }
 
@@ -257,7 +397,7 @@ bool MfH264Encoder::Open(uint32_t width, uint32_t height, uint32_t fps, uint32_t
             if (SUCCEEDED(sehr) && swActivates) {
                 for (UINT32 i = 0; i < swCount; ++i) {
                     std::string swErr;
-                    if (TryOpenCandidate(swActivates[i], true, true, width_, height_, fps_, bitrateKbps_, nullptr, swErr)) {
+                    if (TryOpenCandidate(swActivates[i], true, true, false, width_, height_, fps_, bitrateKbps_, nullptr, swErr)) {
                         for (UINT32 j = 0; j < swCount; ++j) swActivates[j]->Release();
                         CoTaskMemFree(swActivates);
                         return true;
@@ -385,7 +525,7 @@ void MfH264Encoder::ApplyRateControlBufferAndQp(ICodecAPI* api, uint32_t bitrate
     }
 
     // Give high-bitrate/high-FPS encoders sufficient HRD/VBV headroom (~100-200ms up to 2 MiB)
-    // so UI transitions and fast motion bursts do not clamp P-frames to QP=51 macroblocks.
+    // so UI animations and fast motion bursts do not clamp P-frames to QP=51 macroblocks.
     uint64_t vbvBytes = (bitrateKbps >= 12000) ? ((meanBps / 8ULL) / 5ULL) : ((meanBps / 8ULL) / 10ULL);
     if (vbvBytes < 32768ULL) vbvBytes = 32768ULL;
     if (vbvBytes > 2097152ULL) vbvBytes = 2097152ULL;
@@ -406,8 +546,8 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
     api->SetValue(&CODECAPI_AVEncCommonRealTime, &v);
 
-    // Use CBR with a generous VBV buffer to preserve live ICodecAPI bitrate changes.
-    // FilterAndInspectAnnexB strips CBR filler NALs before frames hit the wire.
+    // Use CBR with a generous VBV buffer to limit IDR bursts and apply live bitrate changes.
+    // FilterAndInspectAnnexB removes CBR filler before the frame goes on the wire.
     useVbr_ = false;
     v.vt = VT_UI4;
     v.ulVal = eAVEncCommonRateControlMode_CBR;
@@ -429,7 +569,7 @@ void MfH264Encoder::ApplyCodecApiLowLatency(ICodecAPI* api, uint32_t fps, uint32
     api->SetValue(&CODECAPI_AVEncVideoMaxNumRefFrame, &v);
 
     v.vt = VT_UI4;
-    v.ulVal = (bitrateKbps >= 14000) ? 50u : 35u; // Balanced speed/motion-estimation quality for sharp high-bitrate text & UI
+    v.ulVal = (bitrateKbps >= 14000) ? 50u : 35u; // Balanced speed/motion quality for sharp high-FPS UI & video
     api->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
 
     v.vt = VT_UI4;
@@ -453,9 +593,9 @@ bool MfH264Encoder::UpdateBitrateLive(uint32_t bitrateKbps) {
     return SUCCEEDED(hr);
 }
 
-bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool hevc, uint32_t width, uint32_t height,
-                                     uint32_t fps, uint32_t bitrateKbps, ID3D11Device* d3dDevice,
-                                     std::string& outError) {
+bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool hevc, bool allowZeroCopy,
+                                     uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrateKbps,
+                                     ID3D11Device* d3dDevice, std::string& outError) {
     if (!activate) return false;
     wchar_t* friendly = nullptr;
     UINT32 friendlyLen = 0;
@@ -487,7 +627,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
 
     bool d3dBound = false;
     if (!ConfigureTransform(mft.Get(), asyncMft, hevc, width, height, fps, bitrateKbps, d3dDevice, d3dBound, outError)) {
-        d3dMgr_.Reset();
+        ResetMediaObjects();
         activate->ShutdownObject();
         return false;
     }
@@ -495,15 +635,16 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
     encoder_ = mft;
     isAsync_ = asyncMft;
     isHardware_ = hardware;
-    isD3D11ZeroCopy_ = d3dBound;
+    isD3D11ZeroCopy_ = d3dBound && allowZeroCopy;
+    d3dUploadMode_ = d3dBound && !allowZeroCopy;
     isHevc_ = hevc;
-    encoderName_ = d3dBound ? (name + " [D3D11]") : name;
+    encoderName_ = isD3D11ZeroCopy_ ? (name + " [D3D11]")
+                 : (d3dUploadMode_ ? (name + " [D3D11-Upload]") : name);
 
     if (isAsync_) {
         encoder_.As(&eventGen_);
         if (!eventGen_) {
-            encoder_.Reset();
-            d3dMgr_.Reset();
+            ResetMediaObjects();
             activate->ShutdownObject();
             outError = "Async MFT missing IMFMediaEventGenerator";
             return false;
@@ -511,7 +652,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
         StartAsyncEventPump();
     }
 
-    // Smoke-test hardware MFT with up to 3 frames so unusable GPU/D3D11 MFTs cleanly fall back
+    // Smoke-test hardware MFT with up to 4 frames so NVENC/AMF/QSV MFTs complete STREAM_CHANGE & emit initial params
     if (hardware) {
         bool produced = false;
         if (isD3D11ZeroCopy_ && d3dDevice) {
@@ -525,8 +666,12 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
             td.Usage = D3D11_USAGE_DEFAULT;
             td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
             Microsoft::WRL::ComPtr<ID3D11Texture2D> probeTex;
-            if (SUCCEEDED(d3dDevice->CreateTexture2D(&td, nullptr, probeTex.GetAddressOf())) && probeTex) {
-                for (int p = 0; p < 3 && !produced; ++p) {
+            if (FAILED(d3dDevice->CreateTexture2D(&td, nullptr, probeTex.GetAddressOf())) || !probeTex) {
+                td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                d3dDevice->CreateTexture2D(&td, nullptr, probeTex.GetAddressOf());
+            }
+            if (probeTex) {
+                for (int p = 0; p < 4 && !produced; ++p) {
                     std::vector<uint8_t> probeOut;
                     bool probeKey = false;
                     std::string probeErr;
@@ -540,7 +685,7 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
             }
         } else {
             std::vector<uint8_t> probeNv12(static_cast<size_t>(width) * static_cast<size_t>(height) * 3 / 2, 128);
-            for (int p = 0; p < 3 && !produced; ++p) {
+            for (int p = 0; p < 4 && !produced; ++p) {
                 std::vector<uint8_t> probeOut;
                 bool probeKey = false;
                 std::string probeErr;
@@ -554,24 +699,11 @@ bool MfH264Encoder::TryOpenCandidate(IMFActivate* activate, bool hardware, bool 
         }
 
         if (!produced) {
-            StopAsyncEventPump();
-            reusableInBuf_.Reset();
-            reusableInBufCap_ = 0;
-            codecApi_.Reset();
-            eventGen_.Reset();
-            encoder_.Reset();
-            d3dMgr_.Reset();
+            ResetMediaObjects();
             activate->ShutdownObject();
-            cachedSpsPps_.clear();
-            isAsync_ = false;
-            isHardware_ = false;
-            isD3D11ZeroCopy_ = false;
-            isHevc_ = false;
-            encoderName_.clear();
             if (outError.empty()) outError = "Hardware MFT produced no output during probe";
             return false;
         }
-        lastSampleTimeHns_ = -1;
         keyframeRequested_.store(true);
     }
     return true;
@@ -589,7 +721,7 @@ bool MfH264Encoder::TryOpenBuiltinSoftware(uint32_t width, uint32_t height, uint
         if (SUCCEEDED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
                                 &inType, &outType, &activates, &count)) && activates) {
             for (UINT32 i = 0; i < count; ++i) {
-                if (TryOpenCandidate(activates[i], false, false, width, height, fps, bitrateKbps, nullptr, outError)) {
+                if (TryOpenCandidate(activates[i], false, false, false, width, height, fps, bitrateKbps, nullptr, outError)) {
                     for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
                     CoTaskMemFree(activates);
                     return true;
@@ -638,9 +770,11 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
         outStreamId_ = 0;
     }
 
-    // Bind D3D11 DXGI Device Manager before media types if hardware MFT supports zero-copy GPU NV12 input
+    // Bind D3D11 DXGI Device Manager before media types if hardware MFT supports D3D11 input
     d3dMgr_.Reset();
     d3dResetToken_ = 0;
+    boundD3dDev_.Reset();
+    boundD3dCtx_.Reset();
     if (d3dDevice) {
         Microsoft::WRL::ComPtr<IMFAttributes> attrs;
         UINT32 d3dAware = 0;
@@ -651,6 +785,8 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
                 SUCCEEDED(mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                                               reinterpret_cast<ULONG_PTR>(d3dMgr_.Get())))) {
                 outD3D11Bound = true;
+                boundD3dDev_ = d3dDevice;
+                d3dDevice->GetImmediateContext(boundD3dCtx_.ReleaseAndGetAddressOf());
             } else {
                 d3dMgr_.Reset();
                 d3dResetToken_ = 0;
@@ -673,6 +809,8 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
     outMt->SetUINT32(MF_MT_AVG_BITRATE, bitrateKbps * 1000u);
     outMt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     outMt->SetUINT32(MF_MT_MPEG2_PROFILE, hevc ? eAVEncH265VProfile_Main_420_8 : eAVEncH264VProfile_High);
+    outMt->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+    outMt->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
     MFSetAttributeSize(outMt.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(outMt.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(outMt.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -683,15 +821,20 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
         hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
     }
     if (FAILED(hr)) {
-        if (hevc) {
-            outMt->DeleteItem(MF_MT_MPEG2_PROFILE);
-        } else {
-            outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
-        }
+        outMt->DeleteItem(MF_MT_YUV_MATRIX);
+        outMt->DeleteItem(MF_MT_VIDEO_NOMINAL_RANGE);
         hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
         if (FAILED(hr)) {
-            outError = FormatEncHr(hevc ? "SetOutputType(HEVC) failed" : "SetOutputType(H264) failed", hr);
-            return false;
+            if (hevc) {
+                outMt->DeleteItem(MF_MT_MPEG2_PROFILE);
+            } else {
+                outMt->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+            }
+            hr = mft->SetOutputType(outStreamId_, outMt.Get(), 0);
+            if (FAILED(hr)) {
+                outError = FormatEncHr(hevc ? "SetOutputType(HEVC) failed" : "SetOutputType(H264) failed", hr);
+                return false;
+            }
         }
     }
 
@@ -702,6 +845,8 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
     inMt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     inMt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
     inMt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    inMt->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+    inMt->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
     if (!outD3D11Bound) {
         inMt->SetUINT32(MF_MT_DEFAULT_STRIDE, width);
     }
@@ -711,8 +856,13 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
 
     hr = mft->SetInputType(inStreamId_, inMt.Get(), 0);
     if (FAILED(hr)) {
-        outError = FormatEncHr("SetInputType(NV12) failed", hr);
-        return false;
+        inMt->DeleteItem(MF_MT_YUV_MATRIX);
+        inMt->DeleteItem(MF_MT_VIDEO_NOMINAL_RANGE);
+        hr = mft->SetInputType(inStreamId_, inMt.Get(), 0);
+        if (FAILED(hr)) {
+            outError = FormatEncHr("SetInputType(NV12) failed", hr);
+            return false;
+        }
     }
 
     // Re-apply ICodecAPI AFTER SetInputType because some GPU MFTs reset rate control / low-latency on type negotiation
@@ -734,14 +884,240 @@ bool MfH264Encoder::ConfigureTransform(IMFTransform* mft, bool isAsync, bool hev
     return true;
 }
 
-void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& hasIdr, bool& hasSps) {
+void MfH264Encoder::IngestParameterSetsFromAnnexB(const uint8_t* data, size_t len) {
+    if (!data || len < 5) return;
+    size_t i = 0;
+    while (i + 3 < len) {
+        size_t scLen = 0;
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) scLen = 3;
+        else if (i + 3 < len && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) scLen = 4;
+        if (scLen == 0) { ++i; continue; }
+
+        size_t nalStart = i + scLen;
+        if (nalStart >= len) break;
+        size_t nextSc = nalStart + 1;
+        while (nextSc + 2 < len) {
+            if (data[nextSc] == 0 && data[nextSc + 1] == 0 &&
+                (data[nextSc + 2] == 1 || (nextSc + 3 < len && data[nextSc + 2] == 0 && data[nextSc + 3] == 1))) {
+                break;
+            }
+            ++nextSc;
+        }
+        if (nextSc + 2 >= len) nextSc = len;
+
+        uint8_t nalType = isHevc_
+            ? static_cast<uint8_t>((data[nalStart] >> 1) & 0x3F)
+            : static_cast<uint8_t>(data[nalStart] & 0x1F);
+        auto storeParam = [&](std::vector<uint8_t>& dst) {
+            dst.clear();
+            dst.reserve(4 + (nextSc - nalStart));
+            dst.push_back(0);
+            dst.push_back(0);
+            dst.push_back(0);
+            dst.push_back(1);
+            dst.insert(dst.end(), data + nalStart, data + nextSc);
+        };
+        if (isHevc_) {
+            if (nalType == 32) storeParam(cachedVps_);
+            else if (nalType == 33) storeParam(cachedSps_);
+            else if (nalType == 34) storeParam(cachedPps_);
+        } else {
+            if (nalType == 7) storeParam(cachedSps_);
+            else if (nalType == 8) storeParam(cachedPps_);
+        }
+        i = nextSc;
+    }
+}
+
+void MfH264Encoder::CaptureSequenceHeaderFromOutputType() {
+    if (!encoder_) return;
+    Microsoft::WRL::ComPtr<IMFMediaType> curOutMt;
+    if (FAILED(encoder_->GetOutputCurrentType(outStreamId_, curOutMt.GetAddressOf())) || !curOutMt) return;
+    UINT8* seqBlob = nullptr;
+    UINT32 seqLen = 0;
+    if (SUCCEEDED(curOutMt->GetAllocatedBlob(MF_MT_MPEG_SEQUENCE_HEADER, &seqBlob, &seqLen)) && seqBlob) {
+        bool looksAnnexB = (seqLen >= 4 &&
+                            ((seqBlob[0] == 0 && seqBlob[1] == 0 && seqBlob[2] == 1) ||
+                             (seqLen >= 5 && seqBlob[0] == 0 && seqBlob[1] == 0 && seqBlob[2] == 0 && seqBlob[3] == 1)));
+        if (looksAnnexB) {
+            IngestParameterSetsFromAnnexB(seqBlob, seqLen);
+        }
+        CoTaskMemFree(seqBlob);
+    }
+}
+
+bool MfH264Encoder::HandleOutputStreamChange() {
+    if (!encoder_) return false;
+    const GUID desiredSub = isHevc_ ? MFVideoFormat_HEVC : MFVideoFormat_H264;
+    for (DWORD idx = 0; idx < 16; ++idx) {
+        Microsoft::WRL::ComPtr<IMFMediaType> availMt;
+        HRESULT hr = encoder_->GetOutputAvailableType(outStreamId_, idx, availMt.GetAddressOf());
+        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
+        GUID sub = GUID_NULL;
+        if (SUCCEEDED(availMt->GetGUID(MF_MT_SUBTYPE, &sub)) && sub == desiredSub) {
+            if (SUCCEEDED(encoder_->SetOutputType(outStreamId_, availMt.Get(), 0))) {
+                MFT_OUTPUT_STREAM_INFO osi = {};
+                if (SUCCEEDED(encoder_->GetOutputStreamInfo(outStreamId_, &osi))) {
+                    outBufMinSize_ = osi.cbSize > 0 ? osi.cbSize : (width_ * height_);
+                    outProvidesSamples_ = ((osi.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0);
+                }
+                CaptureSequenceHeaderFromOutputType();
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int64_t MfH264Encoder::NextMonotonicPts(int64_t sampleTimeHns, int64_t* outDurationHns) {
+    int64_t minStep = std::max<int64_t>(10000LL, frameDurationHns_ / 4);
+    int64_t prevPts = lastInputPtsHns_;
+    int64_t pts = (prevPts < 0)
+        ? std::max<int64_t>(0LL, sampleTimeHns)
+        : std::max<int64_t>(sampleTimeHns, prevPts + minStep);
+    if (outDurationHns) {
+        int64_t dur = frameDurationHns_;
+        if (prevPts >= 0 && pts > prevPts) {
+            int64_t d = pts - prevPts;
+            if (d < frameDurationHns_) dur = frameDurationHns_;
+            else if (d > 1000000LL) dur = 1000000LL;
+            else dur = d;
+        }
+        *outDurationHns = dur;
+    }
+    lastInputPtsHns_ = pts;
+    return pts;
+}
+
+bool MfH264Encoder::EnsureGpuUploadRing() {
+    if (!boundD3dDev_ || !boundD3dCtx_ || width_ < 16 || height_ < 16) return false;
+    if (uploadStagingTex_ && uploadRing_[0] && uploadTexW_ == width_ && uploadTexH_ == height_) {
+        return true;
+    }
+    uploadStagingTex_.Reset();
+    for (int s = 0; s < 4; ++s) uploadRing_[s].Reset();
+    uploadTexW_ = 0;
+    uploadTexH_ = 0;
+    uploadSlot_ = 0;
+
+    D3D11_TEXTURE2D_DESC sd = {};
+    sd.Width = width_;
+    sd.Height = height_;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_NV12;
+    sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE | D3D11_CPU_ACCESS_READ;
+    if (FAILED(boundD3dDev_->CreateTexture2D(&sd, nullptr, uploadStagingTex_.GetAddressOf()))) {
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(boundD3dDev_->CreateTexture2D(&sd, nullptr, uploadStagingTex_.GetAddressOf()))) {
+            return false;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = width_;
+    td.Height = height_;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_NV12;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    const UINT bindTry[] = {
+        D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        D3D11_BIND_SHADER_RESOURCE,
+        0u
+    };
+    UINT chosenBind = 0u;
+    bool bindSelected = false;
+    for (UINT bf : bindTry) {
+        td.BindFlags = bf;
+        if (SUCCEEDED(boundD3dDev_->CreateTexture2D(&td, nullptr, uploadRing_[0].ReleaseAndGetAddressOf())) && uploadRing_[0]) {
+            chosenBind = bf;
+            bindSelected = true;
+            break;
+        }
+    }
+    if (!bindSelected) {
+        uploadStagingTex_.Reset();
+        return false;
+    }
+    td.BindFlags = chosenBind;
+    for (int s = 1; s < 4; ++s) {
+        if (FAILED(boundD3dDev_->CreateTexture2D(&td, nullptr, uploadRing_[s].ReleaseAndGetAddressOf())) || !uploadRing_[s]) {
+            uploadStagingTex_.Reset();
+            for (int k = 0; k < 4; ++k) uploadRing_[k].Reset();
+            return false;
+        }
+    }
+    uploadTexW_ = width_;
+    uploadTexH_ = height_;
+    return true;
+}
+
+bool MfH264Encoder::UploadCpuNv12AndEncode(const uint8_t* nv12Data, size_t nv12Bytes, int64_t ptsHns, int64_t durHns,
+                                           bool forceKeyframe, std::vector<uint8_t>& outAnnexB,
+                                           bool& outIsKeyframe, std::string& outError) {
+    const size_t minRequired = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 3u / 2u;
+    if (nv12Bytes < minRequired || !EnsureGpuUploadRing()) {
+        return false;
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(boundD3dCtx_->Map(uploadStagingTex_.Get(), 0, D3D11_MAP_WRITE, 0, &mapped)) || !mapped.pData) {
+        return false;
+    }
+    uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
+    for (uint32_t r = 0; r < height_; ++r) {
+        std::memcpy(dst + static_cast<size_t>(r) * mapped.RowPitch, nv12Data + static_cast<size_t>(r) * width_, width_);
+    }
+    const uint8_t* srcUv = nv12Data + static_cast<size_t>(width_) * height_;
+    uint8_t* dstUv = dst + static_cast<size_t>(mapped.RowPitch) * height_;
+    const uint32_t uvRows = height_ / 2u;
+    for (uint32_t r = 0; r < uvRows; ++r) {
+        std::memcpy(dstUv + static_cast<size_t>(r) * mapped.RowPitch, srcUv + static_cast<size_t>(r) * width_, width_);
+    }
+    boundD3dCtx_->Unmap(uploadStagingTex_.Get(), 0);
+
+    int slot = uploadSlot_ & 3;
+    uploadSlot_ = (slot + 1) & 3;
+    ID3D11Texture2D* dstTex = uploadRing_[slot].Get();
+    boundD3dCtx_->CopyResource(dstTex, uploadStagingTex_.Get());
+    boundD3dCtx_->Flush();
+
+    Microsoft::WRL::ComPtr<IMFSample> inSample;
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> dxBuf;
+    HRESULT hr = MFCreateSample(inSample.GetAddressOf());
+    if (FAILED(hr)) { outError = "MFCreateSample(upload) failed"; return true; }
+    hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), dstTex, 0, FALSE, dxBuf.GetAddressOf());
+    if (FAILED(hr)) { outError = FormatEncHr("MFCreateDXGISurfaceBuffer(upload) failed", hr); return true; }
+    Microsoft::WRL::ComPtr<IMF2DBuffer> buf2d;
+    if (SUCCEEDED(dxBuf.As(&buf2d)) && buf2d) {
+        DWORD contLen = 0;
+        if (SUCCEEDED(buf2d->GetContiguousLength(&contLen)) && contLen > 0) {
+            dxBuf->SetCurrentLength(contLen);
+        }
+    }
+    inSample->AddBuffer(dxBuf.Get());
+    inSample->SetSampleTime(ptsHns);
+    inSample->SetSampleDuration(durHns > 0 ? durHns : frameDurationHns_);
+    if (!EncodeSampleInternal(inSample.Get(), forceKeyframe, outAnnexB, outIsKeyframe, outError)) {
+        return true;
+    }
+    return true;
+}
+
+void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& hasIdr,
+                                           bool& seenVps, bool& seenSps, bool& seenPps) {
     hasIdr = false;
-    hasSps = false;
+    seenVps = false;
+    seenSps = false;
+    seenPps = false;
     const uint8_t* data = annexB.data();
     size_t len = annexB.size();
     if (!data || len < 5) return;
 
-    std::vector<uint8_t> foundSpsPps;
     std::vector<uint8_t> filtered;
     bool strippedAny = false;
 
@@ -783,15 +1159,24 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
             continue;
         }
 
+        auto cacheParam = [&](std::vector<uint8_t>& dst) {
+            dst.clear();
+            dst.reserve(4 + (nextSc - nalStart));
+            dst.push_back(0);
+            dst.push_back(0);
+            dst.push_back(0);
+            dst.push_back(1);
+            dst.insert(dst.end(), data + nalStart, data + nextSc);
+        };
         const bool isIdrNal = isHevc ? (nalType >= 19 && nalType <= 21) : (nalType == 5);
-        const bool isSpsNal = isHevc ? (nalType == 33) : (nalType == 7);
-        const bool isParamSet = isHevc
-            ? (nalType == 32 || nalType == 33 || nalType == 34)
-            : (nalType == 7 || nalType == 8);
         if (isIdrNal) hasIdr = true;
-        if (isSpsNal) hasSps = true;
-        if (isParamSet) {
-            foundSpsPps.insert(foundSpsPps.end(), data + i, data + nextSc);
+        if (isHevc) {
+            if (nalType == 32) { seenVps = true; cacheParam(cachedVps_); }
+            else if (nalType == 33) { seenSps = true; cacheParam(cachedSps_); }
+            else if (nalType == 34) { seenPps = true; cacheParam(cachedPps_); }
+        } else {
+            if (nalType == 7) { seenSps = true; cacheParam(cachedSps_); }
+            else if (nalType == 8) { seenPps = true; cacheParam(cachedPps_); }
         }
 
         if (strippedAny) {
@@ -800,24 +1185,9 @@ void MfH264Encoder::FilterAndInspectAnnexB(std::vector<uint8_t>& annexB, bool& h
         i = nextSc;
     }
 
-    if (!foundSpsPps.empty()) {
-        cachedSpsPps_ = std::move(foundSpsPps);
-    }
     if (strippedAny) {
         annexB.swap(filtered);
     }
-}
-
-int64_t MfH264Encoder::ComputeSampleDurationHns(int64_t sampleTimeHns) {
-    int64_t durHns = frameDurationHns_;
-    if (lastSampleTimeHns_ >= 0 && sampleTimeHns > lastSampleTimeHns_) {
-        int64_t delta = sampleTimeHns - lastSampleTimeHns_;
-        if (delta < frameDurationHns_) durHns = frameDurationHns_;
-        else if (delta > 1000000LL) durHns = 1000000LL;
-        else durHns = delta;
-    }
-    lastSampleTimeHns_ = sampleTimeHns;
-    return durHns;
 }
 
 bool MfH264Encoder::EncodeD3D11Texture(ID3D11Texture2D* nv12Tex, int64_t sampleTimeHns,
@@ -846,8 +1216,9 @@ bool MfH264Encoder::EncodeD3D11Texture(ID3D11Texture2D* nv12Tex, int64_t sampleT
     }
 
     inSample->AddBuffer(dxBuf.Get());
-    inSample->SetSampleTime(sampleTimeHns);
-    inSample->SetSampleDuration(ComputeSampleDurationHns(sampleTimeHns));
+    int64_t durHns = frameDurationHns_;
+    inSample->SetSampleTime(NextMonotonicPts(sampleTimeHns, &durHns));
+    inSample->SetSampleDuration(durHns);
     return EncodeSampleInternal(inSample.Get(), forceKeyframe, outAnnexB, outIsKeyframe, outError);
 }
 
@@ -859,6 +1230,19 @@ bool MfH264Encoder::EncodeNv12(const uint8_t* nv12Data, size_t nv12Bytes, int64_
     if (!encoder_ || !nv12Data || nv12Bytes == 0) {
         outError = "Encoder not open";
         return false;
+    }
+
+    int64_t durHns = frameDurationHns_;
+    const int64_t ptsHns = NextMonotonicPts(sampleTimeHns, &durHns);
+    if (boundD3dDev_ && boundD3dCtx_) {
+        std::string upErr;
+        if (UploadCpuNv12AndEncode(nv12Data, nv12Bytes, ptsHns, durHns, forceKeyframe, outAnnexB, outIsKeyframe, upErr)) {
+            if (!upErr.empty()) {
+                outError = upErr;
+                return false;
+            }
+            return true;
+        }
     }
 
     DWORD reqBytes = static_cast<DWORD>(nv12Bytes);
@@ -880,8 +1264,8 @@ bool MfH264Encoder::EncodeNv12(const uint8_t* nv12Data, size_t nv12Bytes, int64_
     hr = MFCreateSample(inSample.GetAddressOf());
     if (FAILED(hr)) { outError = "MFCreateSample(in) failed"; return false; }
     inSample->AddBuffer(reusableInBuf_.Get());
-    inSample->SetSampleTime(sampleTimeHns);
-    inSample->SetSampleDuration(ComputeSampleDurationHns(sampleTimeHns));
+    inSample->SetSampleTime(ptsHns);
+    inSample->SetSampleDuration(durHns);
     return EncodeSampleInternal(inSample.Get(), forceKeyframe, outAnnexB, outIsKeyframe, outError);
 }
 
@@ -897,37 +1281,45 @@ bool MfH264Encoder::EncodeSampleInternal(IMFSample* inSample, bool forceKeyframe
     }
 
     auto pullOutputSample = [&](std::vector<uint8_t>& accum) -> HRESULT {
-        MFT_OUTPUT_DATA_BUFFER odb = {};
-        odb.dwStreamID = outStreamId_;
-        Microsoft::WRL::ComPtr<IMFSample> outSample;
-        if (!outProvidesSamples_) {
-            if (FAILED(MFCreateSample(outSample.GetAddressOf()))) return E_OUTOFMEMORY;
-            Microsoft::WRL::ComPtr<IMFMediaBuffer> ob;
-            DWORD sz = outBufMinSize_ > 65536 ? outBufMinSize_ : (width_ * height_);
-            if (FAILED(MFCreateMemoryBuffer(sz, ob.GetAddressOf()))) return E_OUTOFMEMORY;
-            outSample->AddBuffer(ob.Get());
-            odb.pSample = outSample.Get();
-        }
-        DWORD status = 0;
-        HRESULT ohr = encoder_->ProcessOutput(0, 1, &odb, &status);
-        if (odb.pEvents) odb.pEvents->Release();
-        if (SUCCEEDED(ohr) && odb.pSample) {
-            Microsoft::WRL::ComPtr<IMFMediaBuffer> contig;
-            if (SUCCEEDED(odb.pSample->ConvertToContiguousBuffer(contig.GetAddressOf())) && contig) {
-                BYTE* p = nullptr;
-                DWORD curLen = 0;
-                if (SUCCEEDED(contig->Lock(&p, nullptr, &curLen)) && p && curLen > 0) {
-                    accum.insert(accum.end(), p, p + curLen);
-                    contig->Unlock();
-                }
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            MFT_OUTPUT_DATA_BUFFER odb = {};
+            odb.dwStreamID = outStreamId_;
+            Microsoft::WRL::ComPtr<IMFSample> outSample;
+            if (!outProvidesSamples_) {
+                if (FAILED(MFCreateSample(outSample.GetAddressOf()))) return E_OUTOFMEMORY;
+                Microsoft::WRL::ComPtr<IMFMediaBuffer> ob;
+                DWORD sz = outBufMinSize_ > 65536 ? outBufMinSize_ : (width_ * height_);
+                if (FAILED(MFCreateMemoryBuffer(sz, ob.GetAddressOf()))) return E_OUTOFMEMORY;
+                outSample->AddBuffer(ob.Get());
+                odb.pSample = outSample.Get();
             }
-            if (outProvidesSamples_) {
+            DWORD status = 0;
+            HRESULT ohr = encoder_->ProcessOutput(0, 1, &odb, &status);
+            if (odb.pEvents) odb.pEvents->Release();
+            if (ohr == MF_E_TRANSFORM_STREAM_CHANGE) {
+                if (outProvidesSamples_ && odb.pSample) odb.pSample->Release();
+                if (!HandleOutputStreamChange()) return ohr;
+                continue;
+            }
+            if (SUCCEEDED(ohr) && odb.pSample) {
+                Microsoft::WRL::ComPtr<IMFMediaBuffer> contig;
+                if (SUCCEEDED(odb.pSample->ConvertToContiguousBuffer(contig.GetAddressOf())) && contig) {
+                    BYTE* p = nullptr;
+                    DWORD curLen = 0;
+                    if (SUCCEEDED(contig->Lock(&p, nullptr, &curLen)) && p && curLen > 0) {
+                        accum.insert(accum.end(), p, p + curLen);
+                        contig->Unlock();
+                    }
+                }
+                if (outProvidesSamples_) {
+                    odb.pSample->Release();
+                }
+            } else if (outProvidesSamples_ && odb.pSample) {
                 odb.pSample->Release();
             }
-        } else if (outProvidesSamples_ && odb.pSample) {
-            odb.pSample->Release();
+            return ohr;
         }
-        return ohr;
+        return MF_E_TRANSFORM_STREAM_CHANGE;
     };
 
     if (isAsync_ && asyncState_) {
@@ -1019,30 +1411,31 @@ bool MfH264Encoder::EncodeSampleInternal(IMFSample* inSample, bool forceKeyframe
         }
         for (int i = 0; i < 4; ++i) {
             HRESULT ohr = pullOutputSample(outAnnexB);
-            if (ohr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-            if (ohr == MF_E_TRANSFORM_STREAM_CHANGE) {
-                MFT_OUTPUT_STREAM_INFO osi = {};
-                if (SUCCEEDED(encoder_->GetOutputStreamInfo(outStreamId_, &osi))) {
-                    outBufMinSize_ = osi.cbSize > 0 ? osi.cbSize : (width_ * height_);
-                    outProvidesSamples_ = ((osi.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0);
-                }
-                continue;
-            }
-            if (FAILED(ohr)) break;
+            if (ohr == MF_E_TRANSFORM_NEED_MORE_INPUT || FAILED(ohr)) break;
         }
     }
 
     if (!outAnnexB.empty()) {
-        bool hasIdr = false, hasSps = false;
-        FilterAndInspectAnnexB(outAnnexB, hasIdr, hasSps);
+        bool hasIdr = false, seenVps = false, seenSps = false, seenPps = false;
+        FilterAndInspectAnnexB(outAnnexB, hasIdr, seenVps, seenSps, seenPps);
         outIsKeyframe = hasIdr;
-        // Guarantee SPS/PPS precedes every IDR frame so decoder can start/recover immediately
-        if (hasIdr && !hasSps && !cachedSpsPps_.empty()) {
-            std::vector<uint8_t> combined;
-            combined.reserve(cachedSpsPps_.size() + outAnnexB.size());
-            combined.insert(combined.end(), cachedSpsPps_.begin(), cachedSpsPps_.end());
-            combined.insert(combined.end(), outAnnexB.begin(), outAnnexB.end());
-            outAnnexB.swap(combined);
+        // Guarantee complete parameter sets (VPS/SPS/PPS) precede every IDR frame for cross-GPU/cross-OS decoding
+        if (hasIdr) {
+            CaptureSequenceHeaderFromOutputType();
+            std::vector<uint8_t> prefix;
+            if (isHevc_ && !seenVps && !cachedVps_.empty()) {
+                prefix.insert(prefix.end(), cachedVps_.begin(), cachedVps_.end());
+            }
+            if (!seenSps && !cachedSps_.empty()) {
+                prefix.insert(prefix.end(), cachedSps_.begin(), cachedSps_.end());
+            }
+            if (!seenPps && !cachedPps_.empty()) {
+                prefix.insert(prefix.end(), cachedPps_.begin(), cachedPps_.end());
+            }
+            if (!prefix.empty()) {
+                prefix.insert(prefix.end(), outAnnexB.begin(), outAnnexB.end());
+                outAnnexB.swap(prefix);
+            }
         }
     }
     return true;
