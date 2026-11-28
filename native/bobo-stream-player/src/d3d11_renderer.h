@@ -38,6 +38,8 @@ public:
                             uint32_t visibleWidth, uint32_t visibleHeight, std::string& outError);
     bool PresentNv12Texture(ID3D11Texture2D* nv12Tex, uint32_t subresourceIndex, std::string& outError);
     bool PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width, uint32_t height, uint32_t stride, std::string& outError);
+    bool PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width, uint32_t height, uint32_t stride,
+                              uint32_t surfaceHeight, std::string& outError);
     bool PresentClearFrame(float r, float g, float b, std::string& outError);
 
     void SetVideoSourceDimensions(uint32_t videoW, uint32_t videoH);
@@ -72,6 +74,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnum_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessor> videoProcessor_;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> gpuCopyNv12_;
+    uint32_t gpuCopyW_ = 0;
+    uint32_t gpuCopyH_ = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> cpuUploadNv12_;
     uint32_t cpuUploadW_ = 0;
     uint32_t cpuUploadH_ = 0;

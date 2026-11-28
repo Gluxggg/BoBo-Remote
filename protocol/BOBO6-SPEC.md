@@ -118,7 +118,7 @@ Host → Client:
   "deviceCode": "987654321",
   "deviceName": "Workstation",
   "certThumbprint": "<64-hex>",
-  "version": "7.6.3",
+  "version": "7.6.4",
   "allowIncoming": true,
   "authorized": true,
   "publicIpv6s": ["2409:8900:..."],
@@ -148,8 +148,8 @@ Host → Client:
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.6.3 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.6.3 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `lockServiceActive`, `udpCandidates`） |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.6.4 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.6.4 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `lockServiceActive`, `udpCandidates`） |
 | `UDP_CANDIDATES` | 双向 | `v7.4.0+`：`candidates` 数组（`kind`: `lan`/`ipv6`/`direct4`/`srflx`/`relay`/`tsnet`, `host`, `port`, `priority`；`v7.5.0+` 新增 `"sym": true`；`v7.6.0+` 新增有符号 `"delta"` 指示统一对称 NAT 端口步长预测与并行 NAT-PMP/UPnP IGD 外部端口租约），经已认证 TLS 通道交换并用 SSRF 白名单校验 |
 | `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`（Windows `v7.6.2+` 强制 `16×8` 编码尺寸对齐以消除硬编右/底边绿边）；`v7.6.1+` `RECONFIGURED`（及 `SUPER_DISPLAY_STATE`）携带 `ok` 与失败原因 `error`（并支持失败回滚），Helper 重连后自动重建采集与关键帧 |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |

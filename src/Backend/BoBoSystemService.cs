@@ -1507,7 +1507,7 @@ namespace DualRemote
                                     {
                                         if (disposed || Volatile.Read(ref sessionToken) != myToken || data == null || data.Length == 0) return;
                                         BoBoCoreInterop.BoBoHostNativeHandle hRef = createdRef;
-                                        byte vCodec = hRef != null ? (byte)hRef.VideoCodec : (byte)BoBoCoreInterop.VideoCodecH264;
+                                        byte vCodec = hRef != null ? (byte)hRef.VideoCodec : (byte)(prefHevc ? BoBoCoreInterop.VideoCodecHevc : BoBoCoreInterop.VideoCodecH264);
                                         byte[] pkt = new byte[14 + data.Length];
                                         pkt[0] = isKey ? (byte)1 : (byte)0;
                                         WriteInt32LE(pkt, 1, vw);

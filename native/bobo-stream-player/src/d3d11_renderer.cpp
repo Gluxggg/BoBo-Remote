@@ -24,6 +24,7 @@ static std::string FormatHr(const char* label, HRESULT hr) {
 D3D11Renderer::~D3D11Renderer() {
     std::lock_guard<std::mutex> lock(mutex_);
     cpuUploadNv12_.Reset();
+    gpuCopyNv12_.Reset();
     videoProcessor_.Reset();
     vpEnum_.Reset();
     swapChain_.Reset();
@@ -393,7 +394,41 @@ bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t 
     inDesc.Texture2D.ArraySlice = subresourceIndex;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
     hr = videoDevice_->CreateVideoProcessorInputView(nv12Tex, vpEnum_.Get(), &inDesc, inView.GetAddressOf());
-    if (FAILED(hr)) { outError = FormatHr("CreateVideoProcessorInputView failed", hr); return false; }
+    if (FAILED(hr)) {
+        // Fallback when NVIDIA/hybrid D3D11VA returns BIND_DECODER-only Texture2DArrays that reject direct VideoProcessor views
+        if (!gpuCopyNv12_ || gpuCopyW_ != srcDesc.Width || gpuCopyH_ != srcDesc.Height) {
+            gpuCopyNv12_.Reset();
+            gpuCopyW_ = 0;
+            gpuCopyH_ = 0;
+            D3D11_TEXTURE2D_DESC cd = {};
+            cd.Width = srcDesc.Width;
+            cd.Height = srcDesc.Height;
+            cd.MipLevels = 1;
+            cd.ArraySize = 1;
+            cd.Format = DXGI_FORMAT_NV12;
+            cd.SampleDesc.Count = 1;
+            cd.Usage = D3D11_USAGE_DEFAULT;
+            const UINT bindTry[] = {
+                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_BIND_DECODER
+            };
+            for (UINT bf : bindTry) {
+                cd.BindFlags = bf;
+                if (SUCCEEDED(device_->CreateTexture2D(&cd, nullptr, gpuCopyNv12_.ReleaseAndGetAddressOf())) && gpuCopyNv12_) {
+                    gpuCopyW_ = srcDesc.Width;
+                    gpuCopyH_ = srcDesc.Height;
+                    break;
+                }
+            }
+        }
+        if (gpuCopyNv12_) {
+            context_->CopySubresourceRegion(gpuCopyNv12_.Get(), 0, 0, 0, 0, nv12Tex, subresourceIndex, nullptr);
+            inDesc.Texture2D.ArraySlice = 0;
+            hr = videoDevice_->CreateVideoProcessorInputView(gpuCopyNv12_.Get(), vpEnum_.Get(), &inDesc, inView.GetAddressOf());
+        }
+        if (FAILED(hr)) { outError = FormatHr("CreateVideoProcessorInputView failed", hr); return false; }
+    }
 
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc = {};
     outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
@@ -414,6 +449,11 @@ bool D3D11Renderer::PresentNv12TextureLocked(ID3D11Texture2D* nv12Tex, uint32_t 
 }
 
 bool D3D11Renderer::PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width, uint32_t height, uint32_t stride, std::string& outError) {
+    return PresentNv12CpuBuffer(nv12Data, width, height, stride, 0, outError);
+}
+
+bool D3D11Renderer::PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width, uint32_t height, uint32_t stride,
+                                         uint32_t surfaceHeight, std::string& outError) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!device_ || !context_ || !nv12Data || width == 0 || height == 0) {
         outError = "Invalid CPU NV12 buffer";
@@ -451,15 +491,16 @@ bool D3D11Renderer::PresentNv12CpuBuffer(const uint8_t* nv12Data, uint32_t width
     if (FAILED(hr)) { outError = FormatHr("Map NV12 upload failed", hr); return false; }
 
     uint32_t srcStride = stride >= width ? stride : width;
+    uint32_t planeH = (surfaceHeight >= height) ? surfaceHeight : height;
     uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
     for (uint32_t row = 0; row < height; ++row) {
-        std::memcpy(dst + row * mapped.RowPitch, nv12Data + row * srcStride, width);
+        std::memcpy(dst + static_cast<size_t>(row) * mapped.RowPitch, nv12Data + static_cast<size_t>(row) * srcStride, width);
     }
-    const uint8_t* srcUv = nv12Data + srcStride * height;
-    uint8_t* dstUv = dst + mapped.RowPitch * alignedH;
+    const uint8_t* srcUv = nv12Data + static_cast<size_t>(srcStride) * planeH;
+    uint8_t* dstUv = dst + static_cast<size_t>(mapped.RowPitch) * alignedH;
     uint32_t uvRows = height / 2;
     for (uint32_t row = 0; row < uvRows; ++row) {
-        std::memcpy(dstUv + row * mapped.RowPitch, srcUv + row * srcStride, width);
+        std::memcpy(dstUv + static_cast<size_t>(row) * mapped.RowPitch, srcUv + static_cast<size_t>(row) * srcStride, width);
     }
     context_->Unmap(cpuUploadNv12_.Get(), 0);
 
