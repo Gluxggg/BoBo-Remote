@@ -18,6 +18,7 @@ namespace bobo {
 
 uint64_t GetLastRemoteMouseInjectMs();
 bool IsPrivacyCursorMasked();
+bool NeedsInputDesktopSwitch();
 bool SyncThreadToInputDesktop(bool* outSwitched = nullptr);
 void ResetThreadDesktopHandle();
 

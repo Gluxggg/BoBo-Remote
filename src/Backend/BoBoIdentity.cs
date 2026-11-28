@@ -31,6 +31,7 @@ namespace DualRemote
     {
         private const string PfxPassword = "bobo-v6-identity-key";
         private static readonly byte[] DpapiMagic = Encoding.ASCII.GetBytes("BDP1");
+        private static readonly byte[] PeersDpapiMagic = Encoding.ASCII.GetBytes("BPP1");
         private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("BoBoRemote-V6-NodePfx-v1");
         private static readonly object DefaultGate = new object();
         private static BoBoIdentityStore defaultInstance;
@@ -210,19 +211,26 @@ namespace DualRemote
                     byte[] raw = File.ReadAllBytes(pfxPath);
                     bool wasDpapi;
                     byte[] pfxBytes = UnprotectPfxBytes(raw, out wasDpapi);
-                    cert = LoadPfxForSchannel(pfxBytes);
-                    if (!cert.HasPrivateKey)
+                    try
                     {
-                        cert.Dispose();
-                        throw new CryptographicException("BoBo 本机证书缺少私钥。");
+                        cert = LoadPfxForSchannel(pfxBytes);
+                        if (!cert.HasPrivateKey)
+                        {
+                            cert.Dispose();
+                            throw new CryptographicException("BoBo 本机证书缺少私钥。");
+                        }
+                        if (!wasDpapi)
+                        {
+                            // Retain the existing identity if storage is temporarily unavailable.
+                            try { WriteProtectedPfxFile(pfxPath, pfxBytes); }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                            catch (CryptographicException) { }
+                        }
                     }
-                    if (!wasDpapi)
+                    finally
                     {
-                        // Retain the existing identity if storage is temporarily unavailable.
-                        try { WriteProtectedPfxFile(pfxPath, pfxBytes); }
-                        catch (IOException) { }
-                        catch (UnauthorizedAccessException) { }
-                        catch (CryptographicException) { }
+                        if (pfxBytes != null) Array.Clear(pfxBytes, 0, pfxBytes.Length);
                     }
                 }
                 else
@@ -290,8 +298,15 @@ namespace DualRemote
                 using (X509Certificate2 created = req.CreateSelfSigned(now.AddDays(-1), now.AddYears(20)))
                 {
                     byte[] pfxBytes = created.Export(X509ContentType.Pfx, PfxPassword);
-                    WriteProtectedPfxFile(pfxPath, pfxBytes);
-                    return LoadPfxForSchannel(pfxBytes);
+                    try
+                    {
+                        WriteProtectedPfxFile(pfxPath, pfxBytes);
+                        return LoadPfxForSchannel(pfxBytes);
+                    }
+                    finally
+                    {
+                        if (pfxBytes != null) Array.Clear(pfxBytes, 0, pfxBytes.Length);
+                    }
                 }
             }
         }
@@ -368,41 +383,89 @@ namespace DualRemote
             get { return Path.Combine(storeDir, "authorized-peers.json"); }
         }
 
+        private string ProtectedPeersFilePath
+        {
+            get { return Path.Combine(storeDir, "authorized-peers.dpapi"); }
+        }
+
+        private byte[] BuildPeersDpapiEntropy()
+        {
+            return Encoding.UTF8.GetBytes("BoBoRemote-V6-Peers-v1|" + (certThumbprint ?? "").ToLowerInvariant());
+        }
+
+        private void ParsePeersJsonIntoList(string jsonText)
+        {
+            if (string.IsNullOrWhiteSpace(jsonText)) return;
+            var ser = new JavaScriptSerializer();
+            object parsed = ser.DeserializeObject(jsonText);
+            object[] items = parsed as object[];
+            if (items == null)
+            {
+                var dict = parsed as Dictionary<string, object>;
+                if (dict != null && dict.ContainsKey("peers")) items = dict["peers"] as object[];
+            }
+            if (items == null) return;
+            for (int i = 0; i < items.Length; i++)
+            {
+                var m = items[i] as Dictionary<string, object>;
+                if (m == null) continue;
+                string nid = ReadStr(m, "nodeId");
+                string thumb = ReadStr(m, "certThumbprint");
+                if (string.IsNullOrEmpty(nid) || !BoBoProtocol.IsValidHexSha256(thumb)) continue;
+                peers.Add(new BoBoAuthorizedPeer
+                {
+                    NodeId = nid,
+                    DeviceCode = ReadStr(m, "deviceCode"),
+                    DeviceName = ReadStr(m, "deviceName"),
+                    CertThumbprint = thumb,
+                    LastHost = ReadStr(m, "lastHost"),
+                    PairedAtUtc = ReadStr(m, "pairedAtUtc"),
+                    LastConnectedUtc = ReadStr(m, "lastConnectedUtc")
+                });
+            }
+        }
+
         private void LoadPeersUnlocked()
         {
             peers = new List<BoBoAuthorizedPeer>();
+            if (File.Exists(ProtectedPeersFilePath))
+            {
+                try
+                {
+                    byte[] raw = File.ReadAllBytes(ProtectedPeersFilePath);
+                    if (raw == null || raw.Length <= PeersDpapiMagic.Length ||
+                        raw[0] != PeersDpapiMagic[0] || raw[1] != PeersDpapiMagic[1] ||
+                        raw[2] != PeersDpapiMagic[2] || raw[3] != PeersDpapiMagic[3])
+                    {
+                        return;
+                    }
+                    byte[] cipher = new byte[raw.Length - PeersDpapiMagic.Length];
+                    Buffer.BlockCopy(raw, PeersDpapiMagic.Length, cipher, 0, cipher.Length);
+                    byte[] plain = ProtectedData.Unprotect(cipher, BuildPeersDpapiEntropy(), DataProtectionScope.CurrentUser);
+                    ParsePeersJsonIntoList(Encoding.UTF8.GetString(plain));
+                    if (File.Exists(PeersFilePath))
+                    {
+                        try { File.Delete(PeersFilePath); } catch { }
+                    }
+                }
+                catch
+                {
+                    // Fail-closed: never fall back to unsigned plaintext authorized-peers.json when protected store exists
+                    peers.Clear();
+                }
+                return;
+            }
+
             if (!File.Exists(PeersFilePath)) return;
             try
             {
-                var ser = new JavaScriptSerializer();
-                object parsed = ser.DeserializeObject(File.ReadAllText(PeersFilePath, Encoding.UTF8));
-                object[] items = parsed as object[];
-                if (items == null)
-                {
-                    var dict = parsed as Dictionary<string, object>;
-                    if (dict != null && dict.ContainsKey("peers")) items = dict["peers"] as object[];
-                }
-                if (items == null) return;
-                for (int i = 0; i < items.Length; i++)
-                {
-                    var m = items[i] as Dictionary<string, object>;
-                    if (m == null) continue;
-                    string nid = ReadStr(m, "nodeId");
-                    string thumb = ReadStr(m, "certThumbprint");
-                    if (string.IsNullOrEmpty(nid) || string.IsNullOrEmpty(thumb)) continue;
-                    peers.Add(new BoBoAuthorizedPeer
-                    {
-                        NodeId = nid,
-                        DeviceCode = ReadStr(m, "deviceCode"),
-                        DeviceName = ReadStr(m, "deviceName"),
-                        CertThumbprint = thumb,
-                        LastHost = ReadStr(m, "lastHost"),
-                        PairedAtUtc = ReadStr(m, "pairedAtUtc"),
-                        LastConnectedUtc = ReadStr(m, "lastConnectedUtc")
-                    });
-                }
+                ParsePeersJsonIntoList(File.ReadAllText(PeersFilePath, Encoding.UTF8));
+                SavePeersUnlocked();
             }
-            catch { }
+            catch
+            {
+                peers.Clear();
+            }
         }
 
         private void SavePeersUnlocked()
@@ -427,7 +490,27 @@ namespace DualRemote
                 var root = new Dictionary<string, object>();
                 root["peers"] = list;
                 var ser = new JavaScriptSerializer();
-                File.WriteAllText(PeersFilePath, ser.Serialize(root), new UTF8Encoding(false));
+                byte[] plain = Encoding.UTF8.GetBytes(ser.Serialize(root));
+                byte[] cipher = ProtectedData.Protect(plain, BuildPeersDpapiEntropy(), DataProtectionScope.CurrentUser);
+                byte[] payload = new byte[PeersDpapiMagic.Length + cipher.Length];
+                Buffer.BlockCopy(PeersDpapiMagic, 0, payload, 0, PeersDpapiMagic.Length);
+                Buffer.BlockCopy(cipher, 0, payload, PeersDpapiMagic.Length, cipher.Length);
+
+                string tmp = ProtectedPeersFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllBytes(tmp, payload);
+                    if (File.Exists(ProtectedPeersFilePath)) File.Replace(tmp, ProtectedPeersFilePath, null);
+                    else File.Move(tmp, ProtectedPeersFilePath);
+                }
+                finally
+                {
+                    try { File.Delete(tmp); } catch { }
+                }
+                if (File.Exists(PeersFilePath))
+                {
+                    try { File.Delete(PeersFilePath); } catch { }
+                }
             }
             catch { }
         }

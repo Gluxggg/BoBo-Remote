@@ -35,6 +35,7 @@ namespace BoBoSetup
             bool launchAfter = true;
             bool autoStart = false;
             bool preserveAutoStart = false;
+            bool installLockService = true;
             bool elevatedChild = false;
             int waitPid = 0;
             string customDir = null;
@@ -52,6 +53,7 @@ namespace BoBoSetup
                 else if (string.Equals(arg, "--no-launch", StringComparison.OrdinalIgnoreCase)) launchAfter = false;
                 else if (string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase)) autoStart = true;
                 else if (string.Equals(arg, "--preserve-autostart", StringComparison.OrdinalIgnoreCase)) preserveAutoStart = true;
+                else if (string.Equals(arg, "--no-lock-service", StringComparison.OrdinalIgnoreCase)) installLockService = false;
                 else if (string.Equals(arg, "--elevated-child", StringComparison.OrdinalIgnoreCase)) elevatedChild = true;
                 else if (arg.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase))
                 {
@@ -87,6 +89,8 @@ namespace BoBoSetup
                 LaunchAfterInstall = launchAfter,
                 AutoStart = autoStart,
                 PreserveAutoStart = preserveAutoStart,
+                InstallLockService = installLockService,
+                Silent = silent,
                 WaitPid = waitPid,
                 PurgeUserData = purgeData
             };
@@ -205,6 +209,8 @@ namespace BoBoSetup
         internal bool LaunchAfterInstall = true;
         internal bool AutoStart;
         internal bool PreserveAutoStart;
+        internal bool InstallLockService = true;
+        internal bool Silent;
         internal int WaitPid;
         internal bool PurgeUserData;
     }
@@ -447,7 +453,7 @@ namespace BoBoSetup
                 }
             }
             catch { }
-            return "7.6.1";
+            return "7.6.2";
         }
 
         internal static Bitmap LoadBrandLogo()
@@ -685,19 +691,36 @@ namespace BoBoSetup
             }
             Report(report, 98, "正在配置低延迟直连防火墙规则…");
             ConfigureWindowsFirewallRules(mainExe, true);
-            if (IsAdministrator())
+            if (options.InstallLockService)
             {
-                Report(report, 99, "正在部署并校验受保护目录锁屏服务…");
-                string svcDetail;
-                bool svcOk = TryRunMainExeSwitch(mainExe, "--upgrade-service", 25000, out svcDetail);
-                LastServiceActionSummary = svcOk
-                    ? "锁屏穿透服务已部署至 Program Files 受保护目录并校验通过。"
-                    : ("锁屏穿透服务部署未完成（" + svcDetail + "），可在软件设置中重新安装/修复。");
-                Report(report, 99, LastServiceActionSummary);
+                if (IsAdministrator())
+                {
+                    Report(report, 99, "正在部署并校验受保护目录锁屏服务…");
+                    string svcDetail;
+                    bool svcOk = TryRunMainExeSwitch(mainExe, "--upgrade-service --firewall-exe=\"" + mainExe + "\"", 25000, out svcDetail);
+                    LastServiceActionSummary = svcOk
+                        ? "锁屏穿透服务已部署至 Program Files 受保护目录并校验通过。"
+                        : ("锁屏穿透服务部署未完成（" + svcDetail + "），可在软件设置中重新安装/修复。");
+                    Report(report, 99, LastServiceActionSummary);
+                }
+                else if (!options.Silent || File.Exists(GetProtectedServiceExePath()))
+                {
+                    Report(report, 99, "正在请求管理员权限配置锁屏穿透服务…");
+                    string svcDetail;
+                    bool svcOk = TryRunMainExeSwitchElevated(mainExe, "--upgrade-service --firewall-exe=\"" + mainExe + "\"", 25000, out svcDetail);
+                    LastServiceActionSummary = svcOk
+                        ? "锁屏穿透服务已部署至 Program Files 受保护目录并校验通过。"
+                        : ("锁屏穿透服务未完成部署（" + svcDetail + "），可在「设置 → 网络与内核」一键启用。");
+                    Report(report, 99, LastServiceActionSummary);
+                }
+                else
+                {
+                    LastServiceActionSummary = "当前为标准用户静默更新且尚未配置锁屏服务（不影响常规远控，可在设置中一键启用）。";
+                }
             }
             else
             {
-                LastServiceActionSummary = "当前为标准用户安装，未配置管理员锁屏穿透服务（不影响常规远控，可在设置中一键启用）。";
+                LastServiceActionSummary = "已按选项跳过系统锁屏服务部署（可在「设置 → 网络与内核」随时开启）。";
             }
 
             Report(report, 100, "安装完成！BoBo Remote 已准备就绪。");
@@ -714,18 +737,16 @@ namespace BoBoSetup
             string mainExeUninstall = Path.Combine(fullDir, MainExeName);
             string protectedSvcExe = GetProtectedServiceExePath();
             string svcSwitchExe = File.Exists(protectedSvcExe) ? protectedSvcExe : (File.Exists(mainExeUninstall) ? mainExeUninstall : null);
-            if (IsAdministrator() && !string.IsNullOrEmpty(svcSwitchExe))
+            if (!string.IsNullOrEmpty(svcSwitchExe) && (IsAdministrator() || File.Exists(protectedSvcExe)))
             {
                 Report(report, 6, "正在停止并卸载锁屏穿透服务…");
                 string unDetail;
-                bool unOk = TryRunMainExeSwitch(svcSwitchExe, "--uninstall-service", 15000, out unDetail);
+                bool unOk = IsAdministrator()
+                    ? TryRunMainExeSwitch(svcSwitchExe, "--uninstall-service", 15000, out unDetail)
+                    : TryRunMainExeSwitchElevated(svcSwitchExe, "--uninstall-service", 15000, out unDetail);
                 LastServiceActionSummary = unOk
                     ? "锁屏穿透服务及受保护服务目录已移除。"
                     : ("锁屏穿透服务卸载提示：" + unDetail);
-            }
-            else if (!IsAdministrator() && File.Exists(protectedSvcExe))
-            {
-                LastServiceActionSummary = "检测到系统级锁屏服务仍存在，如需彻底移除请以管理员身份运行卸载程序。";
             }
             Report(report, 10, "正在关闭运行中的 BoBo Remote 进程…");
             StopRunningProcessesInDir(fullDir);
@@ -853,6 +874,51 @@ namespace BoBoSetup
                     }
                     return p.ExitCode == 0;
                 }
+            }
+            catch (Exception ex)
+            {
+                detail = ex.Message;
+                return false;
+            }
+        }
+
+        private static bool TryRunMainExeSwitchElevated(string mainExe, string arguments, int timeoutMs, out string detail)
+        {
+            detail = "";
+            if (string.IsNullOrWhiteSpace(mainExe) || !File.Exists(mainExe))
+            {
+                detail = "程序文件不存在";
+                return false;
+            }
+            try
+            {
+                var psi = new ProcessStartInfo(mainExe, arguments ?? "")
+                {
+                    WorkingDirectory = Path.GetDirectoryName(mainExe),
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (p == null)
+                    {
+                        detail = "未能启动提权进程";
+                        return false;
+                    }
+                    if (!p.WaitForExit(Math.Max(1000, timeoutMs)))
+                    {
+                        detail = "提权操作超时";
+                        return false;
+                    }
+                    detail = p.ExitCode == 0 ? "成功" : ("退出码 " + p.ExitCode);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                detail = ex.NativeErrorCode == 1223 ? "已取消管理员授权" : ex.Message;
+                return false;
             }
             catch (Exception ex)
             {
@@ -1382,6 +1448,7 @@ namespace BoBoSetup
         private CheckBox startMenuChk;
         private CheckBox launchChk;
         private CheckBox autoStartChk;
+        private CheckBox lockServiceChk;
         private RoundedButton installBtn;
 
         private SmoothProgressBar progressBar;
@@ -1586,7 +1653,7 @@ namespace BoBoSetup
             // White card for path + checkboxes
             var card = new Panel
             {
-                Bounds = new Rectangle(24, 102, 510, 178),
+                Bounds = new Rectangle(24, 96, 510, 200),
                 BackColor = SetupPalette.Card
             };
             card.Paint += delegate(object s, PaintEventArgs e)
@@ -1603,20 +1670,20 @@ namespace BoBoSetup
                 Text = "安装目录",
                 Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold),
                 ForeColor = SetupPalette.Ink,
-                Location = new Point(18, 16),
+                Location = new Point(18, 14),
                 AutoSize = true
             };
             pathBox = new TextBox
             {
                 Text = options.InstallDir,
                 Font = new Font("Microsoft YaHei UI", 9f),
-                Location = new Point(18, 40),
+                Location = new Point(18, 36),
                 Size = new Size(374, 28),
                 BorderStyle = BorderStyle.FixedSingle
             };
             var browseBtn = new RoundedButton("更改目录…", false)
             {
-                Location = new Point(402, 37),
+                Location = new Point(402, 33),
                 Size = new Size(90, 30)
             };
             browseBtn.Click += delegate
@@ -1635,10 +1702,11 @@ namespace BoBoSetup
                 }
             };
 
-            desktopChk = MakeCheck("创建桌面快捷方式（BoBo Remote）", options.CreateDesktopShortcut, 18, 82);
-            startMenuChk = MakeCheck("创建开始菜单快捷方式", options.CreateStartMenuShortcut, 266, 82);
-            launchChk = MakeCheck("安装完成后立即启动 BoBo Remote", options.LaunchAfterInstall, 18, 112);
-            autoStartChk = MakeCheck("开机自动启动（需软件内手动授权才会允许连入）", options.AutoStart, 18, 142);
+            desktopChk = MakeCheck("创建桌面快捷方式（BoBo Remote）", options.CreateDesktopShortcut, 18, 76);
+            startMenuChk = MakeCheck("创建开始菜单快捷方式", options.CreateStartMenuShortcut, 266, 76);
+            launchChk = MakeCheck("安装完成后立即启动 BoBo Remote", options.LaunchAfterInstall, 18, 106);
+            autoStartChk = MakeCheck("开机自动启动（需软件内手动授权才会允许连入）", options.AutoStart, 18, 136);
+            lockServiceChk = MakeCheck("启用锁屏与 UAC 安全桌面穿透服务（推荐，支持锁屏解锁）", options.InstallLockService, 18, 166);
 
             card.Controls.Add(dirLabel);
             card.Controls.Add(pathBox);
@@ -1647,11 +1715,12 @@ namespace BoBoSetup
             card.Controls.Add(startMenuChk);
             card.Controls.Add(launchChk);
             card.Controls.Add(autoStartChk);
+            card.Controls.Add(lockServiceChk);
             page.Controls.Add(card);
 
             installBtn = new RoundedButton("立即安装", true)
             {
-                Bounds = new Rectangle(170, 298, 218, 42)
+                Bounds = new Rectangle(170, 306, 218, 40)
             };
             installBtn.Click += delegate { BeginInstall(); };
             page.Controls.Add(installBtn);
@@ -1661,7 +1730,7 @@ namespace BoBoSetup
                 Text = "MIT 开源许可 · V6 全内置零外挂原生内核（DXGI + D3D11VA + TLS 1.2 + UDP+FEC）· 随时可在系统应用列表卸载",
                 Font = new Font("Microsoft YaHei UI", 7.8f),
                 ForeColor = SetupPalette.Muted,
-                Bounds = new Rectangle(24, 348, 510, 22),
+                Bounds = new Rectangle(24, 351, 510, 20),
                 TextAlign = ContentAlignment.MiddleCenter
             };
             page.Controls.Add(foot);
@@ -1839,6 +1908,7 @@ namespace BoBoSetup
             options.CreateStartMenuShortcut = startMenuChk.Checked;
             options.LaunchAfterInstall = launchChk.Checked;
             options.AutoStart = autoStartChk.Checked;
+            options.InstallLockService = lockServiceChk.Checked;
 
             string reason;
             if (!InstallerEngine.IsSafeInstallDir(options.InstallDir, out reason))

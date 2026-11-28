@@ -662,7 +662,7 @@ namespace DualRemote
                     bool peerPaired = identity.IsPeerAuthorized(clientNodeId, clientThumb);
                     // Require cryptographic proof-of-possession (AUTH_PROOF or signed PAIR_REQUEST) before any privileged command!
                     bool authorized = false;
-                    List<BoBoMonitorDescriptor> monitors = BoBoCoreInterop.EnumerateMonitors();
+                    List<BoBoMonitorDescriptor> monitors = nativeHost.EnumerateMonitors();
 
                     var ack = new Dictionary<string, object>();
                     ack["type"] = "HELLO_ACK";
@@ -981,7 +981,7 @@ namespace DualRemote
                                 if (ct.IsCancellationRequested || !object.ReferenceEquals(activeStreamConn, conn)) break;
                                 // The outgoing connection cannot restore another session's display.
                                 nativeHost.RestoreSuperDisplay();
-                                List<BoBoMonitorDescriptor> currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                List<BoBoMonitorDescriptor> currentMonitors = nativeHost.EnumerateMonitors();
                                 activeMonitorIndex = FindMonitorIndex(currentMonitors, reqMon);
                                 display.ViewportProtocol = BoBoProtocol.GetInt(msg, "superDisplayVersion", 0) >= BoBoDisplayState.Version;
                                 display.SetRequestedStream(reqW, reqH);
@@ -1280,7 +1280,7 @@ namespace DualRemote
                                 });
                             }
 
-                            List<BoBoMonitorDescriptor> curMons = BoBoCoreInterop.EnumerateMonitors();
+                            List<BoBoMonitorDescriptor> curMons = nativeHost.EnumerateMonitors();
                             var started = new Dictionary<string, object>();
                             started["type"] = "STREAM_STARTED";
                             started["width"] = reqW;
@@ -1400,13 +1400,13 @@ namespace DualRemote
                                 reqFps = abrController.CurrentFps;
                                 display.SetRequestedStream(reqW, reqH);
 
-                                List<BoBoMonitorDescriptor> currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                List<BoBoMonitorDescriptor> currentMonitors = nativeHost.EnumerateMonitors();
                                 reqMon = FindMonitorIndex(currentMonitors, reqMon);
                                 if (reqMon != activeMonitorIndex)
                                 {
                                     nativeHost.InjectInput(activeMonitorIndex, new BoBoInputPacket { Kind = 6 });
                                     nativeHost.RestoreSuperDisplay();
-                                    currentMonitors = BoBoCoreInterop.EnumerateMonitors();
+                                    currentMonitors = nativeHost.EnumerateMonitors();
                                     reqMon = FindMonitorIndex(currentMonitors, reqMon);
                                     display.UpdateDesktop(reqMon, currentMonitors, nativeHost);
                                 }
@@ -1536,7 +1536,7 @@ namespace DualRemote
                             {
                                 if (!object.ReferenceEquals(activeStreamConn, conn) || ct.IsCancellationRequested) break;
                                 display.ReadRequest(msg, "enable");
-                                display.UpdateDesktop(activeMonitorIndex, BoBoCoreInterop.EnumerateMonitors(), nativeHost);
+                                display.UpdateDesktop(activeMonitorIndex, nativeHost.EnumerateMonitors(), nativeHost);
                                 int streamW, streamH;
                                 display.GetStreamSize(abrController.AutoEnabled ? wanPixelBudget : long.MaxValue, out streamW, out streamH);
                                 int effEnc = abrController.CurrentBitrateKbps;
@@ -1891,7 +1891,7 @@ namespace DualRemote
                 }
                 if (DesktopWidth <= 0 || DesktopHeight <= 0)
                 {
-                    monitors = BoBoCoreInterop.EnumerateMonitors();
+                    monitors = bridge != null ? bridge.EnumerateMonitors() : BoBoCoreInterop.EnumerateMonitors();
                     if (index < monitors.Count)
                     {
                         DesktopWidth = monitors[index].Width;
@@ -1941,8 +1941,9 @@ namespace DualRemote
             scale = Math.Min(scale, Math.Sqrt((double)pixelBudget / ((long)desktopWidth * desktopHeight)));
             // The capture path requires even NV12 dimensions and has a 320 x 240 minimum.
             scale = Math.Max(scale, Math.Max(320.0 / desktopWidth, 240.0 / desktopHeight));
-            width = (int)(desktopWidth * scale + 1e-7) & ~1;
-            height = (int)(desktopHeight * scale + 1e-7) & ~1;
+            // Align to 16x8 so hardware H.265/H.264 encoders never pad right/bottom edges with green chroma
+            width = Math.Max(320, ((int)(desktopWidth * scale + 1e-7)) & ~15);
+            height = Math.Max(240, ((int)(desktopHeight * scale + 1e-7)) & ~7);
         }
 
         private static void CapVideoPixels(ref int width, ref int height, long pixelBudget)
@@ -1951,8 +1952,8 @@ namespace DualRemote
             long pixels = (long)width * height;
             if (pixels <= pixelBudget) return;
             double scale = Math.Sqrt((double)pixelBudget / pixels);
-            width = Math.Max(2, (int)(width * scale) & ~1);
-            height = Math.Max(2, (int)(height * scale) & ~1);
+            width = Math.Max(320, ((int)(width * scale)) & ~15);
+            height = Math.Max(240, ((int)(height * scale)) & ~7);
         }
 
         private static void TryRequestDebouncedRecoveryKeyframe(ref int lastTick, BoBoSystemService.BoBoSecureDesktopBridge host, int cooldownMs)

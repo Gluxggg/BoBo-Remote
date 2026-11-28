@@ -998,15 +998,6 @@ namespace DualRemote
             {
                 stopping = false;
                 EnsureSoftwareSasPolicy();
-                Task.Run(delegate
-                {
-                    try
-                    {
-                        string mainExe = Process.GetCurrentProcess().MainModule.FileName;
-                        BoBoNatTraversal.ConfigureFirewallRulesForPaths(mainExe, BoBoEmbeddedTailnet.GetExpectedBinaryPath(), true);
-                    }
-                    catch { }
-                });
                 watchdogThread = new Thread(WatchdogLoop)
                 {
                     IsBackground = true,
@@ -1182,6 +1173,7 @@ namespace DualRemote
         private const byte OpPing = 12;
         private const byte OpApplySuperDisplay = 13;
         private const byte OpRestoreSuperDisplay = 14;
+        private const byte OpEnumerateMonitors = 15;
 
         private const byte OpVideoFrame = 100;
         private const byte OpAudioFrame = 101;
@@ -1189,6 +1181,7 @@ namespace DualRemote
         private const byte OpAck = 104;
         private const byte OpPong = 105;
         private const byte OpSuperDisplayReply = 106;
+        private const byte OpMonitorsReply = 107;
 
         private static bool WritePipeMessage(Stream stream, object writeLock, byte op, byte[] payload)
         {
@@ -1297,14 +1290,18 @@ namespace DualRemote
             private readonly object inputQueueLock = new object();
             private readonly Queue<Action> inputQueue = new Queue<Action>();
             private readonly AutoResetEvent inputWakeEvent = new AutoResetEvent(false);
+            private readonly object hostGate = new object();
+            private readonly object clientsGate = new object();
+            private readonly List<NamedPipeServerStream> activeClientPipes = new List<NamedPipeServerStream>();
             private readonly Thread inputThread;
             private readonly Thread serverThread;
 
             private volatile bool disposed;
-            private long lastDesktopSyncTicks;
             private int injectedPackets;
             private int sasCalls;
             private NamedPipeServerStream activeServerPipe;
+            private BoBoCoreInterop.BoBoHostNativeHandle activeHostHandle;
+            private long sessionToken;
 
             internal int InjectedPacketCount { get { return Volatile.Read(ref injectedPackets); } }
             internal int SasCallCount { get { return Volatile.Read(ref sasCalls); } }
@@ -1340,18 +1337,58 @@ namespace DualRemote
                     NamedPipeServerStream pipe = null;
                     try
                     {
-                        pipe = CreateSecuredPipeServer(pipeName, targetSessionId, restrictToConsoleUser);
+                        SecurityIdentifier grantedUserSid;
+                        pipe = CreateSecuredPipeServer(pipeName, targetSessionId, restrictToConsoleUser, out grantedUserSid);
                         activeServerPipe = pipe;
                         IAsyncResult ar = pipe.BeginWaitForConnection(null, null);
                         WaitHandle[] waits = new WaitHandle[] { ar.AsyncWaitHandle, stopEvent.WaitHandle };
-                        int idx = WaitHandle.WaitAny(waits);
-                        if (idx != 0)
+                        bool recreateForUserLogon = false;
+                        while (!disposed && !stopEvent.IsSet)
+                        {
+                            int idx = WaitHandle.WaitAny(waits, 1500);
+                            if (idx == 1)
+                            {
+                                try { pipe.Dispose(); } catch { }
+                                return;
+                            }
+                            if (idx == 0) break;
+                            // WaitTimeout: if DesktopHelper started before user sign-in, recreate pipe ACL once console user SID appears
+                            if (restrictToConsoleUser && targetSessionId >= 0)
+                            {
+                                SecurityIdentifier nowSid = TryGetSessionUserSid(targetSessionId);
+                                if (nowSid != null && !nowSid.Equals(grantedUserSid))
+                                {
+                                    recreateForUserLogon = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (recreateForUserLogon || disposed || stopEvent.IsSet)
                         {
                             try { pipe.Dispose(); } catch { }
-                            break;
+                            continue;
                         }
+
                         pipe.EndWaitForConnection(ar);
-                        HandleClientConnection(pipe);
+                        if (!VerifyPipeClientProcess(pipe, targetSessionId, restrictToConsoleUser))
+                        {
+                            try { pipe.Dispose(); } catch { }
+                            continue;
+                        }
+
+                        NamedPipeServerStream connectedPipe = pipe;
+                        pipe = null;
+                        activeServerPipe = null;
+                        lock (clientsGate)
+                        {
+                            if (disposed || stopEvent.IsSet)
+                            {
+                                try { connectedPipe.Dispose(); } catch { }
+                                break;
+                            }
+                            activeClientPipes.Add(connectedPipe);
+                        }
+                        ThreadPool.QueueUserWorkItem(delegate { HandleClientConnection(connectedPipe); });
                     }
                     catch
                     {
@@ -1371,8 +1408,7 @@ namespace DualRemote
             private void HandleClientConnection(NamedPipeServerStream pipe)
             {
                 var writeLock = new object();
-                BoBoCoreInterop.BoBoHostNativeHandle hostHandle = null;
-                long sessionToken = 0;
+                long connSessionToken = 0;
 
                 try
                 {
@@ -1395,11 +1431,6 @@ namespace DualRemote
                         }
                         else if (op == OpCreateSession)
                         {
-                            if (hostHandle != null)
-                            {
-                                try { hostHandle.Dispose(); } catch { }
-                                hostHandle = null;
-                            }
                             if (payload == null || payload.Length < 24)
                             {
                                 SendCreateReply(pipe, writeLock, false, 0, 0, "请求参数不完整。");
@@ -1415,59 +1446,85 @@ namespace DualRemote
                             bool prefAac = payload[22] != 0;
                             bool prefHevc = payload[23] != 0;
 
-                            long myToken = Interlocked.Increment(ref sessionToken);
-                            BoBoCoreInterop.BoBoHostNativeHandle createdRef = null;
-                            string err;
-                            createdRef = BoBoCoreInterop.CreateHostSession(
-                                monIdx, w, h, fps, bitrate, mute,
-                                delegate(byte[] data, bool isKey, int vw, int vh, uint ts)
-                                {
-                                    if (Volatile.Read(ref sessionToken) != myToken || data == null || data.Length == 0) return;
-                                    BoBoCoreInterop.BoBoHostNativeHandle hRef = createdRef;
-                                    byte vCodec = hRef != null ? (byte)hRef.VideoCodec : (byte)BoBoCoreInterop.VideoCodecH264;
-                                    byte[] pkt = new byte[14 + data.Length];
-                                    pkt[0] = isKey ? (byte)1 : (byte)0;
-                                    WriteInt32LE(pkt, 1, vw);
-                                    WriteInt32LE(pkt, 5, vh);
-                                    WriteUInt32LE(pkt, 9, ts);
-                                    pkt[13] = vCodec;
-                                    Buffer.BlockCopy(data, 0, pkt, 14, data.Length);
-                                    WritePipeMessage(pipe, writeLock, OpVideoFrame, pkt);
-                                },
-                                delegate(byte[] data, int sr, int ch, int samples)
-                                {
-                                    if (Volatile.Read(ref sessionToken) != myToken || data == null || data.Length == 0) return;
-                                    BoBoCoreInterop.BoBoHostNativeHandle hRef = createdRef;
-                                    byte aCodec = hRef != null ? (byte)hRef.AudioCodec : (byte)BoBoCoreInterop.AudioCodecAdpcm;
-                                    byte[] pkt = new byte[13 + data.Length];
-                                    WriteInt32LE(pkt, 0, sr);
-                                    WriteInt32LE(pkt, 4, ch);
-                                    WriteInt32LE(pkt, 8, samples);
-                                    pkt[12] = aCodec;
-                                    Buffer.BlockCopy(data, 0, pkt, 13, data.Length);
-                                    WritePipeMessage(pipe, writeLock, OpAudioFrame, pkt);
-                                },
-                                out err,
-                                compCursor,
-                                prefAac,
-                                prefHevc);
-                            hostHandle = createdRef;
-                            if (hostHandle != null)
+                            // Wake idle lock-screen display on input thread before initializing capture
+                            EnqueueInputAction(delegate
                             {
-                                SendCreateReply(pipe, writeLock, true, (byte)hostHandle.VideoCodec, (byte)hostHandle.AudioCodec, "");
+                                BoBoCoreInterop.SyncInputDesktop();
+                                BoBoCoreInterop.InjectInput(monIdx, new BoBoInputPacket { Kind = 2, Flags = 0, A = 0, B = 0 });
+                            });
+
+                            BoBoCoreInterop.BoBoHostNativeHandle createdRef = null;
+                            string err = "";
+                            lock (hostGate)
+                            {
+                                Interlocked.Increment(ref sessionToken);
+                                if (activeHostHandle != null)
+                                {
+                                    try { activeHostHandle.Dispose(); } catch { }
+                                    activeHostHandle = null;
+                                }
+
+                                long myToken = Interlocked.Increment(ref sessionToken);
+                                connSessionToken = myToken;
+                                createdRef = BoBoCoreInterop.CreateHostSession(
+                                    monIdx, w, h, fps, bitrate, mute,
+                                    delegate(byte[] data, bool isKey, int vw, int vh, uint ts)
+                                    {
+                                        if (disposed || Volatile.Read(ref sessionToken) != myToken || data == null || data.Length == 0) return;
+                                        BoBoCoreInterop.BoBoHostNativeHandle hRef = createdRef;
+                                        byte vCodec = hRef != null ? (byte)hRef.VideoCodec : (byte)BoBoCoreInterop.VideoCodecH264;
+                                        byte[] pkt = new byte[14 + data.Length];
+                                        pkt[0] = isKey ? (byte)1 : (byte)0;
+                                        WriteInt32LE(pkt, 1, vw);
+                                        WriteInt32LE(pkt, 5, vh);
+                                        WriteUInt32LE(pkt, 9, ts);
+                                        pkt[13] = vCodec;
+                                        Buffer.BlockCopy(data, 0, pkt, 14, data.Length);
+                                        WritePipeMessage(pipe, writeLock, OpVideoFrame, pkt);
+                                    },
+                                    delegate(byte[] data, int sr, int ch, int samples)
+                                    {
+                                        if (disposed || Volatile.Read(ref sessionToken) != myToken || data == null || data.Length == 0) return;
+                                        BoBoCoreInterop.BoBoHostNativeHandle hRef = createdRef;
+                                        byte aCodec = hRef != null ? (byte)hRef.AudioCodec : (byte)BoBoCoreInterop.AudioCodecAdpcm;
+                                        byte[] pkt = new byte[13 + data.Length];
+                                        WriteInt32LE(pkt, 0, sr);
+                                        WriteInt32LE(pkt, 4, ch);
+                                        WriteInt32LE(pkt, 8, samples);
+                                        pkt[12] = aCodec;
+                                        Buffer.BlockCopy(data, 0, pkt, 13, data.Length);
+                                        WritePipeMessage(pipe, writeLock, OpAudioFrame, pkt);
+                                    },
+                                    out err,
+                                    compCursor,
+                                    prefAac,
+                                    prefHevc);
+                                activeHostHandle = createdRef;
+                            }
+                            if (createdRef != null)
+                            {
+                                SendCreateReply(pipe, writeLock, true, (byte)createdRef.VideoCodec, (byte)createdRef.AudioCodec, "");
                             }
                             else
                             {
+                                connSessionToken = 0;
                                 SendCreateReply(pipe, writeLock, false, 0, 0, err ?? "CreateHostSession failed");
                             }
                         }
                         else if (op == OpDestroySession)
                         {
-                            Interlocked.Increment(ref sessionToken);
-                            if (hostHandle != null)
+                            lock (hostGate)
                             {
-                                try { hostHandle.Dispose(); } catch { }
-                                hostHandle = null;
+                                if (connSessionToken != 0 && Volatile.Read(ref sessionToken) == connSessionToken)
+                                {
+                                    Interlocked.Increment(ref sessionToken);
+                                    if (activeHostHandle != null)
+                                    {
+                                        try { activeHostHandle.Dispose(); } catch { }
+                                        activeHostHandle = null;
+                                    }
+                                    connSessionToken = 0;
+                                }
                             }
                             WritePipeMessage(pipe, writeLock, OpAck, new byte[] { 1 });
                         }
@@ -1478,30 +1535,34 @@ namespace DualRemote
                             int h = ReadInt32LE(payload, 8);
                             int fps = ReadInt32LE(payload, 12);
                             int bitrate = ReadInt32LE(payload, 16);
-                            bool ok = hostHandle != null && hostHandle.Reconfigure(monIdx, w, h, fps, bitrate);
+                            bool ok = false;
+                            lock (hostGate)
+                            {
+                                ok = activeHostHandle != null && activeHostHandle.Reconfigure(monIdx, w, h, fps, bitrate);
+                            }
                             WritePipeMessage(pipe, writeLock, OpAck, new byte[] { ok ? (byte)1 : (byte)0 });
                         }
                         else if (op == OpSetBitrate && payload != null && payload.Length >= 4)
                         {
                             int bitrate = ReadInt32LE(payload, 0);
-                            if (hostHandle != null) hostHandle.SetBitrate(bitrate);
+                            lock (hostGate) { if (activeHostHandle != null) activeHostHandle.SetBitrate(bitrate); }
                         }
                         else if (op == OpSetFps && payload != null && payload.Length >= 4)
                         {
                             int fps = ReadInt32LE(payload, 0);
-                            if (hostHandle != null) hostHandle.SetFps(fps);
+                            lock (hostGate) { if (activeHostHandle != null) activeHostHandle.SetFps(fps); }
                         }
                         else if (op == OpSetCompositeCursor && payload != null && payload.Length >= 1)
                         {
-                            if (hostHandle != null) hostHandle.SetCompositeCursor(payload[0] != 0);
+                            lock (hostGate) { if (activeHostHandle != null) activeHostHandle.SetCompositeCursor(payload[0] != 0); }
                         }
                         else if (op == OpRequestKeyframe)
                         {
-                            if (hostHandle != null) hostHandle.RequestKeyframe();
+                            lock (hostGate) { if (activeHostHandle != null) activeHostHandle.RequestKeyframe(); }
                         }
                         else if (op == OpSetMuteHost && payload != null && payload.Length >= 1)
                         {
-                            if (hostHandle != null) hostHandle.SetMuteHost(payload[0] != 0);
+                            lock (hostGate) { if (activeHostHandle != null) activeHostHandle.SetMuteHost(payload[0] != 0); }
                         }
                         else if (op == OpInjectInput && payload != null && payload.Length >= 10)
                         {
@@ -1515,7 +1576,7 @@ namespace DualRemote
                             int monIdx = ReadInt32LE(payload, 6);
                             EnqueueInputAction(delegate
                             {
-                                SyncInputDesktopThrottled();
+                                BoBoCoreInterop.SyncInputDesktop();
                                 BoBoCoreInterop.InjectInput(monIdx, pkt);
                                 Interlocked.Increment(ref injectedPackets);
                             });
@@ -1527,7 +1588,7 @@ namespace DualRemote
                             {
                                 EnqueueInputAction(delegate
                                 {
-                                    SyncInputDesktopThrottled();
+                                    BoBoCoreInterop.SyncInputDesktop();
                                     BoBoCoreInterop.InjectUnicodeText(text);
                                     Interlocked.Increment(ref injectedPackets);
                                 });
@@ -1537,7 +1598,7 @@ namespace DualRemote
                         {
                             EnqueueInputAction(delegate
                             {
-                                SyncInputDesktopThrottled();
+                                BoBoCoreInterop.SyncInputDesktop();
                                 BoBoCoreInterop.SendSAS();
                                 Interlocked.Increment(ref sasCalls);
                             });
@@ -1559,15 +1620,72 @@ namespace DualRemote
                         {
                             BoBoCoreInterop.RestoreSuperDisplay();
                         }
+                        else if (op == OpEnumerateMonitors)
+                        {
+                            List<BoBoMonitorDescriptor> mons = null;
+                            using (var done = new ManualResetEventSlim(false))
+                            {
+                                EnqueueInputAction(delegate
+                                {
+                                    try
+                                    {
+                                        BoBoCoreInterop.SyncInputDesktop();
+                                        mons = BoBoCoreInterop.EnumerateMonitors();
+                                    }
+                                    finally
+                                    {
+                                        try { done.Set(); } catch { }
+                                    }
+                                });
+                                done.Wait(1200);
+                            }
+                            WritePipeMessage(pipe, writeLock, OpMonitorsReply, SerializeMonitorListReply(mons));
+                        }
                     }
                 }
                 finally
                 {
-                    Interlocked.Increment(ref sessionToken);
-                    if (hostHandle != null)
+                    if (connSessionToken != 0)
                     {
-                        try { hostHandle.Dispose(); } catch { }
+                        lock (hostGate)
+                        {
+                            if (Volatile.Read(ref sessionToken) == connSessionToken)
+                            {
+                                Interlocked.Increment(ref sessionToken);
+                                if (activeHostHandle != null)
+                                {
+                                    try { activeHostHandle.Dispose(); } catch { }
+                                    activeHostHandle = null;
+                                }
+                            }
+                        }
                     }
+                    lock (clientsGate) { activeClientPipes.Remove(pipe); }
+                    try { pipe.Dispose(); } catch { }
+                }
+            }
+
+            private static byte[] SerializeMonitorListReply(List<BoBoMonitorDescriptor> mons)
+            {
+                if (mons == null || mons.Count == 0) return new byte[] { 0, 0, 0, 0 };
+                using (var ms = new MemoryStream())
+                {
+                    byte[] tmp = new byte[4];
+                    WriteInt32LE(tmp, 0, mons.Count);
+                    ms.Write(tmp, 0, 4);
+                    for (int i = 0; i < mons.Count; i++)
+                    {
+                        BoBoMonitorDescriptor m = mons[i];
+                        WriteInt32LE(tmp, 0, m.Index); ms.Write(tmp, 0, 4);
+                        ms.WriteByte(m.IsPrimary ? (byte)1 : (byte)0);
+                        WriteInt32LE(tmp, 0, m.Width); ms.Write(tmp, 0, 4);
+                        WriteInt32LE(tmp, 0, m.Height); ms.Write(tmp, 0, 4);
+                        byte[] nameBytes = Encoding.UTF8.GetBytes(m.Name ?? "");
+                        int nLen = Math.Min(1024, nameBytes.Length);
+                        WriteInt16LE(tmp, 0, (short)nLen); ms.Write(tmp, 0, 2);
+                        if (nLen > 0) ms.Write(nameBytes, 0, nLen);
+                    }
+                    return ms.ToArray();
                 }
             }
 
@@ -1612,17 +1730,6 @@ namespace DualRemote
                 }
             }
 
-            private void SyncInputDesktopThrottled()
-            {
-                long now = Stopwatch.GetTimestamp();
-                long last = Interlocked.Read(ref lastDesktopSyncTicks);
-                if (last == 0 || ((now - last) * 1000.0 / Stopwatch.Frequency) >= 25.0)
-                {
-                    BoBoCoreInterop.SyncInputDesktop();
-                    Interlocked.Exchange(ref lastDesktopSyncTicks, now);
-                }
-            }
-
             public void Dispose()
             {
                 if (disposed) return;
@@ -1633,6 +1740,25 @@ namespace DualRemote
                 if (p != null)
                 {
                     try { p.Dispose(); } catch { }
+                }
+                List<NamedPipeServerStream> clientsCopy;
+                lock (clientsGate)
+                {
+                    clientsCopy = new List<NamedPipeServerStream>(activeClientPipes);
+                    activeClientPipes.Clear();
+                }
+                for (int i = 0; i < clientsCopy.Count; i++)
+                {
+                    try { clientsCopy[i].Dispose(); } catch { }
+                }
+                lock (hostGate)
+                {
+                    Interlocked.Increment(ref sessionToken);
+                    if (activeHostHandle != null)
+                    {
+                        try { activeHostHandle.Dispose(); } catch { }
+                        activeHostHandle = null;
+                    }
                 }
                 if (serverThread != null && serverThread.IsAlive)
                 {
@@ -1647,8 +1773,75 @@ namespace DualRemote
             }
         }
 
-        private static NamedPipeServerStream CreateSecuredPipeServer(string pipeName, int sessionId, bool includeConsoleUser)
+        internal static bool IsAuthorizedHelperClientImage(string imgPath, uint clientSid, int targetSessionId, string protectedSvcExe)
         {
+            if (string.IsNullOrWhiteSpace(imgPath)) return false;
+            if (clientSid == 0 && !string.IsNullOrEmpty(protectedSvcExe) &&
+                string.Equals(imgPath, protectedSvcExe, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (targetSessionId < 0 || clientSid != (uint)targetSessionId) return false;
+            return string.Equals(Path.GetFileName(imgPath), "BoBo远程.exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool VerifyPipeClientProcess(NamedPipeServerStream pipe, int targetSessionId, bool restrictToConsoleUser)
+        {
+            if (pipe == null) return false;
+            bool addedRef = false;
+            uint clientPid = 0;
+            try
+            {
+                pipe.SafePipeHandle.DangerousAddRef(ref addedRef);
+                if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out clientPid) || clientPid == 0)
+                    return false;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (addedRef) { try { pipe.SafePipeHandle.DangerousRelease(); } catch { } }
+            }
+
+            if (!restrictToConsoleUser)
+            {
+                return clientPid == unchecked((uint)Process.GetCurrentProcess().Id);
+            }
+
+            uint clientSid;
+            if (!ProcessIdToSessionId(clientPid, out clientSid)) return false;
+
+            IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, clientPid);
+            if (hProc == IntPtr.Zero) return false;
+            try
+            {
+                var sb = new StringBuilder(1024);
+                uint cap = (uint)sb.Capacity;
+                if (!QueryFullProcessImageNameW(hProc, 0, sb, ref cap) || cap == 0) return false;
+                string imgPath = sb.ToString();
+                if (!IsAuthorizedHelperClientImage(imgPath, clientSid, targetSessionId, GetProtectedServiceExePath()))
+                    return false;
+                return File.Exists(imgPath);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                CloseHandle(hProc);
+            }
+        }
+
+        private static NamedPipeServerStream CreateSecuredPipeServer(
+            string pipeName,
+            int sessionId,
+            bool includeConsoleUser,
+            out SecurityIdentifier grantedUserSid)
+        {
+            grantedUserSid = null;
             var ps = new PipeSecurity();
             ps.AddAccessRule(new PipeAccessRule(
                 new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
@@ -1665,6 +1858,7 @@ namespace DualRemote
                 SecurityIdentifier consoleSid = TryGetSessionUserSid(sessionId);
                 if (consoleSid != null)
                 {
+                    grantedUserSid = consoleSid;
                     ps.AddAccessRule(new PipeAccessRule(consoleSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
                     addedUser = true;
                 }
@@ -1687,7 +1881,7 @@ namespace DualRemote
             return new NamedPipeServerStream(
                 pipeName,
                 PipeDirection.InOut,
-                1,
+                16,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous,
                 65536,
@@ -1928,6 +2122,35 @@ namespace DualRemote
                 WritePipeMessage(pipe, writeLock, OpRestoreSuperDisplay, null);
             }
 
+            internal List<BoBoMonitorDescriptor> EnumerateMonitors()
+            {
+                byte[] rep = SendRpc(OpEnumerateMonitors, null, OpMonitorsReply, 1500);
+                var list = new List<BoBoMonitorDescriptor>();
+                if (rep == null || rep.Length < 4) return list;
+                int count = ReadInt32LE(rep, 0);
+                int off = 4;
+                for (int i = 0; i < count && off + 15 <= rep.Length; i++)
+                {
+                    int idx = ReadInt32LE(rep, off); off += 4;
+                    bool pri = rep[off++] != 0;
+                    int w = ReadInt32LE(rep, off); off += 4;
+                    int h = ReadInt32LE(rep, off); off += 4;
+                    int nLen = ReadInt16LE(rep, off); off += 2;
+                    if (nLen < 0 || off + nLen > rep.Length) break;
+                    string name = nLen > 0 ? Encoding.UTF8.GetString(rep, off, nLen) : ("DISPLAY" + (idx + 1));
+                    off += nLen;
+                    list.Add(new BoBoMonitorDescriptor
+                    {
+                        Index = idx,
+                        IsPrimary = pri,
+                        Width = w,
+                        Height = h,
+                        Name = name
+                    });
+                }
+                return list;
+            }
+
             private byte[] SendRpc(byte reqOp, byte[] payload, byte expectedReplyOp, int timeoutMs)
             {
                 if (disposed || disconnected) return null;
@@ -1999,7 +2222,7 @@ namespace DualRemote
                                 try { cb(audio, sr, ch, samples); } catch { }
                             }
                         }
-                        else if (op == OpCreateReply || op == OpAck || op == OpPong || op == OpSuperDisplayReply)
+                        else if (op == OpCreateReply || op == OpAck || op == OpPong || op == OpSuperDisplayReply || op == OpMonitorsReply)
                         {
                             lock (rpcStateLock)
                             {
@@ -2375,6 +2598,11 @@ namespace DualRemote
 
                 // Prefer SYSTEM Helper when available so capture survives Winlogon/UAC switches seamlessly
                 DesktopHelperClient client = TryConnectHelper(true);
+                if (client == null && customPipeNameProvider == null && IsServiceRunning())
+                {
+                    try { Thread.Sleep(150); } catch { }
+                    client = TryConnectHelper(true);
+                }
                 if (client != null)
                 {
                     string helperErr;
@@ -2567,34 +2795,76 @@ namespace DualRemote
 
             internal bool SendSAS()
             {
-                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
+                DesktopHelperClient hc = helperClient;
                 if (hc != null && hc.IsConnected)
                 {
                     hc.SendSAS();
                     return true;
+                }
+                using (DesktopHelperClient temp = TryConnectHelper(false))
+                {
+                    if (temp != null && temp.IsConnected)
+                    {
+                        temp.SendSAS();
+                        return true;
+                    }
                 }
                 return BoBoCoreInterop.SendSAS();
             }
 
             internal bool ApplySuperDisplay(int monitorIndex, int clientW, int clientH, out int actualW, out int actualH)
             {
-                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
+                DesktopHelperClient hc = helperClient;
                 if (hc != null && hc.IsConnected)
                 {
                     return hc.ApplySuperDisplay(monitorIndex, clientW, clientH, out actualW, out actualH);
+                }
+                using (DesktopHelperClient temp = TryConnectHelper(false))
+                {
+                    if (temp != null && temp.IsConnected)
+                    {
+                        return temp.ApplySuperDisplay(monitorIndex, clientW, clientH, out actualW, out actualH);
+                    }
                 }
                 return BoBoCoreInterop.ApplySuperDisplay(monitorIndex, clientW, clientH, out actualW, out actualH);
             }
 
             internal void RestoreSuperDisplay()
             {
-                DesktopHelperClient hc = helperClient ?? TryConnectHelper(false);
+                DesktopHelperClient hc = helperClient;
                 if (hc != null && hc.IsConnected)
                 {
                     hc.RestoreSuperDisplay();
                     return;
                 }
+                using (DesktopHelperClient temp = TryConnectHelper(false))
+                {
+                    if (temp != null && temp.IsConnected)
+                    {
+                        temp.RestoreSuperDisplay();
+                        return;
+                    }
+                }
                 BoBoCoreInterop.RestoreSuperDisplay();
+            }
+
+            internal List<BoBoMonitorDescriptor> EnumerateMonitors()
+            {
+                DesktopHelperClient hc = helperClient;
+                if (hc != null && hc.IsConnected)
+                {
+                    List<BoBoMonitorDescriptor> remoteMons = hc.EnumerateMonitors();
+                    if (remoteMons != null && remoteMons.Count > 0) return remoteMons;
+                }
+                using (DesktopHelperClient temp = TryConnectHelper(false))
+                {
+                    if (temp != null && temp.IsConnected)
+                    {
+                        List<BoBoMonitorDescriptor> remoteMons = temp.EnumerateMonitors();
+                        if (remoteMons != null && remoteMons.Count > 0) return remoteMons;
+                    }
+                }
+                return BoBoCoreInterop.EnumerateMonitors();
             }
 
             internal bool IsSecureDesktopBlockedWithoutService()
@@ -2835,6 +3105,23 @@ namespace DualRemote
         [DllImport("userenv.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+
+        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000u;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetNamedPipeClientProcessId(IntPtr Pipe, out uint ClientProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ProcessIdToSessionId(uint dwProcessId, out uint pSessionId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]

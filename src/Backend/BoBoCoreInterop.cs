@@ -639,10 +639,10 @@ namespace DualRemote
                 {
                     try
                     {
-                        string embeddedHash = ComputeSha256Prefix(embeddedBytes, 12);
+                        string embeddedHash = ComputeSha256Prefix(embeddedBytes, 64);
                         byte[] diskBytes = File.ReadAllBytes(protectedDll);
                         if (diskBytes.Length != embeddedBytes.Length ||
-                            !string.Equals(ComputeSha256Prefix(diskBytes, 12), embeddedHash, StringComparison.OrdinalIgnoreCase))
+                            !BoBoIdentityStore.FixedTimeEqualsHex(ComputeSha256Prefix(diskBytes, 64), embeddedHash))
                         {
                             error = "受保护系统目录中的 BoBoCore.dll 与当前服务主程序摘要不一致，请升级或重新安装锁屏服务。";
                             return null;
@@ -660,7 +660,8 @@ namespace DualRemote
             byte[] dllBytes = GetEmbeddedCoreDllBytes(out error);
             if (dllBytes == null) return null;
 
-            string hash12 = ComputeSha256Prefix(dllBytes, 12);
+            string fullHash = ComputeSha256Prefix(dllBytes, 64);
+            string hash12 = fullHash.Substring(0, 12);
             string coreRoot = Path.Combine(RecentStore.DirPath, "core");
             string verDir = Path.Combine(coreRoot, hash12);
             string targetDll = Path.Combine(verDir, "BoBoCore.dll");
@@ -675,7 +676,7 @@ namespace DualRemote
                     if (fi.Length == dllBytes.Length)
                     {
                         byte[] existing = File.ReadAllBytes(targetDll);
-                        if (string.Equals(ComputeSha256Prefix(existing, 12), hash12, StringComparison.OrdinalIgnoreCase))
+                        if (BoBoIdentityStore.FixedTimeEqualsHex(ComputeSha256Prefix(existing, 64), fullHash))
                         {
                             needWrite = false;
                         }

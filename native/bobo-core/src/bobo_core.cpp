@@ -238,7 +238,11 @@ struct BoBoHostSession {
         if (SUCCEEDED(hrCo)) CoUninitialize();
     }
 
-    void RunVideoLoop() {
+    void RunCaptureWorkerLoop(bool& hasEmittedAnyRealFrame, bool& outRespawnRequested) {
+        outRespawnRequested = false;
+        // Bind to the active input desktop BEFORE CoInitializeEx or any D3D11/DXGI/GDI handle is created on this thread.
+        (void)SyncThreadToInputDesktop(nullptr);
+        SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
         ScopedTimerResolution1ms timerGuard;
         HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         ScreenCapturer capturer;
@@ -249,23 +253,6 @@ struct BoBoHostSession {
         bool initialized = false;
         uint64_t curCapDeviceGen = 0;
         int64_t frameIndex = 0;
-
-        {
-            std::lock_guard<std::mutex> lk(frameMutex);
-            encodePauseRequested = false;
-            encodePaused = false;
-            encodeStop = false;
-            staged = StagedCaptureFrame{};
-            stagedGpuSlot = -1;
-            encodingGpuSlot = -1;
-            startClock = std::chrono::steady_clock::now();
-        }
-        sentFrameCount.store(0, std::memory_order_release);
-        lastEncodedMs.store(-2000, std::memory_order_release);
-        encoderAllowZeroCopy.store(true, std::memory_order_release);
-        encoderResetRequested.store(false, std::memory_order_release);
-
-        std::thread encodeThread([this]() { RunEncodeLoop(); });
 
         auto pauseEncodeAndDrain = [&]() {
             std::unique_lock<std::mutex> lk(frameMutex);
@@ -299,12 +286,27 @@ struct BoBoHostSession {
         auto nextDeadline = std::chrono::steady_clock::now();
 
         while (running.load(std::memory_order_acquire)) {
-            bool deskSwitched = false;
-            (void)SyncThreadToInputDesktop(&deskSwitched);
+            if (NeedsInputDesktopSwitch()) {
+                pauseEncodeAndDrain();
+                capturer.Shutdown();
+                initialized = false;
+                bool deskSwitched = false;
+                bool switchedOk = SyncThreadToInputDesktop(&deskSwitched);
+                resumeEncode();
+                if (!running.load(std::memory_order_acquire)) break;
+                if (!switchedOk) {
+                    // GPU/GDI driver left a hidden window on this thread so SetThreadDesktop got ERROR_BUSY; respawn a fresh worker thread.
+                    outRespawnRequested = true;
+                    break;
+                }
+                keyframePending.store(true, std::memory_order_release);
+                nextDeadline = std::chrono::steady_clock::now();
+                continue;
+            }
+
             bool wantComposite = compositeCursor.load(std::memory_order_acquire);
             bool allowZeroCopy = encoderAllowZeroCopy.load(std::memory_order_acquire);
-            bool capDeviceChanged = (initialized && capturer.UsingDxgi() && (capturer.DeviceGeneration() != curCapDeviceGen)) ||
-                                    (initialized && deskSwitched);
+            bool capDeviceChanged = initialized && capturer.UsingDxgi() && (capturer.DeviceGeneration() != curCapDeviceGen);
 
             if (!initialized || capDeviceChanged || reconfigPending.exchange(false, std::memory_order_acq_rel)) {
                 int32_t reqMon, reqW, reqH, reqFps, reqBps;
@@ -328,8 +330,14 @@ struct BoBoHostSession {
 
                 if (geomChanged) {
                     pauseEncodeAndDrain();
+                    capturer.Shutdown();
                     if (!running.load(std::memory_order_acquire)) {
                         resumeEncode();
+                        break;
+                    }
+                    if (NeedsInputDesktopSwitch() && !SyncThreadToInputDesktop(nullptr)) {
+                        resumeEncode();
+                        outRespawnRequested = true;
                         break;
                     }
                     curMon = reqMon;
@@ -347,7 +355,7 @@ struct BoBoHostSession {
                     } else {
                         initialized = false;
                         resumeEncode();
-                        Sleep(200);
+                        Sleep(40);
                         continue;
                     }
                     resumeEncode();
@@ -404,25 +412,25 @@ struct BoBoHostSession {
 
             if (devResetReq) {
                 pauseEncodeAndDrain();
-                (void)SyncThreadToInputDesktop(nullptr);
-                std::string resetErr;
-                if (capturer.Initialize(curMon, static_cast<uint32_t>(curW), static_cast<uint32_t>(curH), resetErr)) {
-                    curCapDeviceGen = capturer.DeviceGeneration();
-                    encoderAllowZeroCopy.store(true, std::memory_order_release);
-                    keyframePending.store(true, std::memory_order_release);
-                } else {
-                    initialized = false;
-                    resumeEncode();
-                    Sleep(150);
-                    continue;
-                }
+                capturer.Shutdown();
+                initialized = false;
+                bool switchedOk = SyncThreadToInputDesktop(nullptr);
                 resumeEncode();
+                if (!running.load(std::memory_order_acquire)) break;
+                if (!switchedOk || NeedsInputDesktopSwitch()) {
+                    outRespawnRequested = true;
+                    break;
+                }
+                keyframePending.store(true, std::memory_order_release);
                 nextDeadline = std::chrono::steady_clock::now();
                 continue;
             }
 
             bool hasGpuFrame = capOk && preferGpu && (gpuNv12Tex != nullptr) && (outGpuSlot >= 0);
             bool hasCpuFrame = capOk && !hasGpuFrame && !nv12Buf.empty();
+            if (hasGpuFrame || hasCpuFrame) {
+                hasEmittedAnyRealFrame = true;
+            }
 
             if (capOk && !changed && !forceProduce) {
                 auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -435,7 +443,7 @@ struct BoBoHostSession {
                 continue;
             }
 
-            if (!hasGpuFrame && !hasCpuFrame && (frameIndex == 0 || forceKey)) {
+            if (!hasGpuFrame && !hasCpuFrame && !hasEmittedAnyRealFrame && frameIndex == 0) {
                 uint32_t fw = capturer.OutputWidth();
                 uint32_t fh = capturer.OutputHeight();
                 if (fw >= 320 && fh >= 240) {
@@ -446,8 +454,13 @@ struct BoBoHostSession {
                     hasCpuFrame = true;
                 }
             }
-            if (!hasGpuFrame && !hasCpuFrame && forceKey) {
+            if (!hasGpuFrame && !hasCpuFrame) {
                 keyframePending.store(true, std::memory_order_release);
+                if (!capOk && running.load(std::memory_order_acquire)) {
+                    Sleep(35);
+                    nextDeadline = std::chrono::steady_clock::now();
+                    continue;
+                }
             }
 
             if (hasGpuFrame || hasCpuFrame) {
@@ -498,6 +511,52 @@ struct BoBoHostSession {
             }
         }
 
+        capturer.Shutdown();
+        ResetThreadDesktopHandle();
+        SetThreadExecutionState(ES_CONTINUOUS);
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+    }
+
+    void RunVideoLoop() {
+        {
+            std::lock_guard<std::mutex> lk(frameMutex);
+            encodePauseRequested = false;
+            encodePaused = false;
+            encodeStop = false;
+            staged = StagedCaptureFrame{};
+            stagedGpuSlot = -1;
+            encodingGpuSlot = -1;
+            startClock = std::chrono::steady_clock::now();
+        }
+        sentFrameCount.store(0, std::memory_order_release);
+        lastEncodedMs.store(-2000, std::memory_order_release);
+        encoderAllowZeroCopy.store(true, std::memory_order_release);
+        encoderResetRequested.store(false, std::memory_order_release);
+
+        std::thread encodeThread([this]() { RunEncodeLoop(); });
+
+        bool hasEmittedAnyRealFrame = false;
+        while (running.load(std::memory_order_acquire)) {
+            bool respawnRequested = false;
+            std::thread captureWorker([this, &hasEmittedAnyRealFrame, &respawnRequested]() {
+                RunCaptureWorkerLoop(hasEmittedAnyRealFrame, respawnRequested);
+            });
+            if (captureWorker.joinable()) {
+                captureWorker.join();
+            }
+            if (!respawnRequested || !running.load(std::memory_order_acquire)) {
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lk(frameMutex);
+                encodePauseRequested = false;
+            }
+            frameCv.notify_all();
+            pauseCv.notify_all();
+            keyframePending.store(true, std::memory_order_release);
+            Sleep(25);
+        }
+
         {
             std::lock_guard<std::mutex> lk(frameMutex);
             encodeStop = true;
@@ -508,9 +567,6 @@ struct BoBoHostSession {
         if (encodeThread.joinable()) {
             encodeThread.join();
         }
-        capturer.Shutdown();
-        ResetThreadDesktopHandle();
-        if (SUCCEEDED(hrCo)) CoUninitialize();
     }
 };
 
@@ -939,9 +995,9 @@ static bool IsPrivacyMouseEventAllowed(DWORD flags, ULONG_PTR extraInfo, uint64_
     bool tagMatch = (extraInfo == kBoBoInjectedMagic) ||
                     ((extraInfo & 0xFFFFFFFFULL) == (kBoBoInjectedMagic & 0xFFFFFFFFULL));
     if (tagMatch) return true;
-    // Fallback if a 3rd-party mouse hook/filter strips dwExtraInfo during an active remote injection
+    // Fallback only briefly if a 3rd-party mouse hook/filter strips dwExtraInfo during an active remote injection
     uint64_t lastInject = g_lastRemoteMouseInjectMs.load(std::memory_order_acquire);
-    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 500ULL);
+    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 60ULL);
 }
 
 static bool IsPrivacyKeyEventAllowed(DWORD flags, ULONG_PTR extraInfo, uint64_t nowMs) {
@@ -951,7 +1007,7 @@ static bool IsPrivacyKeyEventAllowed(DWORD flags, ULONG_PTR extraInfo, uint64_t 
                     ((extraInfo & 0xFFFFFFFFULL) == (kBoBoInjectedMagic & 0xFFFFFFFFULL));
     if (tagMatch) return true;
     uint64_t lastInject = g_lastRemoteKeyInjectMs.load(std::memory_order_acquire);
-    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 500ULL);
+    return (lastInject != 0) && (nowMs >= lastInject) && ((nowMs - lastInject) <= 60ULL);
 }
 
 static LRESULT CALLBACK PrivacyLowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -1804,6 +1860,19 @@ BOBO_API int32_t __stdcall BoBoCore_SelfTest(char* reportBuf, int32_t reportBufL
               ? (std::string(capturer.UsingDxgi() ? "DXGI+GPU" : "GDI-Fallback") + " 640x360 NV12")
               : (headlessFallback ? ("non-interactive desktop -> synthetic NV12 (" + capErr + ")") : capErr));
 
+    ScreenCapturer alignCheck;
+    std::string alignErr;
+    bool alignOk = alignCheck.Initialize(0, 2022, 1138, alignErr) &&
+                   alignCheck.OutputWidth() == 2016 &&
+                   alignCheck.OutputHeight() == 1136 &&
+                   (alignCheck.OutputWidth() % 16u == 0) &&
+                   (alignCheck.OutputHeight() % 8u == 0);
+    uint32_t alignedW = alignCheck.OutputWidth();
+    uint32_t alignedH = alignCheck.OutputHeight();
+    alignCheck.Shutdown();
+    check("Screen capture 16x8 encoder alignment (2022x1138 -> 2016x1136)", alignOk,
+          std::to_string(alignedW) + "x" + std::to_string(alignedH));
+
     MfH264Encoder encoder;
     std::string encErr;
     bool encOpen = encoder.Open(640, 360, 30, 4000, encErr);
@@ -2327,6 +2396,8 @@ BOBO_API void __stdcall BoBoHost_Destroy(void* handle) {
     auto* session = static_cast<BoBoHostSession*>(handle);
     if (!session) return;
     session->running.store(false);
+    session->frameCv.notify_all();
+    session->pauseCv.notify_all();
     session->audioCap.Stop();
     if (session->videoThread.joinable()) {
         session->videoThread.join();

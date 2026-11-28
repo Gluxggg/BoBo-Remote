@@ -176,6 +176,29 @@ bool QueryDesktopNameLower(HDESK hDesk, wchar_t (&outName)[64]) {
 }
 } // namespace
 
+bool NeedsInputDesktopSwitch() {
+    HDESK curDesk = GetThreadDesktop(GetCurrentThreadId());
+    HDESK hInput = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (!hInput) {
+        hInput = OpenInputDesktop(
+            0, FALSE,
+            DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP |
+                DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALPLAYBACK);
+    }
+    if (!hInput) {
+        hInput = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+    }
+    if (!hInput) return false;
+
+    wchar_t curName[64] = {};
+    wchar_t inName[64] = {};
+    QueryDesktopNameLower(curDesk, curName);
+    QueryDesktopNameLower(hInput, inName);
+    CloseDesktop(hInput);
+    if (inName[0] == L'\0') return false;
+    return curName[0] == L'\0' || _wcsicmp(curName, inName) != 0;
+}
+
 bool SyncThreadToInputDesktop(bool* outSwitched) {
     if (outSwitched) *outSwitched = false;
     HDESK curDesk = GetThreadDesktop(GetCurrentThreadId());
@@ -260,8 +283,9 @@ bool ScreenCapturer::Initialize(int monitorIndex, uint32_t outWidth, uint32_t ou
 
     uint32_t targetW = (outWidth >= 320 && outWidth <= 4096) ? outWidth : static_cast<uint32_t>(activeMonitor_.width);
     uint32_t targetH = (outHeight >= 240 && outHeight <= 2560) ? outHeight : static_cast<uint32_t>(activeMonitor_.height);
-    outW_ = (targetW + 1u) & ~1u;
-    outH_ = (targetH + 1u) & ~1u;
+    // Align to 16x8 so hardware H.265/H.264 encoders never pad unaligned right/bottom edges with green chroma (U=0,V=0)
+    outW_ = targetW & ~15u;
+    outH_ = targetH & ~7u;
     if (outW_ < 320) outW_ = 320;
     if (outH_ < 240) outH_ = 240;
 

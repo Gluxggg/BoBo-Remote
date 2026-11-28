@@ -13,7 +13,7 @@
 | 局域网发现 / STUN | `UDP 49812`（被控端局域网发现广播 UTF-8 JSON；独立部署的 `bobo-relay` 自 `v7.4.0` 起默认在 `:49812` 提供可选 RFC 5389 STUN 服务）。 |
 | 证书与双向身份证明模型 | 被控端持有本地生成的自签名 RSA-2048 X.509 证书；控制端必须直接从 TLS 握手叶证书计算 `SHA-256` 小写十六进制指纹（`certThumbprint`）并执行严格 TOFU 钉扎（绝不信任 JSON 自报指纹或静默覆盖变更指纹）。控制端在 `HELLO` 附带自身 `clientCertDer`（Base64 X.509 DER），并在已配对重连（`AUTH_PROOF`）或首次配对（`PAIR_REQUEST.authSig`）时使用自身 RSA 私钥对 `BOBO6-AUTH:<nonce>\|<clientThumb>\|<hostThumb>` 签名（RSASSA-PKCS1-v1_5 + SHA-256），由被控端核验 `SHA256(clientCertDer) == clientThumbprint` 及公钥验签，彻底杜绝伪造 JSON `certThumbprint` 绕过鉴权。 |
 | 预认证帧限制与防爆破 | 完成鉴权前单帧载荷上限严格限制为 `64 KiB`；4 位临时配对码连续失败 `5` 次立即作废，每次失败延迟 `500 ms` 并立即断开当前连接。 |
-| 跨网互联与安全桌面 | 局域网直连（UDP `49812` 自动发现）、公网 IPv6 直连竞速、NAT-PMP (`:5351`)/UPnP IGD 并行端口映射与续租/断开清理、RFC 5389 STUN + 统一对称 NAT `PortDelta` 步长预测 + `"BOP7"` 无状态 HMAC 反向打洞学习、嵌入式 `BoBoTsNet`（SOCKS5 + `/udp-bridge` + 节点真实公网候选提取）及自建 `bobo-relay` TCP+UDP 盲中转兜底。Windows 被控端可选注册 **`BoBoRemoteService`** (`NT AUTHORITY\SYSTEM`，安装于受 ACL 保护的 `%ProgramFiles%\BoBoRemote\Service\` 并校验内核 DLL SHA-256) + 同会话 Helper 与 `sas.dll!SendSAS(FALSE)` 穿透**登录后** `Win+L` 锁屏与 UAC 桌面（注：由于网络监听仍由桌面程序在用户登录后拉起，开机尚未登录前的冷启动桌面不在该服务独立穿透范围内）。 |
+| 跨网互联与安全桌面 | 局域网直连（UDP `49812` 自动发现）、公网 IPv6 直连竞速、NAT-PMP (`:5351`)/UPnP IGD 并行端口映射与续租/断开清理、RFC 5389 STUN + 统一对称 NAT `PortDelta` 步长预测 + `"BOP7"` 无状态 HMAC 反向打洞学习、嵌入式 `BoBoTsNet`（SOCKS5 + `/udp-bridge` + 节点真实公网候选提取）及自建 `bobo-relay` TCP+UDP 盲中转兜底。Windows 被控端默认在安装向导启用受 ACL 保护的 **`BoBoRemoteService`** (`NT AUTHORITY\SYSTEM`，`%ProgramFiles%\BoBoRemote\Service\`) + 多实例并发管道（校验证书/镜像路径与 `GetNamedPipeClientProcessId`）+ 独立采集工作线程与 `sas.dll!SendSAS(FALSE)` 穿透**登录后** `Win+L` 锁屏与 UAC 桌面（注：网络监听仍由桌面端在用户登录后拉起，开机尚未登录前的冷启动桌面不在该服务独立穿透范围内）。 |
 
 ---
 
@@ -118,7 +118,7 @@ Host → Client:
   "deviceCode": "987654321",
   "deviceName": "Workstation",
   "certThumbprint": "<64-hex>",
-  "version": "7.6.1",
+  "version": "7.6.2",
   "allowIncoming": true,
   "authorized": true,
   "publicIpv6s": ["2409:8900:..."],
@@ -148,10 +148,10 @@ Host → Client:
 
 | 消息 `type` | 方向 | 关键字段 |
 |---|---|---|
-| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.6.1 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
-| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.6.1 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `lockServiceActive`, `udpCandidates`） |
+| `START_STREAM` | C → H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`, `muteHost`, `requestPrivacy`, `superDisplay`, `clientWidth`, `clientHeight`（V6.3–v7.6.2 可选：`autoBitrate`, `freeMouse`, `udpTransport`, `udpCipher`, `udpCiphers`, `udpInterleavedFec`, `udpNack`, `audioCodecs`, `preferHevc`, `videoCodecs`, `stunHost`, `stunPort`, `nativeLocalCursor`, `initialRttMs`, `udpCandidates`） |
+| `STREAM_STARTED` | H → C | `width`, `height`, `fps`, `bitrateKbps`, `monitorIndex`, `superDisplayActive`, `superDisplayNativeMatch`, `monitors`, `platform`, `hostControlMode`, `hostCursorComposited`（V6.3–v7.6.2 可选：`udpPort`, `udpSessionId`, `udpKey`, `udpCipher`, `udpNack`, `audioCodec`, `videoCodec`, `lockServiceActive`, `udpCandidates`） |
 | `UDP_CANDIDATES` | 双向 | `v7.4.0+`：`candidates` 数组（`kind`: `lan`/`ipv6`/`direct4`/`srflx`/`relay`/`tsnet`, `host`, `port`, `priority`；`v7.5.0+` 新增 `"sym": true`；`v7.6.0+` 新增有符号 `"delta"` 指示统一对称 NAT 端口步长预测与并行 NAT-PMP/UPnP IGD 外部端口租约），经已认证 TLS 通道交换并用 SSRF 白名单校验 |
-| `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`；`v7.6.1+` `RECONFIGURED`（及 `SUPER_DISPLAY_STATE`）携带 `ok` 与失败原因 `error`（并支持失败回滚），Helper 重连后自动重建采集与关键帧 |
+| `RECONFIGURE` / `RECONFIGURED` | C ↔ H | `monitorIndex`, `width`, `height`, `fps`, `bitrateKbps`（Windows `v7.6.2+` 强制 `16×8` 编码尺寸对齐以消除硬编右/底边绿边）；`v7.6.1+` `RECONFIGURED`（及 `SUPER_DISPLAY_STATE`）携带 `ok` 与失败原因 `error`（并支持失败回滚），Helper 重连后自动重建采集与关键帧 |
 | `SET_SUPER_DISPLAY` / `SUPER_DISPLAY_STATE` | C ↔ H | `enable`/`active`, `nativeMatch`, `clientWidth`/`width`, `clientHeight`/`height` |
 | `SET_CURSOR_MODE` / `CURSOR_MODE_STATE` | C ↔ H | `composite` / `hostCursorComposited` |
 | `REQUEST_KEYFRAME` | C → H | 无 |

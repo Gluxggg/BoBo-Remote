@@ -32,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [System.IO.Path]::Is
 }
 
 $BuildTimestamp = Get-Date
-$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.6.1' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
+$BuildVersion = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { '7.6.2' } else { $ReleaseVersion.Trim().TrimStart('v', 'V') }
 
 $BuildDir        = Join-Path $Root '.cache\build'
 $StageRoot       = Join-Path $BuildDir 'clean-stage'
@@ -98,7 +98,7 @@ function Invoke-CompileStage {
 
     $verFile = Join-Path $BuildDir 'app-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
-    $cleanAsmVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.1' }
+    $cleanAsmVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.2' }
     $asmInfoFile = Join-Path $BuildDir 'AssemblyVersionInfo.cs'
     $asmInfoText = @(
         "[assembly: System.Reflection.AssemblyVersion(`"$cleanAsmVer.0`")]"
@@ -189,7 +189,7 @@ function Build-SetupInstaller {
 
     $verFile = Join-Path $setupBuildDir 'setup-version.txt'
     [System.IO.File]::WriteAllText($verFile, $BuildVersion, (New-Object System.Text.UTF8Encoding($false)))
-    $cleanSetupVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.1' }
+    $cleanSetupVer = if ($BuildVersion -match '^(\d+\.\d+\.\d+)') { $Matches[1] } else { '7.6.2' }
     $setupAsmFile = Join-Path $setupBuildDir 'SetupAssemblyInfo.cs'
     $setupAsmText = @(
         "[assembly: System.Reflection.AssemblyVersion(`"$cleanSetupVer.0`")]"

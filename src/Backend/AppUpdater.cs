@@ -67,7 +67,7 @@ namespace DualRemote
         internal const string FullSetupAssetName = "BoBoRemote-Setup-x64.exe";
         internal const string Sha256SumsAssetName = "SHA256SUMS.txt";
         internal const string VersionResourceName = "DualRemote.app-version.txt";
-        internal const string FallbackVersion = "7.6.1";
+        internal const string FallbackVersion = "7.6.2";
 
         /// <summary>当前内嵌架构指纹；与发布流水线写入 SHA256SUMS.txt 的 # engines= 对齐。从 V5 升级至 V6 时强制走完整安装包以彻底清理旧外置引擎。</summary>
         internal const string CurrentEnginesStamp = "bobo-v6-allinone-inproc";
@@ -433,7 +433,13 @@ namespace DualRemote
                 headReq.AllowAutoRedirect = true;
                 using (var headResp = (HttpWebResponse)headReq.GetResponse())
                 {
-                    string finalUri = headResp.ResponseUri != null ? headResp.ResponseUri.AbsoluteUri : "";
+                    if (headResp.ResponseUri == null ||
+                        !string.Equals(headResp.ResponseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "更新重定向目标协议不是 HTTPS，已拒绝。";
+                        return false;
+                    }
+                    string finalUri = headResp.ResponseUri.AbsoluteUri;
                     if (TryExtractTagFromReleaseUrl(finalUri, out tag))
                     {
                         info = BuildReleaseFromTag(tag);
@@ -634,6 +640,11 @@ namespace DualRemote
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 using (Stream input = resp.GetResponseStream())
                 {
+                    if (resp.ResponseUri == null ||
+                        !string.Equals(resp.ResponseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("更新包重定向至非 HTTPS 地址，已中止下载。");
+                    }
                     if (input == null) throw new IOException("更新文件响应流为空。");
                     long total = resp.ContentLength > 0 ? resp.ContentLength : update.AssetSizeBytes;
                     long received = 0;

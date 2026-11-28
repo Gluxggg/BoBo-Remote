@@ -946,6 +946,11 @@ namespace DualRemote
         {
             exePath = null;
             error = null;
+            if (BoBoSystemService.IsRunningAsSystem())
+            {
+                error = "安全策略禁止在 SYSTEM 身份下释放或运行 BoBoTsNet。";
+                return false;
+            }
             try
             {
                 using (Stream resStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(EmbeddedResourceName))
@@ -955,29 +960,74 @@ namespace DualRemote
                         error = "未找到内置跨网内核资源 BoBoTsNet.exe.gz。";
                         return false;
                     }
-                    string hashTag;
-                    using (var sha = SHA256.Create())
-                    {
-                        byte[] digest = sha.ComputeHash(resStream);
-                        var sb = new StringBuilder(16);
-                        for (int i = 0; i < 8; i++) sb.Append(digest[i].ToString("x2"));
-                        hashTag = sb.ToString();
-                    }
-                    string binDir = Path.Combine(Path.Combine(TsNetRootDir, "bin"), hashTag);
-                    exePath = Path.Combine(binDir, "BoBoTsNet.exe");
-                    if (File.Exists(exePath) && new FileInfo(exePath).Length > 1024 * 1024)
-                        return true;
-
-                    Directory.CreateDirectory(binDir);
-                    string tmp = exePath + "." + Process.GetCurrentProcess().Id + ".tmp";
-                    resStream.Position = 0;
+                    byte[] plainBytes;
                     using (var gz = new GZipStream(resStream, CompressionMode.Decompress, false))
-                    using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                    using (var ms = new MemoryStream())
                     {
-                        gz.CopyTo(fs);
+                        gz.CopyTo(ms);
+                        plainBytes = ms.ToArray();
                     }
-                    if (File.Exists(exePath)) File.Delete(exePath);
-                    File.Move(tmp, exePath);
+                    if (plainBytes.Length <= 1024 * 1024)
+                    {
+                        error = "内置跨网内核资源体积异常。";
+                        return false;
+                    }
+                    string expectedSha = BoBoIdentityStore.ComputeCertSha256Hex(plainBytes);
+                    string hashTag = expectedSha.Substring(0, 16);
+                    string binRoot = Path.Combine(TsNetRootDir, "bin");
+                    string binDir = Path.Combine(binRoot, hashTag);
+                    exePath = Path.Combine(binDir, "BoBoTsNet.exe");
+
+                    bool needWrite = true;
+                    if (File.Exists(exePath))
+                    {
+                        try
+                        {
+                            var fi = new FileInfo(exePath);
+                            if (fi.Length == plainBytes.Length)
+                            {
+                                byte[] diskBytes = File.ReadAllBytes(exePath);
+                                string diskSha = BoBoIdentityStore.ComputeCertSha256Hex(diskBytes);
+                                if (BoBoIdentityStore.FixedTimeEqualsHex(diskSha, expectedSha))
+                                {
+                                    needWrite = false;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (needWrite)
+                    {
+                        Directory.CreateDirectory(binDir);
+                        string tmp = exePath + "." + Process.GetCurrentProcess().Id + ".tmp";
+                        try
+                        {
+                            File.WriteAllBytes(tmp, plainBytes);
+                            if (File.Exists(exePath)) File.Replace(tmp, exePath, null);
+                            else File.Move(tmp, exePath);
+                        }
+                        finally
+                        {
+                            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                        }
+                    }
+
+                    // Clean up outdated cached hash directories best-effort
+                    try
+                    {
+                        if (Directory.Exists(binRoot))
+                        {
+                            foreach (string dir in Directory.GetDirectories(binRoot))
+                            {
+                                if (!string.Equals(Path.GetFileName(dir), hashTag, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    try { Directory.Delete(dir, true); } catch { }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
                     return true;
                 }
             }

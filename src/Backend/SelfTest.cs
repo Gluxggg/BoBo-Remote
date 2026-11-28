@@ -641,6 +641,7 @@ namespace DualRemote
             RunV75ZeroLagSelfTests();
             RunV76WinlogonAndZeroLossSelfTests();
             RunV761SecurityAndTransportIsolationSelfTests();
+            RunV762LockScreenAndSecuritySelfTests();
 
             Log("");
             Log(_failures == 0 ? "结果：全部通过" : "结果：失败 " + _failures + " 项");
@@ -2624,6 +2625,118 @@ namespace DualRemote
             Check("V7.6.1 P1-5 线速总预算优先分流：G=2/3/5 高延迟冗余加协议头绝不超过 Pacer 排水上限",
                 wireBudgetOk,
                 "ok=" + wireBudgetOk);
+        }
+
+        private static void RunV762LockScreenAndSecuritySelfTests()
+        {
+            Log("");
+            Log("—— v7.6.2 管道防泄漏/并发 Helper + 16x8 绿边消融 + DPAPI 信任表与内核完整性自检 ——");
+
+            // 1. Pipe leak regression + multi-instance concurrency + helper peer image guard
+            string pipeName = "BoBoRemote.SelfTest762." + Guid.NewGuid().ToString("N");
+            bool pipeNoLeakOk = false;
+            bool multiPipeOk = false;
+            bool peerGuardOk = BoBoSystemService.IsAuthorizedHelperClientImage(@"C:\Users\A\AppData\Local\BoBoRemote\BoBo远程.exe", 1u, 1, @"C:\Program Files\BoBoRemote\Service\BoBo远程.exe")
+                && BoBoSystemService.IsAuthorizedHelperClientImage(@"C:\Program Files\BoBoRemote\Service\BoBo远程.exe", 0u, 1, @"C:\Program Files\BoBoRemote\Service\BoBo远程.exe")
+                && !BoBoSystemService.IsAuthorizedHelperClientImage(@"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", 1u, 1, @"C:\Program Files\BoBoRemote\Service\BoBo远程.exe")
+                && !BoBoSystemService.IsAuthorizedHelperClientImage(@"C:\Users\A\AppData\Local\BoBoRemote\BoBo远程.exe", 2u, 1, @"C:\Program Files\BoBoRemote\Service\BoBo远程.exe");
+
+            using (var srv = new BoBoSystemService.DesktopHelperServer(pipeName, -1))
+            using (var bridge = new BoBoSystemService.BoBoSecureDesktopBridge(delegate { return pipeName; }))
+            {
+                bridge.RestoreSuperDisplay();
+                bridge.EnumerateMonitors();
+                string bErr;
+                bool started = bridge.StartHostSession(
+                    0, 640, 360, 30, 2000, false, true, false, false,
+                    delegate { }, delegate { }, out bErr);
+                pipeNoLeakOk = started && bridge.IsUsingSystemHelper;
+                using (var extraClient = BoBoSystemService.DesktopHelperClient.TryConnect(pipeName, 800))
+                {
+                    multiPipeOk = extraClient != null && extraClient.IsConnected;
+                }
+            }
+            Check("V7.6.2 管道零泄漏 + 多实例并发 + 仅放行 BoBoRemote Helper 客户端鉴权",
+                pipeNoLeakOk && multiPipeOk && peerGuardOk,
+                "noLeak=" + pipeNoLeakOk + " multi=" + multiPipeOk + " peerGuard=" + peerGuardOk);
+
+            // 2. 16x8 macroblock encoder alignment regression (fixes 2022x1138 right-edge green bar)
+            int alW, alH, al1610W, al1610H;
+            BoBoHostServer.FitDesktopStream(2560, 1440, 2022, 1138, 2560L * 1600L, out alW, out alH);
+            BoBoHostServer.FitDesktopStream(2880, 1800, 2022, 1138, 2560L * 1600L, out al1610W, out al1610H);
+            bool align16x8Ok = (alW % 16) == 0 && (alH % 8) == 0 && alW == 2016 && alH == 1136
+                && (al1610W % 16) == 0 && (al1610H % 8) == 0 && al1610W == 1808 && al1610H == 1136;
+            Check("V7.6.2 H.265/NV12 16x8 宏块对齐 (16:9->2016x1136, 16:10->1808x1136 消除右侧绿条)",
+                align16x8Ok, alW + "x" + alH + " / " + al1610W + "x" + al1610H);
+
+            // 3. DPAPI authorized-peers sealing, one-time plaintext migration & fail-closed tamper rejection
+            string peerDir = Path.Combine(Path.GetTempPath(), "BoBoV762-Peers-" + Guid.NewGuid().ToString("N"));
+            bool dpapiMigrateOk = false;
+            bool rogueRejectedOk = false;
+            bool corruptFailClosedOk = false;
+            try
+            {
+                string thumbA = new string('a', 64);
+                string nodeA = "aaaa1111bbbb2222cccc3333";
+                string thumbB = new string('b', 64);
+                string nodeB = "bbbb1111cccc2222dddd3333";
+                var initStore = new BoBoIdentityStore(peerDir);
+                string initCode = initStore.DeviceCode;
+                string dpapiFile = Path.Combine(peerDir, "authorized-peers.dpapi");
+                string plainFile = Path.Combine(peerDir, "authorized-peers.json");
+                if (File.Exists(dpapiFile)) File.Delete(dpapiFile);
+
+                string legacyJson = "{\"peers\":[{\"nodeId\":\"" + nodeA + "\",\"deviceCode\":\"123456789\",\"deviceName\":\"LegacyHost\",\"certThumbprint\":\"" + thumbA + "\"}]}";
+                File.WriteAllText(plainFile, legacyJson, new UTF8Encoding(false));
+
+                var migratedStore = new BoBoIdentityStore(peerDir);
+                dpapiMigrateOk = !string.IsNullOrEmpty(initCode)
+                    && migratedStore.IsPeerAuthorized(nodeA, thumbA)
+                    && File.Exists(dpapiFile)
+                    && !File.Exists(plainFile);
+
+                string rogueJson = "{\"peers\":[{\"nodeId\":\"" + nodeA + "\",\"certThumbprint\":\"" + thumbA + "\"},{\"nodeId\":\"" + nodeB + "\",\"certThumbprint\":\"" + thumbB + "\"}]}";
+                File.WriteAllText(plainFile, rogueJson, new UTF8Encoding(false));
+                var guardedStore = new BoBoIdentityStore(peerDir);
+                rogueRejectedOk = guardedStore.IsPeerAuthorized(nodeA, thumbA) && !guardedStore.IsPeerAuthorized(nodeB, thumbB);
+
+                byte[] rawDpapi = File.ReadAllBytes(dpapiFile);
+                if (rawDpapi.Length > 16)
+                {
+                    rawDpapi[rawDpapi.Length - 3] ^= 0xFF;
+                    rawDpapi[rawDpapi.Length - 2] ^= 0xA5;
+                    File.WriteAllBytes(dpapiFile, rawDpapi);
+                }
+                var tamperedStore = new BoBoIdentityStore(peerDir);
+                corruptFailClosedOk = tamperedStore.ListAuthorizedPeers().Count == 0 && !tamperedStore.IsPeerAuthorized(nodeA, thumbA);
+            }
+            finally
+            {
+                try { if (Directory.Exists(peerDir)) Directory.Delete(peerDir, true); } catch { }
+            }
+            Check("V7.6.2 授权设备表 DPAPI 加密迁移与明文篡改/损坏 fail-closed 拦截",
+                dpapiMigrateOk && rogueRejectedOk && corruptFailClosedOk,
+                "migrate=" + dpapiMigrateOk + " rejectRogue=" + rogueRejectedOk + " corrupt=" + corruptFailClosedOk);
+
+            // 4. Full 256-bit SHA-256 tamper self-repair for extracted BoBoTsNet.exe
+            bool tsnetTamperRepairOk = true;
+            string tsPath = BoBoEmbeddedTailnet.GetExpectedBinaryPath();
+            if (!string.IsNullOrEmpty(tsPath) && File.Exists(tsPath))
+            {
+                byte[] origBytes = File.ReadAllBytes(tsPath);
+                string origSha = BoBoIdentityStore.ComputeCertSha256Hex(origBytes);
+                byte[] badBytes = (byte[])origBytes.Clone();
+                badBytes[128] ^= 0x5A;
+                File.WriteAllBytes(tsPath, badBytes);
+
+                string repairedPath = BoBoEmbeddedTailnet.GetExpectedBinaryPath();
+                string repairedSha = !string.IsNullOrEmpty(repairedPath) && File.Exists(repairedPath)
+                    ? BoBoIdentityStore.ComputeCertSha256Hex(File.ReadAllBytes(repairedPath))
+                    : "";
+                tsnetTamperRepairOk = string.Equals(origSha, repairedSha, StringComparison.OrdinalIgnoreCase);
+            }
+            Check("V7.6.2 BoBoTsNet.exe 256 位全摘要完整性校验与篡改自愈还原",
+                tsnetTamperRepairOk, "ok=" + tsnetTamperRepairOk);
         }
 
         private static bool ReadExactSync(System.Net.Sockets.NetworkStream stream, byte[] buf, int count)

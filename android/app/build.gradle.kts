@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val boboVersionName = providers.gradleProperty("boboReleaseVersion").orElse("7.6.1").get()
+val boboVersionName = providers.gradleProperty("boboReleaseVersion").orElse("7.6.2").get()
 val releaseVersionMatch = requireNotNull(
     Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matchEntire(boboVersionName)
 ) { "boboReleaseVersion must be a numeric major.minor.patch version" }
